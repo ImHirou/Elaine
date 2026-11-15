@@ -22,6 +22,8 @@
 #include "net/reactor.hpp"
 #include "proto/frame.hpp"
 #include "proto/packets.hpp"
+#include "server/command.hpp"
+#include "server/console.hpp"
 #include "server/inventory.hpp"
 #include "server/prelogin.hpp"
 #include "server/settings.hpp"
@@ -36,12 +38,21 @@ inline i32 chunk_of(double v) { return proto::floor_int(v) >> 4; }
 
 class Game {
   public:
-    Game(const Settings& s, std::vector<std::unique_ptr<net::Reactor>>& reactors, std::atomic<u32>& online);
+    // `console`: where the server's own command lines come from, null for none.
+    Game(const Settings& s, std::vector<std::unique_ptr<net::Reactor>>& reactors, std::atomic<u32>& online,
+         Console* console = nullptr);
     ~Game();
 
     void run(const std::atomic<bool>& stop);  // blocks; call on the tick thread
 
+    // The command tree: where a command is added (server/command.hpp says how). Players are
+    // sent the tree again at the end of the tick in which it changed.
+    cmd::Registry& commands() { return commands_; }
+
   private:
+    struct Commands;  // the server's own commands (server/commands.cpp)
+    friend struct cmd::Invocation;
+
     static constexpr u32 kNone = ~0u;
     static constexpr u64 kTickNs = 50 * 1'000'000ull;
     static constexpr u32 kOutInitial = 8192;  // first size of a player's per-tick output buffer
@@ -50,6 +61,14 @@ class Game {
     // dirty_ bits: what a player's tick has to look at again.
     static constexpr u8 kMenuDirty = 1;   // slots may differ from what the client was told (Menu::send_changes)
     static constexpr u8 kEquipDirty = 2;  // hands or armour may differ from what viewers were told
+
+    // How a block is set: the flags of Level.setBlock that mean something here (Block.UPDATE_*).
+    static constexpr u32 kUpdateNeighbors = 1;        // the six neighbours hear neighborChanged
+    static constexpr u32 kUpdateClients = 2;          // (always: every change is broadcast)
+    static constexpr u32 kUpdateKnownShape = 16;      // the neighbours' shapes are left alone
+    static constexpr u32 kUpdateSkipContainer = 256;  // SKIP_BLOCK_ENTITY_SIDEEFFECTS: what a container held is not spilled
+    static constexpr u32 kUpdateSkipOnPlace = 512;    // the new block is not told it was placed
+    static constexpr u32 kUpdateAll = kUpdateNeighbors | kUpdateClients;
 
     struct Player {
         u32 reactor = 0, slot = 0, gen = 0;
@@ -77,7 +96,11 @@ class Game {
         // stack thrown out of the creative inventory, -1 a tick.
         u32 drop_spam = 0;
         u64 drop_spam_tick = 0;
-        Menu menu;  // the inventory, the menu that is open, and what the client knows of both
+        // ...and commandSpamThrottler: +20 for each command, -1 a tick, up to 20 a second of the threshold.
+        u32 command_spam = 0;
+        u64 command_spam_tick = 0;
+        u8 level = cmd::kAll;  // PermissionLevel: 0, or what the ops list gives
+        Menu menu;             // the inventory, the menu that is open, and what the client knows of both
         // The menu that is open, when it is not the player's own: its number
         // (ServerPlayer.containerCounter, 1..100), the block it was opened on, and for a chest
         // or a furnace the block entities behind it (chests_ / furnaces_; a double chest has two).
@@ -104,6 +127,7 @@ class Game {
     void keepalives(u64 now);
     u64 flush();  // returns the bytes handed to the reactors
     void kick(u32 pi, std::string_view reason);
+    void kick(u32 pi, const text::Text& reason);
     void remove_player(u32 pi);
     void refuse(u32 ri, const net::InHeader& h, const net::JoinTransport& t, std::string_view reason);
     void post(u32 ri, const net::OutMsg& m);
@@ -127,6 +151,7 @@ class Game {
     void show_equipment(u32 pi);
     void apply_effects(u32 pi);
     void drop(u32 pi, ItemStack stack, bool thrown, bool predicted);
+    void fake_item(u32 pi, ItemStack stack);
     void on_punch(u32 pi);
     bool swing(u32 pi, u32 hand, proto::Swing how, bool to_self);
     void play_sound(u32 sound, double x, double y, double z);
@@ -142,15 +167,49 @@ class Game {
     }
 
     // ---- item entities (server/item_entities.cpp)
-    void spawn_item(ItemStack stack, double x, double y, double z, u64 pickup_delay = 40);
+    void spawn_item(ItemStack stack, double x, double y, double z, u64 pickup_delay = 40, u64 age = 0);
     void remove_item(u32 slot);
     void tick_items();
     void merge_item(u32 k);
     void pick_up_items(u32 pi);
 
+    // ---- commands (server/commands.cpp)
+    struct Op {  // an entry of ops.json (ServerOpListEntry)
+        Uuid uuid;
+        std::string name;
+        u8 level;
+        bool bypasses_player_limit;
+    };
+    void init_commands();
+    void on_chat_command(u32 pi, std::string_view line);
+    void run_command(const cmd::Source& source, std::string_view line);
+    void run_console();
+    cmd::Source source_of(u32 pi) const;
+    cmd::Source console_source() const;
+    u32 player_of(const cmd::Source& source) const;
+    void send_commands(u32 pi);
+    void send_permission_level(u32 pi);
+    void system_message(u32 pi, const text::Text& message);
+    void command_success(const cmd::Source& source, const text::Text& message, bool broadcast);
+    void command_failure(const cmd::Source& source, const text::Text& message);
+    text::Text display_name(u32 row) const;
+    static text::Text item_display_name(const ItemStack& stack);
+    void select(const cmd::Selector& sel, const cmd::Source& source, bool players_only, std::vector<u32>& slots);
+    bool teleport(u32 row, double x, double y, double z, u32 relatives, float yaw, float pitch);
+    u32 summon(u32 type, double x, double y, double z);
+    void remove_entity(u32 slot);
+    bool destroy_block_with_drops(proto::BlockPos pos);
+    bool place_block_input(proto::BlockPos pos, const cmd::BlockArg& block, u32 flags);
+    void load_ops();
+    void save_ops() const;
+    u32 find_op(Uuid uuid) const;
+
     // ---- block entities and the menus on them (server/block_entities.cpp)
-    bool set_block(proto::BlockPos pos, world::BlockState state);
-    void neighbour_changed(proto::BlockPos pos, u32 from_direction, world::BlockState changed);
+    bool set_block(proto::BlockPos pos, world::BlockState state, u32 flags = kUpdateAll);
+    void update_neighbors_at(proto::BlockPos pos);
+    void neighbor_changed(proto::BlockPos pos);
+    world::BlockState update_shape(world::BlockState state, u32 direction, world::BlockState neighbour) const;
+    world::BlockState update_from_neighbour_shapes(world::BlockState state, proto::BlockPos pos) const;
     bool use_block(u32 pi, proto::BlockPos pos, world::BlockState state, const ItemStack& held, u32 hand);
     world::BlockState chest_for_placement(u32 pi, proto::BlockPos at, u32 face) const;
     void open_menu(u32 pi, Menu::Kind kind, u32 menu_type, std::span<const u8> title, u32 rows);
@@ -232,6 +291,7 @@ class Game {
 
     base::BufPool pool_;
     base::ByteBuf scratch_;
+    base::ByteBuf text_scratch_;  // one text component, encoded, on its way into a packet
     std::vector<crypto::Cfb8Job> jobs_;
     std::vector<u8> touched_;  // per reactor: needs a wake after flush
     std::vector<u32> viewers_, border_;
@@ -289,6 +349,18 @@ class Game {
         double v[3] = {0, 0, 0};
     };
     std::vector<Knock> knock_;
+
+    // Commands: the tree, who may use how much of it, and the console.
+    cmd::Registry commands_;
+    Console* console_;
+    bool stop_requested_ = false;  // /stop
+    std::vector<Op> ops_;
+    // The `commands` packet per permission level, framed: built when first asked for after a
+    // change of the tree, then copied to whoever has that level.
+    base::ByteBuf command_frames_[cmd::kOwners + 1];
+    u32 command_frames_version_[cmd::kOwners + 1] = {~0u, ~0u, ~0u, ~0u, ~0u};
+    u32 commands_sent_ = 0;  // the tree version the players have
+    std::vector<u32> select_scratch_;
 };
 
 }  // namespace server

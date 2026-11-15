@@ -18,6 +18,8 @@
 #define PROTO_GEN_ENTITIES_HPP "proto/gen/v777/entities.hpp"                // entity types, entity-data ids, poses
 #define PROTO_GEN_RECIPES_HPP "proto/gen/v777/recipes.hpp"                  // crafting and smelting recipes (item/recipes.cpp only)
 #define PROTO_GEN_STATIC_IDS_HPP "proto/gen/v777/static_ids.hpp"            // menus, block entity types, sounds, particles
+#define PROTO_GEN_COMMAND_DATA_HPP "proto/gen/v777/command_data.hpp"        // names for commands: properties, items (world/block.cpp only)
+#define PROTO_GEN_LANG_HPP "proto/gen/v777/lang.hpp"                        // en_us messages for the console (text/lang.cpp only)
 
 namespace proto {
 namespace ids = gen::ids;

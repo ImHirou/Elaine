@@ -82,6 +82,7 @@ add_library(core STATIC
   src/proto/static_data.cpp
   src/nbt/nbt.cpp
   src/text/component.cpp
+  src/text/text.cpp
   src/crypto/cfb8.cpp
   src/crypto/auth.cpp
   src/net/reactor.cpp
@@ -108,6 +109,10 @@ add_library(core STATIC
   src/server/block_entities.cpp
   src/server/explosion.cpp
   src/server/players.cpp
+  src/server/command.cpp
+  src/server/command_args.cpp
+  src/server/commands.cpp
+  src/server/console.cpp
   src/server/game.cpp
 )
 target_link_libraries(core
@@ -136,6 +141,7 @@ if(MC_TESTS)
       tests/unit/item_test.cpp
       tests/unit/inventory_test.cpp
       tests/unit/container_test.cpp
+      tests/unit/command_test.cpp
     )
     target_link_libraries(unit_tests PRIVATE core GTest::gtest_main OpenSSL::Crypto)
     add_test(NAME unit COMMAND unit_tests)
@@ -143,7 +149,7 @@ if(MC_TESTS)
     if(Python3_FOUND)
       add_test(NAME integration
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/integration/run.py $<TARGET_FILE:server_exe>)
-      set_tests_properties(integration PROPERTIES TIMEOUT 120)
+      set_tests_properties(integration PROPERTIES TIMEOUT 240)
     endif()
   else()
     message(WARNING "GoogleTest not found: unit tests are not built")
@@ -152,6 +158,6 @@ endif()
 
 if(MC_BENCH)
   add_executable(bench bench/bench.cpp bench/world_bench.cpp bench/entity_bench.cpp bench/item_bench.cpp
-    bench/nbt_bench.cpp bench/game_bench.cpp)
+    bench/nbt_bench.cpp bench/game_bench.cpp bench/command_bench.cpp)
   target_link_libraries(bench PRIVATE core mc_core_flags OpenSSL::Crypto)
 endif()

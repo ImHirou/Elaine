@@ -22,4 +22,6 @@ void build_config_burst(base::ByteBuf& out, i32 threshold) {
     frame_raw(out, threshold, {gen::kTagsBlob, sizeof gen::kTagsBlob});
 }
 
+std::span<const u8> tags_body() { return {gen::kTagsBlob, sizeof gen::kTagsBlob}; }
+
 }  // namespace proto

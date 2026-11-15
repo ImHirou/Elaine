@@ -352,8 +352,43 @@ TEST(TextComponent, HoverEvents) {
     EXPECT_EQ(hover({s("action", "show_text"), i("value", 1)}), kInvalid);
     EXPECT_EQ(hover({s("action", "show_nothing"), s("value", "x")}), kInvalid);
     EXPECT_EQ(hover({s("value", "x")}), kInvalid);
-    EXPECT_EQ(hover({s("action", "show_item"), s("id", "minecraft:stone")}), kUnsupported);
-    EXPECT_EQ(hover({s("action", "show_entity"), s("id", "minecraft:pig")}), kUnsupported);
+
+    // show_item: ItemStackTemplate - an item, how many (not written for one), no components.
+    EXPECT_EQ(hover({s("id", "stone"), s("action", "show_item")}), kept({s("action", "show_item"), s("id", "minecraft:stone")}));
+    EXPECT_EQ(hover({s("action", "show_item"), s("id", "minecraft:stone"), i("count", 1), c("components", {})}),
+              kept({s("action", "show_item"), s("id", "minecraft:stone")}));
+    EXPECT_EQ(hover({s("action", "show_item"), s("id", "minecraft:stone"), b("count", 64)}),
+              kept({i("count", 64), s("action", "show_item"), s("id", "minecraft:stone")}));
+    EXPECT_EQ(hover({s("action", "show_item")}), kInvalid);
+    EXPECT_EQ(hover({s("action", "show_item"), s("id", "minecraft:stone"), i("count", 0)}), kInvalid);
+    EXPECT_EQ(hover({s("action", "show_item"), s("id", "minecraft:stone"), i("count", 100)}), kInvalid);
+    EXPECT_EQ(hover({s("action", "show_item"), s("id", "not an id")}), kInvalid);
+    EXPECT_EQ(hover({s("action", "show_item"), s("id", "minecraft:nonsense")}), kInvalid);
+    EXPECT_EQ(hover({s("action", "show_item"), s("id", "minecraft:air")}), kInvalid);
+    EXPECT_EQ(hover({s("action", "show_item"), s("id", "minecraft:stone"), c("components", {i("minecraft:damage", 1)})}),
+              kUnsupported);
+
+    // show_entity: the type, the UUID as four ints (however it was spelled), a name if there is one.
+    const Bytes uuid = entry(11, "uuid", be32(4) + be32(0x01234567) + be32(0x89abcdef) + be32(0xfedcba98) + be32(0x76543210));
+    EXPECT_EQ(hover({uuid, s("action", "show_entity"), s("id", "pig")}),
+              kept({s("action", "show_entity"), s("id", "minecraft:pig"), uuid}));
+    EXPECT_EQ(hover({s("action", "show_entity"), s("id", "minecraft:pig"), s("uuid", "01234567-89AB-cdef-fedc-ba9876543210")}),
+              kept({s("action", "show_entity"), s("id", "minecraft:pig"), uuid}));
+    EXPECT_EQ(hover({s("action", "show_entity"), s("id", "minecraft:pig"),
+                     l("uuid", 3, {be32(0x01234567), be32(0x89abcdef), be32(0xfedcba98), be32(0x76543210)})}),
+              kept({s("action", "show_entity"), s("id", "minecraft:pig"), uuid}));
+    EXPECT_EQ(hover({s("action", "show_entity"), s("id", "minecraft:pig"), uuid, c("name", {s("text", "Pinky"), b("bold", 1)})}),
+              kept({c("name", {s("text", "Pinky"), b("bold", 1)}), s("action", "show_entity"), s("id", "minecraft:pig"), uuid}));
+    EXPECT_EQ(hover({s("action", "show_entity"), s("id", "minecraft:pig"), uuid, s("name", "Pinky")}),
+              kept({s("name", "Pinky"), s("action", "show_entity"), s("id", "minecraft:pig"), uuid}));
+    EXPECT_EQ(hover({s("action", "show_entity"), s("id", "minecraft:pig")}), kInvalid);  // no UUID
+    EXPECT_EQ(hover({s("action", "show_entity"), uuid}), kInvalid);
+    EXPECT_EQ(
+        hover({s("action", "show_entity"), s("id", "minecraft:pig"), entry(11, "uuid", be32(3) + be32(1) + be32(2) + be32(3))}),
+        kInvalid);
+    EXPECT_EQ(hover({s("action", "show_entity"), s("id", "minecraft:pig"), uuid, i("name", 5)}), kInvalid);
+    EXPECT_EQ(hover({s("action", "show_entity"), s("id", "minecraft:nonsense"), uuid}), kInvalid);
+    EXPECT_EQ(hover({s("action", "show_entity"), s("id", "minecraft:pig"), s("uuid", "1-2-3-4-5")}), kUnsupported);
 }
 
 TEST(TextComponent, WhatIsNoComponentAndWhatIsNotRead) {

@@ -18,6 +18,9 @@ Emitted files (all deterministic, all committed):
   recipes.hpp         crafting and smelting recipes (gen_game.py; include from one .cpp)
   update_recipes.bin  pre-serialized play `update_recipes` packet body (recipe property sets)
   static_ids.hpp      menu and block entity type ids, the sounds and particles the server sends
+  command_data.hpp    what commands look up by name: argument type ids, block properties, item
+                      names, which entities can be summoned (gen_commands.py; one .cpp includes it)
+  lang.hpp            en_us.json's messages, for the console (gen_commands.py; one .cpp includes it)
 
 Inputs beyond the jar itself: `mcgen.py reports` (ids, tags, item components), `mcgen.py blockdata`
 (per-state light, fluid and shape properties) and `mcgen.py gamedata` (block classes and their
@@ -37,6 +40,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+import gen_commands
 import gen_game
 import mcgen
 from mcgen import ROOT, die, javap, jar_for, vdir, version_info
@@ -1231,6 +1235,8 @@ def generate_into(version: str, out: Path, reports: Path | None = None) -> dict:
     tables.update(recipes.emit(hdr, packets))
     stats.update(tables.pop("_stats"))
     tables["static_ids.hpp"] = gen_game.emit_static_ids(hdr, static_regs)
+    tables["command_data.hpp"] = gen_commands.emit_command_data(hdr, d, static_regs, blocks)
+    tables["lang.hpp"] = gen_commands.emit_lang(hdr, version)
     for name, content in tables.items():
         if isinstance(content, bytes):
             (out / name).write_bytes(content)

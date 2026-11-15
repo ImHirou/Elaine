@@ -93,11 +93,12 @@ void Game::init_titles() {
 
 // ---------------------------------------------------------------------------- blocks changing
 
-// Level.setBlock(pos, state, UPDATE_ALL) with everything that hangs on it: the block entity of
-// the old block goes (its contents fall out), the one of the new block comes, the new block is
+// Level.setBlock(pos, state, flags) with everything that hangs on it: the block entity of the
+// old block goes (its contents fall out), the one of the new block comes, the new block is
 // told it was placed, and the six neighbours are told that something changed beside them.
-// Every change of a block the game makes goes through here.
-bool Game::set_block(BlockPos pos, BlockState state) {
+// Every change of a block the game makes goes through here. `flags` are vanilla's (kUpdate*):
+// what a player does is kUpdateAll; a command leaves parts of it out.
+bool Game::set_block(BlockPos pos, BlockState state, u32 flags) {
     const BlockState old = world_.block(pos.x, pos.y, pos.z);
     if (!world_.set_block(pos.x, pos.y, pos.z, state)) return false;
     const world::BlockInfo& was = world::block_info_of(old);
@@ -123,13 +124,15 @@ bool Game::set_block(BlockPos pos, BlockState state) {
     if (&was != &now) {  // LevelChunk.setBlockState: another block, not another state of the same
         if ((world::flags_of(old) & world::state::kBlockEntity) && world_.remove_block_entity(pos.x, pos.y, pos.z, gone)) {
             // BaseContainerBlockEntity.preRemoveSideEffects: Containers.dropContents.
+            // ...unless the change says to leave that out: then what it held is gone with it.
             gone_kind = was.kind;
+            const bool spill = !(flags & kUpdateSkipContainer);
             if (gone_kind == block_kind::kChest) {
                 chests_[gone].alive = false;  // ChestBlockEntity.stopOpen does nothing for a removed chest
-                drop_contents(pos, chests_[gone].items, Chest::kSlots);
+                if (spill) drop_contents(pos, chests_[gone].items, Chest::kSlots);
             } else {
                 furnaces_[gone].alive = false;
-                drop_contents(pos, furnaces_[gone].items, Furnace::kSlots);
+                if (spill) drop_contents(pos, furnaces_[gone].items, Furnace::kSlots);
             }
         }
         if (now.kind == block_kind::kChest || now.kind == block_kind::kFurnace) {  // EntityBlock.newBlockEntity
@@ -156,44 +159,77 @@ bool Game::set_block(BlockPos pos, BlockState state) {
             world_.add_block_entity(pos.x, pos.y, pos.z, now.block_entity, data);
         }
         // BlockState.onPlace. TntBlock: next to a redstone signal it goes off at once.
-        if (now.kind == block_kind::kTnt && has_neighbour_signal(pos)) {
+        if (!(flags & kUpdateSkipOnPlace) && now.kind == block_kind::kTnt && has_neighbour_signal(pos)) {
             prime_tnt(pos, 80, true);
             set_block(pos, world::kAir);
             forget();
             return true;
         }
     }
-    // Level.updateNeighborsAt + BlockState.updateNeighbourShapes
-    for (u32 dir = 0; dir < 6; ++dir) neighbour_changed(step(pos, dir), world::opposite(dir), world_.block(pos.x, pos.y, pos.z));
+    // Level.markAndNotifyBlock: updateNeighborsAt, then BlockState.updateNeighbourShapes - each
+    // neighbour takes the shape it has beside the new block (Block.updateOrDestroy: set without
+    // telling its own neighbours again).
+    if (flags & kUpdateNeighbors) update_neighbors_at(pos);
+    if (!(flags & kUpdateKnownShape)) {
+        for (u32 dir = 0; dir < 6; ++dir) {
+            const BlockPos at = step(pos, dir);
+            const BlockState there = world_.block(at.x, at.y, at.z);
+            if (LIKELY(there == world::kAir) || !is_chest(there)) continue;  // (SnowyBlock's is world::Dimension's own)
+            const BlockState shaped = update_shape(there, world::opposite(dir), world_.block(pos.x, pos.y, pos.z));
+            if (shaped != there) set_block(at, shaped, flags & ~kUpdateNeighbors);
+        }
+    }
     forget();
     return true;
 }
 
-// The block at `pos` hears that its neighbour in direction `dir` is now `changed`:
-// BlockBehaviour.neighborChanged and updateShape, for the blocks that override them.
-// (SnowyBlock's updateShape is world::Dimension's own.)
-void Game::neighbour_changed(BlockPos pos, u32 dir, BlockState changed) {
+// Level.updateNeighborsAt: the six blocks around `pos` hear that it changed.
+void Game::update_neighbors_at(BlockPos pos) {
+    for (u32 dir = 0; dir < 6; ++dir) neighbor_changed(step(pos, dir));
+}
+
+// BlockBehaviour.neighborChanged, for the blocks that override it.
+void Game::neighbor_changed(BlockPos pos) {
     const BlockState state = world_.block(pos.x, pos.y, pos.z);
     if (LIKELY(state == world::kAir)) return;
-    const u32 kind = world::block_info_of(state).kind;
-    if (kind == block_kind::kTnt) {  // TntBlock.neighborChanged
-        if (has_neighbour_signal(pos)) {
-            prime_tnt(pos, 80, true);
-            set_block(pos, world::kAir);
-        }
-    } else if (kind == block_kind::kChest) {  // ChestBlock.updateShape
+    if (world::block_info_of(state).kind == block_kind::kTnt && has_neighbour_signal(pos)) {  // TntBlock.neighborChanged
+        prime_tnt(pos, 80, true);
+        set_block(pos, world::kAir);
+    }
+}
+
+// BlockState.updateShape: what `state` becomes when its neighbour in direction `dir` is
+// `neighbour` - for the blocks that override it, itself for the others.
+BlockState Game::update_shape(BlockState state, u32 dir, BlockState neighbour) const {
+    const world::BlockInfo& info = world::block_info_of(state);
+    if (info.kind == block_kind::kChest) {  // ChestBlock.updateShape
         ChestState c = chest_state(state);
         const bool horizontal = dir >= world::kNorth;
-        if (is_chest(changed) && horizontal) {
+        if (is_chest(neighbour) && horizontal) {
             // A single chest joins the half that was just placed against it.
-            const ChestState n = chest_state(changed);
+            const ChestState n = chest_state(neighbour);
             if (c.type == kSingle && n.type != kSingle && c.facing == n.facing && connected_direction(n) == world::opposite(dir))
                 c.type = n.type == kLeft ? kRight : kLeft;
         } else if (connected_direction(c) == dir) {
             c.type = kSingle;  // the other half is gone
         }
-        if (chest_block(c) != state) set_block(pos, chest_block(c));
+        return chest_block(c);
     }
+    // SnowyBlock.updateShape: snowy while what lies on it is snow.
+    if ((info.flags & world::block_flag::kPlaceMask) == world::block_flag::kPlaceSnowy && dir == world::kUp)
+        return info.alt[(world::block_info_of(neighbour).flags & world::block_flag::kSnowTag) ? 1 : 0];
+    return state;
+}
+
+// Block.updateFromNeighbourShapes: the state as its six neighbours would have it, asked in
+// vanilla's order (BlockBehaviour.UPDATE_SHAPE_ORDER: west, east, north, south, down, up).
+BlockState Game::update_from_neighbour_shapes(BlockState state, BlockPos pos) const {
+    static constexpr u32 kOrder[6] = {world::kWest, world::kEast, world::kNorth, world::kSouth, world::kDown, world::kUp};
+    for (const u32 dir : kOrder) {
+        const BlockPos at = step(pos, dir);
+        state = update_shape(state, dir, state_for_client(at));
+    }
+    return state;
 }
 
 // Containers.dropContents: every stack falls out in pieces of 10 to 30, all pieces of a stack

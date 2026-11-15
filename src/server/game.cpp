@@ -31,7 +31,7 @@ constexpr double kSpawnX = 8.5, kSpawnZ = 8.5;
 constexpr proto::gen::dimension::Type kOverworldType = proto::gen::dimension::kTypes[reg::dimension_type::kOverworld];
 }  // namespace
 
-Game::Game(const Settings& s, std::vector<std::unique_ptr<net::Reactor>>& reactors, std::atomic<u32>& online)
+Game::Game(const Settings& s, std::vector<std::unique_ptr<net::Reactor>>& reactors, std::atomic<u32>& online, Console* console)
     : s_(s),
       reactors_(reactors),
       online_(online),
@@ -39,7 +39,8 @@ Game::Game(const Settings& s, std::vector<std::unique_ptr<net::Reactor>>& reacto
                  static_cast<u16>(reg::worldgen_biome::kPlains)),
       world_(reg::dimension_type::kOverworld, std::string(kOverworld), generator_, s.compression_threshold),
       tracker_(ents_, s.compression_threshold, s.entity_broadcast_range),
-      rng_(base::now_ns() | 1) {
+      rng_(base::now_ns() | 1),
+      console_(console) {
     pcx_.reserve(s.max_players);
     pcz_.reserve(s.max_players);
     pview_.reserve(s.max_players);
@@ -54,6 +55,8 @@ Game::Game(const Settings& s, std::vector<std::unique_ptr<net::Reactor>>& reacto
     // The same for every client: the recipe property sets (mcgen), framed once.
     frame_raw(recipes_frame_, s.compression_threshold, {gen::kUpdateRecipesBlob, sizeof gen::kUpdateRecipesBlob});
     init_titles();
+    init_commands();
+    load_ops();
 }
 
 Game::~Game() {
@@ -75,7 +78,7 @@ void Game::run(const std::atomic<bool>& stop) {
     constexpr u64 kStatsEvery = 100;  // ticks: 5 s
     u64 next = base::now_ns();
     u64 busy_ns = 0, worst_ns = 0, track_ns = 0, flush_ns = 0, sent_bytes = 0;
-    while (!stop.load(std::memory_order_relaxed)) {
+    while (!stop.load(std::memory_order_relaxed) && !stop_requested_) {
         const u64 t0 = base::now_ns();
         // Same order as MinecraftServer.tickChildren: packets, then the level - scheduled block
         // ticks, block and light changes go out to whoever sees them
@@ -84,6 +87,7 @@ void Game::run(const std::atomic<bool>& stop) {
         // is the menu), then the block entities (furnaces) - then the per-connection tick (block
         // change acks, the player's own tick), and one flush per player at the end.
         for (u32 ri = 0; ri < reactors_.size(); ++ri) drain(ri);
+        run_console();     // DedicatedServer.tickConnection: the console's lines after the players' packets
         recheck_chests();  // ServerLevel.tick: scheduled block ticks come first
         broadcast_changes();
         const u64 t1 = base::now_ns();
@@ -98,6 +102,10 @@ void Game::run(const std::atomic<bool>& stop) {
         // Not t0: a player who joined during drain() has keepalive_sent_ns > t0, and the unsigned
         // difference would wrap and send a keep-alive at once.
         if (++tick_ % 20 == 0) keepalives(base::now_ns());
+        if (UNLIKELY(commands_.version() != commands_sent_)) {  // a command was added or removed: everyone's tree is stale
+            for (u32 pi = 0; pi < players_.size(); ++pi) send_commands(pi);
+            commands_sent_ = commands_.version();
+        }
         const u64 t2 = base::now_ns();
         sent_bytes += flush();
         const u64 t3 = base::now_ns();
@@ -234,6 +242,7 @@ void Game::on_join(u32 ri, const InHeader& h, const u8* payload, u32 n) {
     p.threshold = t.threshold;
     p.keepalive_sent_ns = base::now_ns();  // first keep-alive one interval from now
     p.loaded_at_tick = tick_ + kClientLoadTimeoutTicks;
+    if (const u32 op = find_op(p.uuid); op != kNone) p.level = ops_[op].level;  // MinecraftServer.getProfilePermissions
     const double spawn_y = generator_.spawn_height();
     // The entity: a player's row in the entity table is its index here (the store keeps players
     // in front). Whoever is near is shown it by the tracker at the end of this tick, after the
@@ -280,6 +289,7 @@ void Game::on_join(u32 ri, const InHeader& h, const u8* payload, u32 n) {
     // What a client's screens ask about recipes: which items a furnace takes (the shift-click
     // it predicts), and so on. The recipe book stays empty: nothing is unlocked.
     out(pi).append(recipes_frame_.data, recipes_frame_.len);
+    send_permission_level(pi);  // its permission level, and the commands it may use
 
     p.teleport_id = 1;
     p.awaiting_teleport = true;
@@ -478,6 +488,13 @@ HOT void Game::on_packet(u32 pi, const u8* body, u32 n) {
         case sbid::kPickItemFromBlock: {
             const auto pk = sb::PickItemFromBlock::decode(rd);
             if (rd.ok) on_pick_block(pi, pk);
+            break;
+        }
+        case sbid::kChatCommand:
+        case sbid::kChatCommandSigned: {
+            const auto c = id == sbid::kChatCommand ? sb::ChatCommand::decode(rd) : sb::ChatCommand::decode_signed(rd);
+            // A copy: running it may send large packets, and the command is a view into the inflate buffer.
+            if (rd.done()) on_chat_command(pi, std::string(c.command));  // (may kick: nothing of `p` after this)
             break;
         }
         case sbid::kPunch:  // handlePunch: not held back until the client has loaded, unlike the actions

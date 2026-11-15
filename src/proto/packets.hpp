@@ -329,6 +329,22 @@ struct SystemChat {
     u8* encode(u8* p) const { return put_bool(put_nbt_text(p, text), overlay); }
 };
 
+// The same two packets with a text component that is more than plain text: `component` is its
+// tag, ready-made (text::Text::encode, text::transcode).
+struct DisconnectComponent {
+    static constexpr u32 kId = ids::play::cb::kDisconnect;
+    std::span<const u8> component;
+    usize bound() const { return component.size(); }
+    u8* encode(u8* p) const { return put_bytes(p, component.data(), component.size()); }
+};
+struct SystemChatComponent {
+    static constexpr u32 kId = ids::play::cb::kSystemChat;
+    std::span<const u8> component;
+    bool overlay = false;
+    usize bound() const { return component.size() + 1; }
+    u8* encode(u8* p) const { return put_bool(put_bytes(p, component.data(), component.size()), overlay); }
+};
+
 struct PlayPong {  // answer to serverbound ping_request (F3 ping graph)
     static constexpr u32 kId = ids::play::cb::kPongResponse;
     u64 time;
@@ -674,6 +690,41 @@ struct Sound {
         p = put_be32(p, static_cast<u32>(java_int(y * 8.0)));
         p = put_be32(p, static_cast<u32>(java_int(z * 8.0)));
         return put_be64(put_f32(put_f32(p, volume), pitch), seed);
+    }
+};
+
+// A sound that is named, not looked up (Holder.direct of SoundEvent.createVariableRangeEvent:
+// what /playsound sends, whatever the name): holder id 0, then the event itself - its
+// identifier and no fixed range.
+struct SoundByName {
+    static constexpr u32 kId = ids::play::cb::kSound;
+    std::string_view sound;  // "minecraft:block.note_block.harp"
+    u32 source;              // SoundSource ordinal
+    double x, y, z;
+    float volume, pitch;
+    u64 seed;
+    usize bound() const { return 1 + str_bound(sound) + 1 + 5 + 12 + 8 + 8; }
+    u8* encode(u8* p) const {
+        p = put_bool(put_str(put_varint(p, 0), sound), false);
+        p = put_varint(p, source);
+        p = put_be32(p, static_cast<u32>(java_int(x * 8.0)));
+        p = put_be32(p, static_cast<u32>(java_int(y * 8.0)));
+        p = put_be32(p, static_cast<u32>(java_int(z * 8.0)));
+        return put_be64(put_f32(put_f32(p, volume), pitch), seed);
+    }
+};
+
+// ClientboundStopSoundPacket: a byte saying what follows - bit 0 a source, bit 1 a sound.
+struct StopSound {
+    static constexpr u32 kId = ids::play::cb::kStopSound;
+    static constexpr u32 kAnySource = ~0u;
+    u32 source = kAnySource;  // SoundSource ordinal
+    std::string_view sound;   // empty: every sound
+    usize bound() const { return 1 + 5 + str_bound(sound); }
+    u8* encode(u8* p) const {
+        p = put_u8(p, static_cast<u8>((source != kAnySource ? 1 : 0) | (sound.empty() ? 0 : 2)));
+        if (source != kAnySource) p = put_varint(p, source);
+        return sound.empty() ? p : put_str(p, sound);
     }
 };
 
@@ -1047,6 +1098,31 @@ struct PickItemFromBlock {
         p.pos = unpack_block_pos(r.be64());
         p.include_data = r.boolean();
         return p;
+    }
+};
+
+// A command typed into the chat, without its slash. chat_command when nothing in it is signed;
+// chat_command_signed when the client signed its message arguments (a kick's reason) - the
+// signatures are read past, not checked: this server does not enforce secure chat.
+struct ChatCommand {
+    static constexpr u32 kMaxBytes = 32767 * 3;  // readUtf(): 32767 chars
+    std::string_view command;
+    static ChatCommand decode(Reader& r) { return {r.str(kMaxBytes)}; }
+    // ServerboundChatCommandSignedPacket: command, timestamp, salt, up to 8 (argument name,
+    // 256-byte signature), then LastSeenMessages.Update: an offset, 20 bits, a checksum byte.
+    static ChatCommand decode_signed(Reader& r) {
+        ChatCommand c{r.str(kMaxBytes)};
+        r.be64();
+        r.be64();
+        const u32 signatures = r.varint();
+        if (signatures > 8) r.ok = false;
+        for (u32 i = 0; i < signatures && r.ok; ++i) {
+            r.str(16 * 3);
+            r.bytes(256);
+        }
+        r.varint();
+        r.bytes(3 + 1);
+        return c;
     }
 };
 

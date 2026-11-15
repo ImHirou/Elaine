@@ -95,6 +95,14 @@ the jar, not memory, the source of every byte.
 - Not everything about a menu goes out with its synchronisation: a crafting grid's result is sent the
   moment the grid changes (`Effect::kSetSlot`), once per change - byte for byte what vanilla does, and
   only visible in a recording (`tools/vanilla/container_probe.py`).
+- A text component the server makes itself - a system message, a kick's reason - is a `text::Text`
+  (`Text::translatable(key).arg(...)`), sent with `cb::SystemChatComponent` / `cb::DisconnectComponent`
+  (`Game::system_message`, `Game::kick(pi, Text)`): vanilla's own messages are translatable, with typed
+  arguments, and `Text::encode` gives them the bytes vanilla's codec does. `cb::SystemChat{"..."}` is for plain
+  words only.
+- `player_position` after the join is a teleport like any other: `Game::teleport` sets the flags of
+  `net.minecraft.world.entity.Relative` for what the client is to add to its own position, and the client's
+  `accept_teleportation` echoes where that put it.
 - What others see a player do is mostly not in the packet that says it: a swing comes from `punch` (26.x; no
   payload - the server reads the animation off the held item), from a successful `use_item_on`, from a drop.
   When wiring a handler, read vanilla's whole `handle…` method to its end and port what it broadcasts

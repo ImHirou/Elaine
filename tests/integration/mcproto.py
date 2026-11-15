@@ -83,6 +83,7 @@ MENUS = _constants("static_ids.hpp", "menu")            # menu types: MENUS["kGe
 BLOCK_ENTITY = _constants("static_ids.hpp", "block_entity_type")
 SOUND = _constants("static_ids.hpp", "sound")           # the sounds the server sends by itself: SOUND["kBlockChestOpen"]
 PARTICLE = _constants("static_ids.hpp", "particle")
+ARGUMENT = _constants("command_data.hpp", "argument")   # command argument types the server names: ARGUMENT["kVec3"]
 
 
 def load_item_table() -> dict[str, dict]:
@@ -407,6 +408,9 @@ class Client:
         self.block_events: list[tuple] = []    # ((x, y, z), b0, b1, block id)
         self.explosions: list[dict] = []
         self.recipe_sets: dict[str, set] = {}  # update_recipes: property set name -> item ids
+        self.permission_level = None           # entity event 24 + level about the player itself
+        self.commands = None                   # the last `commands` packet, as parse_commands() returns it
+        self.stopped_sounds: list[tuple] = []  # stop_sound: (source or None, sound name or None)
 
     def close(self) -> None:
         self.sock.close()
@@ -483,6 +487,25 @@ class Client:
                     self.send("keep_alive", r.take(8))
         finally:
             self.sock.settimeout(old)
+
+    def recv_pending_chat(self) -> list:
+        """The system messages among what has been received and not read yet: their text
+        components. Block changes and the tab list are passed over; whatever else is waiting is an
+        error."""
+        said = []
+        self.send("ping_request", struct.pack(">q", 0x5A1D))
+        while True:
+            name, r = self.recv()
+            if name == "pong_response":
+                assert r.i64() == 0x5A1D
+                return said
+            if name in ("block_update", "section_blocks_update", "light_update", "block_changed_ack", "player_info_update",
+                        "player_info_remove"):
+                continue
+            assert name == "system_chat", f"expected only system_chat, got {name}"
+            said.append(r.nbt())
+            r.bool()
+            r.done()
 
     def recv_any(self) -> tuple[str, Reader]:
         while True:
@@ -642,7 +665,8 @@ ENTITY_PACKETS = {"bundle_delimiter", "add_entity", "remove_entities", "set_enti
                   "move_entity_pos_rot", "move_entity_rot", "entity_position_sync", "rotate_head", "set_entity_motion",
                   "set_equipment", "take_item_entity", "swing_animation", "entity_event"}
 MENU_PACKETS = {"container_set_content", "container_set_slot", "set_cursor_item", "set_player_inventory", "set_held_slot",
-                "sound", "open_screen", "container_set_data", "container_close", "update_recipes", "block_event", "explode"}
+                "sound", "open_screen", "container_set_data", "container_close", "update_recipes", "block_event", "explode",
+                "commands", "stop_sound"}
 # Slots of the menus a block opens, by menu type (the menu registry): the container's own, then
 # the 36 of the inventory. From the constructors of ChestMenu, AbstractFurnaceMenu, CraftingMenu.
 WINDOW_SLOTS = {"kGeneric9x3": 27, "kGeneric9x6": 54, "kFurnace": 3, "kCrafting": 10}
@@ -849,10 +873,22 @@ def _apply_menu_packet(self: "Client", name: str, r: Reader) -> None:
         e["play_sound"] = r.bool()
         self.explosions.append(e)
     elif name == "sound":
+        # Holder<SoundEvent>: a registry id + 1, or 0 and the event itself (its name, and a
+        # range if it has a fixed one) - then the sound is listed by its name.
         holder = r.varint()
-        assert holder != 0, "an inline sound event"
-        self.sounds.append((holder - 1, r.varint(), (r.i32() / 8, r.i32() / 8, r.i32() / 8), r.f32(), r.f32()))
+        sound = holder - 1
+        if holder == 0:
+            sound = r.str()
+            assert not r.bool(), "a sound event with a fixed range"
+        self.sounds.append((sound, r.varint(), (r.i32() / 8, r.i32() / 8, r.i32() / 8), r.f32(), r.f32()))
         r.i64()  # seed
+    elif name == "commands":
+        self.commands = parse_commands(r)
+        return
+    elif name == "stop_sound":   # ClientboundStopSoundPacket: bit 0 a source follows, bit 1 a sound
+        flags = r.u8()
+        source = r.varint() if flags & 1 else None
+        self.stopped_sounds.append((source, r.str() if flags & 2 else None))
     r.done()
 
 
@@ -954,6 +990,8 @@ def _apply_entity_packet(self: "Client", name: str, r: Reader) -> None:
         eid, event = r.i32(), r.u8()
         r.done()
         assert eid == self.entity_id or eid in self.entities, f"entity_event for unknown entity {eid}"
+        if 24 <= event <= 28 and eid == self.entity_id:   # LocalPlayer.handleEntityEvent: its permission level
+            self.permission_level = event - 24
         if event == 55 and eid in self.entities:   # LivingEntity.handleEntityEvent: swap the hands
             eq = self.entities[eid].equipment
             main, off = eq.pop(0, None), eq.pop(1, None)
@@ -1061,6 +1099,59 @@ Client.apply_entity_packet = _apply_entity_packet
 
 
 # ----------------------------------------------------------------------------- play-state parsers
+
+_ARGUMENT_NAME = {v: k for k, v in ARGUMENT.items()}
+
+
+def parse_commands(r: Reader) -> dict:
+    """ClientboundCommandsPacket as a tree: {"type", "name", "executable", "restricted", "children":
+    {name: node}} and, for an argument, "parser" (a key of ARGUMENT), "properties", "suggestions";
+    for a node that redirects, "redirect": the name of the root's child it goes to.
+
+    Per node: a flags byte (bits 0-1 root / literal / argument, 4 executable, 8 redirects, 16 has
+    suggestions, 32 restricted), the indices of its children, the index it redirects to, then
+    its name and - an argument - its parser by id with that parser's properties."""
+    nodes = []
+    for _ in range(r.varint()):
+        flags = r.u8()
+        node = {"type": ("root", "literal", "argument")[flags & 3], "executable": bool(flags & 4),
+                "restricted": bool(flags & 32), "child_ids": [r.varint() for _ in range(r.varint())]}
+        if flags & 8:
+            node["redirect_id"] = r.varint()
+        if flags & 3:
+            node["name"] = r.str()
+        if flags & 3 == 2:
+            parser = _ARGUMENT_NAME.get(r.varint())
+            assert parser is not None, "a command argument type this client cannot read"
+            node["parser"] = parser
+            props = {}
+            if parser in ("kInteger", "kFloat", "kDouble"):   # ArgumentUtils.createNumberFlags: 1 min, 2 max
+                bounds = r.u8()
+                read = {"kInteger": r.i32, "kFloat": r.f32, "kDouble": r.f64}[parser]
+                if bounds & 1:
+                    props["min"] = read()
+                if bounds & 2:
+                    props["max"] = read()
+            elif parser == "kString":
+                props["type"] = ("word", "phrase", "greedy")[r.varint()]
+            elif parser == "kEntity":   # bit 0: one at most, bit 1: players only
+                mask = r.u8()
+                props = {"amount": "single" if mask & 1 else "multiple", "type": "players" if mask & 2 else "entities"}
+            elif parser == "kResource":
+                props["registry"] = r.str()
+            node["properties"] = props
+            if flags & 16:
+                node["suggestions"] = r.str()
+        nodes.append(node)
+    root = nodes[r.varint()]
+    r.done()
+    assert root["type"] == "root"
+    for node in nodes:
+        node["children"] = {nodes[i]["name"]: nodes[i] for i in node.pop("child_ids")}
+        if "redirect_id" in node:
+            node["redirect"] = nodes[node.pop("redirect_id")].get("name", "")   # "" is the root (execute run)
+    return root
+
 
 def parse_login(r: Reader) -> dict:
     p = {"entity_id": r.i32(), "hardcore": r.bool(), "dimensions": [r.str() for _ in range(r.varint())],

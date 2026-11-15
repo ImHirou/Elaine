@@ -54,7 +54,7 @@ Box item_box(const entity::Store& e, u32 row) {  // EntityDimensions.makeBoundin
 // `pickup_delay` ticks before it can be picked up - 40 for what a player drops
 // (createItemStackToDrop), 10 for what a block drops (setDefaultPickUpDelay), none for what
 // falls out of a chest. At rest and without gravity (see top).
-void Game::spawn_item(ItemStack stack, double x, double y, double z, u64 pickup_delay) {
+void Game::spawn_item(ItemStack stack, double x, double y, double z, u64 pickup_delay, u64 age) {
     if (stack.empty() || ents_.size() >= entity::kMaxEntities) return;
     // Mth.createInsecureUUID, and the yaw the ItemEntity constructor draws: random.nextFloat() * 360.
     const Uuid uuid{(random() & ~0xF000ull) | 0x4000ull, (random() & 0x3FFFFFFFFFFFFFFFull) | 0x8000000000000000ull};
@@ -70,10 +70,11 @@ void Game::spawn_item(ItemStack stack, double x, double y, double z, u64 pickup_
     item_slot_.push_back(slot);
     item_cell_.push_back(item_grid_.add(item_cell_of(x), item_cell_of(z), slot));  // nothing moves it: it stays in this cell
     item_born_.push_back(tick_);
-    item_age_from_.push_back(tick_);
+    item_age_from_.push_back(tick_ - age);  // (modulo 2^64, as every difference taken from it is)
     // The delay counts down in the item's own tick, which runs before the players': 40 ticks
     // from one set while packets are handled, the 40th item tick has brought it to zero.
-    item_pickup_.push_back(pickup_delay ? tick_ + pickup_delay - 1 : tick_);
+    // kNever: ItemEntity.setNeverPickUp.
+    item_pickup_.push_back(pickup_delay == kNever ? kNever : pickup_delay ? tick_ + pickup_delay - 1 : tick_);
     item_health_.push_back(kHealth);
 }
 
@@ -131,7 +132,7 @@ void Game::merge_item(u32 k) {
     // isMergable: alive, not at its end, and with room in its stack.
     const auto mergable = [&](u32 i, u32 row) {
         const ItemStack& s = ents_.item[row];
-        return !s.empty() && tick_ - item_age_from_[i] < kLifetime && s.count() < s.max_stack();
+        return !s.empty() && item_pickup_[i] != kNever && tick_ - item_age_from_[i] < kLifetime && s.count() < s.max_stack();
     };
     const u32 row = ents_.by_slot(item_slot_[k]);
     if (!mergable(k, row)) return;

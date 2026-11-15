@@ -11,6 +11,7 @@
 #include "base/log.hpp"
 #include "net/reactor.hpp"
 #include "proto/gen/current.hpp"
+#include "server/console.hpp"
 #include "server/game.hpp"
 #include "server/prelogin.hpp"
 #include "server/settings.hpp"
@@ -34,6 +35,9 @@ int main(int argc, char** argv) {
     sigaction(SIGINT, &sa, nullptr);
     sigaction(SIGTERM, &sa, nullptr);
     std::signal(SIGPIPE, SIG_IGN);
+    // The console reads stdin. A background job that tries is stopped by the terminal unless
+    // it says it does not mind: then the read fails and the server runs without a console.
+    std::signal(SIGTTIN, SIG_IGN);
 
     std::atomic<u32> online{0};
     server::Prelogin prelogin(s, online);
@@ -66,7 +70,9 @@ int main(int argc, char** argv) {
 
     pthread_setname_np(pthread_self(), "tick");
     {
-        server::Game game(s, reactors, online);
+        server::Console console;
+        console.start();
+        server::Game game(s, reactors, online, &console);
         game.run(g_stop);
     }
     LOG_INFO("stopping");

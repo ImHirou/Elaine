@@ -58,7 +58,7 @@ STATE_LAYOUTS = {
 }
 
 # Sounds and particles the server sends by id (static registries: sound_event, particle_type).
-SOUNDS = ["block.chest.open", "block.chest.close", "entity.tnt.primed", "entity.generic.explode"]
+SOUNDS = ["block.chest.open", "block.chest.close", "entity.tnt.primed", "entity.generic.explode", "entity.item.pickup"]
 PARTICLES = ["explosion", "explosion_emitter", "poof", "smoke"]
 
 

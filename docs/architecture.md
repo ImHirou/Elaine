@@ -230,8 +230,7 @@ watching the other walk, turn, sneak, sprint, jump, leave and return). Walking, 
 lagging a tick, sneaking, sprinting flags, options, range, leaving: the same bytes. What differs:
 
 - `update_attributes` (a player's own creative reach comes from there too), the locator bar
-  (`waypoint`): not sent. Nor are footsteps (`sound`, to those who hear a player walk) and
-  entity event 24 at join (the permission level).
+  (`waypoint`): not sent. Nor are footsteps (`sound`, to those who hear a player walk).
 - Vanilla 26.x simulates a player's movement on the server as well as on the client. From that it
   knows a player stands on the ground before the client says so, and it infers jumps, which
   viewers get as `set_entity_motion`. We take the on-ground flag from the client's packets and
@@ -697,6 +696,187 @@ All of it is paid once, when a client hands the stack over (`set_creative_mode_s
 on the stack is the 8 bytes it always was, and its text is bytes to copy. A stack with a plain
 name costs what one with two plain components costs: the patch store, not the tag.
 
+## Commands (src/server/command.*, command_args.cpp, commands.cpp, console.*)
+
+### The tree is Brigadier's, because the client has a copy
+
+A client is sent the command tree (`commands`) and reads every line against it while it is
+typed: what it colours as valid, what it completes, which usage it shows. So the tree here is
+not ours to design. `cmd::Registry` is `CommandDispatcher`: literal and argument nodes, children
+in the order they were added, a node that redirects (`tp`), a command on the nodes a line may
+end at - and `Registry::parse` is `parseNodes`, read from brigadier-1.3.11.jar: a literal child
+spelled like the next word shuts out its argument siblings; argument siblings are all tried;
+among the readings the one that used the whole line wins, then one without errors, otherwise
+the first tried; what is reported is the one exception of the last node if there was exactly
+one, else "Unknown or incomplete command" (nothing matched, or the line ended early) or
+"Incorrect argument for command", at the cursor the reading stopped at. `error_context` is
+`Commands.finishParsing`: the ten characters before that cursor, the rest underlined, `<--[HERE]`.
+None of this is guessed at by a test client: `tools/vanilla/command_probe.py` types some 120
+lines, right and wrong, at a vanilla server and at this one and diffs every answer.
+
+### A command is a line and a function
+
+    r.add("give <targets:players> <item:item> [<count:int(1)>]", cmd::kGamemasters, &give);
+    r.add("teleport <targets:entities> <location:vec3> [<rotation:rotation>]", cmd::kGamemasters, &teleport);
+    r.add("fill <from:block_pos> <to:block_pos> <block:block_state> [(outline|hollow|destroy|strict)]", ...);
+    r.alias("tp", "teleport", cmd::kGamemasters);
+
+A word is a literal, `<name:type>` an argument, `(a|b)` one literal of several, `[` makes what
+follows optional. Lines that begin alike share their nodes, so a command is written out the
+way its usage reads, one line per form, and the tree that results is the one vanilla's builder
+chain makes - names and order included, which is the part a client shows. The types
+(`cmd::Type`) are vanilla's argument types that have a parser here; each is the port of its
+class (`command_args.cpp`), with its errors and the cursor it leaves them at.
+
+A handler is `i32 (*)(cmd::Invocation&)` and a `void*` of its own. It reads what was typed by
+name (`in.integer("count", 1)`, `in.has("hollow")`, `in.value("pos")`), asks the game what a
+name stands for at that moment - a selector is kept as parsed and resolved when the command
+runs, as `EntitySelector` is - and answers through `in.success(text, broadcast)` or
+`return in.fail(text)`. No templates, no captures, no exceptions: this is the surface a plugin
+gets. A Lua plugin's command is the same `add` with one C trampoline as the handler and the
+script's function as `user`; adding or removing a command bumps `Registry::version()`, and the
+tick that sees it sends everyone their tree again.
+
+The server's own commands are written against exactly this (`Game::Commands`,
+`server/commands.cpp`), which is how the surface was found to be enough.
+
+### Who may, and who hears
+
+Permission levels are vanilla's five; a command's root node has one, a source has one, and a
+node the source may not use does not exist for it - not in `parse`, not in the tree it is sent
+(`Commands.sendCommands`; one encoding per level, cached until the tree changes). Operators
+are `ops.json` in vanilla's format, read at start and written by `/op` and `/deop`; an operator
+gets `op-permission-level`. A client is told its level by entity event 24 + level, then sent
+its tree - at join, and whenever the level changes.
+
+The console is the other source: a thread blocks on stdin and hands lines to the tick thread
+through an SPSC ring (`Console`), where they run after the players' packets, as in vanilla,
+with level 4, from the world's spawn. It is how the first operator is made.
+
+`CommandSourceStack.sendSuccess` is `Game::command_success`: the source reads the message; if
+the command says so, every other operator reads `[Steve: message]` in grey italics and the log
+gets the same line. A failure is the message in red, to the source alone. A console's answers
+are printed as text: `text::Text::plain()` fills translations in from en_us.json, generated
+from the jar (`lang.hpp`: the 4000 keys a server prints - commands, arguments, the names of
+blocks, items and entities - 215 KiB of text in the binary).
+
+The tenth command in a row disconnects a player who is not an operator (`TickThrottler`: 20 a
+command, 1 back a tick, `command-spam-threshold-seconds` x 20 at most). That, and the 32768
+blocks a `/fill` may touch, is what bounds the cost of this path - which is why it allocates
+freely: a line a person typed is parsed into vectors and strings, a `Text` owns its parts, and
+none of it is ever per tick. What it costs when it is used is under "What it costs" below.
+
+### What a command says (`text::Text`)
+
+Vanilla's commands answer with `Component.translatable(key, args)`, and what the arguments are
+is part of the wire: a number travels as an int tag, a player as a text with a click event
+(`/tell name `), a hover event (`show_entity`: type, UUID, name) and an insertion; a stack as
+`[Stone]` in the colour of its rarity with a `show_item` hover. `Text` builds such a component
+call by call - `Text::translatable("commands.give.success.single").arg(3).arg(item).arg(who)` -
+and `encode()` writes it through `text::transcode`, the one place that knows the form vanilla's
+codec gives a component (and the order of its HashMap). That needed the two hover events
+transcode did not read; they are read now for clients' components too.
+
+### Selectors, blocks, coordinates
+
+`Game::select` is `EntitySelector.findEntities` / `findPlayers` over the entity table: by name,
+by UUID, or `@p @a @r @s @e @n` with the options `type` (and `#tags`, negated or not), `name`,
+`distance`, `x y z`, `dx dy dz`, `x_rotation`, `y_rotation`, `limit`, `sort`, `gamemode`,
+`level`, `tag`, `team` - the last four against what every entity here has (creative, level 0,
+no tags, no team). Entities are found by a scan of the table's columns, players by a scan of
+the player rows: no index is kept for a question a person types.
+
+A block argument is a block's name and properties (`chest[facing=east,type=left]`), resolved
+against the block's property table (generated: every block's properties, values and strides),
+or - where vanilla allows it - a `#tag`. What `/setblock` and `/fill` then do is
+`BlockInput.place` and vanilla's flags for `Game::set_block` (`kUpdate*`): the state takes the
+shape its neighbours give it, the block it replaces does not spill, the neighbours are told
+afterwards - all at once for a `/fill`, so a TNT in the region is replaced before the redstone
+beside it could light it - and `strict` leaves out both. Rule 9 holds here as for a hand: a
+block whose class is not ported is refused, in words of this server's own.
+
+Coordinates are `WorldCoordinates` and `LocalCoordinates`: `~` from where the source stands, `^`
+along where it looks, a whole number in a `vec3` the middle of its block. `/tp` sends a player
+`player_position` with vanilla's relative flags - a `~` is an offset the client adds to where
+it is, velocity kept - and waits for the confirmation like the teleport at join does.
+
+### Compared with vanilla
+
+`tools/vanilla/command_probe.py` joins two bots, makes one an operator from the console, and
+has it run the commands above in their forms - and what is not one: unknown blocks, bad
+properties, selectors that do not parse, too many items, places outside the world - while the
+second watches, is given things, moved, opped, deopped and kicked. Every system message either
+of them gets is compared as bytes (UUIDs of summoned entities aside), with the block changes,
+teleports, sounds and the command tree.
+
+Of the 186 steps (93 lines, each as two bots see it) 185 come out the same: every answer and
+every error with its `<--[HERE]` line as the same bytes, what the other operator is told, the
+order of `/help`, the blocks a `/fill hollow` or `replace #planks` changes, the offsets and
+flags of a relative teleport and the second player's absolute one, the item that flies into a
+player on `/give` with its sound, a sound played from two blocks away at its least volume, the
+`stop_sound` variants, the level a player is told when opped and deopped, the reason a kicked
+player reads. The command trees agree node for node as far as ours goes - names, order,
+parsers and their properties, what runs, what redirects - with what differs listed here:
+
+- `/op` and `/deop` name `minecraft:ask_server` for their argument's suggestions in vanilla
+  (who is not an operator yet; who is one); here the client completes player names itself;
+- vanilla shows a summoned entity the moment it is made, before the command's answer; here it
+  appears with the tick's other entities, after it (the tracker's one deliberate difference);
+- left out of the comparison because the things do not exist here: "has made the advancement"
+  after a `/give`, "left the game" after a `/kick`, grass turning to dirt under a block a
+  command put on it;
+- a vanilla server asked to op a name it has not seen asks Mojang whose it is - even in
+  offline mode - and ops that account. Here an unseen name in offline mode is its own profile.
+
+The same recording run found what reading the classes had not: that `MutableComponent.append`
+drops an empty string (no `""` child in front of an error at cursor 0), that an unknown
+entity type leaves the cursor behind its name where every other parser puts it back, that
+`/help` lists `deop` before `op`, and that a server treats the position a client confirms a
+teleport with as a move - a bot that echoed a relative teleport's offsets was put right with
+a second, absolute one. The hover events `show_entity` and `show_item`, which the answers
+needed, went into `tools/vanilla/component_probe.py` with their spellings: the same bytes.
+
+### What it costs
+
+Reading a line is 1 - 3 us and building and encoding its answer another 3 us (`bench
+command`: 0.6 M lines/s for a `setblock` with properties, 0.3 M for a `tp` with a six-option
+selector or a `fill` with a tag filter, 1.0 M for a line that fails at its second argument;
+0.3 M answers/s for "Gave 3 [Diamond] to Steve" with both hover events). Next to the tick a
+command runs in that is nothing; what a command *does* is the cost. The largest `/fill` there
+is, 32768 blocks, takes the tick it runs in: 50 - 57 ms for a 32 x 32 x 32 cube of stone and
+for clearing it again (the block changes, their light, one `section_blocks_update` per
+section), 33 ms for a hollow shell of 5768 glowstone, where the light is most of it. (Release
+build; measured while two game clients were running on the same four cores, so on the high
+side.) The limit is vanilla's (`maxBlockModifications`); it is the one command here that costs
+a tick, and only an operator can type it.
+
+The binary grew from 1.2 to 2.2 MiB: en_us (215 KiB of text and its index), the names of
+1658 items with their translation keys, the property tables of 1286 blocks, and the parsers.
+None of it is touched unless a command runs.
+
+
+### Not there
+
+- NBT in any argument: a block's `{...}`, an item's `[components]`, `/summon`'s tag, a
+  selector's `nbt=`. It needs an SNBT reader and, per component, its `Codec`.
+- `/tp ... facing`, `/rotate`: the `player_look_at` packet and `Entity.lookAt`.
+- What is summoned is not ticked. A mob stands where it was put; anything a client would let
+  fall by itself is flagged `NO_GRAVITY`, as items on the ground are. `/summon item` (an item
+  entity without a stack, which vanilla discards in its first tick) summons nothing.
+- `/kill`: the entity is gone at once - no death animation, no drops - and a player cannot be
+  killed: there is no health and no respawn.
+- `/kick <reason>`, like every `message` argument: plain text; selectors inside it are not
+  resolved, and a signed command's signatures are read past (no secure chat).
+- `/op` of someone who is not online works by name only in offline mode (the name is its own
+  profile); in online mode Mojang would have to be asked.
+- Suggestions the server would have to compute (`ask_server`): `/op` and `/deop` leave their
+  argument to the client's own completion of player names.
+- `/setblock ... destroy` breaks the block without the particles and sound of a broken block
+  (`level_event` 2001), which nothing here sends yet.
+- Every command about something that does not exist: chat (`say`, `msg`, `me`, `tellraw`),
+  time and weather, game modes, effects, experience, scoreboards and teams, `execute`, `data`,
+  `clear` (the inventory can do it; its item predicates are the work), bans and the whitelist.
+
 ## Wire format handling
 
 - **VarInt** (`proto/varint.hpp`): one-byte values take a predicted branch; longer ones are branch-free
@@ -743,6 +923,10 @@ LuaJIT, one state, tick thread only. The intended shape:
   hooks sit at the two choke points that already exist (`Game::on_packet` for inbound, `write_packet`
   callers for outbound).
 - Lua errors never unwind through C++ frames (no exceptions here): all calls go through `lua_pcall`.
+- Commands are the first piece of this that exists: `Game::commands()` takes a syntax line, a C
+  function and a pointer (see "Commands"), and the handler reads typed values by name. A plugin's
+  `register_command("heal <targets:players> [<amount:int(1,20)>]", fn)` is that call with a
+  trampoline that pushes the `Invocation` and `lua_pcall`s the function kept under `user`.
 
 ## Known gaps and next steps
 
@@ -765,10 +949,11 @@ Roughly in dependency order:
 7. **Items**: the component hashes of `container_click`, the rest of the components (stacks in
    stacks, the behaviour components), the crafting recipes that compute their result. Survival
    needs none of that first, only a game mode.
-   Text: selectors and the other contents that are not read; a builder for the server's own
-   components (chat, a renamed item) on top of `nbt::Writer` - a menu's title is the first text
-   the server makes itself (`Component.translatable`, through `text::transcode`).
+   Text: selectors and the other contents that are not read. (The server's own components are
+   built with `text::Text`.)
 8. **Blocks**: `docs/blocks-roadmap.md` - shapes that follow their neighbours, scheduled and
    random ticks, fluids, redstone, the other block entities. And what the first four still
    lack: experience orbs, item physics (`world::collide` is there for it), `entityInside`.
-9. Lua plugin host.
+9. **Commands**: an SNBT reader (block entity data, item components, `/summon`'s tag, `nbt=`),
+   `facing`, then the commands that wait for their subject - chat first.
+10. Lua plugin host.

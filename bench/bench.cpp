@@ -108,5 +108,6 @@ int main(int argc, char** argv) {
     item_benchmarks();
     nbt_benchmarks();
     game_benchmarks();
+    command_benchmarks();
     return 0;
 }

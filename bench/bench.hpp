@@ -53,10 +53,11 @@ inline void report(const char* name, double value, const char* unit) {
     if (selected(name)) std::printf("%-44s %12.2f %s\n", name, value, unit);
 }
 
-void world_benchmarks();   // bench/world_bench.cpp
-void entity_benchmarks();  // bench/entity_bench.cpp
-void item_benchmarks();    // bench/item_bench.cpp
-void nbt_benchmarks();     // bench/nbt_bench.cpp
-void game_benchmarks();    // bench/game_bench.cpp
+void world_benchmarks();    // bench/world_bench.cpp
+void entity_benchmarks();   // bench/entity_bench.cpp
+void item_benchmarks();     // bench/item_bench.cpp
+void nbt_benchmarks();      // bench/nbt_bench.cpp
+void game_benchmarks();     // bench/game_bench.cpp
+void command_benchmarks();  // bench/command_bench.cpp
 
 }  // namespace benchmark

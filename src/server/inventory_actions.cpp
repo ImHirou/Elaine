@@ -211,6 +211,14 @@ void Game::drop(u32 pi, ItemStack stack, bool thrown, bool predicted) {
     (void)thrown;  // ItemEntity.thrower: only advancement triggers ask who threw it
 }
 
+// Player.createItemStackToDrop + ItemEntity.makeFakeItem: an item that is only there to be
+// seen flying into the player (/give) - never picked up, never merged, and at the end of its
+// life already: its first tick, later in this one, discards it.
+void Game::fake_item(u32 pi, ItemStack stack) {
+    const double y = ents_.y[pi] + static_cast<double>(eye_height(ents_.pose[pi])) - kDropBelowEyes;
+    spawn_item(std::move(stack), ents_.x[pi], y, ents_.z[pi], kNever, 5999);
+}
+
 // handlePunch: the left mouse button, whatever it hit - the air, a block (the block itself is
 // player_action's business), an entity (`attack` came first). The client swung its own arm; the
 // others are shown the attack animation of what the main hand holds.

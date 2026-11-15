@@ -65,6 +65,12 @@ bool set_key(Settings& s, std::string_view k, std::string_view v, std::string& e
         s.brand = std::string(v);
     else if (k == "debug")
         ok = parse_bool(v, s.debug);
+    else if (k == "op-permission-level")
+        ok = parse_num(v, s.op_permission_level, 0, 4);
+    else if (k == "command-spam-threshold-seconds")
+        ok = parse_num(v, s.command_spam_threshold, 0, 1000000);
+    else if (k == "ops-file")
+        s.ops_file = std::string(v);
     else
         return true;  // unknown keys (vanilla has many we do not implement yet) are ignored
     if (!ok) err = "invalid value for " + std::string(k) + ": '" + std::string(v) + "'";

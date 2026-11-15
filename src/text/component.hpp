@@ -12,10 +12,12 @@
 // Read: plain text, translatable (with fallback and arguments), keybind; children ("extra");
 // the whole style - colour (named or #RRGGBB), shadow colour, bold, italic, underlined,
 // strikethrough, obfuscated, insertion, font - with click events open_url, run_command,
-// suggest_command, change_page, copy_to_clipboard and the hover event show_text.
+// suggest_command, change_page, copy_to_clipboard and the hover events show_text, show_entity
+// and show_item (of a stack without components).
 // Not read, and answered kUnsupported: score, selector, nbt and object contents; the click
-// events show_dialog and custom; the hover events show_item and show_entity; a shadow colour
-// given as four floats; a URL that is not plainly one (Java's URI parser decides those).
+// events show_dialog and custom; a show_item whose stack has components, a show_entity whose
+// UUID is spelled otherwise than UUID.toString spells it; a shadow colour given as four floats;
+// a URL that is not plainly one (Java's URI parser decides those).
 #pragma once
 
 #include "base/buf.hpp"

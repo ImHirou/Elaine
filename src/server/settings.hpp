@@ -23,6 +23,9 @@ struct Settings {
     std::string session_server = "https://sessionserver.mojang.com";  // session-server
     std::string brand = "vanilla";                                    // server-brand: shown on the client's F3 screen
     bool debug = false;                                               // debug: verbose logging
+    u32 op_permission_level = 4;                                      // op-permission-level: what /op gives
+    u32 command_spam_threshold = 10;    // command-spam-threshold-seconds: commands in a row that get a player thrown out
+    std::string ops_file = "ops.json";  // ops-file: the operators (vanilla's ops.json)
 };
 
 // Missing file is not an error (defaults apply). Returns false + err on a malformed value.

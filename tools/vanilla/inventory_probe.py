@@ -33,8 +33,7 @@ Reading the diff:
   * Entity ids, UUIDs and sound seeds differ by nature and are replaced or cut.
   * Known differences that remain: vanilla shows a new entity to its viewers the moment it is
     created (ours at the end of the tick, so a swing and the item it threw swap places in the
-    stream); its falling items merge after two ticks instead of forty; it sends entity event 24
-    (the permission level) at join.
+    stream); its falling items merge after two ticks instead of forty.
 """
 from __future__ import annotations
 
@@ -94,6 +93,12 @@ class Actor(Bot):
                 x, y, z = r.f64(), r.f64(), r.f64()
                 r.take(24)
                 yaw, pitch = r.f32(), r.f32()
+                # Relative: bits X, Y, Z, Y_ROT, X_ROT say which values are offsets from where the
+                # client is. What it confirms is where that puts it - a server takes the echo as a move.
+                flags = r.i32()
+                old, rot = getattr(self, "pos", None) or [0.0, 0.0, 0.0], getattr(self, "rot", (0.0, 0.0))
+                x, y, z = (v + o if flags >> i & 1 else v for i, (v, o) in enumerate(zip((x, y, z), old)))
+                yaw, pitch = yaw + rot[0] if flags & 8 else yaw, pitch + rot[1] if flags & 16 else pitch
                 self.pos = [x, y, z]
                 self.rot = (yaw, pitch)
                 c.send("accept_teleportation", varint(tid) + struct.pack(">dddff", x, y, z, yaw, pitch))

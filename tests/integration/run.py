@@ -45,11 +45,15 @@ def free_port() -> int:
 class Server:
     def __init__(self, exe: str, **args):
         self.port = free_port()
+        # The operators' file: none to begin with, and nothing of a test left in the working directory.
+        self.ops_file = os.path.join(tempfile.gettempdir(), f"ops-{os.getpid()}-{self.port}.json")
         opts = {"server-ip": "127.0.0.1", "server-port": self.port, "online-mode": "false", "debug": "true",
-                "config": "/nonexistent/server.properties"}
+                "config": "/nonexistent/server.properties", "ops-file": self.ops_file}
         opts.update({k.replace("_", "-"): v for k, v in args.items()})
         self.log = tempfile.NamedTemporaryFile("w+", suffix=".log", delete=False)
-        self.proc = subprocess.Popen([exe] + [f"--{k}={v}" for k, v in opts.items()], stderr=self.log, stdout=self.log)
+        # stdin is the server's console: a pipe, so that a test can type on it.
+        self.proc = subprocess.Popen([exe] + [f"--{k}={v}" for k, v in opts.items()], stderr=self.log, stdout=self.log,
+                                     stdin=subprocess.PIPE)
         deadline = time.time() + 5
         while True:
             if self.proc.poll() is not None:
@@ -77,6 +81,21 @@ class Server:
         with open(self.log.name) as f:
             return f.read()
 
+    def console(self, line: str) -> None:
+        """Type a line on the server's console."""
+        self.proc.stdin.write(line.encode() + b"\n")
+        self.proc.stdin.flush()
+
+    def wait_log(self, text: str, timeout: float = 5.0) -> str:
+        """The server's log once `text` is in it."""
+        deadline = time.time() + timeout
+        while True:
+            log = self.read_log()
+            if text in log:
+                return log
+            assert time.time() < deadline, f"{text!r} never came up in the log:\n" + "\n".join(log.splitlines()[-15:])
+            time.sleep(0.02)
+
     def stop(self) -> int:
         if self.proc.poll() is None:
             self.proc.terminate()
@@ -85,6 +104,10 @@ class Server:
             except subprocess.TimeoutExpired:
                 self.proc.kill()
                 self.proc.wait()
+        if self.proc.stdin:
+            self.proc.stdin.close()
+        if os.path.exists(self.ops_file):
+            os.unlink(self.ops_file)
         return self.proc.returncode
 
 
@@ -789,9 +812,11 @@ def players_see_each_other(srv: Server):
     ja = join(a, "Alice")
     ida = ja["login"]["entity_id"]
     a.ticks(3)
-    # Alone in the world: the only entity news is about oneself, once.
+    # Alone in the world: the only entity news is about oneself, once - its permission level
+    # (entity event 24: none) at the join, then its own data.
     assert a.own_data == FRESH_PLAYER, a.own_data
-    assert not a.entities and [e[0] for e in a.entity_log] == ["set_entity_data"], a.entity_log
+    assert not a.entities and [e[:1] + e[2:] if e[0] == "entity_event" else e[:1] for e in a.entity_log] == [
+        ("entity_event", 24), ("set_entity_data",)], a.entity_log
 
     jb = join(b, "Bob")
     idb = jb["login"]["entity_id"]
@@ -2057,6 +2082,520 @@ def tnt(srv: Server):
     assert collect(a).get((9, -60, 6), AIR) == AIR
     collect(b)
     assert len(of_type(b, "kTnt")) == 1
+
+
+# ----------------------------------------------------------------------------- commands
+
+def run_command(c: Client, line: str, ticks: int = 3) -> dict:
+    """Type a command and let `ticks` server ticks pass. What came of it: {"said": the system
+    messages (text components as values), "blocks": {pos: state}, "teleports": [...]}; a
+    teleport is accepted, the chunks of a new view are taken. Entities, sounds and menus go
+    into the client's model as always."""
+    out = {"said": [], "blocks": {}, "teleports": []}
+    c.send("chat_command", mc.mc_str(line))
+    for i in range(ticks):
+        token = 0xC0DE00 + i
+        c.send("ping_request", struct.pack(">q", token))
+        while True:
+            name, r = c.recv()
+            if name == "pong_response":
+                assert r.i64() == token
+                break
+            if name == "system_chat":
+                out["said"].append(r.nbt())
+                assert r.bool() is False     # not the action bar
+                r.done()
+            elif name == "player_position":
+                tp = {"id": r.varint(), "pos": (r.f64(), r.f64(), r.f64()), "delta": (r.f64(), r.f64(), r.f64()),
+                      "rot": (r.f32(), r.f32()), "relative": r.i32()}
+                r.done()
+                out["teleports"].append(tp)
+                c.send("accept_teleportation", varint(tp["id"]) + struct.pack(">dddff", *tp["pos"], *tp["rot"]))
+            elif name == "block_update":
+                pos, state = mc.parse_block_update(r)
+                out["blocks"][pos] = state
+            elif name == "section_blocks_update":
+                out["blocks"].update(mc.parse_section_blocks_update(r))
+            elif name == "keep_alive":
+                c.send("keep_alive", r.take(8))
+            else:
+                assert name in ("block_changed_ack", "light_update", "player_info_update", "player_info_remove", "set_chunk_cache_center",
+                                "chunk_batch_start", "level_chunk_with_light", "chunk_batch_finished", "forget_level_chunk"), \
+                    f"unexpected {name} after /{line}"
+    return out
+
+
+def tr(key: str, *args) -> dict:
+    """Component.translatable(key, args) as it arrives."""
+    return {"translate": key, "with": list(args)} if args else {"translate": key}
+
+
+def failure(message) -> dict:
+    """CommandSourceStack.sendFailure: the message inside an empty red text."""
+    return {"text": "", "extra": [message], "color": "red"}
+
+
+def here(line: str, cursor: int) -> dict:
+    """Commands.finishParsing: the line with the place of the error marked."""
+    parts = (["..."] if cursor > 10 else []) + ([line[max(0, cursor - 10):cursor]] if cursor else [])
+    if cursor < len(line):
+        parts.append({"text": line[cursor:], "color": "red", "underlined": mc.Byte(1)})
+    parts.append({"translate": "command.context.here", "color": "red", "italic": mc.Byte(1)})
+    return failure({"text": "", "color": "gray", "extra": parts,
+                    "click_event": {"action": "suggest_command", "command": "/" + line}})
+
+
+def player_name(name: str) -> dict:
+    """Player.getDisplayName: a click suggests a whisper, pointing shows the entity."""
+    raw = bytes.fromhex(mc.offline_uuid(name))
+    return {"text": name, "insertion": name, "click_event": {"action": "suggest_command", "command": f"/tell {name} "},
+            "hover_event": {"action": "show_entity", "id": "minecraft:player", "name": name,
+                            "uuid": mc.IntArray(struct.unpack(">4i", raw))}}
+
+
+def item_name(item: str, count: int = 1, block: bool = False, color: str = "white") -> dict:
+    """ItemStack.getDisplayName of a stack without components."""
+    hover = {"action": "show_item", "id": "minecraft:" + item}
+    if count != 1:
+        hover["count"] = count
+    return {"translate": "chat.square_brackets", "color": color, "hover_event": hover,
+            "with": [{"text": "", "extra": [tr(("block" if block else "item") + ".minecraft." + item)]}]}
+
+
+def admin(who, message) -> dict:
+    """CommandSourceStack.broadcastToAdmins: what the other operators read."""
+    return {"translate": "chat.type.admin", "with": [who, message], "color": "gray", "italic": mc.Byte(1)}
+
+
+def make_op(srv: Server, c: Client, name: str) -> None:
+    """`op` on the console; the client is told its new level and sent the tree that goes with it."""
+    srv.console(f"op {name}")
+    srv.wait_log(f"Made {name} a server operator")
+    # An operator by the time the console's answer goes round: it is the first thing it reads as one.
+    assert c.recv_pending_chat() == [admin("Server", tr("commands.op.success", name))]
+    assert c.permission_level == 4, c.permission_level
+
+
+@test()
+def command_tree_and_operators(srv: Server):
+    """Who may run what: the tree a client is sent, the console, /op and /deop, what the other
+    operators are told."""
+    a, b = srv.client(), srv.client()
+    join(a, "Alice")
+    join(b, "Bob")
+    a.expect("player_info_update")
+    for cl in (a, b):
+        cl.send("player_loaded")
+    settle(a, b)
+
+    # Nobody is an operator: level 0, and a tree of the two commands anyone may use.
+    assert a.permission_level == 0 and sorted(a.commands["children"]) == ["help", "list"], a.commands["children"].keys()
+    lst = a.commands["children"]["list"]
+    assert lst["executable"] and not lst["restricted"] and list(lst["children"]) == ["uuids"] and lst["children"]["uuids"]["executable"]
+    assert a.commands["children"]["help"]["children"]["command"]["properties"] == {"type": "greedy"}
+    # What is not in the tree is not a command, for this player.
+    line = "setblock 8 -60 12 stone"
+    got = run_command(a, line)
+    assert got["said"] == [failure(tr("command.unknown.command")), here(line, 0)] and not got["blocks"], got
+    assert run_command(a, "list")["said"] == [tr("commands.list.players", 2, 500, {"text": "", "extra": [
+        player_name("Alice"), {"text": ", ", "color": "gray"}, player_name("Bob")]})]
+    assert run_command(a, "help")["said"] == ["/help [<command>]", "/list [uuids]"]
+
+    # The console makes Alice an operator: entity event 28, the whole tree, a line in ops.json.
+    make_op(srv, a, "Alice")
+    tree = a.commands["children"]
+    assert sorted(tree) == ["deop", "fill", "give", "help", "kick", "kill", "list", "op", "playsound", "setblock", "stop",
+                            "stopsound", "summon", "teleport", "tp"], sorted(tree)
+    assert tree["setblock"]["restricted"] and not tree["setblock"]["executable"] and not tree["list"]["restricted"]
+    pos = tree["setblock"]["children"]["pos"]
+    assert pos["parser"] == "kBlockPos" and not pos["executable"]
+    block = pos["children"]["block"]
+    assert block["parser"] == "kBlockState" and block["executable"] and list(block["children"]) == ["destroy", "keep", "replace", "strict"]
+    targets = tree["give"]["children"]["targets"]
+    assert targets["properties"] == {"amount": "multiple", "type": "players"}
+    count = targets["children"]["item"]["children"]["count"]
+    assert (count["parser"], count["properties"], count["executable"]) == ("kInteger", {"min": 1}, True)
+    sound = tree["playsound"]["children"]["sound"]
+    assert (sound["parser"], sound["suggestions"]) == ("kResourceLocation", "minecraft:available_sounds")
+    assert list(sound["children"]) == ["master", "music", "record", "weather", "block", "hostile", "neutral", "player", "ambient", "voice", "ui"]
+    pitch = sound["children"]["block"]["children"]["targets"]["children"]["pos"]["children"]["volume"]["children"]["pitch"]
+    assert pitch["properties"] == {"min": 0.0, "max": 2.0}
+    entity = tree["summon"]["children"]["entity"]
+    assert (entity["parser"], entity["properties"], entity["suggestions"]) == ("kResource", {"registry": "minecraft:entity_type"}, "minecraft:summonable_entities")
+    assert tree["tp"]["redirect"] == "teleport" and not tree["tp"]["children"] and tree["tp"]["restricted"]
+    assert list(tree["teleport"]["children"]) == ["location", "destination", "targets"]
+    assert tree["teleport"]["children"]["destination"]["properties"] == {"amount": "single", "type": "entities"}
+    ops = json.load(open(srv.ops_file))
+    dashed = mc.offline_uuid("Alice")
+    dashed = "-".join((dashed[:8], dashed[8:12], dashed[12:16], dashed[16:20], dashed[20:]))
+    assert ops == [{"uuid": dashed, "name": "Alice", "level": 4, "bypassesPlayerLimit": False}], ops
+    assert b.permission_level == 0 and sorted(b.commands["children"]) == ["help", "list"]
+
+    # Alice ops Bob: both read it - Alice as the answer, Bob as what an operator did.
+    got = run_command(a, "op Bob")
+    done = tr("commands.op.success", "Bob")
+    assert got["said"] == [done], got
+    assert b.recv_pending_chat() == [admin(player_name("Alice"), done)]
+    assert b.permission_level == 4 and "setblock" in b.commands["children"]
+    assert run_command(a, "op Bob")["said"] == [failure(tr("commands.op.failed"))]
+    assert "[Alice: Made Bob a server operator]" in srv.read_log()
+    # What Bob does now, Alice is told about; what only answers a question (list) she is not.
+    got = run_command(b, "setblock 8 -60 12 stone")
+    changed = tr("commands.setblock.success", 8, -60, 12)
+    assert got["said"] == [changed] and got["blocks"] == {(8, -60, 12): mc.BLOCK["kStone"]}, got
+    run_command(b, "list")
+    assert a.recv_pending_chat() == [admin(player_name("Bob"), changed)]
+
+    # /deop: back to level 0 and the small tree; a third time there is nobody to deop.
+    assert run_command(a, "deop Bob")["said"] == [tr("commands.deop.success", "Bob")]
+    settle(b)
+    assert b.permission_level == 0 and sorted(b.commands["children"]) == ["help", "list"]
+    assert run_command(a, "deop Bob")["said"] == [failure(tr("commands.deop.failed"))]
+    assert [o["name"] for o in json.load(open(srv.ops_file))] == ["Alice"]
+    # A name nobody has: in offline mode it is a profile all the same (and can be opped ahead of joining).
+    assert run_command(a, "op Carol")["said"] == [tr("commands.op.success", "Carol")]
+    c = srv.client()
+    join(c, "Carol")
+    assert c.permission_level == 4 and "stop" in c.commands["children"]
+
+    # The console is a source too: it runs everything, and reads the answers in its log.
+    srv.console("list")
+    srv.wait_log("There are 3 of a max of 500 players online: Alice, Bob, Carol")
+    srv.console("/setblock 8 -60 13 glowstone")
+    srv.wait_log("Changed the block at 8, -60, 13")
+    srv.console("nonsense")
+    srv.wait_log("nonsense<--[HERE]")
+    srv.console("kill")
+    srv.wait_log("An entity is required to run this command here")
+
+
+@test()
+def command_blocks(srv: Server):
+    """/setblock and /fill: the modes, what they answer, what they refuse."""
+    a, b = srv.client(), srv.client()
+    join(a, "Alice")
+    join(b, "Bob")
+    a.expect("player_info_update")
+    for cl in (a, b):
+        cl.send("player_loaded")
+    settle(a, b)
+    make_op(srv, a, "Alice")
+    stone, glow, chest_state = mc.BLOCK["kStone"], mc.BLOCK["kGlowstone"], mc.BLOCK["kChest"]
+
+    # Relative to where Alice stands (8.5, -60, 8.5): "~ ~ ~3" is the block (8, -60, 11).
+    at = (8, -60, 11)
+    got = run_command(a, "setblock ~ ~ ~3 stone")
+    assert got["said"] == [tr("commands.setblock.success", *at)] and got["blocks"] == {at: stone}, got
+    assert collect(b)[at] == stone
+    assert run_command(a, "setblock ~ ~ ~3 minecraft:stone")["said"] == [failure(tr("commands.setblock.failed"))]   # no change
+    assert run_command(a, "setblock 8 -60 11 glowstone keep")["said"] == [failure(tr("commands.setblock.failed"))]  # not air
+    assert run_command(a, "setblock 8 -60 11 glowstone replace")["blocks"] == {at: glow}
+    # destroy: the old block breaks first and drops what it drops - glowstone dust.
+    got = run_command(a, "setblock 8 -60 11 air destroy")
+    assert got["said"] == [tr("commands.setblock.success", *at)] and got["blocks"] == {at: AIR}
+    dust = [e for e in of_type(a, "kItem").values() if e.data[D_ITEM][1][0] == I["kGlowstoneDust"]]
+    assert len(dust) == 1 and all(lo <= v < lo + 1 for v, lo in zip(dust[0].pos, at)), [e.pos for e in dust]
+    # Properties: a chest facing east, the right half of a pair; `strict` leaves the neighbours alone.
+    first = chest_state - 1
+    got = run_command(a, "setblock 8 -60 11 chest[facing=east]")
+    assert got["blocks"] == {at: first + 3 * 6 + 1}, got
+    got = run_command(a, "setblock 8 -60 12 chest[facing=east,type=right] strict")
+    assert got["blocks"] == {(8, -60, 12): first + 3 * 6 + 4 + 1}, got
+    # Without `strict` the neighbours take their shape: the single chest joins the half beside it.
+    got = run_command(a, "setblock 8 -60 12 chest[facing=east,type=right]")
+    assert got["said"] == [failure(tr("commands.setblock.failed"))]             # it is that already
+    got = run_command(a, "setblock 8 -60 12 chest[facing=east,type=right,waterlogged=false] destroy")
+    assert got["blocks"] == {(8, -60, 12): first + 3 * 6 + 4 + 1, at: first + 3 * 6 + 2 + 1}, got    # ...as the left half
+    # What a command replaces is not spilled: the chest's contents go with it.
+    give(a, 36, I["kStone"], 20)
+    click(a, at, 1, seq=1)
+    collect(a), collect(b)
+    assert a.window and a.window["type"] == "kGeneric9x6"
+    menu_click(a, 54 + 27, 0, QUICK_MOVE)
+    settle(a)
+    items = len(of_type(b, "kItem"))
+    mark = len(a.menu_log)
+    got = run_command(a, "fill 8 -60 11 8 -60 12 air")
+    assert got["said"] == [tr("commands.fill.success", 2)] and got["blocks"] == {at: AIR, (8, -60, 12): AIR}, got
+    settle(a)
+    collect(b)
+    assert a.window is None and ("container_close", 1) in a.menu_log[mark:]    # the screen closes with its chest
+    assert len(of_type(b, "kItem")) == items
+
+    # What is not a block, what a block does not have, what this server cannot simulate yet.
+    line = "setblock 8 -60 11 nonsense"
+    assert run_command(a, line)["said"] == [failure(tr("argument.block.id.invalid", "minecraft:nonsense")), here(line, 18)]
+    line = "setblock 8 -60 11 chest[facing=up]"
+    assert run_command(a, line)["said"] == [failure(tr("argument.block.property.invalid", "minecraft:chest", "up", "facing")), here(line, 31)]
+    line = "setblock 8 -60"
+    assert run_command(a, line)["said"] == [failure(tr("argument.pos3d.incomplete")), here(line, 9)]
+    line = "setblock 8 -60 11 stone now"
+    assert run_command(a, line)["said"] == [failure(tr("command.unknown.argument")), here(line, 24)]
+    assert run_command(a, "setblock 8 -60 11")["said"] == [failure(tr("command.unknown.command")), here("setblock 8 -60 11", 17)]
+    assert run_command(a, "setblock 8 999 11 stone")["said"] == [failure(tr("argument.pos.outofworld"))]
+    assert run_command(a, "setblock 100000 -60 11 stone")["said"] == [failure(tr("argument.pos.unloaded"))]
+    got = run_command(a, "setblock 8 -60 11 oak_stairs")
+    assert got["said"] == [failure("The block minecraft:oak_stairs is not supported by this server yet")] and not got["blocks"]
+    got = run_command(a, "setblock 8 -60 11 chest[waterlogged=true]")
+    assert got["said"] == [failure("The block minecraft:chest cannot hold a fluid on this server yet")]
+
+    # /fill: a 5 x 3 x 3 box, east of Alice.
+    lo, hi = (10, -60, 10), (14, -58, 12)
+    box = [(x, y, z) for x in range(lo[0], hi[0] + 1) for y in range(lo[1], hi[1] + 1) for z in range(lo[2], hi[2] + 1)]
+    shell = [p for p in box if any(v in (l, h) for v, l, h in zip(p, lo, hi))]
+    got = run_command(a, "fill 10 -60 10 14 -58 12 stone")
+    assert got["said"] == [tr("commands.fill.success", 45)] and got["blocks"] == {p: stone for p in box}
+    assert collect(b) == got["blocks"]
+    got = run_command(a, "fill 14 -58 12 10 -60 10 glowstone hollow")      # the corners in the other order
+    assert got["said"] == [tr("commands.fill.success", 45)] and len(shell) == 42
+    assert got["blocks"] == {p: (glow if p in shell else AIR) for p in box}
+    got = run_command(a, "fill 10 -60 10 14 -58 12 stone outline")
+    assert got["said"] == [tr("commands.fill.success", 42)] and got["blocks"] == {p: stone for p in shell}
+    got = run_command(a, "fill 10 -60 10 14 -58 12 oak_planks keep")       # only where there is air: the inside
+    assert got["said"] == [tr("commands.fill.success", 3)] and set(got["blocks"]) == set(box) - set(shell)
+    got = run_command(a, "fill 10 -60 10 14 -58 12 glowstone replace #minecraft:planks")
+    assert got["said"] == [tr("commands.fill.success", 3)] and got["blocks"] == {p: glow for p in set(box) - set(shell)}
+    got = run_command(a, "fill 10 -60 10 14 -58 12 glowstone replace stone strict")
+    assert got["said"] == [tr("commands.fill.success", 42)]
+    assert run_command(a, "fill 10 -60 10 14 -58 12 glowstone")["said"] == [failure(tr("commands.fill.failed"))]   # nothing to change
+    assert run_command(a, "fill 10 -60 10 14 -58 12 stone replace stone")["said"] == [failure(tr("commands.fill.failed"))]
+    got = run_command(a, "fill 0 -60 0 40 -30 40 stone")
+    assert got["said"] == [failure(tr("commands.fill.toobig", 32768, mc.Long(41 * 31 * 41)))] and not got["blocks"]
+    assert run_command(a, "fill 10 -60 10 14 -58 12 air")["said"] == [tr("commands.fill.success", 45)]
+
+    # TNT beside a block of redstone: set by a command it goes off (onPlace) - unless `strict`.
+    run_command(a, "setblock 12 -60 10 redstone_block")
+    got = run_command(a, "setblock 13 -60 10 tnt strict")
+    assert got["blocks"] == {(13, -60, 10): mc.BLOCK["kTnt"]} and not of_type(a, "kTnt")
+    got = run_command(a, "setblock 11 -60 10 tnt")
+    assert got["said"] == [tr("commands.setblock.success", 11, -60, 10)] and len(of_type(a, "kTnt")) == 1
+    # ...and the one set strictly hears of the next change beside it.
+    run_command(a, "setblock 13 -59 10 stone")
+    assert len(of_type(a, "kTnt")) == 2
+    run_command(a, "kill @e[type=tnt]")
+    collect(b)
+    assert not of_type(a, "kTnt") and not of_type(b, "kTnt")
+
+
+@test()
+def command_teleport_give_summon(srv: Server):
+    """/tp, /give, /summon, /kill: what moves, what appears, what everyone is told."""
+    a, b = srv.client(), srv.client()
+    ja = join(a, "Alice")
+    jb = join(b, "Bob")
+    a.expect("player_info_update")
+    for cl in (a, b):
+        cl.send("player_loaded")
+    settle(a, b)
+    make_op(srv, a, "Alice")
+    ida, idb = ja["login"]["entity_id"], jb["login"]["entity_id"]
+    alice, bob = player_name("Alice"), player_name("Bob")
+
+    # Relative: the client is sent offsets and told which parts are such (X Y Z, both angles,
+    # and the velocity along each axis: 0xFF); the others see her five blocks up.
+    got = run_command(a, "tp ~ ~5 ~")
+    assert got["said"] == [tr("commands.teleport.success.location.single", alice, "8.500000", "-55.000000", "8.500000")], got
+    assert got["teleports"] == [{"id": 2, "pos": (0.0, 5.0, 0.0), "delta": (0.0, 0.0, 0.0), "rot": (0.0, 0.0), "relative": 0xFF}]
+    settle(a, b)
+    assert b.entities[ida].pos == (8.5, -55.0, 8.5), b.entities[ida].pos
+    # Absolute, with a rotation; a whole number is the middle of its block.
+    got = run_command(a, "tp @s 10 -60 9 90 45")
+    assert got["said"] == [tr("commands.teleport.success.location.single", alice, "10.500000", "-60.000000", "9.500000")]
+    assert got["teleports"] == [{"id": 3, "pos": (10.5, -60.0, 9.5), "delta": (0.0, 0.0, 0.0), "rot": (90.0, 45.0), "relative": 0}]
+    settle(a, b)
+    e = b.entities[ida]
+    assert e.pos == (10.5, -60.0, 9.5) and (e.yaw, e.pitch) == (90.0, 45.0), (e.pos, e.yaw, e.pitch)
+    # Others: Bob to Alice, then everyone to a place - and each is told where it now is.
+    got = run_command(a, "teleport Bob Alice")
+    assert got["said"] == [tr("commands.teleport.success.entity.single", bob, alice)] and not got["teleports"]
+    tp = run_command(b, "list")["teleports"]
+    assert len(tp) == 1 and (tp[0]["pos"], tp[0]["rot"], tp[0]["relative"]) == ((10.5, -60.0, 9.5), (90.0, 45.0), 0), tp
+    got = run_command(a, "tp @a 8.5 -60 8.5")
+    assert got["said"] == [tr("commands.teleport.success.location.multiple", 2, "8.500000", "-60.000000", "8.500000")]
+    assert got["teleports"][0]["relative"] == 0x18      # the rotation was not given: it stays (Y_ROT | X_ROT)
+    run_command(b, "list")
+    settle(a, b)
+    assert a.entities[idb].pos == (8.5, -60.0, 8.5) and b.entities[ida].pos == (8.5, -60.0, 8.5)
+    # Far away: the view follows, and the place is as real as any (a block can be set there).
+    got = run_command(a, "tp 1000 -60 1000", ticks=6)
+    assert got["teleports"][0]["pos"] == (1000.5, -60.0, 1000.5)
+    got = run_command(a, "setblock ~ ~ ~1 stone")
+    assert got["blocks"] == {(1000, -60, 1001): mc.BLOCK["kStone"]}, got
+    settle(a, b)
+    assert ida not in b.entities                        # out of Bob's sight
+    run_command(a, "tp Bob", ticks=6)
+    settle(a, b)
+    assert b.entities[ida].pos == (8.5, -60.0, 8.5)
+    # What cannot be: outside the world, nobody of that name, a selector that does not parse.
+    assert run_command(a, "tp 0 30000000 0")["said"] == [failure(tr("commands.teleport.invalidPosition"))]
+    assert run_command(a, "tp Nobody")["said"] == [failure(tr("argument.entity.notfound.entity"))]
+    line = "kill @e[type=nonsense]"
+    assert run_command(a, line)["said"] == [failure(tr("argument.entity.options.type.invalid", "minecraft:nonsense")), here(line, 13)]
+    line = "give @e stone"
+    assert run_command(a, line)["said"] == [failure(tr("argument.player.entities")), here(line, 0)]
+
+    # /give: into the inventory, with the sound and the item that flies in - there for one tick.
+    sounds, log = len(b.sounds), len(b.entity_log)
+    got = run_command(a, "give @s diamond 3")
+    assert got["said"] == [tr("commands.give.success.single", 3, item_name("diamond"), alice)], got
+    assert a.slots[36] == plain("kDiamond", 3) and server_menu(a)[36] == plain("kDiamond", 3)
+    settle(b)
+    sound, source, where, volume, pitch = b.sounds[sounds]
+    assert (sound, source, where) == (mc.SOUND["kEntityItemPickup"], 7, (8.5, -60.0, 8.5)), b.sounds[sounds]
+    assert abs(volume - 0.2) < 1e-6 and 0.6 <= pitch <= 3.4, (volume, pitch)
+    flown = [(n, w) for n, eid, w in b.entity_log[log:] if n in ("add_entity", "remove_entities")]
+    assert [n for n, w in flown] == ["add_entity", "remove_entities"] and not of_type(b, "kItem"), flown
+    got = run_command(a, "give @a stone 130")           # more than a stack: three of them
+    assert got["said"] == [tr("commands.give.success.multiple", 130, item_name("stone", block=True), 2)]
+    assert [a.slots[i] for i in (37, 38, 39)] == [plain("kStone", 64), plain("kStone", 64), plain("kStone", 2)]
+    settle(b)
+    assert b.slots[36] == plain("kStone", 64) and b.slots[38] == plain("kStone", 2)
+    assert run_command(a, "give Bob enchanted_golden_apple")["said"] == [
+        tr("commands.give.success.single", 1, item_name("enchanted_golden_apple", color="aqua"), bob)]
+    got = run_command(a, "give @s ender_pearl 1601")    # a hundred stacks is the most
+    assert got["said"] == [failure(tr("commands.give.failed.toomanyitems", 1600, item_name("ender_pearl")))]
+    line = "give @s stone 0"
+    assert run_command(a, line)["said"] == [failure(tr("argument.integer.low", 1, 0)), here(line, 14)]
+    line = "give @s diamond[damage=1]"
+    assert run_command(a, line)["said"] == [failure("Item components in commands are not supported by this server yet"), here(line, 15)]
+    assert run_command(a, "give Nobody stone")["said"] == [failure(tr("argument.entity.notfound.player"))]
+
+    # /summon: an entity like any other - shown, selected, killed. It only stands there.
+    before = set(a.entities)
+    got = run_command(a, "summon armor_stand ~2 ~ ~")
+    (eid,) = set(a.entities) - before
+    stand = a.entities[eid]
+    assert stand.type == mc.ENTITY_TYPE["kArmorStand"] and stand.pos == (10.5, -60.0, 8.5), (stand.type, stand.pos)
+    uuid = "-".join((stand.uuid[:8], stand.uuid[8:12], stand.uuid[12:16], stand.uuid[16:20], stand.uuid[20:]))
+    shown = {"translate": "entity.minecraft.armor_stand", "insertion": uuid,
+             "hover_event": {"action": "show_entity", "id": "minecraft:armor_stand", "name": tr("entity.minecraft.armor_stand"),
+                             "uuid": mc.IntArray(struct.unpack(">4i", bytes.fromhex(stand.uuid)))}}
+    assert got["said"] == [tr("commands.summon.success", shown)], got
+    settle(b)
+    assert b.entities[eid].pos == stand.pos
+    run_command(a, "summon minecraft:armor_stand 12 -60 8")
+    run_command(a, "summon cow")
+    assert len(of_type(a, "kArmorStand")) == 2 and len(of_type(a, "kCow")) == 1
+    # Selectors: the nearest stand; then by a box, by distance, by what they are not.
+    got = run_command(a, "tp @e[type=armor_stand,sort=nearest,limit=1] ~ ~3 ~")
+    assert got["said"] == [tr("commands.teleport.success.location.single", shown, "8.500000", "-57.000000", "8.500000")], got
+    settle(a, b)
+    assert a.entities[eid].pos == (8.5, -57.0, 8.5) and b.entities[eid].pos == (8.5, -57.0, 8.5)
+    assert run_command(a, "kill @e[type=!player,type=!cow,distance=..2]")["said"] == [failure(tr("argument.entity.notfound.entity"))]
+    got = run_command(a, "kill @e[type=armor_stand,y=-58,dy=3]")
+    assert got["said"] == [tr("commands.kill.success.single", shown)] and eid not in a.entities
+    got = run_command(a, "kill @e[type=!player]")
+    assert got["said"] == [tr("commands.kill.success.multiple", 2)] and not of_type(a, "kArmorStand") and not of_type(a, "kCow")
+    settle(b)
+    assert set(b.entities) == {ida}
+    assert run_command(a, "kill")["said"] == [failure("Players cannot be killed on this server yet")]
+    line = "summon nonsense"
+    assert run_command(a, line)["said"] == [failure(tr("argument.resource.not_found", "minecraft:nonsense", "minecraft:entity_type")), here(line, 15)]
+    assert run_command(a, "summon player")["said"] == [failure(tr("entity.not_summonable", "minecraft:player"))]
+    assert run_command(a, "summon cow 0 30000000 0")["said"] == [failure(tr("commands.summon.invalidPosition"))]
+    # A summoned TNT is a primed one: it falls, and its fuse burns down from 80.
+    run_command(a, "summon tnt ~ ~4 ~3")
+    settle(a, ticks=12)
+    (tnt,) = of_type(a, "kTnt").values()
+    assert tnt.pos[1] < -56.0 and 60 <= tnt.data[mc.TNT_DATA["kFuse"]][1] < 80, (tnt.pos, tnt.data)
+    run_command(a, "kill @e[type=tnt]")
+
+
+@test()
+def command_sounds_kick_stop(srv: Server):
+    """/playsound and /stopsound, /kick, the limit on commands in a row, and /stop."""
+    a, b = srv.client(), srv.client()
+    join(a, "Alice")
+    join(b, "Bob")
+    a.expect("player_info_update")
+    for cl in (a, b):
+        cl.send("player_loaded")
+    settle(a, b)
+    make_op(srv, a, "Alice")
+    alice, bob = player_name("Alice"), player_name("Bob")
+    harp = "minecraft:block.note_block.harp"
+
+    # A sound by its name - whatever the name: the client looks it up, not the server.
+    n = len(a.sounds)
+    got = run_command(a, "playsound block.note_block.harp")
+    assert got["said"] == [tr("commands.playsound.success.single", harp, alice)], got
+    assert a.sounds[n:] == [(harp, 0, (8.5, -60.0, 8.5), 1.0, 1.0)] and len(b.sounds) == 0     # to herself, as "master"
+    got = run_command(a, "playsound some:thing voice @a ~ ~2 ~ 0.5 2")
+    assert got["said"] == [tr("commands.playsound.success.multiple", "some:thing", 2)]
+    settle(b)
+    assert a.sounds[-1] == ("some:thing", 9, (8.5, -58.0, 8.5), 0.5, 2.0) and b.sounds[-1] == a.sounds[-1]
+    # Out of earshot nothing is sent - unless a least volume is given: then from two blocks away.
+    assert run_command(a, "playsound some:thing block Bob ~ ~100 ~")["said"] == [failure(tr("commands.playsound.failed"))]
+    got = run_command(a, "playsound some:thing block Bob ~ ~100 ~ 1 1 0.25")
+    assert got["said"] == [tr("commands.playsound.success.single", "some:thing", bob)]
+    settle(b)
+    assert b.sounds[-1] == ("some:thing", 4, (8.5, -58.0, 8.5), 0.25, 1.0), b.sounds[-1]
+    line = "playsound some:thing block @a ~ ~ ~ 1 3"
+    assert run_command(a, line)["said"] == [failure(tr("argument.float.big", mc.Float(2.0), mc.Float(3.0))), here(line, 38)]
+    line = "playsound Some:Thing"     # an identifier has no capitals: it ends before the first, empty
+    assert run_command(a, line)["said"] == [failure(tr("command.expected.separator")), here(line, 10)]
+
+    assert run_command(a, "stopsound @a")["said"] == [tr("commands.stopsound.success.sourceless.any")]
+    assert run_command(a, "stopsound @a music")["said"] == [tr("commands.stopsound.success.source.any", "music")]
+    assert run_command(a, "stopsound Bob * block.note_block.harp")["said"] == [tr("commands.stopsound.success.sourceless.sound", harp)]
+    assert run_command(a, "stopsound Bob ui block.note_block.harp")["said"] == [tr("commands.stopsound.success.source.sound", harp, "ui")]
+    settle(b)
+    assert a.stopped_sounds == [(None, None), (1, None)] and b.stopped_sounds == [(None, None), (1, None), (None, harp), (10, harp)]
+
+    # Twelve commands in a row are two too many for someone who is not an operator.
+    for _ in range(12):
+        b.send("chat_command", mc.mc_str("list"))
+    while True:
+        name, r = b.recv()
+        if name == "disconnect":
+            assert r.nbt() == tr("disconnect.spam")
+            break
+        assert name == "system_chat", name
+    b.expect_closed()
+    for _ in range(12):                                   # an operator may
+        a.send("chat_command", mc.mc_str("list"))
+    assert len(a.recv_pending_chat()) == 12
+
+    # /kick: with the default reason, and with one given; everyone left reads who went.
+    c, d = srv.client(), srv.client()
+    join(c, "Carol")
+    join(d, "Dave")
+    got = run_command(a, "kick Carol")
+    reason = tr("multiplayer.disconnect.kicked")
+    assert got["said"] == [tr("commands.kick.success", player_name("Carol"), reason)], got
+
+    def kicked(cl: Client):
+        """The reason this client is thrown out with (after whatever it was still to read)."""
+        while True:
+            name, r = cl.recv()
+            if name == "disconnect":
+                why = r.nbt()
+                cl.expect_closed()
+                return why
+
+    assert kicked(c) == reason
+    got = run_command(a, "kick Dave that is довольно")
+    assert got["said"] == [tr("commands.kick.success", player_name("Dave"), "that is довольно")]
+    assert kicked(d) == "that is довольно"
+    assert run_command(a, "kick Nobody")["said"] == [failure(tr("argument.entity.notfound.player"))]
+    # A section sign may not travel in chat: the one who types it is thrown out.
+    e = srv.client()
+    join(e, "Erin")
+    e.send("chat_command", mc.mc_str("list §c"))
+    assert kicked(e) == tr("multiplayer.disconnect.illegal_characters")
+
+    # /stop: said, logged, done - the server ends by itself, cleanly.
+    a.send("chat_command", mc.mc_str("stop"))
+    said = []
+    while True:
+        name, r = a.recv()
+        if name == "system_chat":
+            said.append(r.nbt())
+        elif name == "disconnect":
+            break
+    assert said == [tr("commands.stop.stopping")], said
+    assert srv.proc.wait(timeout=5) == 0
+    assert "[Alice: Stopping the server]" in srv.read_log()
 
 
 def join_many(srv: Server, n: int, view: int, online: bool = False) -> list:

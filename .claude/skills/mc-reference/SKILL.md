@@ -76,6 +76,10 @@ class names containing `$` (`'…ClientboundPlayerInfoUpdatePacket$Action'`).
 | `ParticleTypes.STREAM_CODEC` | VarInt particle type id, then that type's own options - nothing for the simple ones (explosion, poof, smoke) |
 | `WeightedList.streamCodec(c)` | VarInt count, then per entry the value and a VarInt weight |
 | `ClientboundBlockEventPacket` | position, two bytes, and the block as its **block registry** id (not a state id) |
+| `ClientboundCommandsPacket` | VarInt count, then per node: a flags byte (bits 0-1: root / literal / argument; 4 runs; 8 redirects; 16 suggestions; 32 restricted), VarInt array of child indices, the redirect index if any, the name unless root, and for an argument its `command_argument_type` id with that type's properties (numbers: a byte 1 = min, 2 = max, then those; string: VarInt word / phrase / greedy; entity: a byte 1 = single, 2 = players only; resource: the registry's identifier; most: nothing) and the suggestions' identifier if flagged; last the root's index - `cmd::Registry::encode_tree` |
+| `SoundEvent.STREAM_CODEC` (a `Holder`) | VarInt registry id + 1; or `0`, then the event inline: its identifier and an optional (bool-prefixed) float range - what `/playsound` sends for any name |
+| `ClientboundStopSoundPacket` | a byte: bit 0 a source (VarInt enum) follows, bit 1 a sound (identifier) follows |
+| `ServerboundChatCommandSignedPacket` | command, long timestamp, long salt, up to 8 x (argument name of 16 chars, 256-byte signature), then `LastSeenMessages.Update`: VarInt offset, 20 bits as 3 bytes, a checksum byte |
 
 All rows above were read from the 26.3 jar. If you meet a codec that is not in the table, read its
 implementation (`mcgen.py find 'codec/ByteBufCodecs'`, then `javap --full` the anonymous class) and add a row.
@@ -216,6 +220,20 @@ How to read it:
   ground is sent as exact positions every tick), that `CraftingMenu` sends its result slot once per
   ingredient taken, and that a menu shows its emptied slots before it closes on a broken chest. Two
   recordings on one vanilla world do not compare: the first one's crater is in the second.
+- `tools/vanilla/command_probe.py`: what a server answers to commands - some 120 lines, right and wrong, typed by
+  an operator bot while a second one watches; system messages byte for byte, block changes, teleports, sounds, the
+  command tree. It is how the order of `/help`, the cursor of an unknown entity type (behind the name, where every
+  other parser puts it back in front), the empty string `MutableComponent.append` drops, and the second, absolute
+  `player_position` a server sends when a confirmed teleport does not match were found. The bot is opped from the
+  console after it joined: asked to op a name it has not seen, vanilla looks it up at Mojang.
+- **Commands** are Brigadier's (`com.mojang.brigadier`, not in the server jar: read it with `javap -p -c -cp
+  .cache/mc/<version>/datagen/libraries/com/mojang/brigadier/*/brigadier-*.jar com.mojang.brigadier.CommandDispatcher`).
+  A command's tree is the builder chain in its class (`mcgen.py pseudo net.minecraft.server.commands.FillCommand`
+  prints it in one line; `then()` order is child order - `reports/commands.json` sorts children by name, the wire
+  does not). An error's text is a translation key and its arguments in the order of the *lambda's array*, not of
+  the `create(...)` call (`argument.block.property.invalid` is created with block, property, value and reads block,
+  value, property): print the `lambda$static$N` bodies. Where the cursor is when a parser throws is in its code
+  (`reader.setCursor(start)` or not) and shows as the `<--[HERE]` line.
 - A packet you remember may be gone, with another in its place: 26.x has no serverbound `swing`, the left
   button is `punch`. Before concluding that the client sends nothing, list what it can send
   (`src/proto/gen/*/packet_ids.hpp`, or the `handle*` methods of `ServerGamePacketListenerImpl`) and read what

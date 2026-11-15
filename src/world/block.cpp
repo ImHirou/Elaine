@@ -1,6 +1,8 @@
 #include "world/block.hpp"
 
 #include PROTO_GEN_BLOCK_TABLES_HPP
+#include PROTO_GEN_COMMAND_DATA_HPP
+#include PROTO_GEN_ENTITIES_HPP
 
 namespace world {
 
@@ -25,6 +27,55 @@ u32 item_count() { return static_cast<u32>(std::size(gen::kItems)); }
 const ItemInfo& item_info(u32 item) {
     DCHECK(item < std::size(gen::kItems));
     return gen::kItems[item];
+}
+
+// ---- by name
+
+namespace {
+namespace cmd = gen::command;
+static_assert(std::size(cmd::kBlockPropertyFirst) == state::kBlockCount + 1);
+static_assert(std::size(cmd::kBlocksByName) == state::kBlockCount && std::size(cmd::kItems) == std::size(gen::kItems));
+static_assert(std::size(cmd::kEntityTypesByName) == gen::entity_type::kCount);
+
+// `order`: ids sorted by the name `name_of` gives them.
+template <usize N, class NameOf>
+u32 find_by_name(const unsigned short (&order)[N], std::string_view name, NameOf&& name_of) {
+    usize lo = 0, hi = N;
+    while (lo < hi) {
+        const usize mid = (lo + hi) / 2;
+        if (name_of(order[mid]) < name) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo < N && name_of(order[lo]) == name ? order[lo] : kNoId;
+}
+}  // namespace
+
+u32 find_block(std::string_view name) {
+    return find_by_name(cmd::kBlocksByName, name, [](u32 i) { return gen::kBlockNames[i]; });
+}
+u32 find_item(std::string_view name) {
+    return find_by_name(cmd::kItemsByName, name, [](u32 i) { return cmd::kItems[i].name; });
+}
+u32 find_entity_type(std::string_view name) {
+    return find_by_name(cmd::kEntityTypesByName, name, [](u32 i) { return gen::entity_type::kNames[i]; });
+}
+std::string_view item_name(u32 item) { return item < std::size(cmd::kItems) ? cmd::kItems[item].name : "?"; }
+std::string_view item_text_key(u32 item) { return item < std::size(cmd::kItems) ? cmd::kItems[item].key : "?"; }
+u32 item_rarity(u32 item) { return item < std::size(cmd::kItems) ? cmd::kItems[item].rarity : 0; }
+std::string_view entity_type_name(u32 type) { return type < gen::entity_type::kCount ? gen::entity_type::kNames[type] : "?"; }
+bool summonable(u32 type) { return type < gen::entity_type::kCount && cmd::kSummonable[type]; }
+
+u32 block_property_count(u32 block) {
+    DCHECK(block < state::kBlockCount);
+    return static_cast<u32>(cmd::kBlockPropertyFirst[block + 1] - cmd::kBlockPropertyFirst[block]);
+}
+BlockProperty block_property(u32 block, u32 index) {
+    const cmd::BlockProperty& use = cmd::kBlockProperties[cmd::kBlockPropertyFirst[block] + index];
+    const cmd::Property& p = cmd::kProperties[use.property];
+    return {p.name, {cmd::kPropertyValues + p.first_value, p.values}, use.stride};
 }
 
 std::span<const Box> collision_boxes(BlockState s, bool& dynamic) {

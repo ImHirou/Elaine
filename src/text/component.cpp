@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "proto/identifier.hpp"
+#include "world/block.hpp"
 
 namespace text {
 
@@ -65,6 +66,7 @@ constexpr NamedColor kColors[] = {
 
 enum Contents : u8 { kPlain, kTranslatable, kKeybindContents };
 enum Click : u8 { kOpenUrl, kRunCommand, kSuggestCommand, kChangePage, kCopyToClipboard };
+enum Hover : u8 { kShowText, kShowEntity, kShowItem };
 
 constexpr u32 style_bit(u32 key) { return 1u << (key - kColor); }
 
@@ -77,9 +79,13 @@ struct Style {
     Click click{};  // click_event: the action...
     u32 rgb = 0;
     i32 shadow = 0;
-    i32 page = 0;       // ...and its page, or
-    Tag click_value;    // ...its url / command / value
-    u32 hover = kNone;  // hover_event show_text: the component
+    i32 page = 0;                      // ...and its page, or
+    Tag click_value;                   // ...its url / command / value
+    Hover hover_kind{};                // hover_event: the action...
+    u32 hover = kNone;                 // ...show_text: the component; show_entity: its name, if it has one
+    u32 hover_id = 0;                  // ...show_entity: the entity type; show_item: the item
+    i32 hover_uuid[4] = {0, 0, 0, 0};  // ...show_entity: UUIDUtil.uuidToIntArray
+    i32 hover_count = 1;               // ...show_item
     Tag insertion;
     Tag font;
 };
@@ -456,9 +462,73 @@ class Transcoder {
         const std::string_view a = action.str();
         if (a == "show_text") {
             const Tag value = t.get("value");
+            s.hover_kind = kShowText;
             return value ? resolve(value, depth + 1, s.hover) : Result::kInvalid;
         }
-        if (a == "show_item" || a == "show_entity") return Result::kUnsupported;
+        // A registry entry by name; one that is not in the registry is an error to vanilla too
+        // (it throws the sender out: tools/vanilla/component_probe.py).
+        char full[320];
+        const auto named = [&](Tag id) -> std::string_view {
+            proto::Identifier parsed;
+            if (id.type != nbt::kString || !proto::parse_identifier(id.str(), parsed) || parsed.size() > sizeof full) return {};
+            return {full, static_cast<usize>(reinterpret_cast<char*>(parsed.put(reinterpret_cast<u8*>(full))) - full)};
+        };
+        if (a == "show_entity") {  // HoverEvent.EntityTooltipInfo.CODEC: id, uuid, an optional name
+            const std::string_view type = named(t.get("id"));
+            if (type.empty()) return Result::kInvalid;
+            s.hover_kind = kShowEntity;
+            s.hover_id = world::find_entity_type(type);
+            if (s.hover_id == world::kNoId) return Result::kInvalid;
+            // UUIDUtil.LENIENT_CODEC: four ints (an array, or a list of numbers), or a string -
+            // of which only the form UUID.toString writes is read here.
+            const Tag uuid = t.get("uuid");
+            if (uuid.type == nbt::kString) {
+                const std::string_view text = uuid.str();
+                if (text.size() != 36) return Result::kUnsupported;
+                u32 part = 0, digits = 0;
+                for (u32 i = 0; i < 36; ++i) {
+                    const u8 c = static_cast<u8>(text[i]);
+                    if (i == 8 || i == 13 || i == 18 || i == 23) {
+                        if (c != '-') return Result::kUnsupported;
+                        continue;
+                    }
+                    const u32 digit = c >= '0' && c <= '9'                     ? c - '0'
+                                      : (c | 0x20) >= 'a' && (c | 0x20) <= 'f' ? (c | 0x20) - 'a' + 10
+                                                                               : 16;
+                    if (digit == 16) return Result::kUnsupported;
+                    part = part << 4 | digit;
+                    if (++digits % 8 == 0) s.hover_uuid[digits / 8 - 1] = static_cast<i32>(part);
+                }
+            } else if (uuid.type == nbt::kIntArray || uuid.type == nbt::kList) {
+                if (uuid.size() != 4) return Result::kInvalid;
+                u32 i = 0;
+                for (const Tag e : uuid.elements()) {
+                    if (!e.numeric()) return Result::kInvalid;
+                    s.hover_uuid[i++] = e.as_int();
+                }
+            } else {
+                return uuid ? Result::kUnsupported : Result::kInvalid;
+            }
+            const Tag name = t.get("name");
+            return name ? resolve(name, depth + 1, s.hover) : Result::kOk;
+        }
+        if (a == "show_item") {  // ItemStackTemplate.MAP_CODEC: id, count (1..99, 1 if absent), components
+            const std::string_view item = named(t.get("id"));
+            if (item.empty()) return Result::kInvalid;
+            s.hover_kind = kShowItem;
+            s.hover_id = world::find_item(item);
+            if (s.hover_id == world::kNoId || s.hover_id == 0) return Result::kInvalid;  // Item.CODEC: not air either
+            if (const Tag count = t.get("count")) {
+                if (!count.numeric() || count.as_int() < 1 || count.as_int() > 99) return Result::kInvalid;
+                s.hover_count = count.as_int();
+            }
+            // A stack with components: each one's Codec would have to be read, and none is yet.
+            if (const Tag components = t.get("components")) {
+                if (components.type != nbt::kCompound) return Result::kInvalid;
+                if (components.size() != 0) return Result::kUnsupported;
+            }
+            return Result::kOk;
+        }
         return Result::kInvalid;
     }
 
@@ -502,14 +572,7 @@ class Transcoder {
                 case kColor: emit_color(c.style, w); break;
                 case kShadowColor: w.put_int(name, c.style.shadow); break;
                 case kClickEvent: emit_click(c.style, w); break;
-                case kHoverEvent:
-                    // {action: "show_text", value: ...}: "action" lands in an earlier bucket than "value".
-                    w.begin_compound(name);
-                    w.put_string_raw("action", "show_text");
-                    w.buf().commit(put_tag_header(w.buf().reserve(8), shape(c.style.hover), "value"));
-                    emit(c.style.hover, w);
-                    w.end_compound();
-                    break;
+                case kHoverEvent: emit_hover(c.style, w); break;
                 case kInsertion: w.put_string_raw(name, c.style.insertion.str()); break;
                 case kFont: {  // Identifier.toString: always with its namespace
                     proto::Identifier id;
@@ -582,6 +645,34 @@ class Transcoder {
         w.put_string_raw(kKeyName[kColor], {hex, 7});
     }
 
+    // The fields of a hover event in the order of its HashMap: every name in a bucket of its own
+    // (see the static_assert below), so the order in which the codec hands them over is not asked.
+    void emit_hover(const Style& s, nbt::Writer& w) const {
+        w.begin_compound(kKeyName[kHoverEvent]);
+        const auto component = [&](std::string_view field) {
+            w.buf().commit(put_tag_header(w.buf().reserve(3 + field.size()), shape(s.hover), field));
+            emit(s.hover, w);
+        };
+        switch (s.hover_kind) {
+            case kShowText:  // action, value
+                w.put_string_raw("action", "show_text");
+                component("value");
+                break;
+            case kShowEntity:  // name, action, id, uuid
+                if (s.hover != kNone) component("name");
+                w.put_string_raw("action", "show_entity");
+                w.put_string_raw("id", world::entity_type_name(s.hover_id));
+                w.put_int_array("uuid", s.hover_uuid);
+                break;
+            case kShowItem:  // count (unless 1), action, id
+                if (s.hover_count != 1) w.put_int("count", s.hover_count);
+                w.put_string_raw("action", "show_item");
+                w.put_string_raw("id", world::item_name(s.hover_id));
+                break;
+        }
+        w.end_compound();
+    }
+
     // {action: ..., <the action's field>: ...}: "action" lands in an earlier bucket than any of them.
     static void emit_click(const Style& s, nbt::Writer& w) {
         static constexpr std::string_view kAction[] = {"open_url", "run_command", "suggest_command", "change_page",
@@ -606,6 +697,9 @@ class Transcoder {
 constexpr u32 bucket16(std::string_view s) { return map_hash(s) & 15; }
 static_assert(bucket16("action") < bucket16("url") && bucket16("action") < bucket16("command") &&
               bucket16("action") < bucket16("page") && bucket16("action") < bucket16("value"));
+// ...and the fields of show_entity and show_item, as emit_hover writes them.
+static_assert(bucket16("name") < bucket16("action") && bucket16("action") < bucket16("id") && bucket16("id") < bucket16("uuid") &&
+              bucket16("count") < bucket16("action"));
 
 Transcoder transcoder;
 

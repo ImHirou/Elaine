@@ -61,6 +61,25 @@ inline const BlockInfo& block_info_of(BlockState s) { return block_info(block_of
 std::string_view block_name(u32 block);
 u32 item_count();
 const ItemInfo& item_info(u32 item);  // item < item_count()
+// ---- by name (cold: commands, text components). A name is a whole identifier, "minecraft:stone".
+inline constexpr u32 kNoId = ~0u;
+u32 find_block(std::string_view name);        // a block id, kNoId
+u32 find_item(std::string_view name);         // an item id, kNoId
+u32 find_entity_type(std::string_view name);  // an entity type id, kNoId
+std::string_view item_name(u32 item);
+std::string_view item_text_key(u32 item);  // the translation key of its default ITEM_NAME component
+u32 item_rarity(u32 item);                 // Rarity ordinal of its default RARITY: common, uncommon, rare, epic
+std::string_view entity_type_name(u32 type);
+bool summonable(u32 type);  // EntityType.canSummon()
+// Block.getStateDefinition(): a block's properties in order. The state with value index v_i of
+// property i is first_state + sum(v_i * stride_i).
+struct BlockProperty {
+    std::string_view name;
+    std::span<const std::string_view> values;
+    u32 stride;
+};
+u32 block_property_count(u32 block);
+BlockProperty block_property(u32 block, u32 index);
 // Collision boxes of a state in block-local coordinates; empty for states without collision.
 // `dynamic` is set when vanilla computes the shape from the position or the entity instead.
 std::span<const Box> collision_boxes(BlockState s, bool& dynamic);
