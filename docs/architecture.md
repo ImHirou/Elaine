@@ -581,7 +581,11 @@ down in its entity data every tick, the height of its hop tick by tick, the swit
 positions when it lands, the `explode` packet (its tail of particles and sound byte for byte,
 the push it gives a player four blocks away within a few percent - it depends on which blocks
 the rays took), the second TNT going off from where it fell, dirt lying about in stacks of 16.
-What differs:
+One thing that looks like a bug and is not: a chest that becomes half of a double one while a
+player has it open keeps that player's screen as it is - 27 slots onto its own half, the lid of
+the pair up - until it is closed; opened again it is the double chest. Vanilla does exactly
+this (the probe's steps "A opens the single chest again" to "A puts it back and closes"), and
+so it stays. What differs:
 
 - vanilla shows a new entity the moment it is created, so `add_entity` of a primed TNT comes
   before its sound and before the `explode` packet of the TNT that lit it; here it comes with
