@@ -166,8 +166,13 @@ def record(port: int, out_path: str, name_a: str, name_b: str) -> None:
     step("both keep it open for 12 ticks", ticks=12)
     step("B closes", b.close)
     step("A closes", a.close)
+    # The chest becomes a double one while A has it open: what happens to A's screen, and whose lid is up.
+    step("A opens the single chest again", lambda: a.use(at(0, 1, 2)))
     step("B places a second chest beside it", lambda: b.use(at(1, 0, 2)))
+    step("A keeps the screen it has for 12 ticks", ticks=12)
     step("B opens the double chest", lambda: b.use(at(1, 1, 2)))
+    step("A, still in its screen, takes the stone", lambda: a.wclick(0, 0, PICKUP))
+    step("A puts it back and closes", lambda: (a.wclick(0, 0, PICKUP), a.close()))
     step("A opens it too", lambda: a.use(at(0, 1, 2)))
     step("A closes", a.close)
     step("A breaks the half with the stone in it", lambda: a.dig(at(0, 1, 2)), ticks=10)
