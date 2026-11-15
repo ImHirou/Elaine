@@ -1,0 +1,119 @@
+// Dimension: one level - its chunks, the light engine over them, and the cache of wire frames.
+//
+// Chunk pipeline (the same staging as vanilla's chunk statuses, for the same reason: a chunk's
+// light depends on its neighbours' blocks):
+//
+//   load(c)     generate blocks, derive heightmaps and sky sources, register the sections with
+//               the light engine                                            (-> LightReady)
+//   lit(c)      all 8 neighbours loaded, then its own light sources propagate    (-> Lit)
+//   frame(c)    all 8 neighbours lit ("ticking"): light is final, the chunk may be sent, edited
+//               and broadcast. The framed + compressed packet is built once and cached until a
+//               block or a light value in the chunk changes.
+//
+// So sending a view of radius r generates (2r+5)^2 chunks, lights (2r+3)^2 and encodes (2r+1)^2.
+// Chunks are never unloaded yet: that needs persistence (a player's edits must go somewhere) and
+// the save/retain half of the light engine.
+//
+// Tick thread only. Nothing here locks; workers for generation and compression will get chunks
+// handed to them, not shared.
+#pragma once
+
+#include <span>
+#include <string>
+#include <vector>
+
+#include "base/buf.hpp"
+#include "world/chunk.hpp"
+#include "world/chunk_map.hpp"
+#include "world/generator.hpp"
+#include "world/light.hpp"
+
+namespace world {
+
+class Dimension {
+  public:
+    // One changed block, in the form the broadcast needs: sorted, these group by chunk and section.
+    struct BlockChange {
+        Chunk* chunk;
+        u16 section;  // section index
+        u16 pos;      // SectionPos.sectionRelativePos: x<<8 | z<<4 | y
+        bool operator==(const BlockChange&) const = default;
+    };
+
+    // `type_id` is the network id in the dimension_type registry (reg::dimension_type).
+    Dimension(u32 type_id, std::string name, ChunkGenerator& gen, i32 compression_threshold);
+    ~Dimension();
+    Dimension(const Dimension&) = delete;
+    Dimension& operator=(const Dimension&) = delete;
+
+    u32 type_id() const { return type_id_; }
+    const std::string& name() const { return name_; }
+    i32 min_y() const { return min_y_; }
+    i32 max_y() const { return max_y_; }  // inclusive
+    u32 sections() const { return sections_; }
+    bool has_skylight() const { return has_sky_; }
+    ChunkGenerator& generator() { return gen_; }
+
+    // ---- chunks
+    Chunk* find(i32 cx, i32 cz) const { return map_.find(cx, cz); }
+    Chunk& load(i32 cx, i32 cz);
+    Chunk& lit(i32 cx, i32 cz);
+    Chunk& ticking(i32 cx, i32 cz);
+    // The level_chunk_with_light packet for (cx, cz), framed for this server's compression
+    // threshold. Valid until the next call that changes the world.
+    std::span<const u8> frame(i32 cx, i32 cz);
+    usize chunk_count() const { return map_.size(); }
+
+    // ---- blocks
+    // Air outside the build height and in chunks that are not loaded.
+    ALWAYS_INLINE BlockState block(i32 x, i32 y, i32 z) const {
+        const Chunk* c = map_.find(x >> 4, z >> 4);
+        const u32 si = static_cast<u32>((y - min_y_) >> 4);
+        if (UNLIKELY(!c || si >= sections_)) return kAir;
+        return c->sections[si].get(Section::index(static_cast<u32>(x & 15), static_cast<u32>(y & 15), static_cast<u32>(z & 15)));
+    }
+    // Level.setBlock(pos, state, UPDATE_ALL): store the state, keep heightmaps and light in step,
+    // run the neighbour shape updates we implement, and record everything for this tick's
+    // broadcast. False when nothing changed (same state, outside the world, chunk not ticking).
+    bool set_block(i32 x, i32 y, i32 z, BlockState s);
+
+    // ---- per tick
+    // Bring light up to date with this tick's block changes. Call once, after all set_block calls
+    // and before reading the change lists.
+    void update_light();
+    // This tick's block changes, sorted by chunk, section, position, without duplicates.
+    std::vector<BlockChange>& block_changes();
+    // Chunks with Chunk::sky_changed / block_changed bits to broadcast.
+    std::vector<Chunk*>& light_changes() { return light_.changed(); }
+    // Forget both lists (clears the per-chunk masks).
+    void end_tick();
+
+    LightEngine& light() { return light_; }
+    const LightEngine& light() const { return light_; }
+    usize memory_bytes() const;  // pools + cached frames, for diagnostics
+
+  private:
+    void prime_heightmaps(Chunk& c);
+    void update_heightmaps(Chunk& c, u32 lx, i32 y, u32 lz, BlockState s);
+    void encode(Chunk& c);
+    bool set_block_raw(Chunk& c, i32 x, i32 y, i32 z, BlockState s);
+
+    u32 type_id_;
+    std::string name_;
+    ChunkGenerator& gen_;
+    i32 threshold_;
+    i32 min_y_, max_y_;
+    u32 sections_;
+    bool has_sky_;
+
+    ChunkMap map_;
+    SectionAllocator alloc_;
+    BlockPool chunk_pool_{sizeof(Chunk)};
+    LightEngine light_;
+    std::vector<BlockChange> changes_;
+    bool changes_sorted_ = true;
+    base::ByteBuf scratch_;
+    usize frame_bytes_ = 0;
+};
+
+}  // namespace world

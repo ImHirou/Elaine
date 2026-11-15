@@ -1,0 +1,9 @@
+# Text is stored with LF endings, whatever the committer's platform does.
+* text=auto eol=lf
+
+# Generated tables are #embed-ded byte for byte: never let a line-ending filter near them
+# (git takes a file without NUL bytes for text). After the line above: the last match wins.
+*.bin binary
+
+# Emitted by tools/mcgen - reviewed as "regenerated", not line by line.
+src/proto/gen/v*/** linguist-generated=true

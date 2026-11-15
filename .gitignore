@@ -1,0 +1,24 @@
+# Build trees (one per CMake preset) and everything mcgen downloads or extracts:
+# Mojang's jars, reports, game data, the vanilla reference server and its worlds.
+/build/
+/.cache/
+/compile_commands.json
+/CMakeUserPresets.json
+
+# Python
+__pycache__/
+*.pyc
+
+# What a server started from the source tree leaves behind
+/server.properties
+/logs/
+
+# Profiling
+perf.data*
+
+# Per-user tool state
+/.claude/settings.local.json
+/.idea/
+/.vscode/
+*.swp
+*~

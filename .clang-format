@@ -1,0 +1,14 @@
+# Formatting is not a goal here, consistency is: run `clang-format -i` on files you touch.
+BasedOnStyle: Google
+IndentWidth: 4
+ColumnLimit: 130
+AccessModifierOffset: -2
+AllowShortFunctionsOnASingleLine: All
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLoopsOnASingleLine: true
+AllowShortCaseLabelsOnASingleLine: true
+AllowShortBlocksOnASingleLine: Empty
+DerivePointerAlignment: false
+PointerAlignment: Left
+IncludeBlocks: Preserve
+SortIncludes: CaseSensitive

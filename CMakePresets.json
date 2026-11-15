@@ -1,0 +1,43 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "release",
+      "displayName": "Release (x86-64-v3, LTO)",
+      "generator": "Ninja",
+      "binaryDir": "build/release",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    },
+    {
+      "name": "native",
+      "displayName": "Release tuned for this machine (-march=native, LTO)",
+      "inherits": "release",
+      "binaryDir": "build/native",
+      "cacheVariables": { "MC_ARCH": "native" }
+    },
+    {
+      "name": "profile",
+      "displayName": "Release + frame pointers + debug info, for perf",
+      "inherits": "release",
+      "binaryDir": "build/profile",
+      "cacheVariables": { "MC_FRAME_POINTERS": "ON", "MC_LTO": "OFF" }
+    },
+    {
+      "name": "dev",
+      "displayName": "Debug + ASan/UBSan + DCHECKs",
+      "generator": "Ninja",
+      "binaryDir": "build/dev",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "MC_SANITIZE": "address,undefined" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "release", "configurePreset": "release" },
+    { "name": "native", "configurePreset": "native" },
+    { "name": "profile", "configurePreset": "profile" },
+    { "name": "dev", "configurePreset": "dev" }
+  ],
+  "testPresets": [
+    { "name": "release", "configurePreset": "release", "output": { "outputOnFailure": true } },
+    { "name": "dev", "configurePreset": "dev", "output": { "outputOnFailure": true } }
+  ]
+}
