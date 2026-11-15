@@ -106,5 +106,6 @@ int main(int argc, char** argv) {
     world_benchmarks();
     entity_benchmarks();
     item_benchmarks();
+    nbt_benchmarks();
     return 0;
 }

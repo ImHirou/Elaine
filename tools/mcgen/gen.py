@@ -821,7 +821,7 @@ namespace proto::gen {
     # client's decoder throw (Registry.byIdOrThrow), so the server has to check before passing one on.
     it.append("\n// Entry counts of static registries that component values refer to by id.\n"
               "namespace proto::gen::static_registry {\n\n")
-    for key in ("potion", "mob_effect", "sound_event"):
+    for key in ("potion", "mob_effect", "sound_event", "block_entity_type"):
         it.append(f"inline constexpr unsigned {ident(key)}Count = {len(static_regs['minecraft:' + key]['entries'])};\n")
     it.append("\n}  // namespace proto::gen::static_registry\n")
     files["items.hpp"] = "".join(it)

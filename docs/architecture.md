@@ -294,20 +294,41 @@ client's bytes (`item/components.cpp`). Three outcomes:
 | unsupported | well-formed envelope, but a component without a decoder here | the stack is refused and the slot sent back as the server holds it |
 
 "Unsupported" is the same rule as for blocks that cannot be placed yet: the server never holds
-what it cannot vouch for. Read today: stack size, damage, max damage, unbreakable, repair cost,
-rarity, enchantments and stored enchantments, glint override, potion contents and duration scale,
-suspicious stew effects, fireworks and firework explosions, instruments, painting variants, banner
-patterns (all three by registry reference only), block state, tooltip display, dyed colour, map
-id, item model, tooltip style, note block sound, ominous bottle amplifier, glider, waxed, the dye
-and collar colours. That covers what the creative inventory offers except the ominous banner.
-Not read: anything holding text (names, lore, books, signs), NBT (custom data, entity data),
-stacks within stacks (containers, bundles), and the behaviour components (food, tool, equippable,
-attribute modifiers...).
+what it cannot vouch for. Read today:
 
-Two knowing differences from vanilla: a patch is not "sanitized" against the item's defaults (a
-modified client can make a stone with `max_stack_size=64` that will not merge with plain stone - a
-vanilla client never sends that), and a patch is capped at 1 KiB (vanilla's only limit is the
-packet; a stack is copied to every viewer of its holder).
+- the plain ones: stack size, damage, max damage, unbreakable, repair cost, rarity, enchantments
+  and stored enchantments, glint override, potion contents and duration scale, suspicious stew
+  effects, fireworks and firework explosions, instruments, painting variants, banner patterns
+  (all three by registry reference only), block state, tooltip display, dyed colour, map id, item
+  model, tooltip style, note block sound, ominous bottle amplifier, glider, waxed, the dye and
+  collar colours;
+- text: custom name, item name, lore, the pages and title of books, the lines of a sign - each
+  a text component, read and written by `text::transcode` (below);
+- tags: custom data, bucket entity data, entity data and block entity data - compounds, kept as
+  vanilla would write the compound it loaded but with their entries in name order
+  (`nbt::Doc::write`). What is *in* them is nobody's business on the wire: a client's decoder
+  takes any well-formed compound, and the server will read them only where it acts on them.
+
+That covers everything the creative inventory offers, the ominous banner included. Not read:
+stacks within stacks (containers, bundles, charged projectiles), the behaviour components (food,
+tool, equippable, attribute modifiers...), the components that have a `Codec` only and so travel
+as the tag it makes (map decorations, lock, recipes... - custom data is the one of them that is
+read), and in a text the parts listed under "Text components".
+
+Knowing differences from vanilla:
+
+- a patch is not "sanitized" against the item's defaults (a modified client can make a stone with
+  `max_stack_size=64` that will not merge with plain stone - a vanilla client never sends that);
+- a patch is capped at 1 KiB (vanilla's only limit is the packet; a stack is copied to every
+  viewer of its holder). Names, lore and custom data fit; **a book of more than a page or two
+  does not** and is refused like an unread component - the cap was set before there was text,
+  and is one constant (`kMaxPatchBytes`) to revisit together with a limit on how often a player's
+  equipment may be re-sent. A tag of more than sixteen times the cap is refused without being
+  read: it is the tick thread that reads;
+- "equal" is "equal bytes". Vanilla holds a few things equal that it writes differently - a
+  colour by name and the same colour by number, two NaNs - and such stacks merge there, not here;
+- strings that are not well-formed UTF-8 (or, inside a tag, not what Java itself writes) are
+  refused. Vanilla reads them with replacement characters and passes on what it made of them.
 
 ### The inventory and its menu (`server::Inventory`, `server::Menu`)
 
@@ -411,6 +432,105 @@ shown, with which hand and animation, comes out the same. What differs:
   handled - a vanilla client never punches with a spear, so nobody sees it attack;
 - others do not hear a block being placed or see it break (`sound`, level event 2001).
 
+`tools/vanilla/component_probe.py` does it for what a stack carries as text and as tags - the
+names, lore, books, signs and custom data a client may spell in a hundred ways. Its results are
+under "A text component is read by a codec" below.
+
+## NBT and text components (src/nbt/, src/text/)
+
+### A tag stays the bytes it is (`nbt::Doc`, `nbt::Writer`)
+
+NBT is the tag tree of vanilla's saves and of everything structured in its protocol: text
+components, block entities, custom item data. Vanilla loads a tag into objects - a `HashMap` per
+compound, an object per number. Here a tag is never anything but its bytes:
+
+- **Reading** (`nbt::Doc::parse`) is one pass that checks the bytes the way `NbtIo` loads them
+  and leaves a *tape*: a 20-byte record per tag - its type, where its payload starts and ends,
+  which record follows its subtree. Numbers inside lists and arrays get none; their place is
+  arithmetic. Any tag is then reached, and any subtree skipped, without reading bytes twice:
+  finding a compound's entry is a walk over its entries' records, not over what they hold. A
+  `nbt::Tag` is a 16-byte view (document, record) with vanilla's accessors on it: a number as
+  `Number.intValue()` hands it out, a list's elements as `ListTag` holds them.
+- **The loader's rules are vanilla's**, each read from the jar: 512 compounds and lists deep;
+  strings in modified UTF-8 as `readUTF` takes it; a name read twice keeps its last value; a
+  compound in a list that holds nothing but a tag named "" stands for that tag (how a list of
+  mixed types travels); and `NbtAccounter` - every tag is charged what vanilla takes its Java
+  object to weigh, and a tag from a client may weigh 2 MiB. The quota is also what bounds the
+  tape: a megabyte of empty compounds is fifty in vanilla's books and refused, here as there.
+- **Writing a tag back** (`Doc::write`) gives the bytes vanilla writes for the tag it loaded -
+  repeats gone, list elements wrapped only where the list is mixed, an empty list without a type -
+  with one deliberate difference: a compound's entries go out sorted by name. Vanilla writes
+  them in the iteration order of its `HashMap`, which depends on the order they arrived in and
+  tells a reader nothing. Sorted, equal compounds are equal bytes - which is how the patch store
+  sees that two stacks carry the same data.
+- **Building** (`nbt::Writer`) appends to a `ByteBuf`, one capacity check per tag.
+
+Strings are compared and copied as bytes. That is exact for the bytes Java writes
+(`Doc::plain_strings`); a document that spells a character another way - a raw NUL, a letter in
+two bytes - only comes from a hand-made client, and callers refuse it rather than normalise it.
+
+### A text component is read by a codec, not by a layout (`text::transcode`)
+
+A component has no wire layout. It is a tag that `ComponentSerialization.CODEC` makes sense of -
+`"hi"`, `{text:"hi"}`, `["hi"]` and `{type:"text",text:"hi",anything:1}` are one text - and a
+vanilla server passes none of these on: it decodes the tag into a `Component` and encodes that.
+For a server that stores wire bytes this is the whole problem: stacks named `"hi"` and
+`{text:"hi"}` have to be one stack, and no client may be sent what another client spelled.
+
+`text::transcode` is that round trip without the object. It reads the tag as the codec does -
+the branches of an `Either` in their order, contents without a `type` matched as "the first
+type that fits" (text, translatable, keybind...), optional fields strict or lenient as declared,
+`Codec.BOOL` taking any number - into a flat description (contents, style, children, arguments;
+the strings stay in the document), and writes the tag the codec writes: plain text collapsed to
+a string, colours and identifiers in vanilla's form, lists wrapped as `ListTag` wraps them. And
+in vanilla's order: a compound is a `HashMap` there, so its entries leave bucket by bucket -
+`color` before `text` before `bold` - and move when a thirteenth entry makes the table grow.
+`map_order` reproduces that from the names' hash codes, so the bytes are the ones a vanilla
+server sends.
+
+That claim is measured, not read off the jar: a codec's behaviour is the sum of many small rules
+of DataFixerUpper, and one of them misread makes other bytes. `tools/vanilla/component_probe.py`
+puts 221 stacks into a bot's hand on a vanilla 26.3 server and on this one - every spelling
+above, each style field alone and all of them at once, the colours, the numbers a flag may be,
+click and hover events, lore, books, signs, custom data, and for each what is wrong with it -
+and compares what a second bot is then shown:
+
+| | cases |
+|---|---|
+| the same bytes sent on, or the sender thrown out by both | 193 |
+| vanilla takes it, this server does not read it and refuses the stack (the list below) | 20 |
+| vanilla throws the sender out, this server only refuses the stack (URLs `java.net.URI` rejects, a shadow colour of three floats) | 6 |
+| the same compound, entries by name instead of in HashMap order (custom data) | 1 |
+| an empty lore: vanilla drops what the item says by default, a patch is not held against the defaults here | 1 |
+
+Nothing is taken that vanilla throws out, and nothing thrown out that vanilla takes. (The probe
+found one such case: an entity type that does not exist is a pig to vanilla, not an error - its
+registry has a default.)
+
+Not read, and answered "unsupported" (the stack is refused): the contents score, selector, nbt
+and object (a selector is a parser of its own); the hover events `show_item` and `show_entity`;
+the click events `show_dialog` and `custom`; a shadow colour given as four floats; a URL that is
+not plainly one (`java.net.URI` decides those; `http(s)://host[:port]/path?query#fragment` in
+RFC 2396's characters is taken).
+
+### What it costs
+
+`bench nbt`, `bench text`, `bench item` (i5-9300H, `release`):
+
+| | |
+|---|---|
+| read a chest of 27 stacks: 2.5 KiB of tags, 160 records (3.2 KiB) of tape | 2.6 us (0.95 GB/s) |
+| find one of its entries by name | 42 ns |
+| write it back, names in order | 4.5 us |
+| build the same chest with the `Writer` | 0.8 us |
+| a styled name - colour, flags, a hover text, a child - through the codec | 0.6 us |
+| read a stack with a plain name from a client | 0.3 us |
+| read a stack with a styled name and two lines of lore | 2 us |
+
+All of it is paid once, when a client hands the stack over (`set_creative_mode_slot`). From then
+on the stack is the 8 bytes it always was, and its text is bytes to copy. A stack with a plain
+name costs what one with two plain components costs: the patch store, not the tag.
+
 ## Wire format handling
 
 - **VarInt** (`proto/varint.hpp`): one-byte values take a predicted branch; longer ones are branch-free
@@ -476,7 +596,9 @@ Roughly in dependency order:
 6. **Encryption off the tick thread.** Needed, not optional, for crowds in online mode: 500 players
    in one place cost 8 - 25 ms of AES per tick there (see "What a tick of this costs"). Encrypt on
    the reactors, or split the flush across workers.
-7. **Items**: the rest of the components (text and NBT first: names, lore, custom data), the
-   component hashes of `container_click`, recipes, then containers and block entities. Survival
-   needs none of that first, only a game mode.
+7. **Items**: the component hashes of `container_click`, the rest of the components (stacks in
+   stacks, the behaviour components), recipes, then containers and block entities - for which
+   `nbt::Writer` and `nbt::Doc` are there. Survival needs none of that first, only a game mode.
+   Text: selectors and the other contents that are not read; a builder for the server's own
+   components (chat, a renamed item) on top of `nbt::Writer`.
 8. Lua plugin host.

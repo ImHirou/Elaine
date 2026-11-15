@@ -8,8 +8,10 @@
 #include <vector>
 
 #include "item/stack.hpp"
+#include "nbt_bytes.hpp"
 #include "proto/packets.hpp"
 
+#include PROTO_GEN_ENTITIES_HPP
 #include PROTO_GEN_ITEMS_HPP
 
 using namespace proto;
@@ -18,6 +20,7 @@ using item::PatchId;
 using item::Verdict;
 namespace comp = proto::gen::component;
 namespace it = proto::gen::item;
+namespace n = nbt_bytes;
 
 namespace {
 
@@ -279,18 +282,18 @@ TEST(Patches, EnvelopeErrorsAreMalformed) {
 }
 
 TEST(Patches, WhatTheServerCannotCheckIsUnsupportedNotWrong) {
-    // custom_name: a text component (NBT). Well-formed here or not, it is not this server's to say.
-    Read r = read_patch(untrusted_patch({{comp::kCustomName, {0x08, 0x00, 0x02, 'h', 'i'}}}));
+    // container: stacks within a stack. Well-formed here or not, it is not this server's to say.
+    Read r = read_patch(untrusted_patch({{comp::kContainer, vi(0)}}));
     EXPECT_EQ(r.verdict, Verdict::kUnsupported);
     EXPECT_TRUE(r.consumed);  // the length says where it ends: what follows the stack can still be read
     EXPECT_TRUE(r.wire.empty());
     // One unsupported component spoils the stack, whatever else it carries...
-    EXPECT_EQ(read_patch(untrusted_patch({{comp::kDamage, vi(1)}, {comp::kCustomData, {0x0A, 0x00}}})).verdict,
+    EXPECT_EQ(read_patch(untrusted_patch({{comp::kDamage, vi(1)}, {comp::kFood, {0x01, 0x02, 0x03}}})).verdict,
               Verdict::kUnsupported);
     // ...but removing a component needs no understanding of it.
-    EXPECT_EQ(read_patch(untrusted_patch({}, {comp::kCustomName, comp::kAttributeModifiers})).verdict, Verdict::kOk);
+    EXPECT_EQ(read_patch(untrusted_patch({}, {comp::kContainer, comp::kAttributeModifiers})).verdict, Verdict::kOk);
     // Malformed beats unsupported when it is noticed.
-    EXPECT_EQ(read_patch(untrusted_patch({{comp::kCustomName, {0x08}}, {comp::kDamage, vi(0xFFFFFFFF)}})).verdict,
+    EXPECT_EQ(read_patch(untrusted_patch({{comp::kContainer, {0x08}}, {comp::kDamage, vi(0xFFFFFFFF)}})).verdict,
               Verdict::kMalformed);
 }
 
@@ -459,6 +462,182 @@ TEST(Components, BlockStateIsAMapOfStrings) {
     EXPECT_EQ(read_value(comp::kBlockState, many), Verdict::kUnsupported);
 }
 
+// ---------------------------------------------------------------------------- text and NBT
+//
+// `n::` builds NBT by hand (nbt_bytes.hpp); the entry order expected of a text component is
+// vanilla's (text_test.cpp), that of any other compound is by name.
+
+TEST(Components, StringsAreUtf8OfLimitedLength) {
+    const auto potion_named = [](const Bytes& name) { return Bytes{0, 0} + vi(0) + Bytes{1} + name; };
+    expect_kept(comp::kPotionContents, potion_named(str("\xD0\x97\xD0\xB5\xD0\xBB\xD1\x8C\xD0\xB5 \xF0\x9F\x98\x80")),
+                potion_named(str("\xD0\x97\xD0\xB5\xD0\xBB\xD1\x8C\xD0\xB5 \xF0\x9F\x98\x80")));
+    // Bytes Java would decode with a U+FFFD and so write back differently: not kept.
+    for (const Bytes& bad : {Bytes{0xFF}, Bytes{0xC3}, Bytes{0xC0, 0x80}, Bytes{0xED, 0xA0, 0x80}, Bytes{0xF4, 0x90, 0x80, 0x80},
+                             Bytes{0x80}, Bytes{0xE2, 0x82}})
+        EXPECT_EQ(read_value(comp::kPotionContents, potion_named(vi(static_cast<u32>(bad.size())) + bad)), Verdict::kUnsupported);
+    EXPECT_EQ(read_value(comp::kBlockState, vi(1) + str("level") + vi(1) + Bytes{0xFF}), Verdict::kUnsupported);
+    EXPECT_EQ(read_value(comp::kPotionContents, potion_named(vi(0xFFFFFFFF))), Verdict::kMalformed);  // a negative length
+}
+
+TEST(Components, NamesAreTextComponents) {
+    const Bytes hi = n::root(8, n::str("hi"));
+    for (const u32 type : {comp::kCustomName, comp::kItemName}) {
+        expect_kept(type, hi, hi);
+        // The spellings of one text are one text, and what is kept is what vanilla writes for it.
+        expect_kept(type, n::root(10, n::compound({n::s("text", "hi")})), hi);
+        expect_kept(type, n::root(9, n::list(8, {n::str("hi")})), hi);
+        expect_kept(type, n::root(10, n::compound({n::b("italic", 0), n::s("text", "Excalibur"), n::s("color", "gold")})),
+                    n::root(10, n::compound({n::s("color", "gold"), n::s("text", "Excalibur"), n::b("italic", 0)})));
+        expect_kept(type, hi + Bytes{0xAA, 0xBB}, hi);  // lengthPrefixed drops what the codec does not read
+        // No tag, half a tag, a tag that is no component.
+        EXPECT_EQ(read_value(type, {}), Verdict::kMalformed);
+        EXPECT_EQ(read_value(type, {0x00}), Verdict::kMalformed);  // TAG_End
+        EXPECT_EQ(read_value(type, {0x08, 0x00, 0x05, 'h', 'i'}), Verdict::kMalformed);
+        EXPECT_EQ(read_value(type, n::root(3, n::be32(5))), Verdict::kMalformed);
+        EXPECT_EQ(read_value(type, n::root(10, n::compound({n::s("color", "red")}))), Verdict::kMalformed);
+        EXPECT_EQ(read_value(type, n::root(8, n::be16(1) + Bytes{0x80})), Verdict::kMalformed);  // not modified UTF-8
+        // A component with parts this server does not read, and strings it would not write back as they came.
+        EXPECT_EQ(read_value(type, n::root(10, n::compound({n::s("selector", "@a")}))), Verdict::kUnsupported);
+        EXPECT_EQ(read_value(type, n::root(8, n::be16(1) + Bytes{0x00})), Verdict::kUnsupported);
+    }
+    // Nests deeper than vanilla's reader goes.
+    Bytes deep = n::root(9, {});
+    for (int i = 0; i < 512; ++i) deep = deep + Bytes{9} + n::be32(1);
+    EXPECT_EQ(read_value(comp::kCustomName, deep + Bytes{0} + n::be32(0)), Verdict::kMalformed);
+
+    // Two stacks named the same are the same stack, however their clients spelled the name.
+    const ItemStack a = with_patch(it::kStone, 1, untrusted_patch({{comp::kCustomName, hi}}));
+    const ItemStack b =
+        with_patch(it::kStone, 1, untrusted_patch({{comp::kCustomName, n::root(10, n::compound({n::s("text", "hi")}))}}));
+    const ItemStack c = with_patch(it::kStone, 1, untrusted_patch({{comp::kCustomName, n::root(8, n::str("ho"))}}));
+    EXPECT_NE(a.patch(), 0u);
+    EXPECT_TRUE(item::same_item_same_components(a, b));
+    EXPECT_FALSE(item::same_item_same_components(a, c));
+    EXPECT_FALSE(item::same_item_same_components(a, ItemStack(it::kStone, 1)));
+}
+
+TEST(Components, LoreIsAListOfLines) {
+    const Bytes one = n::root(8, n::str("one")), two = n::root(10, n::compound({n::s("text", "two"), n::s("color", "gray")}));
+    const Bytes two_kept = n::root(10, n::compound({n::s("color", "gray"), n::s("text", "two")}));
+    expect_kept(comp::kLore, vi(2) + one + two, vi(2) + one + two_kept);
+    expect_kept(comp::kLore, vi(0), vi(0));
+    EXPECT_EQ(read_value(comp::kLore, vi(2) + one), Verdict::kMalformed);  // a line short
+    EXPECT_EQ(read_value(comp::kLore, vi(1) + n::root(1, {1})), Verdict::kMalformed);
+    EXPECT_EQ(read_value(comp::kLore, vi(2) + one + n::root(10, n::compound({n::s("nbt", "x")}))), Verdict::kUnsupported);
+    Bytes many = vi(257);
+    for (int i = 0; i < 257; ++i) many = many + n::root(8, n::str(""));
+    EXPECT_EQ(read_value(comp::kLore, many), Verdict::kMalformed);  // ItemLore: at most 256
+    Bytes most = vi(256);
+    for (int i = 0; i < 256; ++i) most = most + n::root(8, n::str(""));
+    expect_kept(comp::kLore, most, most);
+}
+
+TEST(Components, CustomDataIsACompound) {
+    // Kept as vanilla would write the compound after loading it, entries by name.
+    const Bytes in =
+        n::root(10, n::compound({n::i("uses", 3), n::s("owner", "Notch"), n::c("nested", {n::b("z", 1), n::b("a", 2)}),
+                                 n::i("uses", 4), n::l("tags", 10, {n::compound({n::s("", "x")})})}));
+    const Bytes kept = n::root(10, n::compound({n::c("nested", {n::b("a", 2), n::b("z", 1)}), n::s("owner", "Notch"),
+                                                n::l("tags", 8, {n::str("x")}), n::i("uses", 4)}));
+    expect_kept(comp::kCustomData, in, kept);
+    expect_kept(comp::kCustomData, kept, kept);
+    expect_kept(comp::kCustomData, n::root(10, n::compound({})), n::root(10, n::compound({})));
+    expect_kept(comp::kBucketEntityData, in, kept);
+    EXPECT_EQ(read_value(comp::kCustomData, n::root(3, n::be32(1))), Verdict::kMalformed);
+    EXPECT_EQ(read_value(comp::kCustomData, n::root(9, n::list(0, {}))), Verdict::kMalformed);
+    EXPECT_EQ(read_value(comp::kCustomData, {0x00}), Verdict::kMalformed);
+    EXPECT_EQ(read_value(comp::kCustomData, {0x0A, 0x01}), Verdict::kMalformed);
+    // The Codec of custom_data takes SNBT in a string too; the stream codec of the bucket's data does not.
+    EXPECT_EQ(read_value(comp::kCustomData, n::root(8, n::str("{a:1}"))), Verdict::kUnsupported);
+    EXPECT_EQ(read_value(comp::kBucketEntityData, n::root(8, n::str("{a:1}"))), Verdict::kMalformed);
+    // A tag sixteen times the size a whole patch may have is refused unread - vanilla would weigh
+    // these 50 000 empty compounds at 2.6 MiB and throw.
+    Bytes heavy = n::root(10, Bytes{9} + n::str("l") + Bytes{10} + n::be32(50000));
+    heavy.resize(heavy.size() + 50000, 0);
+    EXPECT_EQ(read_value(comp::kCustomData, heavy + Bytes{0}), Verdict::kUnsupported);
+    EXPECT_EQ(read_value(comp::kCustomName, n::root(8, n::str(std::string(20000, 'x')))), Verdict::kUnsupported);
+    // One of 8 KiB is read: malformed is malformed, and what is well-formed is too large to keep.
+    EXPECT_EQ(read_value(comp::kCustomName, n::root(8, n::be16(8000) + Bytes(7999, 'x'))), Verdict::kMalformed);
+    EXPECT_EQ(read_value(comp::kCustomName, n::root(8, n::str(std::string(8000, 'x')))), Verdict::kUnsupported);
+
+    // The same data in another order is the same data.
+    const ItemStack a = with_patch(it::kStone, 1, untrusted_patch({{comp::kCustomData, in}}));
+    const ItemStack b = with_patch(it::kStone, 1, untrusted_patch({{comp::kCustomData, kept}}));
+    EXPECT_NE(a.patch(), 0u);
+    EXPECT_EQ(a.patch(), b.patch());
+}
+
+TEST(Components, EntityDataHasATypeInFront) {
+    namespace sreg = proto::gen::static_registry;
+    namespace et = proto::gen::entity_type;
+    const Bytes data = n::root(10, n::compound({n::s("CustomName", "Bob"), n::b("NoAI", 1)}));
+    expect_kept(comp::kEntityData, vi(5) + data, vi(5) + data);
+    expect_kept(comp::kEntityData, vi(et::kCount - 1) + data, vi(et::kCount - 1) + data);
+    // The registry of entity types has a default: a type that does not exist is a pig, not an error.
+    expect_kept(comp::kEntityData, vi(et::kCount) + data, vi(et::kPig) + data);
+    expect_kept(comp::kEntityData, vi(0xFFFFFFFF) + data, vi(et::kPig) + data);
+    EXPECT_EQ(read_value(comp::kEntityData, vi(5)), Verdict::kMalformed);
+    EXPECT_EQ(read_value(comp::kEntityData, vi(5) + n::root(8, n::str("x"))), Verdict::kMalformed);
+    // That of block entity types has none.
+    expect_kept(comp::kBlockEntityData, vi(sreg::kBlockEntityTypeCount - 1) + data, vi(sreg::kBlockEntityTypeCount - 1) + data);
+    EXPECT_EQ(read_value(comp::kBlockEntityData, vi(sreg::kBlockEntityTypeCount) + data), Verdict::kMalformed);
+}
+
+TEST(Components, Books) {
+    // writable_book_content: pages of text, each perhaps with what a chat filter made of it.
+    expect_kept(comp::kWritableBookContent, vi(2) + str("page one") + Bytes{0} + str("page two") + Bytes{1} + str("p*** two"),
+                vi(2) + str("page one") + Bytes{0} + str("page two") + Bytes{1} + str("p*** two"));
+    expect_kept(comp::kWritableBookContent, vi(0), vi(0));
+    expect_kept(comp::kWritableBookContent, vi(1) + str(std::string(900, 'x')) + Bytes{0},
+                vi(1) + str(std::string(900, 'x')) + Bytes{0});
+    // A page may have 1024 characters - which is fine for vanilla and more than a stack carries here (kMaxPatchBytes).
+    EXPECT_EQ(read_value(comp::kWritableBookContent, vi(1) + str(std::string(1024, 'x')) + Bytes{0}), Verdict::kUnsupported);
+    EXPECT_EQ(read_value(comp::kWritableBookContent, vi(1) + str(std::string(1025, 'x')) + Bytes{0}), Verdict::kMalformed);
+    EXPECT_EQ(read_value(comp::kWritableBookContent, vi(1) + str("page")), Verdict::kMalformed);  // the filtered flag is missing
+    Bytes pages = vi(101);
+    for (int i = 0; i < 101; ++i) pages = pages + str("") + Bytes{0};
+    EXPECT_EQ(read_value(comp::kWritableBookContent, pages), Verdict::kMalformed);  // at most 100
+
+    // written_book_content: title, author, generation, pages of components, resolved.
+    const Bytes page = n::root(10, n::compound({n::s("text", "Once"), n::b("bold", 1)}));
+    const Bytes book = str("Title") + Bytes{1} + str("T****") + str("Author") + vi(2) + vi(2) + page + Bytes{0} +
+                       n::root(8, n::str("The end")) + Bytes{1} + n::root(8, n::str("The ***")) + Bytes{7};
+    const Bytes book_kept = str("Title") + Bytes{1} + str("T****") + str("Author") + vi(2) + vi(2) + page + Bytes{0} +
+                            n::root(8, n::str("The end")) + Bytes{1} + n::root(8, n::str("The ***")) + Bytes{1};
+    expect_kept(comp::kWrittenBookContent, book, book_kept);
+    const auto titled = [](const Bytes& title, u32 generation) {
+        return title + Bytes{0} + str("A") + vi(generation) + vi(0) + Bytes{0};
+    };
+    expect_kept(comp::kWrittenBookContent, titled(str(std::string(32, 't')), 3), titled(str(std::string(32, 't')), 3));
+    EXPECT_EQ(read_value(comp::kWrittenBookContent, titled(str(std::string(33, 't')), 0)), Verdict::kMalformed);
+    // 32 characters, not bytes: sixteen of U+1F600 are 32 UTF-16 units in 64 bytes.
+    std::string faces;
+    for (int i = 0; i < 16; ++i) faces += "\xF0\x9F\x98\x80";
+    expect_kept(comp::kWrittenBookContent, titled(str(faces), 0), titled(str(faces), 0));
+    EXPECT_EQ(read_value(comp::kWrittenBookContent, titled(str(faces + "x"), 0)), Verdict::kMalformed);
+    EXPECT_EQ(read_value(comp::kWrittenBookContent, titled(str("t"), 4)), Verdict::kMalformed);  // generation: 0 .. 3
+    EXPECT_EQ(read_value(comp::kWrittenBookContent, titled(str("t"), 0xFFFFFFFF)), Verdict::kMalformed);
+    EXPECT_EQ(read_value(comp::kWrittenBookContent,
+                         str("t") + Bytes{0} + str("A") + vi(0) + vi(1) + n::root(3, n::be32(1)) + Bytes{0, 0}),
+              Verdict::kMalformed);  // a page that is no component
+}
+
+TEST(Components, SignText) {
+    const Bytes a = n::root(8, n::str("a")), b = n::root(8, n::str("b")), empty = n::root(8, n::str(""));
+    const Bytes lines = a + b + empty + empty;
+    // Four lines without a count, no filtered lines, the dye, the glow.
+    expect_kept(comp::kSignTextFront, lines + Bytes{0} + vi(4) + Bytes{1}, lines + Bytes{0} + vi(4) + Bytes{1});
+    expect_kept(comp::kSignTextBack, lines + Bytes{0} + vi(99) + Bytes{9}, lines + Bytes{0} + vi(0) + Bytes{1});
+    // Filtered lines that say the same - however spelled - are not sent on.
+    const Bytes same = n::root(10, n::compound({n::s("text", "a")})) + b + empty + empty;
+    expect_kept(comp::kSignTextFront, lines + Bytes{1} + same + vi(0) + Bytes{0}, lines + Bytes{0} + vi(0) + Bytes{0});
+    const Bytes other = a + n::root(8, n::str("*")) + empty + empty;
+    expect_kept(comp::kSignTextFront, lines + Bytes{1} + other + vi(0) + Bytes{0}, lines + Bytes{1} + other + vi(0) + Bytes{0});
+    EXPECT_EQ(read_value(comp::kSignTextFront, a + b + empty + Bytes{0} + vi(0) + Bytes{0}), Verdict::kMalformed);  // three lines
+    EXPECT_EQ(read_value(comp::kSignTextFront, lines + Bytes{1} + a + vi(0) + Bytes{0}), Verdict::kMalformed);
+    EXPECT_EQ(read_value(comp::kSignTextFront, lines + Bytes{0} + vi(0)), Verdict::kMalformed);
+}
+
 // ---------------------------------------------------------------------------- what a patch changes
 
 TEST(ItemStack, PatchOverridesTheItemsDefaults) {
@@ -526,7 +705,7 @@ TEST(ItemWire, UntrustedStack) {
     EXPECT_TRUE(s.empty() && done);
     EXPECT_EQ(read(vi(100) + vi(it::kStone) + untrusted_patch({{comp::kDamage, vi(1)}}), s), Verdict::kMalformed);
     EXPECT_EQ(item::patches().live(), live);  // neither kept its patch
-    EXPECT_EQ(read(vi(1) + vi(it::kStone) + untrusted_patch({{comp::kCustomName, {0x08, 0x00, 0x00}}}) + Bytes{0x77}, s, &done),
+    EXPECT_EQ(read(vi(1) + vi(it::kStone) + untrusted_patch({{comp::kContainer, vi(0)}}) + Bytes{0x77}, s, &done),
               Verdict::kUnsupported);
     EXPECT_TRUE(s.empty());
     EXPECT_FALSE(done);  // the reader stands behind the stack, at the 0x77

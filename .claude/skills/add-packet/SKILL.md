@@ -28,7 +28,9 @@ the jar, not memory, the source of every byte.
    };
    ```
    `bound()` must never be smaller than what `encode()` writes: the writer does no checks after reserving.
-   Strings: `str_bound(s)`; text components: `nbt_text_bound(s)`.
+   Strings: `str_bound(s)`; a text component that is plain text: `nbt_text_bound(s)`. Any other NBT in a
+   packet (a block entity, a styled text) is written with `nbt::Writer` into a `ByteBuf` and read with
+   `nbt::Doc` (`src/nbt/nbt.hpp`) - never assembled or picked apart by hand.
 
    Serverbound (`proto::sb`): a struct with `static T decode(Reader& r)`. Give every string and array a maximum
    (`r.str(max_bytes)`, `r.byte_array(max)`) taken from the vanilla codec's limit — the client is untrusted input.
@@ -68,6 +70,8 @@ the jar, not memory, the source of every byte.
 - Optional values come in three encodings (bool-prefixed, `value + 1`, `id + 1` for holders) — the table in
   `mc-reference` says which codec means which.
 - Text components are NBT everywhere except login disconnect and the status response, which are JSON strings.
+  One from a client is never passed on as it came: it goes through `text::transcode`, which writes what
+  vanilla would have written for it.
 - Packet ids ≥ 128 take two bytes; `write_packet` handles it, hand-built bodies must use `put_varint`.
 - Entity packets changed shape in 26.x: `move_entity_rot` has on-ground *before* the angles, position deltas
   carry tick-counted steps, velocities are `LpVec3`, `entity_position_sync` carries a `PositionPath`. The byte

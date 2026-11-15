@@ -5,11 +5,18 @@
 #include <cmath>
 #include <cstdlib>
 
+#include "nbt/nbt.hpp"
+#include "proto/identifier.hpp"
+#include "text/component.hpp"
+
+#include PROTO_GEN_ENTITIES_HPP
+
 namespace item {
 
 using proto::Reader;
 namespace reg = proto::reg;
 namespace sreg = proto::gen::static_registry;
+namespace entity_type = proto::gen::entity_type;
 
 namespace {
 
@@ -113,35 +120,55 @@ Verdict t_holder_reference(Reader& in, Out& out, u32 size) {
     return Verdict::kOk;
 }
 
-// ByteBufCodecs.STRING_UTF8 (Utf8String.read). The limit is in UTF-16 units; up to kMaxString
-// bytes cannot exceed it, and nothing longer fits a patch anyway.
-Verdict t_string(Reader& in, Out& out) {
-    const u32 n = in.varint();
-    if (!in.ok || n > kMaxString * 3 || n > in.remaining()) return Verdict::kMalformed;
-    if (n > kMaxString) return Verdict::kUnsupported;
-    out.varint(n);
-    out.bytes(in.bytes(n));
+// How long a Java String these bytes make, in UTF-16 units - or -1 if they are not well-formed
+// UTF-8. Vanilla decodes such bytes all the same, a U+FFFD for every fault, and so writes
+// back other bytes than it read: not what this server keeps.
+i32 utf16_length(std::span<const u8> s) {
+    u32 units = 0;
+    for (usize i = 0; i < s.size();) {
+        const u8 c = s[i];
+        if (c < 0x80) {
+            ++i;
+            ++units;
+            continue;
+        }
+        const u32 more = (c & 0xE0) == 0xC0 ? 1 : (c & 0xF0) == 0xE0 ? 2 : (c & 0xF8) == 0xF0 ? 3 : 0;
+        if (more == 0 || s.size() - i <= more) return -1;
+        u32 cp = c & (0x3F >> more);
+        for (u32 k = 1; k <= more; ++k) {
+            if ((s[i + k] & 0xC0) != 0x80) return -1;
+            cp = cp << 6 | (s[i + k] & 0x3F);
+        }
+        constexpr u32 kSmallest[4] = {0, 0x80, 0x800, 0x10000};
+        if (cp < kSmallest[more] || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) return -1;
+        units += cp >= 0x10000 ? 2 : 1;
+        i += more + 1;
+    }
+    return static_cast<i32>(units);
+}
+
+// ByteBufCodecs.stringUtf8(max) (Utf8String.read): at most 3 * max bytes that decode to at most
+// `max` UTF-16 units. STRING_UTF8 is max = 32767; nothing that long fits a patch anyway.
+Verdict t_string(Reader& in, Out& out, u32 max = kMaxString) {
+    const i32 n = vint(in);
+    if (!in.ok || n < 0 || static_cast<u32>(n) > max * 3 || static_cast<u32>(n) > in.remaining()) return Verdict::kMalformed;
+    const std::span<const u8> bytes = in.bytes(static_cast<u32>(n));
+    const i32 units = utf16_length(bytes);
+    if (units < 0) return Verdict::kUnsupported;
+    if (static_cast<u32>(units) > max) return Verdict::kMalformed;
+    if (static_cast<u32>(n) > kMaxString) return Verdict::kUnsupported;
+    out.varint(static_cast<u32>(n));
+    out.bytes(bytes);
     return Verdict::kOk;
 }
 
 // Identifier.STREAM_CODEC: a string through Identifier.parse, written back as "namespace:path".
 Verdict t_identifier(Reader& in, Out& out) {
     const std::string_view s = in.str(kMaxString);
-    if (!in.ok) return Verdict::kMalformed;
-    const auto namespace_char = [](char c) {
-        return c == '_' || c == '-' || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.';
-    };
-    const auto path_char = [&](char c) { return namespace_char(c) || c == '/'; };
-    // Identifier.bySeparator: everything before the first ':' is the namespace, unless it is empty.
-    const usize colon = s.find(':');
-    const std::string_view ns = colon == std::string_view::npos || colon == 0 ? "minecraft" : s.substr(0, colon);
-    const std::string_view path = colon == std::string_view::npos ? s : s.substr(colon + 1);
-    if (ns == ".." || !std::all_of(ns.begin(), ns.end(), namespace_char) || !std::all_of(path.begin(), path.end(), path_char))
-        return Verdict::kMalformed;
-    out.varint(static_cast<u32>(ns.size() + 1 + path.size()));
-    out.bytes({reinterpret_cast<const u8*>(ns.data()), ns.size()});
-    out.u8v(':');
-    out.bytes({reinterpret_cast<const u8*>(path.data()), path.size()});
+    proto::Identifier id;
+    if (!in.ok || !proto::parse_identifier(s, id)) return Verdict::kMalformed;
+    out.varint(static_cast<u32>(id.size()));
+    out.b.commit(id.put(out.b.reserve(id.size())));
     return Verdict::kOk;
 }
 
@@ -297,6 +324,7 @@ Verdict t_block_state(Reader& in, Out& out) {
         if (!in.ok || len > kMaxString * 3 || len > in.remaining()) return Verdict::kMalformed;
         if (len > kMaxString) return Verdict::kUnsupported;
         const auto bytes = in.bytes(len);
+        if (utf16_length(bytes) < 0) return Verdict::kUnsupported;
         s = {reinterpret_cast<const char*>(bytes.data()), bytes.size()};
         return Verdict::kOk;
     };
@@ -326,13 +354,165 @@ Verdict t_block_state(Reader& in, Out& out) {
     return Verdict::kOk;
 }
 
+// ---------------------------------------------------------------------------- NBT and text
+//
+// What travels as a tag: custom data and the data of entities and block entities, which stay
+// tags; text components, which a codec reads out of one (text/component.hpp).
+
+// The tag being read. One at a time: a decoder is done with it before the next tag is parsed.
+nbt::Doc the_tag;
+
+// A value this much longer than a whole patch may be is not looked at: it could only shrink to
+// fit by being mostly things vanilla drops, and it is the tick thread that would do the reading.
+constexpr u32 kMaxTagInput = 16 * kMaxPatchBytes;
+
+// ByteBufCodecs.TAG: one tag in the network form, under NbtAccounter.defaultQuota().
+Verdict read_tag(Reader& in) {
+    if (in.remaining() > kMaxTagInput) return Verdict::kUnsupported;
+    const nbt::Error error = the_tag.parse({in.p, in.remaining()});
+    if (error == nbt::Error::kTooBig) return Verdict::kUnsupported;  // counted a little high: see nbt::Error
+    if (error != nbt::Error::kNone) return Verdict::kMalformed;
+    in.p += the_tag.size();
+    if (!the_tag.root()) return Verdict::kMalformed;  // TAG_End: "Expected non-null compound tag"
+    // Names are compared and strings copied as bytes from here on, which is right for the bytes
+    // Java writes and for no others.
+    return the_tag.plain_strings() ? Verdict::kOk : Verdict::kUnsupported;
+}
+
+// ByteBufCodecs.COMPOUND_TAG: a tag that has to be a compound. Kept as vanilla would write the
+// compound it loaded, except that its entries are in name order (nbt::Doc::write).
+// `or_snbt`: custom_data, which has no StreamCodec of its own and goes as the tag its Codec
+// makes (ByteBufCodecs.fromCodecWithRegistries(CustomData.CODEC)). That is the same compound -
+// but the Codec also takes a string of SNBT in its place (TagParser.FLATTENED_CODEC), which no
+// client sends and nothing here parses.
+Verdict t_compound(Reader& in, Out& out, bool or_snbt = false) {
+    if (const Verdict v = read_tag(in); v != Verdict::kOk) return v;
+    const nbt::Tag root = the_tag.root();
+    if (or_snbt && root.type == nbt::kString) return Verdict::kUnsupported;
+    if (root.type != nbt::kCompound) return Verdict::kMalformed;
+    out.u8v(nbt::kCompound);
+    the_tag.write(root, out.b);
+    return Verdict::kOk;
+}
+
+// TypedEntityData.streamCodec: the type's registry id, then the compound. The id goes through
+// ByteBufCodecs.registry, which is Registry.byIdOrThrow - and the registry of entity types is a
+// DefaultedRegistry: an id it does not have is not an error there but its default, the pig.
+// (Block entity types have no default. Nor does holderRegistry ever give one: see t_registry_id.)
+constexpr u32 kNoDefault = ~0u;
+Verdict t_typed_data(Reader& in, Out& out, u32 types, u32 fallback) {
+    const u32 id = in.varint();
+    if (!in.ok || (id >= types && fallback == kNoDefault)) return Verdict::kMalformed;
+    out.varint(id < types ? id : fallback);
+    return t_compound(in, out);
+}
+
+// ComponentSerialization.STREAM_CODEC: a tag, read by the component codec and written by it.
+Verdict t_text(Reader& in, Out& out) {
+    if (const Verdict v = read_tag(in); v != Verdict::kOk) return v;
+    switch (text::transcode(the_tag.root(), out.b)) {
+        case text::Result::kOk: return Verdict::kOk;
+        case text::Result::kInvalid: return Verdict::kMalformed;
+        default: return Verdict::kUnsupported;
+    }
+}
+
+// ItemLore.STREAM_CODEC: at most 256 lines.
+Verdict t_lore(Reader& in, Out& out) {
+    u32 lines;
+    if (!read_count(in, 256, lines)) return Verdict::kMalformed;
+    out.varint(lines);
+    for (u32 i = 0; i < lines; ++i) {
+        if (const Verdict v = t_text(in, out); v != Verdict::kOk) return v;
+    }
+    return Verdict::kOk;
+}
+
+// Filterable.streamCodec: a value, and optionally the same again as a chat filter left it.
+template <class Value>
+Verdict t_filterable(Reader& in, Out& out, Value&& value) {
+    if (const Verdict v = value(); v != Verdict::kOk) return v;
+    const bool filtered = in.u8v() != 0;
+    if (!in.ok) return Verdict::kMalformed;
+    out.u8v(filtered);
+    return filtered ? value() : Verdict::kOk;
+}
+
+// WritableBookContent.STREAM_CODEC: at most 100 pages of at most 1024 characters.
+Verdict t_writable_book(Reader& in, Out& out) {
+    u32 pages;
+    if (!read_count(in, 100, pages)) return Verdict::kMalformed;
+    out.varint(pages);
+    for (u32 i = 0; i < pages; ++i) {
+        if (const Verdict v = t_filterable(in, out, [&] { return t_string(in, out, 1024); }); v != Verdict::kOk) return v;
+    }
+    return Verdict::kOk;
+}
+
+// WrittenBookContent.STREAM_CODEC: title (32 characters), author, generation, pages, resolved.
+// The Codec wants a generation of 0 .. 3 (original .. tattered).
+Verdict t_written_book(Reader& in, Out& out) {
+    if (const Verdict v = t_filterable(in, out, [&] { return t_string(in, out, 32); }); v != Verdict::kOk) return v;
+    if (const Verdict v = t_string(in, out); v != Verdict::kOk) return v;
+    if (const Verdict v = t_int_range(in, out, 0, 3); v != Verdict::kOk) return v;
+    u32 pages;
+    if (!read_count(in, INT32_MAX, pages)) return Verdict::kMalformed;
+    out.varint(pages);
+    for (u32 i = 0; i < pages; ++i) {
+        if (const Verdict v = t_filterable(in, out, [&] { return t_text(in, out); }); v != Verdict::kOk) return v;
+    }
+    return t_bool(in, out);
+}
+
+// SignText.STREAM_CODEC: four lines, optionally the four as filtered, the dye, the glow.
+// SignText.load takes missing filtered lines to be the lines, and filtered lines that equal
+// the lines are not written (filteredMessagesForSerialization). Equal here means equal as
+// written, which is what equal components are - but for the few that vanilla holds equal and
+// writes differently (a colour by name and the same by number).
+Verdict t_sign_text(Reader& in, Out& out) {
+    const auto lines = [&] {
+        for (u32 i = 0; i < 4; ++i) {
+            if (const Verdict v = t_text(in, out); v != Verdict::kOk) return v;
+        }
+        return Verdict::kOk;
+    };
+    const u32 at = out.b.len;
+    if (const Verdict v = lines(); v != Verdict::kOk) return v;
+    const u32 size = out.b.len - at;
+    const bool filtered = in.u8v() != 0;
+    if (!in.ok) return Verdict::kMalformed;
+    out.u8v(filtered);
+    if (filtered) {
+        const u32 again = out.b.len;
+        if (const Verdict v = lines(); v != Verdict::kOk) return v;
+        if (out.b.len - again == size && std::memcmp(out.b.data + at, out.b.data + again, size) == 0) {
+            out.b.len = again;
+            out.b.data[again - 1] = 0;
+        }
+    }
+    t_enum(in, out, 16);  // DyeColor
+    return t_bool(in, out);
+}
+
 // The components this server can vouch for, each by the codecs DataComponents registers for it
 // (26.3): `P` the persistent Codec (value ranges), `N` the network StreamCodec (layout).
-// Everything else - text (custom_name, lore, books, signs), NBT (custom_data, entity data),
-// stacks inside stacks (containers, bundles, charged projectiles), and the behaviour components
-// (food, tool, equippable, attribute_modifiers, ...) - is kUnsupported until it is read too.
+// Everything else - stacks inside stacks (containers, bundles, charged projectiles), the
+// behaviour components (food, tool, equippable, attribute_modifiers, ...), and what has only a
+// Codec and so travels as the tag it makes (map_decorations, lock, recipes, ...; custom_data
+// is the one of those that is read) - is kUnsupported until it is read too.
 Verdict transcode(u32 type, Reader& in, Out& out) {
     switch (type) {
+        case component::kCustomName:
+        case component::kItemName: return t_text(in, out);  // P ComponentSerialization.CODEC, N the same as a tag
+        case component::kLore: return t_lore(in, out);
+        case component::kCustomData: return t_compound(in, out, true);  // P CustomData.CODEC, and no N
+        case component::kBucketEntityData: return t_compound(in, out);  // N CustomData.STREAM_CODEC
+        case component::kEntityData: return t_typed_data(in, out, entity_type::kCount, entity_type::kPig);
+        case component::kBlockEntityData: return t_typed_data(in, out, sreg::kBlockEntityTypeCount, kNoDefault);
+        case component::kWritableBookContent: return t_writable_book(in, out);
+        case component::kWrittenBookContent: return t_written_book(in, out);
+        case component::kSignTextFront:
+        case component::kSignTextBack: return t_sign_text(in, out);
         case component::kMaxStackSize: return t_int_range(in, out, 1, 99);           // P intRange(1, 99), N VAR_INT
         case component::kMaxDamage: return t_int_range(in, out, 1, INT32_MAX);       // P POSITIVE_INT
         case component::kDamage: return t_int_range(in, out, 0, INT32_MAX);          // P NON_NEGATIVE_INT

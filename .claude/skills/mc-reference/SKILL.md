@@ -47,7 +47,8 @@ class names containing `$` (`'…ClientboundPlayerInfoUpdatePacket$Action'`).
 | `writeFixedSizeLongArray` | longs with **no** count (paletted container data) |
 | `writeEnumSet(set, Enum.class)` / fixed bit set | `ceil(n/8)` bytes, bit i = ordinal i |
 | `list()`, `collection(...)`, `map(...)` | VarInt count, then elements (key then value for maps) |
-| `registry(key)`, `holderRegistry(key)` | VarInt registry id |
+| `holderRegistry(key)` (`Item.STREAM_CODEC`, effects, potions) | VarInt registry id; one the registry does not have throws |
+| `registry(key)` (`EntityType.STREAM_CODEC`, block entity types) | VarInt registry id through `Registry.byIdOrThrow` - which a `DefaultedRegistry` (`BuiltInRegistries`: `registerDefaulted…` - entity types default to the pig, blocks and items to air) answers with its default instead of throwing |
 | `holder(key, codec)` | VarInt `id + 1`; `0` = an inline value follows |
 | `UUIDUtil.STREAM_CODEC`, `readUUID` | two longs, most significant first |
 | `BlockPos.STREAM_CODEC` | one long: x:26 \| z:26 \| y:12 |
@@ -57,7 +58,12 @@ class names containing `$` (`'…ClientboundPlayerInfoUpdatePacket$Action'`).
 | `VecDelta.write` (entity moves) | no count of its own: the step count is in the packet's "properties" VarInt (`steps << 1 \| onGround`); 0 steps = three shorts, else per step VarInt ticks + three shorts |
 | `ClientboundBundlePacket` | not a packet of its own: `bundle_delimiter`, the sub-packets, `bundle_delimiter` |
 | `writeChunkPos` | one long: `(z << 32) \| (x & 0xFFFFFFFF)` |
-| `ComponentSerialization.*STREAM_CODEC`, `TAG`, `COMPOUND_TAG` | network NBT (nameless root tag) |
+| `ByteBufCodecs.TAG`, `COMPOUND_TAG` (`FriendlyByteBuf.readNbt/writeNbt`) | one network NBT tag: type byte, payload, no name (`NbtIo.readAnyTag`). A lone `TAG_End` is "no tag" and throws here. `TAG` weighs what it reads against 2 MiB (`NbtAccounter.defaultQuota`); the `TRUSTED_` ones do not - `nbt::Doc`, `nbt::Writer` |
+| `fromCodecWithRegistries(codec)`, and a `DataComponentType` built with `persistent(codec)` only (`custom_data`, `lock`, `recipes`…) | a tag as above, then the `Codec` over `NbtOps`: a layout is the wrong question, see "Codecs over NBT" below |
+| `ComponentSerialization.STREAM_CODEC` (text components) | the same: a tag read by `ComponentSerialization.CODEC` - `text::transcode` |
+| `fixedSizeList(n)` (`SignText`) | n elements and **no** count |
+| `Filterable.streamCodec(c)` (book pages and titles) | the value, a bool, and if true the value again (what a chat filter left of it) |
+| `TypedEntityData.streamCodec(type)` (`entity_data`, `block_entity_data`) | the type's registry id (VarInt), then `COMPOUND_TAG` |
 | `ByteBufCodecs.CONTAINER_ID` | VarInt |
 | `idMapper(BY_ID, ...)` over `ByIdMap.continuous(..., ZERO / WRAP / CLAMP)` | VarInt; an id outside the enum does **not** throw - it becomes the first value / wraps / clamps (check which: it decides what vanilla writes back) |
 | `ItemStack.OPTIONAL_STREAM_CODEC` (clientbound) | VarInt count; if > 0: VarInt item id, then `DataComponentPatch.STREAM_CODEC`: VarInt added, VarInt removed, added x (type id + value), removed x type id. No lengths: reading it needs every component's codec - `proto::put_item`, `mcproto.read_item` |
@@ -68,6 +74,37 @@ class names containing `$` (`'…ClientboundPlayerInfoUpdatePacket$Action'`).
 
 All rows above were read from the 26.3 jar. If you meet a codec that is not in the table, read its
 implementation (`mcgen.py find 'codec/ByteBufCodecs'`, then `javap --full` the anonymous class) and add a row.
+
+## Codecs over NBT
+
+Text components, `custom_data` and everything else that has a `Codec` but no `StreamCodec` travel as an NBT
+tag that a `Codec` (`com.mojang.serialization`, DataFixerUpper) reads. Then the question is not "which bytes"
+but "which tags does the codec take, and which one does it write back" - one value has many spellings, and
+vanilla passes none of them on. DFU is not in the server jar that `mcgen.py` indexes; read it with `javap`
+from `.cache/mc/<version>/datagen/libraries/com/mojang/datafixerupper/` (there after `mcgen.py reports`).
+What was read there for 26.3 (DFU 10.0.21), and then seen to hold on a running vanilla server
+(`tools/vanilla/component_probe.py`):
+
+| In the jar | What it does with a tag |
+|---|---|
+| `Codec.STRING` | a `TAG_String` only |
+| `Codec.BOOL` | any number tag; true unless `doubleValue() == 0` (so `256` and NaN are true). Written as a byte |
+| `Codec.INT` and its ranges | any number tag, `Number.intValue()` (a float truncates, a long keeps its low half). Written as `TAG_Int` |
+| `fieldOf(name)` | the entry must be there. Entries the record does not name are ignored |
+| `optionalFieldOf(name)` | absent is fine; present and wrong is an **error** |
+| `lenientOptionalFieldOf(name)` | present and wrong counts as absent |
+| `optionalFieldOf(name, default)` | as above; **not written** when the value equals the default |
+| `Codec.either(a, b)`, `withAlternative(a, b)` | `a` first, `b` only if `a` failed; written as whichever side the value came out of the `xmap` on |
+| `listOf()` | a `TAG_List` or any array tag (`NbtOps.getList` takes every `CollectionTag`); one bad element fails the list. Written as a `TAG_List` always |
+| `dispatch("type", ...)`, `dispatchMap` | the type entry picks the record, which then reads the same compound; a missing or unknown type is an error |
+| `StringRepresentable.fromEnum`, `idResolverCodec` | the name as a string; an unknown one is an error |
+| `validate(f)`, `comapFlatMap` | the check runs when reading (and, by the bytecode, when writing) |
+| `RecordCodecBuilder` | writes its fields in the order of `group(...)` into a `CompoundTag` - a `HashMap`, so on the wire they come out bucket by bucket (`map_order` in `src/text/component.cpp`), not in that order |
+| `ListTag` (any list on the wire) | elements of mixed types travel as compounds, the others wrapped as `{"": x}`; a reader takes the wrapper off (`addAndUnwrap`). An empty list is written with element type 0 |
+
+`mcgen.py pseudo` shows the arguments of an anonymous class's constructor in the order the class *uses* the
+captured variables, not in the order of the enclosing method's parameters (`ExtraCodecs.orCompressed` reads as
+if its arguments were swapped). When the order matters, look at the `aload` order in `javap --full`.
 
 ## Other things the jar answers
 
@@ -146,6 +183,9 @@ How to read it:
 - `tools/vanilla/inventory_probe.py` is the same idea as `entity_probe.py` for inventories: creative slots,
   equipment, drops, pickups and every kind of click. It is how `ServerPlayer.take` (the menu is synchronised
   right after a pickup) and the two-ticks merge of moving items were found.
+- `tools/vanilla/component_probe.py` asks a server what it makes of an item's text and NBT components: some two
+  hundred spellings, each put into a hand and read back from what a second bot is shown. It is how the codec
+  table above was checked, and the first thing to extend when a component or a part of the text codec is ported.
 - Read the subclass too. A method found on `LivingEntity` or `Player` may be overridden in `ServerPlayer`
   (`take`, `drop`): `mcgen.py pseudo net.minecraft.server.level.ServerPlayer --method ' name\('`.
 - `tools/vanilla/swing_probe.py`: a player's hands - punches, hits, placing, breaking, drops, a spear - and

@@ -81,6 +81,7 @@ add_library(core STATIC
   src/proto/frame.cpp
   src/proto/static_data.cpp
   src/nbt/nbt.cpp
+  src/text/component.cpp
   src/crypto/cfb8.cpp
   src/crypto/auth.cpp
   src/net/reactor.cpp
@@ -120,6 +121,7 @@ if(MC_TESTS)
       tests/unit/varint_test.cpp
       tests/unit/wire_test.cpp
       tests/unit/nbt_test.cpp
+      tests/unit/text_test.cpp
       tests/unit/frame_test.cpp
       tests/unit/crypto_test.cpp
       tests/unit/spsc_test.cpp
@@ -143,6 +145,7 @@ if(MC_TESTS)
 endif()
 
 if(MC_BENCH)
-  add_executable(bench bench/bench.cpp bench/world_bench.cpp bench/entity_bench.cpp bench/item_bench.cpp)
+  add_executable(bench bench/bench.cpp bench/world_bench.cpp bench/entity_bench.cpp bench/item_bench.cpp
+    bench/nbt_bench.cpp)
   target_link_libraries(bench PRIVATE core mc_core_flags OpenSSL::Crypto)
 endif()

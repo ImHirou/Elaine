@@ -159,8 +159,148 @@ class Reader:
         n = struct.unpack(">H", self.take(2))[0]
         return self.take(n).decode()
 
+    def nbt(self):
+        """One nameless tag (NbtIo.readAnyTag) as a Python value; None for TAG_End."""
+        t = self.u8()
+        return None if t == 0 else self._nbt_payload(t)
+
+    def _nbt_payload(self, t: int):
+        if t == 1: return Byte(self.i8())
+        if t == 2: return Short(self.i16())
+        if t == 3: return self.i32()
+        if t == 4: return Long(self.i64())
+        if t == 5: return Float(self.f32())
+        if t == 6: return Double(self.f64())
+        if t == 7: return ByteArray(self.take(self.i32()))
+        if t == 8: return _mutf8_decode(self.take(struct.unpack(">H", self.take(2))[0]))
+        if t == 9:
+            of, n = self.u8(), self.i32()
+            assert n >= 0 and (of != 0 or n == 0), (of, n)
+            out = [self._nbt_payload(of) for _ in range(n)]
+            # ListTag.addAndUnwrap: {"": x} in a list of compounds stands for x.
+            return [x[""] if isinstance(x, dict) and list(x) == [""] else x for x in out] if of == 10 else out
+        if t == 10:
+            out = {}
+            while True:
+                of = self.u8()
+                if of == 0:
+                    return out
+                name = _mutf8_decode(self.take(struct.unpack(">H", self.take(2))[0]))
+                out[name] = self._nbt_payload(of)
+        if t == 11: return IntArray(self.i32() for _ in range(self.i32()))
+        if t == 12: return LongArray(self.i64() for _ in range(self.i32()))
+        raise AssertionError(f"no such tag type: {t}")
+
     def done(self) -> None:
         assert self.i == len(self.d), f"{len(self.d) - self.i} trailing bytes"
+
+
+# ----------------------------------------------------------------------------- NBT
+#
+# Tags as Python values, both ways, written from NbtIo and the TagTypes of the jar. A string is
+# a str, a compound a dict, a list a list, TAG_Int an int; the other numbers and the arrays are
+# the small classes below, so that a value says which tag it is. snbt() prints a value the way
+# /data would, compounds sorted by name: the thing to compare.
+
+class Byte(int): pass
+class Short(int): pass
+class Long(int): pass
+class Float(float): pass
+class Double(float): pass
+class ByteArray(bytes): pass
+class IntArray(tuple): pass
+class LongArray(tuple): pass
+
+
+def _mutf8_decode(b: bytes) -> str:
+    """DataInput.readUTF: UTF-16 units in one, two or three bytes each."""
+    units = []
+    i = 0
+    while i < len(b):
+        c = b[i]
+        if c < 0x80:
+            units.append(c)
+            i += 1
+        elif c & 0xE0 == 0xC0:
+            units.append((c & 0x1F) << 6 | (b[i + 1] & 0x3F))
+            i += 2
+        else:
+            assert c & 0xF0 == 0xE0, f"not modified UTF-8: {b.hex()}"
+            units.append((c & 0x0F) << 12 | (b[i + 1] & 0x3F) << 6 | (b[i + 2] & 0x3F))
+            i += 3
+    return struct.pack(f"<{len(units)}H", *units).decode("utf-16-le", "surrogatepass")
+
+
+def _mutf8_encode(s: str) -> bytes:
+    """DataOutput.writeUTF."""
+    out = bytearray()
+    raw = s.encode("utf-16-le", "surrogatepass")
+    for (u,) in struct.iter_unpack("<H", raw):
+        if 1 <= u <= 0x7F:
+            out.append(u)
+        elif u <= 0x7FF:
+            out += bytes([0xC0 | u >> 6, 0x80 | u & 0x3F])
+        else:
+            out += bytes([0xE0 | u >> 12, 0x80 | (u >> 6) & 0x3F, 0x80 | u & 0x3F])
+    assert len(out) <= 0xFFFF
+    return struct.pack(">H", len(out)) + bytes(out)
+
+
+def _nbt_type(v) -> int:
+    if isinstance(v, bool): return 1
+    for cls, t in ((Byte, 1), (Short, 2), (Long, 4), (Float, 5), (Double, 6), (ByteArray, 7), (IntArray, 11), (LongArray, 12)):
+        if isinstance(v, cls): return t
+    if isinstance(v, int): return 3
+    if isinstance(v, float): return 6
+    if isinstance(v, str): return 8
+    if isinstance(v, (list, tuple)): return 9
+    if isinstance(v, dict): return 10
+    raise TypeError(f"no tag for {v!r}")
+
+
+def _nbt_payload(v) -> bytes:
+    t = _nbt_type(v)
+    if t == 1: return struct.pack(">b", int(v))
+    if t == 2: return struct.pack(">h", v)
+    if t == 3: return struct.pack(">i", v)
+    if t == 4: return struct.pack(">q", v)
+    if t == 5: return struct.pack(">f", v)
+    if t == 6: return struct.pack(">d", v)
+    if t == 7: return struct.pack(">i", len(v)) + bytes(v)
+    if t == 8: return _mutf8_encode(v)
+    if t == 11: return struct.pack(f">i{len(v)}i", len(v), *v)
+    if t == 12: return struct.pack(f">i{len(v)}q", len(v), *v)
+    if t == 10:
+        return b"".join(bytes([_nbt_type(x)]) + _mutf8_encode(k) + _nbt_payload(x) for k, x in v.items()) + b"\x00"
+    # ListTag.write: the elements' type if they agree, else compounds - with everything that is
+    # not a compound, and every compound that looks like such a wrapper, inside {"": x}.
+    types = {_nbt_type(x) for x in v}
+    of = 0 if not v else types.pop() if len(types) == 1 else 10
+
+    def element(x):
+        if of == 10 and (not isinstance(x, dict) or list(x) == [""]):
+            return _nbt_payload({"": x})
+        return _nbt_payload(x)
+    return bytes([of]) + struct.pack(">i", len(v)) + b"".join(element(x) for x in v)
+
+
+def nbt(v) -> bytes:
+    """A value as a nameless tag - the network form. bytes pass through: a tag made by hand."""
+    if isinstance(v, bytes) and not isinstance(v, ByteArray):
+        return v
+    return bytes([_nbt_type(v)]) + _nbt_payload(v)
+
+
+def snbt(v) -> str:
+    t = _nbt_type(v)
+    if t == 10: return "{" + ",".join(f"{k}:{snbt(v[k])}" for k in sorted(v)) + "}"
+    if t == 9: return "[" + ",".join(snbt(x) for x in v) + "]"
+    if t == 8: return '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    if t == 7: return "[B;" + ",".join(str(x if x < 128 else x - 256) for x in v) + "]"
+    if t == 11: return "[I;" + ",".join(map(str, v)) + "]"
+    if t == 12: return "[L;" + ",".join(map(str, v)) + "]"
+    if t in (5, 6): return repr(float(v)) + "fd"[t - 5]
+    return str(int(v)) + {1: "b", 2: "s", 3: "", 4: "L"}[t]
 
 
 # ----------------------------------------------------------------------------- crypto
@@ -525,6 +665,23 @@ def _holder_reference(r: Reader) -> int:
     return v - 1
 
 
+def _filterable(r: Reader, value):
+    """Filterable.streamCodec: (raw, filtered or None)."""
+    raw = value(r)
+    return (raw, value(r) if r.bool() else None)
+
+
+def _sign_text(r: Reader) -> dict:
+    """SignText.STREAM_CODEC: four lines, perhaps four filtered ones, the dye, the glow."""
+    return {"messages": [r.nbt() for _ in range(4)], "filtered": [r.nbt() for _ in range(4)] if r.bool() else None,
+            "color": r.varint(), "glowing": r.bool()}
+
+
+def _written_book(r: Reader) -> dict:
+    return {"title": _filterable(r, Reader.str), "author": r.str(), "generation": r.varint(),
+            "pages": [_filterable(r, Reader.nbt) for _ in range(r.varint())], "resolved": r.bool()}
+
+
 _UNIT = lambda r: True                                        # noqa: E731
 _DYE = lambda r: r.varint()                                   # noqa: E731
 COMPONENT_READERS = {
@@ -546,6 +703,15 @@ COMPONENT_READERS = {
     "kInstrument": _holder_reference, "kPaintingVariant": _holder_reference,
     "kBannerPatterns": lambda r: [(_holder_reference(r), r.varint()) for _ in range(r.varint())],
     "kBlockState": lambda r: {r.str(): r.str() for _ in range(r.varint())},
+    # Text and NBT: a text component is a tag (ComponentSerialization.STREAM_CODEC), read here as
+    # the tag it is - what it means is the client's business, what it is on the wire is the test's.
+    "kCustomName": Reader.nbt, "kItemName": Reader.nbt,
+    "kLore": lambda r: [r.nbt() for _ in range(r.varint())],
+    "kCustomData": Reader.nbt, "kBucketEntityData": Reader.nbt,
+    "kEntityData": lambda r: (r.varint(), r.nbt()), "kBlockEntityData": lambda r: (r.varint(), r.nbt()),
+    "kWritableBookContent": lambda r: [_filterable(r, Reader.str) for _ in range(r.varint())],
+    "kWrittenBookContent": _written_book,
+    "kSignTextFront": _sign_text, "kSignTextBack": _sign_text,
 }
 _COMPONENT_NAME = {v: k for k, v in COMPONENT.items() if k != "kCount"}
 

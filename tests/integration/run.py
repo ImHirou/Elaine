@@ -1034,17 +1034,51 @@ def creative_inventory(srv: Server):
     assert slots[40] == (I["kDiamondSword"], 1, {"kDamage": 5, "kRepairCost": 3, "kLore": None}), slots[40]
     assert slots[41] == (I["kPotion"], 1, {"kPotionContents": {"potion": 7, "color": None, "effects": [], "name": None}}), slots[41]
 
+    # Text and NBT are tags, and a tag has many spellings: what comes back is the one vanilla
+    # writes - a name's entries in the order of its HashMap, custom data without the repeat.
+    name = {"italic": mc.Byte(0), "text": "Excalibur", "color": "#ffaa00", "unknown": 1}
+    lore = [{"text": "Forged"}, ["in ", {"text": "fire", "color": "red"}]]
+    data = mc.nbt({"uses": 3, "owner": "Alice"})[:-1] + b"\x03\x00\x04uses\x00\x00\x00\x04\x00"   # ...and "uses" again
+    c.send("set_creative_mode_slot", struct.pack(">h", 43) + mc.item_stack(I["kDiamondSword"], 1, {
+        "kCustomName": mc.nbt(name), "kLore": varint(2) + mc.nbt(lore[0]) + mc.nbt(lore[1]), "kCustomData": data}))
+    settle(c)
+    comps = server_menu(c)[43][2]
+    assert mc.nbt(comps["kCustomName"]) == mc.nbt({"color": "#FFAA00", "text": "Excalibur", "italic": mc.Byte(0)}), comps
+    assert [mc.nbt(line) for line in comps["kLore"]] == [mc.nbt("Forged"), mc.nbt({"extra": [{"color": "red", "text": "fire"}], "text": "in "})], comps
+    assert mc.nbt(comps["kCustomData"]) == mc.nbt({"owner": "Alice", "uses": 4}), comps
+    give(c, 43, 0, 0)
+
+    # The ominous banner, as Raid.getBannerComponentPatch makes it: the one stack among the
+    # creative inventory's that carries text - its name.
+    patterns, dye = mc.load_registry("banner_pattern"), {"gray": 7, "light_gray": 8, "cyan": 9, "black": 15}
+    layers = [("rhombus", "cyan"), ("stripe_bottom", "light_gray"), ("stripe_center", "gray"), ("border", "light_gray"),
+              ("stripe_middle", "black"), ("half_horizontal", "light_gray"), ("circle", "light_gray"), ("border", "black")]
+    layers = [(patterns.index("minecraft:" + p), dye[d]) for p, d in layers]
+    c.send("set_creative_mode_slot", struct.pack(">h", 43) + mc.item_stack(I["kWhiteBanner"], 1, {
+        "kBannerPatterns": varint(8) + b"".join(varint(p + 1) + varint(d) for p, d in layers),
+        "kTooltipDisplay": b"\x00" + varint(1) + varint(mc.COMPONENT["kBannerPatterns"]),
+        "kItemName": mc.nbt({"translate": "block.minecraft.ominous_banner"}), "kRarity": varint(1)}))
+    settle(c)
+    assert server_menu(c)[43] == (I["kWhiteBanner"], 1, {
+        "kItemName": {"translate": "block.minecraft.ominous_banner"}, "kRarity": 1,
+        "kTooltipDisplay": (False, [mc.COMPONENT["kBannerPatterns"]]), "kBannerPatterns": layers}), c.slots[43]
+    give(c, 43, 0, 0)
+
     # A component it does not read yet: the stack is refused, and the slot is sent back as it is
     # here - the client shows the stack already. (Vanilla would have taken it.)
     before = len(c.menu_log)
-    named = {"kCustomName": b"\x08\x00\x02hi"}   # a text component: TAG_String "hi"
-    c.send("set_creative_mode_slot", struct.pack(">h", 42) + mc.item_stack(I["kStone"], 1, named))
-    c.send("set_creative_mode_slot", struct.pack(">h", 36) + mc.item_stack(I["kStone"], 1, named))
+    boxed = {"kContainer": varint(0)}   # stacks within a stack
+    c.send("set_creative_mode_slot", struct.pack(">h", 42) + mc.item_stack(I["kStone"], 1, boxed))
+    c.send("set_creative_mode_slot", struct.pack(">h", 36) + mc.item_stack(I["kStone"], 1, boxed))
+    # ...and so is a text with a part it does not read (a selector), or a name longer than a stack carries here.
+    c.send("set_creative_mode_slot", struct.pack(">h", 44) + mc.item_stack(I["kStone"], 1, {"kCustomName": mc.nbt({"selector": "@a"})}))
+    c.send("set_creative_mode_slot", struct.pack(">h", 45) + mc.item_stack(I["kStone"], 1, {"kCustomName": mc.nbt("x" * 2000)}))
     settle(c)
-    assert c.menu_log[before:] == [("container_set_slot", 42, None), ("container_set_slot", 36, plain("kStone", 64))], c.menu_log[before:]
-    c.send("set_creative_mode_slot", struct.pack(">h", -1) + mc.item_stack(I["kStone"], 1, named))  # thrown away: nothing to put right
+    assert c.menu_log[before:] == [("container_set_slot", 42, None), ("container_set_slot", 36, plain("kStone", 64)),
+                                   ("container_set_slot", 44, None), ("container_set_slot", 45, None)], c.menu_log[before:]
+    c.send("set_creative_mode_slot", struct.pack(">h", -1) + mc.item_stack(I["kStone"], 1, boxed))  # thrown away: nothing to put right
     settle(c)
-    assert len(c.menu_log) == before + 2 and not c.entities
+    assert len(c.menu_log) == before + 4 and not c.entities
 
     # set_carried_item: a slot outside the hotbar is ignored (vanilla logs a warning).
     c.send("set_carried_item", struct.pack(">h", 9))
@@ -1083,6 +1117,14 @@ def malformed_item_stacks_disconnect(srv: Server):
         "a damage below zero": mc.item_stack(I["kDiamondSword"], 1, {"kDamage": varint(0xFFFFFFFF)}),
         "a stack size of 100": mc.item_stack(I["kStone"], 1, {"kMaxStackSize": varint(100)}),
         "an enchantment that does not exist": mc.item_stack(I["kDiamondSword"], 1, {"kEnchantments": varint(1) + varint(200) + varint(1)}),
+        "a name that is half a tag": mc.item_stack(I["kStone"], 1, {"kCustomName": b"\x08\x00\x05hi"}),
+        "a name that is a number": mc.item_stack(I["kStone"], 1, {"kCustomName": mc.nbt(5)}),
+        "a name without text": mc.item_stack(I["kStone"], 1, {"kItemName": mc.nbt({"color": "red"})}),
+        "a name in no colour": mc.item_stack(I["kStone"], 1, {"kCustomName": mc.nbt({"text": "x", "color": "pinkish"})}),
+        "257 lines of lore": mc.item_stack(I["kStone"], 1, {"kLore": varint(257) + mc.nbt("") * 257}),
+        "custom data that is a list": mc.item_stack(I["kStone"], 1, {"kCustomData": mc.nbt([1, 2])}),
+        "the data of a block entity that does not exist": mc.item_stack(I["kStone"], 1, {"kBlockEntityData": varint(200) + mc.nbt({})}),
+        "a book copied four times": mc.item_stack(I["kWrittenBook"], 1, {"kWrittenBookContent": mc.mc_str("t") + b"\x00" + mc.mc_str("a") + varint(4) + varint(0) + b"\x00"}),
         "bytes after the stack": mc.item_stack(I["kStone"], 1) + b"\x00",
         "no stack at all": b"",
     }
@@ -1292,6 +1334,77 @@ def drop_and_pick_up(srv: Server):
     settle(a, b)
     assert not items(a) and not items(b)
     assert all(s == plain("kGlowstone", 64) for s in server_menu(a)[9:45])
+
+
+@test()
+def named_items(srv: Server):
+    """Text and NBT components travel with the stack: into a hand, onto the ground, back."""
+    a, b = srv.client(), srv.client()
+    ja = join(a, "Alice")
+    jb = join(b, "Bob")
+    idb = jb["login"]["entity_id"]
+    a.expect("player_info_update")
+    for cl in (a, b):
+        cl.send("player_loaded")
+    walk(a, ja, 12.5, 12.5, 10)
+    settle(b, a)
+    item_type = mc.ENTITY_TYPE["kItem"]
+    sent = {"kCustomName": mc.nbt({"text": "Sting", "italic": False, "color": "aqua"}),
+            "kLore": varint(1) + mc.nbt({"translate": "item.minecraft.elytra", "with": ["a", 1]}),
+            "kCustomData": mc.nbt({"b": mc.Byte(1), "a": {"z": [1, 2], "y": mc.LongArray((7,))}}),
+            "kDamage": varint(10)}
+    kept = {"kCustomName": {"color": "aqua", "text": "Sting", "italic": mc.Byte(0)},
+            "kLore": [{"with": ["a", 1], "translate": "item.minecraft.elytra"}],
+            "kCustomData": {"a": {"y": mc.LongArray((7,)), "z": [1, 2]}, "b": mc.Byte(1)},
+            "kDamage": 10}
+
+    def wire(comps):
+        """Each tag among the components as its bytes: equal only if the entries are in the same order."""
+        return {k: [mc.nbt(x) for x in v] if k == "kLore" else v if k == "kDamage" else mc.nbt(v) for k, v in comps.items()}
+
+    def same(stack, count=1):
+        return stack[:2] == (I["kDiamondSword"], count) and wire(stack[2]) == wire(kept)
+
+    # In Bob's hand: Alice is shown the stack, name and all.
+    b.send("set_creative_mode_slot", struct.pack(">h", 36) + mc.item_stack(I["kDiamondSword"], 1, sent))
+    settle(b, a)
+    assert same(a.entities[idb].equipment[MAINHAND]), a.entities[idb].equipment
+    assert same(server_menu(b)[36])
+
+    # Dropped: the item on the ground is that stack. (Bob's client took it out of the slot itself.)
+    action(b, DROP_ALL)
+    settle(b, a)
+    on_ground = [e for e in a.entities.values() if e.type == item_type]
+    assert len(on_ground) == 1 and same(on_ground[0].data[D_ITEM][1]), [e.data for e in on_ground]
+    assert a.entities[idb].equipment == {}
+
+    # Picked up again 40 ticks later: Bob's client is told what it holds - the same stack still.
+    mmark = len(b.menu_log)
+    b.ticks(45)
+    settle(b, a)
+    assert not [e for e in a.entities.values() if e.type == item_type]
+    assert [m[:2] for m in b.menu_log[mmark:]] == [("container_set_slot", 36)] and same(b.menu_log[mmark][2]), b.menu_log[mmark:]
+    assert same(a.entities[idb].equipment[MAINHAND])
+
+    # One name spelled three ways is one name: the stacks that carry it are one kind of thing
+    # and go together. Another name is another thing.
+    for slot, name in ((37, mc.nbt("Rock")), (38, mc.nbt({"text": "Rock"})), (39, mc.nbt(["Rock"]))):
+        b.send("set_creative_mode_slot", struct.pack(">h", slot) + mc.item_stack(I["kStone"], 10, {"kCustomName": name}))
+    b.send("set_creative_mode_slot", struct.pack(">h", 40) + mc.item_stack(I["kStone"], 10, {"kCustomName": mc.nbt("Pebble")}))
+    settle(b)
+    slots = server_menu(b)
+    assert slots[37] == slots[38] == slots[39] == (I["kStone"], 10, {"kCustomName": "Rock"}) and slots[40][2] == {"kCustomName": "Pebble"}
+    menu_click(b, 38, 0, PICKUP)      # pick the second stack up...
+    settle(b)
+    menu_click(b, 37, 0, PICKUP)      # ...and put it on the first: they are the same thing
+    settle(b)
+    menu_click(b, 40, 0, PICKUP)      # the cursor is empty now; this picks the pebbles up
+    settle(b)
+    menu_click(b, 39, 0, PICKUP)      # which do not go onto rocks: the two trade places
+    settle(b)
+    slots = server_menu(b)
+    assert slots[37] == (I["kStone"], 20, {"kCustomName": "Rock"}) and slots[38] is None, slots[36:41]
+    assert slots[39] == (I["kStone"], 10, {"kCustomName": "Pebble"}) and b.cursor == (I["kStone"], 10, {"kCustomName": "Rock"}), (slots[39], b.cursor)
 
 
 @test()

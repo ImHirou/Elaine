@@ -16,7 +16,8 @@ Talk to the user in Russian (their language). Code, comments, commit messages an
 | Blocks | Creative only: break, place, block-change broadcast with sequence acks. Placeable: blocks whose vanilla hooks are all implemented (default state, pillar axis, snowy) - the rest stay `kPlaceNone` |
 | Entities | One SoA table for everything (`entity::Store`: players are the first rows, slot + generation handles, network id = slot + 1). Tracker (`entity::Tracker`) is a port of vanilla's `ChunkMap.TrackedEntity` + `ServerEntity`: who sees whom, add/remove bundles, movement deltas, rotation, head, velocity, entity data - encoded once per entity, copied per viewer. Its packets were compared with a vanilla 26.3 server's, byte for byte (`tools/vanilla/entity_probe.py`); what still differs is listed in docs/architecture.md |
 | Players | Join/leave, tab list. Players see each other: position, rotation, sneaking/sprinting flags, pose, skin layers, main hand, what they hold and wear (`set_equipment`, hand swaps), the arm swinging (`punch`, a placed block, a drop - compared with vanilla by `tools/vanilla/swing_probe.py`). Not yet shown: attributes (`update_attributes`), the jump velocity, footsteps, the locator bar (`waypoint`), what a hit does besides the swing (`attack` is ignored), the stab of a spear, the sounds and particles of placed and broken blocks |
-| Items | `item::ItemStack` is 8 bytes: item, count, id of an interned component patch. A patch from a client is read component by component and stored re-encoded; a stack with a component that has no decoder yet is refused (list in `src/item/components.cpp`, reasons in docs/architecture.md). Inventory and the player's own menu: creative slots, every kind of `container_click`, closing, Q / ctrl+Q / throwing out of the window, F, pick block, what the client is known to hold (state ids). Item entities: dropped, merged, picked up, expired - **at rest**: nothing moves entities yet, so a dropped item hangs where it appears (and says `NO_GRAVITY`). Compared with a vanilla 26.3 server (`tools/vanilla/inventory_probe.py`); the differences left are in docs/architecture.md. Not there: recipes (the crafting grid only stores), component hashes of clicks, text/NBT components |
+| Items | `item::ItemStack` is 8 bytes: item, count, id of an interned component patch. A patch from a client is read component by component and stored re-encoded; a stack with a component that has no decoder yet is refused (list in `src/item/components.cpp`, reasons in docs/architecture.md). Inventory and the player's own menu: creative slots, every kind of `container_click`, closing, Q / ctrl+Q / throwing out of the window, F, pick block, what the client is known to hold (state ids). Item entities: dropped, merged, picked up, expired - **at rest**: nothing moves entities yet, so a dropped item hangs where it appears (and says `NO_GRAVITY`). Compared with a vanilla 26.3 server (`tools/vanilla/inventory_probe.py`); the differences left are in docs/architecture.md. Not there: recipes (the crafting grid only stores), component hashes of clicks, stacks inside stacks (containers, bundles), the behaviour components (food, tool, equippable...) |
+| NBT and text | `nbt::Doc` reads a tag as vanilla's loader does (depth, quota, modified UTF-8, wrapped list elements) into a tape over the bytes - no tree; `nbt::Writer` builds one; `Doc::write` puts a loaded tag back in one canonical form. `text::transcode` is `ComponentSerialization.CODEC` both ways: any spelling of a text component in, the bytes vanilla writes for it out (entry order of its HashMap included) - compared with a vanilla 26.3 server over some 220 spellings (`tools/vanilla/component_probe.py`). On items: custom name, item name, lore, books, sign text; custom data and (block) entity data. Not read (the stack is refused): score / selector / nbt / object contents, `show_item` / `show_entity`, `show_dialog` / `custom`; a patch is still capped at 1 KiB, so a real book does not fit. Nothing *builds* text yet beyond plain strings (`put_nbt_text`): no chat, no renaming |
 | Not started | Mobs (the table and tracker take them; nothing spawns or moves them), physics, movement checks, block entities, block updates/neighbour shapes, containers other than the player's own, recipes, survival (everyone is creative), chat, commands, persistence, chunk unloading, workers, Lua plugins |
 
 ## Commands
@@ -31,7 +32,7 @@ build/release/unit_tests --gtest_filter='Cfb8*'            # one unit suite
 python3 tests/integration/run.py build/release/craftc -k join   # one scenario; --slow adds the timer tests (15 s .. 5 min)
 python3 tests/integration/run.py build/release/craftc -k crowd_500 --slow   # 500 bots in sight of each other: tick time, bytes
 build/release/bench [filter]                               # micro-benchmarks (release/native builds only); `bench tracker` = entities,
-                                                           # `bench item` / `bench menu` / `bench pickup` = items
+                                                           # `bench item` / `bench menu` / `bench pickup` = items, `bench nbt` / `bench text`
 build/release/craftc --online-mode=false --server-port=25565   # run; any server.properties key works as --key=value
 
 python3 tools/mcgen/mcgen.py --help                        # protocol data pipeline
@@ -47,10 +48,12 @@ Other presets: `native` (`-march=native`, for the production box), `profile` (fr
 src/base/     types.hpp (u8..u64, LIKELY, DCHECK), buf.hpp (ByteBuf, BufPool), spsc.hpp (lock-free queues), log, clock
 src/proto/    varint.hpp, wire.hpp (put_* writers, Reader), frame.* (framing + compression),
               packets.hpp (ALL packet layouts), entity_codec.hpp (packed angles, position deltas, LpVec3),
-              static_data.* (pre-baked config packets)
+              identifier.hpp ("namespace:path"), static_data.* (pre-baked config packets)
 src/proto/gen/  GENERATED by tools/mcgen - never edit by hand; current.hpp selects the active version
 src/crypto/   cfb8.* (AES-NI stream cipher, batched), auth.* (RSA key, session hash, UUIDs)
 src/net/      reactor.* (io_uring loop, connections, cross-thread queues)
+src/nbt/      nbt.* (Doc: a tag read into a tape over its bytes; Tag: a view of one; Writer; Doc::write: canonical form)
+src/text/     component.* (text components: ComponentSerialization.CODEC both ways, tag in, vanilla's tag out)
 src/item/     stack.* (ItemStack: 8 bytes, vanilla's methods), components.* (the patch store, and the decoder of
               every component a client may send)
 src/entity/   store.* (the entity table: SoA columns, slots, handles), tracker.* (who sees whom + the per-tick
@@ -173,8 +176,8 @@ upgrade old worlds before importing them. Rules:
 
 - Run it only from `.cache/vanilla-server/`, with the cached official jar and Java 25:
   `cd .cache/vanilla-server && /usr/lib/jvm/java-25-openjdk/bin/java -jar ../mc/<version>/server.jar --nogui`.
-  The probes in `tools/vanilla/` (`entity_probe.py`, `inventory_probe.py`, `swing_probe.py`) record one
-  scripted session on any server; record vanilla and ours, then `diff`. Use player names vanilla has not seen: it saves
+  The probes in `tools/vanilla/` (`entity_probe.py`, `inventory_probe.py`, `swing_probe.py`,
+  `component_probe.py`) record one scripted session on any server; record vanilla and ours, then `diff`. Use player names vanilla has not seen: it saves
   players and what they dropped.
 - **Never create, edit or delete `eula.txt`.** If it is missing or not `eula=true`, stop and ask the user.
   Accepting the EULA is the user's act, not an agent's.
@@ -209,6 +212,11 @@ Java plugin (Bukkit/Paper) compatibility is explicitly out of scope for now.
   `c.cursor`), written from the vanilla client's handlers; scenarios assert on that model, and `settle()`
   waits whole server ticks. `server_menu()` in run.py makes the server send its whole menu (a click with
   a stale state id): the way to see what the server holds rather than what the client believes.
+- NBT in tests is written out by hand, never by the code under test: `tests/unit/nbt_bytes.hpp` (C++) builds
+  tags from the layouts in the jar, `mc.nbt()` / `Reader.nbt()` in mcproto.py are the test client's own
+  reader and writer (`mc.snbt()` prints a value; a dict keeps the wire's entry order, so `mc.nbt(read) ==
+  mc.nbt(expected)` compares bytes). What a *codec* makes of a tag is not a layout and cannot be checked by
+  reading alone: extend `tools/vanilla/component_probe.py` and compare with the vanilla server.
 - The integration tests prove framing, crypto, compression and sequencing. They do **not** prove that a
   layout matches the vanilla client — that comes from reading the jar. Say "verified against the jar"
   or "not verified" in your summary; a real-client check is the user's to run.
@@ -218,7 +226,7 @@ Java plugin (Bukkit/Paper) compatibility is explicitly out of scope for now.
 ## Conventions
 
 - **Naming**: the code name appears only in `CMakeLists.txt` (`project`, `MC_EXE`) and docs. Namespaces are
-  layers (`base`, `proto`, `crypto`, `net`, `server`), macros are unprefixed or `MC_`/`PROTO_`. Do not
+  layers (`base`, `proto`, `nbt`, `text`, `crypto`, `net`, `item`, `entity`, `world`, `server`), macros are unprefixed or `MC_`/`PROTO_`. Do not
   introduce the code name into identifiers.
 - Types `snake_case` for functions/variables, `PascalCase` for types, `kConstant`, members end in `_`.
   Fixed-width ints are `u8…u64`, `i8…i64`, `usize`.
@@ -228,6 +236,11 @@ Java plugin (Bukkit/Paper) compatibility is explicitly out of scope for now.
   reference on its patch, so move where a copy is not meant. Nothing from a client becomes a stack except
   through `item::read_untrusted`. A new component gets a decoder in `src/item/components.cpp` written from
   both of its vanilla codecs (StreamCodec = layout, Codec = ranges) and a test with hand-written bytes.
+- **NBT**: read with `nbt::Doc` (a tape over the bytes; a `nbt::Tag` is a view that lives as long as the
+  Doc and the bytes), write with `nbt::Writer`; no trees of heap nodes, no tags assembled by hand. A tag a
+  client sent is stored only as `Doc::write` puts it out (one form per value), and a text component only
+  through `text::transcode`. Anything that is read by a vanilla `Codec` rather than a `StreamCodec` gets
+  its cases into `component_probe.py` before it is called done.
 - `clang-format -i` the files you touch. Generated files are never formatted or edited.
 - Dependencies are system packages found by CMake: liburing, libdeflate, OpenSSL (libcrypto), libcurl,
   yyjson, GoogleTest (tests only), LuaJIT (later). Ask before adding one.
