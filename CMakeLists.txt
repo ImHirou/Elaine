@@ -80,6 +80,7 @@ add_library(core STATIC
   src/proto/wire.cpp
   src/proto/frame.cpp
   src/proto/static_data.cpp
+  src/nbt/nbt.cpp
   src/crypto/cfb8.cpp
   src/crypto/auth.cpp
   src/net/reactor.cpp
@@ -118,6 +119,7 @@ if(MC_TESTS)
     add_executable(unit_tests
       tests/unit/varint_test.cpp
       tests/unit/wire_test.cpp
+      tests/unit/nbt_test.cpp
       tests/unit/frame_test.cpp
       tests/unit/crypto_test.cpp
       tests/unit/spsc_test.cpp
