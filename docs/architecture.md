@@ -584,8 +584,13 @@ the rays took), the second TNT going off from where it fell, dirt lying about in
 One thing that looks like a bug and is not: a chest that becomes half of a double one while a
 player has it open keeps that player's screen as it is - 27 slots onto its own half, the lid of
 the pair up - until it is closed; opened again it is the double chest. Vanilla does exactly
-this (the probe's steps "A opens the single chest again" to "A puts it back and closes"), and
-so it stays. What differs:
+this (the probe's steps "A opens the single chest again" to "A puts it back and closes", and
+again with the second chest placed sneaking against the first one's side), and so it stays.
+Only the half that is open gets lid events, on both servers; a vanilla client raises both lids
+all the same, because its renderer takes the wider of the two (`ChestBlock.opennessCombiner`).
+A client whose mod draws chests itself may not: Better Block Entities (part of Fabulously
+Optimized) shows one lid up and one down there - on a vanilla server as on this one. What
+differs:
 
 - vanilla shows a new entity the moment it is created, so `add_entity` of a primed TNT comes
   before its sound and before the `explode` packet of the TNT that lit it; here it comes with

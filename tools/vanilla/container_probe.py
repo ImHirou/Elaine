@@ -178,6 +178,22 @@ def record(port: int, out_path: str, name_a: str, name_b: str) -> None:
     step("A breaks the half with the stone in it", lambda: a.dig(at(0, 1, 2)), ticks=10)
     step("B breaks the other half", lambda: b.dig(at(1, 1, 2)))
 
+    # The same with the second chest placed the other way: sneaking, against the side of the
+    # one A has open (a click on a chest's side without the sneak key would open it).
+    def sneak(bot, on: bool) -> None:
+        bot.c.send("player_input", bytes([0x20 if on else 0]))   # the shift bit of player_input
+
+    step("B places a chest further along", lambda: (b.give(36, "kChest", 4), b.select(0), b.use(at(3, 0, 2))))
+    step("A opens that one", lambda: a.use(at(3, 1, 2)))
+    step("B, sneaking, places another against its west side",
+         lambda: (sneak(b, True), b.use(at(3, 1, 2), face=4, cursor=(0.0, 0.5, 0.5)), sneak(b, False)))
+    step("A keeps its screen for 12 ticks more", ticks=12)
+    step("A closes that screen", a.close)
+    step("B opens the pair", lambda: b.use(at(2, 1, 2)))
+    step("B closes it", b.close)
+    step("B breaks one of the pair", lambda: b.dig(at(2, 1, 2)))
+    step("B breaks the other", lambda: b.dig(at(3, 1, 2)))
+
     # ---- crafting
     step("B: a log into the inventory's grid", lambda: b.give(1, "kOakLog", 2))
     step("B takes the planks", lambda: b.click(0, 0, PICKUP))
