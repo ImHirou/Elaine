@@ -71,6 +71,11 @@ class names containing `$` (`'…ClientboundPlayerInfoUpdatePacket$Action'`).
 | `HashedStack.STREAM_CODEC` (in `container_click`) | bool present; item id, VarInt count, map type id -> int (CRC32C of the value's Codec form, at most 256), set of removed type ids |
 | `ClientboundSetEquipmentPacket` | VarInt entity, then (byte slot ordinal, `0x80` set while more follow; stack) - no count |
 | `lenientJson(n)` + `fromCodec(JsonOps, …)` | a JSON string (only status response and login disconnect) |
+| `ByteBufCodecs.OPTIONAL_COMPOUND_TAG` (a block entity's tag in the chunk packet) | a tag, or one `TAG_End` byte for none - which is what an empty `getUpdateTag()` becomes (chests, furnaces) |
+| `ComponentSerialization.TRUSTED_STREAM_CODEC` (the title in `open_screen`) | a text component's tag, as `STREAM_CODEC`, without the quota |
+| `ParticleTypes.STREAM_CODEC` | VarInt particle type id, then that type's own options - nothing for the simple ones (explosion, poof, smoke) |
+| `WeightedList.streamCodec(c)` | VarInt count, then per entry the value and a VarInt weight |
+| `ClientboundBlockEventPacket` | position, two bytes, and the block as its **block registry** id (not a state id) |
 
 All rows above were read from the 26.3 jar. If you meet a codec that is not in the table, read its
 implementation (`mcgen.py find 'codec/ByteBufCodecs'`, then `javap --full` the anonymous class) and add a row.
@@ -163,6 +168,21 @@ How to read it:
 - Data-driven things are not here because they are plain JSON in the server jar (`unzip -l … | grep data/minecraft/`):
   recipes, loot tables, enchantments, biomes, damage types, block transformers (strip / till / flatten), trades.
   In 26.x fuel, composting and brewing are data too (item components and recipes) - there is no table in code.
+  What `tools/mcgen/gen_game.py` learned reading them for 26.3:
+  - **Recipes** are a registry, looked up in path order (the first match wins). Kinds: `crafting_shaped`,
+    `crafting_shapeless`, `crafting_transmute` (dyeing bundles and shulker boxes, cloning maps: the result
+    keeps the input's components), `crafting_dye` / `crafting_imbue` / `crafting_decorated_pot` /
+    `crafting_special_*` (results computed from components), `smelting` / `blasting` / `smoking` /
+    `campfire_cooking`, `stonecutting`, `smithing_*`, and `brewing`. An ingredient is an item, a `#tag` or a
+    list of items; a result may carry components (suspicious stew).
+  - **Loot tables** spell conditions and functions as `condition` and `modifier` (one, or a list for
+    `modifier`); a condition may be a string naming `data/minecraft/predicate/<path>.json`
+    (`minecraft:tool/can_silk_touch`).
+  - **Fuel** is the item component `cooking_fuel`: `burn_time` and `speed_multiplier` name providers in
+    `data/minecraft/context_int_provider/` / `context_float_provider/` that ask whether the block is
+    `#fast_cooking` (smoker, blast furnace).
+  - **`update_recipes`** (play) carries nine "recipe property sets" - item lists a client's screens ask
+    (`furnace_input`: what shift-click sends to a furnace's input) - and the stonecutter's recipes.
 - The whole command tree is `reports/commands.json`.
 - Generated C++ does not read these files yet. When a feature needs a table, teach `gen.py` to take it from
   here and to `die()` when a field it relies on is missing, as it does for `blockdata.json`.
@@ -191,6 +211,11 @@ How to read it:
 - `tools/vanilla/swing_probe.py`: a player's hands - punches, hits, placing, breaking, drops, a spear - and
   which of them the others are shown as an arm swing. It is how the double swing of a placed block was seen
   (`handleUseItemOn` holds the branch twice: the bytecode said so, the recording confirmed two packets).
+- `tools/vanilla/container_probe.py`: chests, crafting, a furnace, TNT - menus compared byte for byte,
+  primed TNT by its height tick by tick. It is how `Entity.requiresPrecisePosition` was found (a TNT on the
+  ground is sent as exact positions every tick), that `CraftingMenu` sends its result slot once per
+  ingredient taken, and that a menu shows its emptied slots before it closes on a broken chest. Two
+  recordings on one vanilla world do not compare: the first one's crater is in the second.
 - A packet you remember may be gone, with another in its place: 26.x has no serverbound `swing`, the left
   button is `punch`. Before concluding that the client sends nothing, list what it can send
   (`src/proto/gen/*/packet_ids.hpp`, or the `handle*` methods of `ServerGamePacketListenerImpl`) and read what

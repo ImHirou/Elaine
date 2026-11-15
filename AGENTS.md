@@ -10,21 +10,22 @@ Talk to the user in Russian (their language). Code, comments, commit messages an
 
 | Area | State |
 |---|---|
-| Protocol | Minecraft **26.3**, protocol **777** (one version at a time, see `src/proto/gen/current.hpp`). Registries, tags, block states and items generated from the jar |
+| Protocol | Minecraft **26.3**, protocol **777** (one version at a time, see `src/proto/gen/current.hpp`). Registries, tags, block states, items, recipes, fuel and what an explosion leaves of a block generated from the jar |
 | Network | Done: io_uring reactor, framing, zlib compression, AES-CFB8, online + offline login, configuration phase, keep-alive. Known limit: encryption runs on the tick thread - 500 players in one place cost it 8-25 ms a tick in online mode |
-| World | Flat generator (vanilla default layers), palette sections, chunk wire codec, sky + block light (port of vanilla's engine), chunk frames cached and invalidated on change, chunk view follows the player. One dimension, chunks never unloaded |
-| Blocks | Creative only: break, place, block-change broadcast with sequence acks. Placeable: blocks whose vanilla hooks are all implemented (default state, pillar axis, snowy) - the rest stay `kPlaceNone` |
-| Entities | One SoA table for everything (`entity::Store`: players are the first rows, slot + generation handles, network id = slot + 1). Tracker (`entity::Tracker`) is a port of vanilla's `ChunkMap.TrackedEntity` + `ServerEntity`: who sees whom, add/remove bundles, movement deltas, rotation, head, velocity, entity data - encoded once per entity, copied per viewer. Its packets were compared with a vanilla 26.3 server's, byte for byte (`tools/vanilla/entity_probe.py`); what still differs is listed in docs/architecture.md |
+| World | Flat generator (vanilla default layers), palette sections, chunk wire codec, sky + block light (port of vanilla's engine), chunk frames cached and invalidated on change, chunk view follows the player. Block entities are kept per chunk and listed in its packet. One dimension, chunks never unloaded |
+| Blocks | Creative only: break, place, block-change broadcast with sequence acks. Placeable: blocks whose vanilla hooks are all implemented (default state, pillar axis, snowy) and the block classes that are ported in full (below) - 325 of 1286; the rest stay `kPlaceNone`. **docs/blocks-roadmap.md** is the checklist of all of them, generated (`tools/mcgen/roadmap.py`) |
+| Block entities, menus | **Chest** (single and double, the lid, two players in one chest, spills when broken), **furnace** (smelting, fuel, the `lit` state, its menu's four numbers), **crafting table** and the inventory's own grid (shaped, shapeless and transmute recipes: 1235 of 1266), **TNT** (flint and steel, a block of redstone; the primed entity falls and bounces as vanilla's; explosions take blocks, drop what their loot tables give, set off other TNT, push players). `server::Menu` is `AbstractContainerMenu` for all of them. Compared with a vanilla 26.3 server (`tools/vanilla/container_probe.py`): menus byte for byte; the differences left are in docs/architecture.md. Not there: experience (no orbs), the recipe book, the 31 recipes that compute their result from components, comparators, names and locks |
+| Entities | One SoA table for everything (`entity::Store`: players are the first rows, slot + generation handles, network id = slot + 1). Tracker (`entity::Tracker`) is a port of vanilla's `ChunkMap.TrackedEntity` + `ServerEntity`: who sees whom, add/remove bundles, movement deltas, rotation, head, velocity, entity data - encoded once per entity, copied per viewer. Its packets were compared with a vanilla 26.3 server's, byte for byte (`tools/vanilla/entity_probe.py`); what still differs is listed in docs/architecture.md. Primed TNT is the one entity that moves by itself (`world::collide`: `Entity.move` without a step height) |
 | Players | Join/leave, tab list. Players see each other: position, rotation, sneaking/sprinting flags, pose, skin layers, main hand, what they hold and wear (`set_equipment`, hand swaps), the arm swinging (`punch`, a placed block, a drop - compared with vanilla by `tools/vanilla/swing_probe.py`). Not yet shown: attributes (`update_attributes`), the jump velocity, footsteps, the locator bar (`waypoint`), what a hit does besides the swing (`attack` is ignored), the stab of a spear, the sounds and particles of placed and broken blocks |
-| Items | `item::ItemStack` is 8 bytes: item, count, id of an interned component patch. A patch from a client is read component by component and stored re-encoded; a stack with a component that has no decoder yet is refused (list in `src/item/components.cpp`, reasons in docs/architecture.md). Inventory and the player's own menu: creative slots, every kind of `container_click`, closing, Q / ctrl+Q / throwing out of the window, F, pick block, what the client is known to hold (state ids). Item entities: dropped, merged, picked up, expired - **at rest**: nothing moves entities yet, so a dropped item hangs where it appears (and says `NO_GRAVITY`). Compared with a vanilla 26.3 server (`tools/vanilla/inventory_probe.py`); the differences left are in docs/architecture.md. Not there: recipes (the crafting grid only stores), component hashes of clicks, stacks inside stacks (containers, bundles), the behaviour components (food, tool, equippable...) |
+| Items | `item::ItemStack` is 8 bytes: item, count, id of an interned component patch. A patch from a client is read component by component and stored re-encoded; a stack with a component that has no decoder yet is refused (list in `src/item/components.cpp`, reasons in docs/architecture.md). Inventory and the player's own menu: creative slots, every kind of `container_click`, closing, Q / ctrl+Q / throwing out of the window, F, pick block, what the client is known to hold (state ids). Item entities: dropped, merged, picked up, expired - **at rest**: nothing moves entities yet, so a dropped item hangs where it appears (and says `NO_GRAVITY`). Compared with a vanilla 26.3 server (`tools/vanilla/inventory_probe.py`); the differences left are in docs/architecture.md. Not there: component hashes of clicks, stacks inside stacks (containers, bundles), the behaviour components (food, tool, equippable...) |
 | NBT and text | `nbt::Doc` reads a tag as vanilla's loader does (depth, quota, modified UTF-8, wrapped list elements) into a tape over the bytes - no tree; `nbt::Writer` builds one; `Doc::write` puts a loaded tag back in one canonical form. `text::transcode` is `ComponentSerialization.CODEC` both ways: any spelling of a text component in, the bytes vanilla writes for it out (entry order of its HashMap included) - compared with a vanilla 26.3 server over some 220 spellings (`tools/vanilla/component_probe.py`). On items: custom name, item name, lore, books, sign text; custom data and (block) entity data. Not read (the stack is refused): score / selector / nbt / object contents, `show_item` / `show_entity`, `show_dialog` / `custom`; a patch is still capped at 1 KiB, so a real book does not fit. Nothing *builds* text yet beyond plain strings (`put_nbt_text`): no chat, no renaming |
-| Not started | Mobs (the table and tracker take them; nothing spawns or moves them), physics, movement checks, block entities, block updates/neighbour shapes, containers other than the player's own, recipes, survival (everyone is creative), chat, commands, persistence, chunk unloading, workers, Lua plugins |
+| Not started | Mobs (the table and tracker take them; nothing spawns or moves them), physics of anything but primed TNT (items hang where they appear), movement checks, block updates in general (scheduled and random ticks, neighbour shapes beyond a chest's, fluids, redstone beyond the block of redstone), the other block entities, survival (everyone is creative), experience, chat, commands, persistence, chunk unloading, workers, Lua plugins |
 
 ## Commands
 
 ```sh
 cmake --preset release && cmake --build --preset release   # -O3, x86-64-v3, LTO  -> build/release/craftc
-ctest --preset release                                     # unit tests + integration tests (~70 s)
+ctest --preset release                                     # unit tests + integration tests (~100 s)
 cmake --preset dev && cmake --build --preset dev           # Debug + ASan/UBSan + DCHECKs
 ASAN_OPTIONS=detect_leaks=1 python3 tests/integration/run.py build/dev/craftc   # must be clean before "done"
 
@@ -32,12 +33,14 @@ build/release/unit_tests --gtest_filter='Cfb8*'            # one unit suite
 python3 tests/integration/run.py build/release/craftc -k join   # one scenario; --slow adds the timer tests (15 s .. 5 min)
 python3 tests/integration/run.py build/release/craftc -k crowd_500 --slow   # 500 bots in sight of each other: tick time, bytes
 build/release/bench [filter]                               # micro-benchmarks (release/native builds only); `bench tracker` = entities,
-                                                           # `bench item` / `bench menu` / `bench pickup` = items, `bench nbt` / `bench text`
+                                                           # `bench item` / `bench menu` / `bench pickup` = items, `bench nbt` / `bench text`,
+                                                           # `bench craft` / `bench furnace` / `bench collide` / `bench clip` / `bench blast` = blocks
 build/release/craftc --online-mode=false --server-port=25565   # run; any server.properties key works as --key=value
 
 python3 tools/mcgen/mcgen.py --help                        # protocol data pipeline
 python3 tools/mcgen/mcgen.py data blocks '^minecraft:oak_stairs$'   # a fact that only exists at runtime (shapes, hooks,
                                                            # fields, attributes, enums, menus): see the mc-reference skill
+python3 tools/mcgen/roadmap.py                             # rewrite docs/blocks-roadmap.md after porting a block class (--check: is it stale?)
 ```
 
 Other presets: `native` (`-march=native`, for the production box), `profile` (frame pointers + `-g`, for `perf`).
@@ -55,19 +58,25 @@ src/net/      reactor.* (io_uring loop, connections, cross-thread queues)
 src/nbt/      nbt.* (Doc: a tag read into a tape over its bytes; Tag: a view of one; Writer; Doc::write: canonical form)
 src/text/     component.* (text components: ComponentSerialization.CODEC both ways, tag in, vanilla's tag out)
 src/item/     stack.* (ItemStack: 8 bytes, vanilla's methods), components.* (the patch store, and the decoder of
-              every component a client may send)
+              every component a client may send), recipes.* (crafting, smelting, fuel: the jar's recipes as tables)
 src/entity/   store.* (the entity table: SoA columns, slots, handles), tracker.* (who sees whom + the per-tick
               encode-once fan-out, equipment), visibility.hpp (its SIMD kernel), grid.hpp (entities by cell: 64 blocks for
               the tracker, 2 for the game's items)
 src/server/   prelogin.* (handshake/status/login/config), session_auth.* (Mojang auth), game.* (tick thread),
               players.cpp (a player's packets and tick as an entity), block_actions.cpp (break/place/pick),
-              inventory.* (Inventory + Menu: slots and clicks, no game state), inventory_actions.cpp (its packets,
-              drops, equipment), item_entities.cpp (items on the ground), viewers.hpp, settings.*
+              inventory.* (Inventory + Menu: slots and clicks of every menu, no game state), inventory_actions.cpp
+              (its packets, drops, equipment), item_entities.cpp (items on the ground), block_entity.* (what a chest
+              and a furnace hold; the furnace's tick), block_entities.cpp (Game::set_block, clicking a block, opening
+              and closing menus, a chest's lid), explosion.cpp (TNT: the entity, its physics, the explosion),
+              viewers.hpp, settings.*
 src/world/    section.* (palette container), chunk*, chunk_codec.* (wire), light.* (light engine),
-              dimension.* (chunks + light + frame cache), generator.*, block.* (state/item tables), pool.hpp, bits.hpp
+              dimension.* (chunks + light + frame cache + where block entities are), generator.*, block.* (state/item
+              tables), collide.* (a box against the blocks: sweep, support, line of sight; an explosion's rays), pool.hpp, bits.hpp
 tests/unit/   GoogleTest;  tests/integration/  independent Python client (mcproto.py) + scenarios (run.py)
-bench/        micro-benchmarks;  tools/mcgen/  protocol data pipeline;  tools/vanilla/  probes that record what a
-              server sends (ours or vanilla) and diff two recordings;  docs/architecture.md  the design in depth
+bench/        micro-benchmarks;  tools/mcgen/  protocol data pipeline (gen.py: wire and state tables; gen_game.py: recipes,
+              loot, fuel, the ported block classes; roadmap.py);  tools/vanilla/  probes that record what a server sends
+              (ours or vanilla) and diff two recordings;  docs/architecture.md  the design in depth;
+              docs/blocks-roadmap.md  every block, done or to do (generated)
 .claude/skills/  task playbooks (below)
 ```
 
@@ -104,6 +113,12 @@ state; workers will come later for chunk work. They share nothing mutable.
    only after the tick thread sends `Release`.
 7. **Vanilla on the wire.** The server must be indistinguishable from vanilla to an unmodified client.
    Behaviour that the client can observe is copied from the vanilla jar, not invented.
+8. **Every block change goes through `Game::set_block`** (never `world_.set_block` from game code): it is
+   what removes and creates block entities, spills their contents, and tells the neighbours.
+9. **A block is placeable only when its class is ported.** Porting one: read every hook the class chain
+   overrides (`mcgen.py data blocks <name> --field hooks`), implement them, enter the class with that hook
+   set in `PORTED_BLOCKS` (`tools/mcgen/gen_game.py`), `mcgen.py generate`, `roadmap.py`. The generator
+   refuses a placeable block whose loot table, signal or explosion hooks it cannot turn into tables.
 
 ## Performance rules
 
@@ -165,7 +180,9 @@ runtime into `.cache/mc/<version>/gamedata/`: every shape and predicate per bloc
 overrides which hook, what each block/item/entity type was constructed with, default attributes,
 synchronized entity data, all static registries, enums, static tables, menu slots. Read it with
 `mcgen.py data` before porting a block, an item, a mob or a menu. It is a reference so far: generated
-C++ takes nothing from it until `gen.py` is taught to, table by table.
+C++ takes from it what `gen.py` / `gen_game.py` have been taught to, table by table - so far: block classes
+and the hooks they override, block entity types, loot table names, speed and bounce factors, crafting
+remainders, which states conduct redstone - and `generate` stops without it.
 
 ### The vanilla server as a reference
 
@@ -177,8 +194,10 @@ upgrade old worlds before importing them. Rules:
 - Run it only from `.cache/vanilla-server/`, with the cached official jar and Java 25:
   `cd .cache/vanilla-server && /usr/lib/jvm/java-25-openjdk/bin/java -jar ../mc/<version>/server.jar --nogui`.
   The probes in `tools/vanilla/` (`entity_probe.py`, `inventory_probe.py`, `swing_probe.py`,
-  `component_probe.py`) record one scripted session on any server; record vanilla and ours, then `diff`. Use player names vanilla has not seen: it saves
-  players and what they dropped.
+  `component_probe.py`, `container_probe.py`) record one scripted session on any server; record vanilla and
+  ours, then `diff`. Use player names vanilla has not seen: it saves players, what they dropped and what
+  they blew up. Start ours on a port nothing else listens on, and stop it by pid: reactors bind with
+  `SO_REUSEPORT`, so a second server on the same port quietly takes half the connections.
 - **Never create, edit or delete `eula.txt`.** If it is missing or not `eula=true`, stop and ask the user.
   Accepting the EULA is the user's act, not an agent's.
 - `server.properties` there must keep `server-ip=127.0.0.1` and `online-mode=false`, on a port other
@@ -232,6 +251,10 @@ Java plugin (Bukkit/Paper) compatibility is explicitly out of scope for now.
   Fixed-width ints are `u8…u64`, `i8…i64`, `usize`.
 - Comments explain *why* (the constraint, the vanilla behaviour being matched, the measured reason for an
   optimization). No comments restating code.
+- **Menus**: `server::Menu` is every menu. A new one is a slot table (`at`, `kind_of`), its `quickMoveStack`,
+  and - if its container does more than store - a case in `Menu::set` / `remove` / `on_take`; the stacks
+  behind it are handed in per operation (`Containers`), never kept. What it shows is compared with vanilla
+  by `container_probe.py` before it is called done.
 - **Item stacks**: pass them by value (`item::ItemStack`, 8 bytes); a copy of one with components takes a
   reference on its patch, so move where a copy is not meant. Nothing from a client becomes a stack except
   through `item::read_untrusted`. A new component gets a decoder in `src/item/components.cpp` written from

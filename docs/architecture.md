@@ -1,9 +1,10 @@
 # Architecture
 
 What exists today is the network stack, a flat world that can be built in, the entity layer
-that lets players see each other, and items: stacks, the player's inventory, what is held and
-worn, what lies on the ground. This document explains how the pieces fit and why; `AGENTS.md`
-has the rules in short form.
+that lets players see each other, items - stacks, the player's inventory, what is held and
+worn, what lies on the ground - and the first blocks that do something: a chest, a furnace, a
+crafting table, TNT. This document explains how the pieces fit and why; `AGENTS.md` has the
+rules in short form, `docs/blocks-roadmap.md` the blocks that are still to come.
 
 ## Threads and the data between them
 
@@ -73,16 +74,19 @@ new connection.
 One tick, in vanilla's order (`MinecraftServer.tickChildren`):
 
 ```
-drain packets ─▶ block + light changes ─▶ entity tracker ─▶ entity ticks ─▶ per-player tick ─▶ keep-alives ─▶ flush
-(move, click…)   (ChunkHolder             (ChunkMap.tick)   (items; the     (ack, equipment,
-                  .broadcastChanges)                         players' menus)  head, pickup, pose)
+drain packets ─▶ block ticks ─▶ block + light changes ─▶ entity tracker ─▶ block events ─▶ entity ticks ─▶ block entities ─▶ per-player tick ─▶ flush
+(move, click…)   (a chest's     (ChunkHolder             (ChunkMap.tick)   (a chest's      (items, primed   (furnaces)       (ack, equipment,
+                  recount)        .broadcastChanges)                         lid)            TNT; menus)                       head, pickup, pose)
 ```
 
 The order is observable, so it is copied: a block change reaches a client before the entity
 movement of the same tick; the tracker runs before a player's own tick, which is why other players
 see a head turn one tick after the body and a new pose one tick after the key that caused it; a
 menu is brought up to date (`ServerPlayer.tick`) before the player's connection ticks, so a slot
-changed by a pickup is sent with the pickup and one changed by a key (F) a tick later.
+changed by a pickup is sent with the pickup and one changed by a key (F) a tick later; block
+entities tick after the entities, so what a furnace cooked in a tick reaches its menu in the next;
+an explosion happens in the tick of its TNT, and the blocks it took go out with the next tick's
+block changes - after the `explode` packet, as in vanilla.
 
 A player is an entity: position, rotation and everything other players are shown live in the
 entity table (below), where players are the first rows - a player's index here is its entity
@@ -350,8 +354,8 @@ touched costs one byte test per tick (`Game::dirty_`); one whose inventory was t
 
 Everyone is in creative mode for now, which decides what reaches this code: the creative
 inventory screen keeps its own copy and reports slots (`set_creative_mode_slot`), and
-`container_click` only arrives from test clients. The 2x2 crafting grid stores items; there are no
-recipes, so its result slot stays empty.
+`container_click` arrives from the screens a block opens - a chest, a furnace, a crafting table
+(below: "Blocks that do something"). The 2x2 grid of the inventory crafts like the table's 3x3.
 
 ### Held, worn, dropped
 
@@ -389,7 +393,7 @@ recipes, so its result slot stays empty.
 | read a plain stack from a client | 15 - 18 ns |
 | read a stack with two components (decode, re-encode, intern) | 0.3 - 0.4 us |
 | write a stack with components | 6 - 7 ns |
-| menu sync of a touched player, nothing to send | 0.16 - 0.2 us |
+| menu sync of a touched player, nothing to send | 0.2 us |
 | 500 players spread out looking for items among 2000 | 8 - 10 us per tick |
 | the same in one place (everything within 40 blocks) | 0.17 - 0.18 ms per tick |
 
@@ -414,7 +418,6 @@ recording). What differs:
 - vanilla shows a new entity to its viewers the moment it is created, we at the end of the tick
   (the tracker's one deliberate difference): a swing and the item it threw swap places in the stream;
 - its items fall, so they merge after 2 ticks instead of 40, and land a little way off;
-- its crafting grid produces results;
 - the `NO_GRAVITY` entry above.
 
 `tools/vanilla/swing_probe.py` does the same for a player's hands: punches in one tick and two,
@@ -435,6 +438,169 @@ shown, with which hand and animation, comes out the same. What differs:
 `tools/vanilla/component_probe.py` does it for what a stack carries as text and as tags - the
 names, lore, books, signs and custom data a client may spell in a hundred ways. Its results are
 under "A text component is read by a codec" below.
+
+## Blocks that do something (src/server/block_entities.cpp, block_entity.*, explosion.cpp, src/item/recipes.*, src/world/collide.*)
+
+Until here a block was a state: stored, lit, sent. Four blocks are more now - a chest, a
+furnace, a crafting table, TNT - and each is the first of a family. `docs/blocks-roadmap.md`
+lists every other block by the class that gives it its behaviour, in the order the missing
+systems are meant to be built; it is generated, so it cannot say "done" about a block the
+server would refuse to place.
+
+The rule for all of them stays the one from the first block: the world never holds a block
+whose reaction to being clicked, updated or blown up would have to be invented. `mcgen` decides
+what can be placed: a block class that is ported is entered in `PORTED_BLOCKS`
+(`tools/mcgen/gen_game.py`) together with every hook it overrides in the jar - a version that
+adds a hook to `ChestBlock` stops the generator until someone has read it.
+
+### A block entity is in three places
+
+- **Where it is, and of which type** belongs to the world: 8 bytes in an array of its chunk
+  (`world::BlockEntityRef`). That is all a chunk packet says about a chest - and it has to say
+  it: a client draws a chest only if the packet lists a block entity there. Finding one by
+  position is a scan of its chunk's array; chunks hold a handful.
+- **What it holds** belongs to the game: `server::Chest` (27 stacks, who has it open) and
+  `server::Furnace` (three stacks, four timers) are plain structs in two arrays that the
+  chunk's entry points into. Entries are reused but never moved - a menu names its chest by
+  index - and furnaces, the one kind that ticks, are walked in a row: one that neither burns
+  nor could start costs the test at the top of the loop.
+- **Who is looking** belongs to the player: the menu (below).
+
+`Game::set_block` is the one door every block change of the game goes through, and the port of
+what `LevelChunk.setBlockState` and `Level.setBlock` do around a change: the old block's block
+entity goes and spills what it held, the new block's comes, the block is told it was placed
+(TNT beside a block of redstone goes off), and the six neighbours hear of it (a chest joins or
+leaves its other half, TNT looks for a signal).
+
+### One player, two menus (`server::Menu`)
+
+A player always has its own menu (container id 0) and the menu that is open - which is its own
+unless it clicked a chest, a furnace or a crafting table. `Menu` holds both: the inventory they
+share, and for each its cursor, its crafting grid and what the client is known to hold.
+`AbstractContainerMenu.doClick` is written once; what differs between `InventoryMenu`,
+`ChestMenu`, `FurnaceMenu` and `CraftingMenu` is a table from slot number to "which stack, which
+kind of slot", `quickMoveStack`, and three hooks that vanilla hides in `Container` and `Slot`
+subclasses:
+
+- `Slot.set` on a crafting grid recomputes the result **and sends it at once**
+  (`CraftingMenu.slotChangedCraftingGrid`), on a furnace's input restarts the cooking
+  (`AbstractFurnaceBlockEntity.setItem`);
+- `Slot.remove` on a result slot takes all of it, whatever was asked;
+- `Slot.onTake` on a result slot uses the ingredients up, one `removeItem` at a time - each of
+  which is a grid change, so crafting sticks from two planks sends the result slot twice.
+  That is vanilla's stream, and the probe below compares it byte for byte.
+
+A menu on a chest or a furnace is compared with what its client knows every tick while it is
+open (somebody else may have a hand in the same chest; a furnace burns), and closes when its
+block is gone or more than four blocks past reach. Two players in one chest need nothing more
+than that: both menus point at the same 27 stacks.
+
+A chest counts who has it open (`ContainerOpenersCounter`): the first opener is heard, every
+change moves the lid (a block event to everyone within 64 blocks), and while it is open the
+chest counts again every five ticks - which is how a player who comes into view later sees the
+lid up. That recount is vanilla's scheduled block tick; until there is a tick queue for blocks
+in general it has a queue of its own.
+
+### Recipes are tables (`src/item/recipes.*`)
+
+`mcgen` reduces `data/minecraft/recipe` to what matching needs: an ingredient is a sorted list
+of item ids (a tag is expanded), a recipe a few bytes. 1235 crafting recipes - shaped,
+shapeless, transmute - and the 73 of the furnace; the 31 recipes that compute their result from
+components (dyed armour, fireworks, banner copies...) are not there, and a grid that holds one
+makes nothing.
+
+The first recipe in id order that matches wins, as in `RecipeManager`. Trying 1235 in a row on
+every click would be the simple way; instead the recipes that name an item at all are listed
+per item, in order, and only the shortest of the grid's lists is walked - any recipe that
+matches is in every one of them. Smelting is one table load per item: a furnace asks for its
+recipe every tick it burns. Fuel is an item component in 26.x (`cooking_fuel`, a provider that
+asks whether the block cooks fast); `mcgen` evaluates it for the plain furnace into
+`ItemInfo::fuel_ticks`.
+
+### TNT: the first thing that moves by itself (`src/server/explosion.cpp`, `src/world/collide.*`)
+
+A primed TNT is a row of the entity table that `Game::tick_tnt` moves the way `PrimedTnt.tick`
+does: gravity, `Entity.move`, drag, the fuse. The move is the port that entity physics will
+grow from: `world::collide` is `Entity.collide` for something that cannot step up - the box
+swept against the collision boxes of the blocks around it, axis by axis in vanilla's order with
+vanilla's margins - and around it what a collision does to the velocity
+(`restituteMovementAfterCollisions`: a slime block bounces), what the block underfoot does
+(`getBlockSpeedFactor`: soul sand, honey), and `requiresPrecisePosition`, which makes the
+tracker send exact positions for a TNT that touches a block. A client simulates primed TNT too,
+so the two have to agree tick by tick; the probe below compares the height of the hop.
+
+The explosion is `ServerExplosion`: 1352 rays that the blocks wear down, the entities within
+twice the radius by how much of them the centre can see (`world::clip_hits`, the collision
+shapes again), the blocks. What a block drops is its loot table - which is why `mcgen` reads
+loot tables: for every block that can be in the world it reduces the table to what an explosion
+without a tool leaves (stone: cobblestone; glass: nothing; glowstone: 2 to 4 dust), and stops
+on a table it cannot reduce. TNT in the blast goes off on a short fuse instead of dropping;
+players get their push in the `explode` packet, which is where a client takes it from.
+
+### What it costs
+
+`bench craft`, `bench smelting`, `bench furnace`, `bench collide`, `bench clip`, `bench blast`
+(i5-9300H, `release`):
+
+| | |
+|---|---|
+| what a grid makes: sticks / a chest (shaped) | 0.14 / 0.17 us |
+| ...flint and steel (shapeless) | 0.06 us |
+| ...nine planks, which make nothing: the longest walk there is | 0.7 us |
+| a furnace's recipe for an item | 2.6 ns |
+| 10 000 furnaces that neither burn nor could start | 13 us per tick |
+| 10 000 furnaces, all burning | 0.15 ms per tick |
+| move a primed TNT: in the air / lying on the ground | 0.10 / 0.21 us |
+| one line of sight of an explosion, 7 blocks long | 0.15 us |
+| the 1352 rays of one explosion | 0.18 ms |
+
+The rays are what an explosion costs: 25 000 points, each a step of a ray. Asking the world
+for the block at every one of them took 0.23 ms; each block's resistance is now looked up once
+per explosion and kept in a cube around the centre. On the running server one TNT then takes
+0.4 to 1.8 ms of its tick (`--debug=true` logs each one) - the rays on a core that was asleep between
+ticks, plus 0.05 to 0.15 ms for the hundred-odd blocks it changes; the light of the crater is
+the next tick's block changes. A hundred TNT in one tick is a tick lost: explosions are the
+first thing here that a player can make arbitrarily expensive, and vanilla has no limit either.
+
+The menus cost what the player's own did: a touched menu with nothing to send is compared in
+0.2 us whichever menu it is (`bench menu`), and only players with a chest, a furnace or a
+crafting table open are looked at every tick. The entity table's new column (a TNT's fuse)
+and the tracker's new flag left `bench tracker` where it was: 0.3 ms for the crowd, 2.0 ms
+with 20 000 mobs.
+
+### Compared with vanilla
+
+`tools/vanilla/container_probe.py` runs one script against a vanilla 26.3 server and against
+this one: a chest placed, opened by two players at once, filled, made double, broken; the
+inventory's grid and a crafting table; a furnace fed and broken; a TNT lit beside another. It
+diffs what the two bots are sent. Every menu packet - `open_screen` with its title, contents,
+slot and cursor updates with their state ids, the furnace's four numbers, `container_close` -
+comes out the same byte for byte, in the same order; so do the block states (which way a chest
+faces, which half it is), the lid's block events and their five-tick rhythm, the chest sounds
+and where they come from, the items a broken chest spills. Of a primed TNT: the fuse counting
+down in its entity data every tick, the height of its hop tick by tick, the switch to exact
+positions when it lands, the `explode` packet (its tail of particles and sound byte for byte,
+the push it gives a player four blocks away within a few percent - it depends on which blocks
+the rays took), the second TNT going off from where it fell, dirt lying about in stacks of 16.
+What differs:
+
+- vanilla shows a new entity the moment it is created, so `add_entity` of a primed TNT comes
+  before its sound and before the `explode` packet of the TNT that lit it; here it comes with
+  the tick's other entity updates (the tracker's one deliberate difference, as for items);
+- vanilla swings the arm twice for a click on a block (`handleUseItemOn`), we once - as for a
+  placed block;
+- `update_recipes` at join carries the same nine property sets (which items a furnace takes...);
+  vanilla also lists the stonecutter's recipes there, which no block here can use yet;
+- not sent at all, each a known gap rather than a difference in what is sent: the sound of a
+  block being placed and the particles of one being broken (to others), a player's footsteps;
+- a furnace gives no experience when it is emptied, ores blown up by a player's TNT none
+  either: there are no experience orbs;
+- items do not move, so what a chest spills or an explosion drops hangs where it appears, and
+  an explosion destroys items or leaves them but does not throw them;
+- a cobweb does not slow a falling TNT and honey does not let it slide (`entityInside`), water
+  does not carry it; a bounce off a slime block is computed but sent as a plain position;
+- a player's inventory is not kept when it leaves, so what it had on a menu's cursor or in a
+  crafting grid is not dropped at its feet.
 
 ## NBT and text components (src/nbt/, src/text/)
 
@@ -597,8 +763,12 @@ Roughly in dependency order:
    in one place cost 8 - 25 ms of AES per tick there (see "What a tick of this costs"). Encrypt on
    the reactors, or split the flush across workers.
 7. **Items**: the component hashes of `container_click`, the rest of the components (stacks in
-   stacks, the behaviour components), recipes, then containers and block entities - for which
-   `nbt::Writer` and `nbt::Doc` are there. Survival needs none of that first, only a game mode.
+   stacks, the behaviour components), the crafting recipes that compute their result. Survival
+   needs none of that first, only a game mode.
    Text: selectors and the other contents that are not read; a builder for the server's own
-   components (chat, a renamed item) on top of `nbt::Writer`.
-8. Lua plugin host.
+   components (chat, a renamed item) on top of `nbt::Writer` - a menu's title is the first text
+   the server makes itself (`Component.translatable`, through `text::transcode`).
+8. **Blocks**: `docs/blocks-roadmap.md` - shapes that follow their neighbours, scheduled and
+   random ticks, fluids, redstone, the other block entities. And what the first four still
+   lack: experience orbs, item physics (`world::collide` is there for it), `entityInside`.
+9. Lua plugin host.

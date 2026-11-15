@@ -89,6 +89,12 @@ the jar, not memory, the source of every byte.
 - `entity_event` carries its entity id as a plain int, every other entity packet as a VarInt.
 - A handler that kicks must return at once: `kick()` swaps the last player into the freed index, so `p` and `pi`
   now name somebody else.
+- Container packets name their menu: id 0 is the player's own, whatever else is open (the creative
+  inventory keeps talking to it through `set_creative_mode_slot`); a block's menu gets 1..100 from the
+  player's counter. A click for a menu that is not the open one is dropped, not an error.
+- Not everything about a menu goes out with its synchronisation: a crafting grid's result is sent the
+  moment the grid changes (`Effect::kSetSlot`), once per change - byte for byte what vanilla does, and
+  only visible in a recording (`tools/vanilla/container_probe.py`).
 - What others see a player do is mostly not in the packet that says it: a swing comes from `punch` (26.x; no
   payload - the server reads the animation off the held item), from a successful `use_item_on`, from a drop.
   When wiring a handler, read vanilla's whole `handle…` method to its end and port what it broadcasts
