@@ -13,6 +13,7 @@
 #include "proto/wire.hpp"
 #include "world/chunk_codec.hpp"
 #include "world/chunk_map.hpp"
+#include "world/collide.hpp"
 #include "world/dimension.hpp"
 #include "world/section.hpp"
 
@@ -699,8 +700,15 @@ TEST(Blocks, GeneratedTablesAgreeWithEachOther) {
         // Placeable: its item is a plain block item that places exactly this block.
         ASSERT_EQ(item_info(info.item).block, b) << block_name(b);
         ASSERT_TRUE(item_info(info.item).flags & item_flag::kPlainBlockItem) << block_name(b);
-        ASSERT_FALSE(info.flags & (block_flag::kInteractive | block_flag::kGameMaster | block_flag::kCustomReplace))
-            << block_name(b);
+        ASSERT_FALSE(info.flags & (block_flag::kGameMaster | block_flag::kCustomReplace)) << block_name(b);
+        // A block that answers a click, or keeps a block entity, is placeable only as a ported class.
+        if ((info.flags & block_flag::kInteractive) || info.block_entity != proto::gen::kNoBlockEntity) {
+            ASSERT_NE(info.kind, proto::gen::block_kind::kPlain) << block_name(b);
+        }
+        // What an explosion leaves of it is an item, or nothing.
+        ASSERT_LT(info.drop[0].item, item_count());
+        ASSERT_LE(info.drop[0].min, info.drop[0].max);
+        ASSERT_TRUE(info.drop_chance > 0.0f && info.drop_chance <= 1.0f) << block_name(b);
         if (kind == block_flag::kPlaceAxis) {
             for (u32 k = 0; k < 3; ++k) ASSERT_EQ(block_of(info.alt[k]), b);
         }
@@ -715,4 +723,124 @@ TEST(Blocks, GeneratedTablesAgreeWithEachOther) {
     EXPECT_TRUE(collision_boxes(kAir, dynamic).empty());
     ASSERT_EQ(collision_boxes(blk::kOakSlab, dynamic).size(), 1u);
     EXPECT_EQ(collision_boxes(blk::kOakSlab, dynamic)[0].max[1], 0.5);
+}
+
+// ---------------------------------------------------------------------------- boxes against blocks
+
+TEST(Collide, ABoxAgainstTheGroundAndAWall) {
+    // The flat world's top block is grass at y = -61: the ground is the plane y = -60.
+    FlatGenerator gen(-64, 24, FlatGenerator::default_layers(), 39);
+    Dimension dim(proto::reg::dimension_type::kOverworld, "minecraft:overworld", gen, proto::kNoCompression);
+    dim.ticking(0, 0);
+    std::vector<Aabb> scratch;
+    double out[3];
+    // A box the size of a primed TNT, half a block up, falling a whole block: it stops on the ground,
+    // and keeps what it moved sideways.
+    const Aabb box{{8.01, -59.5, 8.01}, {8.99, -58.52, 8.99}};
+    const double fall[3] = {0.1, -1.0, -0.2};
+    collide(dim, box, fall, out, scratch);
+    EXPECT_DOUBLE_EQ(out[0], 0.1);
+    EXPECT_DOUBLE_EQ(out[1], -0.5);
+    EXPECT_DOUBLE_EQ(out[2], -0.2);
+    // Resting on it, gravity moves it nowhere; in the air nothing stops it.
+    const Aabb resting{{8.01, -60.0, 8.01}, {8.99, -59.02, 8.99}};
+    const double gravity[3] = {0.0, -0.04, 0.0}, up[3] = {0.0, 0.16, 0.0};
+    collide(dim, resting, gravity, out, scratch);
+    EXPECT_EQ(out[1], 0.0);
+    collide(dim, resting, up, out, scratch);
+    EXPECT_EQ(out[1], 0.16);
+    // A wall two blocks to the east: one block and a hundredth of free way.
+    ASSERT_TRUE(dim.set_block(10, -60, 8, static_cast<BlockState>(blk::kStone)));
+    const double east[3] = {2.0, 0.0, 0.0};
+    collide(dim, resting, east, out, scratch);
+    EXPECT_NEAR(out[0], 1.01, 1e-12);
+    // ...which a box one block higher passes over.
+    Aabb above = resting;
+    above.min[1] += 1.0, above.max[1] += 1.0;
+    collide(dim, above, east, out, scratch);
+    EXPECT_EQ(out[0], 2.0);
+
+    // What it stands on: the block under its middle - and, hanging over an edge, the nearest one.
+    Aabb feet = resting;
+    feet.max[1] = feet.min[1];
+    feet.min[1] -= 1.0e-6;
+    i32 pos[3];
+    ASSERT_TRUE(supporting_block(dim, feet, 8.5, -60.0, 8.5, pos));
+    EXPECT_EQ(pos[0], 8);
+    EXPECT_EQ(pos[1], -61);
+    EXPECT_EQ(pos[2], 8);
+    Aabb over_edge = feet;
+    over_edge.min[0] += 0.4, over_edge.max[0] += 0.4;  // x 8.41 .. 9.39: two blocks under it
+    ASSERT_TRUE(supporting_block(dim, over_edge, 8.9, -60.0, 8.5, pos));
+    EXPECT_EQ(pos[0], 8);  // its middle is still over block 8
+    ASSERT_TRUE(supporting_block(dim, over_edge, 9.1, -60.0, 8.5, pos));
+    EXPECT_EQ(pos[0], 9);
+    Aabb flying = feet;
+    flying.min[1] += 1.0, flying.max[1] += 1.0;
+    EXPECT_FALSE(supporting_block(dim, flying, 8.5, -59.0, 8.5, pos));
+
+    // Lines of sight: through the air, into the ground, through the wall, and from inside a block.
+    const double eye[3] = {8.5, -58.4, 8.5}, far[3] = {14.5, -58.4, 11.5}, below[3] = {8.5, -62.5, 8.5};
+    const double behind[3] = {11.5, -59.5, 8.5}, low[3] = {8.5, -59.5, 8.5}, inside[3] = {10.5, -59.5, 8.5};
+    EXPECT_FALSE(clip_hits(dim, eye, far));
+    EXPECT_TRUE(clip_hits(dim, eye, below));
+    EXPECT_TRUE(clip_hits(dim, low, behind));
+    const double over[3] = {11.5, -58.9, 8.5};
+    EXPECT_FALSE(clip_hits(dim, eye, over));   // above the wall's top
+    EXPECT_TRUE(clip_hits(dim, eye, behind));  // down through its top face
+    EXPECT_TRUE(clip_hits(dim, inside, eye));
+    EXPECT_FALSE(clip_hits(dim, eye, eye));
+}
+
+TEST(Collide, TheRaysOfAnExplosion) {
+    // A TNT's worth (radius 4) on flat ground: grass and dirt give way (resistance 0.6 and 0.5),
+    // the bedrock under them stops every ray, and nothing beyond seven blocks is reached.
+    FlatGenerator gen(-64, 24, FlatGenerator::default_layers(), 39);
+    Dimension dim(proto::reg::dimension_type::kOverworld, "minecraft:overworld", gen, proto::kNoCompression);
+    dim.ticking(0, 0);
+    float strengths[kBlastRays];
+    for (float& s : strengths) s = 0.5f;  // every ray starts with radius * 1.0
+    BlastScratch scratch;
+    std::vector<BlockAt> out;
+    blast_positions(dim, 8.5, -59.93875, 8.5, 4.0f, strengths, scratch, out);
+    std::set<std::tuple<i32, i32, i32>> seen;
+    u32 solid = 0;
+    for (const BlockAt& b : out) {
+        EXPECT_TRUE(seen.insert({b.x, b.y, b.z}).second) << "a position twice";
+        EXPECT_LE(std::abs(b.x - 8), 7);
+        EXPECT_LE(std::abs(b.y + 60), 7);
+        EXPECT_GT(b.y, -64) << "bedrock";
+        solid += !is_air(dim.block(b.x, b.y, b.z));
+    }
+    EXPECT_TRUE(seen.count({8, -61, 8}));   // the grass it lies on
+    EXPECT_TRUE(seen.count({8, -63, 8}));   // ...and the dirt down to the bedrock
+    EXPECT_TRUE(seen.count({8, -57, 8}));   // air counts too
+    EXPECT_FALSE(seen.count({8, -52, 8}));  // 4 / 0.225 * 0.3 = 5.3 blocks through the air at most
+    EXPECT_GT(solid, 40u);
+    EXPECT_LT(solid, 400u);
+    // Twice the strength reaches further; walls and a roof of obsidian around the centre let
+    // nothing through above the ground - under them the rays still dig.
+    for (float& s : strengths) s = 1.0f;
+    std::vector<BlockAt> more;
+    blast_positions(dim, 8.5, -59.93875, 8.5, 4.0f, strengths, scratch, more);
+    EXPECT_GT(more.size(), out.size());
+    for (i32 x = 6; x <= 10; ++x) {
+        for (i32 y = -60; y <= -57; ++y) {
+            for (i32 z = 6; z <= 10; ++z) {
+                if (x == 6 || x == 10 || z == 6 || z == 10 || y == -57) {
+                    ASSERT_TRUE(dim.set_block(x, y, z, static_cast<BlockState>(blk::kObsidian)));
+                }
+            }
+        }
+    }
+    blast_positions(dim, 8.5, -59.93875, 8.5, 4.0f, strengths, scratch, more);
+    u32 below = 0;
+    for (const BlockAt& b : more) {
+        if (b.y < -60) {
+            ++below;
+            continue;
+        }
+        EXPECT_TRUE(b.x > 6 && b.x < 10 && b.z > 6 && b.z < 10 && b.y < -57) << b.x << ' ' << b.y << ' ' << b.z;
+    }
+    EXPECT_GT(below, 20u);
 }

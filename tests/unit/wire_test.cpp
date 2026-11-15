@@ -443,6 +443,68 @@ TEST(Packets, InventoryLayoutsAreWhatVanillaSent) {
     EXPECT_EQ(item_bound(none), 1u);
 }
 
+TEST(Packets, ContainerAndExplosionLayoutsAreWhatVanillaSent) {
+    // Packet bodies a vanilla 26.3 server sent while a test client opened a chest, a double chest,
+    // a crafting table and a furnace, and lit a TNT four blocks away (tools/vanilla/container_probe.py).
+    // A title is a text component: the tag {translate: "container.chest"}.
+    const auto title = [](std::string_view key) {
+        std::vector<u8> t = {
+            0x0a, 0x08, 0x00, 0x09, 't', 'r', 'a', 'n', 's', 'l', 'a', 't', 'e', 0x00, static_cast<u8>(key.size())};
+        t.insert(t.end(), key.begin(), key.end());
+        t.push_back(0x00);
+        return t;
+    };
+    const std::vector<u8> chest = title("container.chest"), furnace = title("container.furnace");
+    EXPECT_EQ(body_hex(cb::OpenScreen{1, 2, chest}),
+              "01020a0800097472616e736c617465000f636f6e7461696e65722e636865737400");  // generic_9x3
+    EXPECT_EQ(body_hex(cb::OpenScreen{4, 14, furnace}), "040e0a0800097472616e736c6174650011636f6e7461696e65722e6675726e61636500");
+    EXPECT_EQ(body_hex(cb::ContainerSetData{4, 3, 200}), "04000300c8");  // the furnace's cooking total
+    EXPECT_EQ(body_hex(cb::ContainerSetData{4, 0, 0}), "0400000000");
+    EXPECT_EQ(body_hex(cb::ContainerClose{2}), "02");
+    // A chest's lid at (4, -60, -13): event 1, one opener; block 245 is minecraft:chest.
+    EXPECT_EQ(body_hex(cb::BlockEvent{4, -60, -13, 1, 1, 245}), "0000013fffff3fc40101f501");
+
+    // The explosion, field by field - and written back from what was read.
+    const std::string sent =
+        "401143ebc8a5453fc04df828f5c00000c0252bbdcdc4144240800000000002ac013f96bf3cfd52e2e93fc82178bbc7ace8bfde4ce5e922e97e1d"
+        "c00502453f0000003f80000001483f8000003f8000000101";
+    std::vector<u8> raw;
+    for (usize i = 0; i < sent.size(); i += 2) raw.push_back(static_cast<u8>(std::stoi(sent.substr(i, 2), nullptr, 16)));
+    Reader r(raw.data(), raw.size());
+    cb::Explode e{};
+    e.x = r.f64(), e.y = r.f64(), e.z = r.f64();
+    EXPECT_DOUBLE_EQ(e.y, -60.0 + static_cast<double>(0.98f) * 0.0625);  // a sixteenth of a TNT's height above the ground
+    e.radius = r.f32();
+    EXPECT_EQ(e.radius, 4.0f);
+    e.block_count = static_cast<i32>(r.be32());
+    EXPECT_EQ(e.block_count, 684);
+    e.knocked = r.boolean();
+    ASSERT_TRUE(e.knocked);  // the client stood four blocks off
+    e.kx = r.f64(), e.ky = r.f64(), e.kz = r.f64();
+    EXPECT_NEAR(std::sqrt(e.kx * e.kx + e.ky * e.ky + e.kz * e.kz), 0.51, 0.01);
+    e.particle = r.varint();
+    EXPECT_EQ(e.particle, 29u);  // explosion_emitter
+    e.sound = r.varint() - 1;    // a holder
+    EXPECT_EQ(e.sound, 703u);    // entity.generic.explode
+    cb::ExplosionParticle particles[2];
+    ASSERT_EQ(r.varint(), 2u);  // Level.DEFAULT_EXPLOSION_BLOCK_PARTICLES
+    for (cb::ExplosionParticle& b : particles) {
+        b.particle = r.varint();
+        b.scaling = r.f32();
+        b.speed = r.f32();
+        b.weight = r.varint();
+    }
+    EXPECT_EQ(particles[0].particle, 69u);  // poof, half size
+    EXPECT_EQ(particles[0].scaling, 0.5f);
+    EXPECT_EQ(particles[1].particle, 72u);  // smoke
+    EXPECT_EQ(particles[1].weight, 1u);
+    e.block_particles = particles;
+    e.play_sound = r.boolean();
+    EXPECT_TRUE(e.play_sound);
+    EXPECT_TRUE(r.done());
+    EXPECT_EQ(body_hex(e), sent);
+}
+
 TEST(Packets, ContainerClickLayout) {
     // ServerboundContainerClickPacket: container id, state id, slot (short), button (byte), input,
     // the changed slots as a map short -> HashedStack, the carried HashedStack. A HashedStack is

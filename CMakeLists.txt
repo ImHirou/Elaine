@@ -93,15 +93,20 @@ add_library(core STATIC
   src/world/chunk_codec.cpp
   src/world/generator.cpp
   src/world/dimension.cpp
+  src/world/collide.cpp
   src/item/components.cpp
   src/item/stack.cpp
+  src/item/recipes.cpp
   src/entity/store.cpp
   src/entity/tracker.cpp
   src/server/prelogin.cpp
+  src/server/block_entity.cpp
   src/server/inventory.cpp
   src/server/inventory_actions.cpp
   src/server/item_entities.cpp
   src/server/block_actions.cpp
+  src/server/block_entities.cpp
+  src/server/explosion.cpp
   src/server/players.cpp
   src/server/game.cpp
 )
@@ -130,6 +135,7 @@ if(MC_TESTS)
       tests/unit/entity_test.cpp
       tests/unit/item_test.cpp
       tests/unit/inventory_test.cpp
+      tests/unit/container_test.cpp
     )
     target_link_libraries(unit_tests PRIVATE core GTest::gtest_main OpenSSL::Crypto)
     add_test(NAME unit COMMAND unit_tests)
@@ -146,6 +152,6 @@ endif()
 
 if(MC_BENCH)
   add_executable(bench bench/bench.cpp bench/world_bench.cpp bench/entity_bench.cpp bench/item_bench.cpp
-    bench/nbt_bench.cpp)
+    bench/nbt_bench.cpp bench/game_bench.cpp)
   target_link_libraries(bench PRIVATE core mc_core_flags OpenSSL::Crypto)
 endif()

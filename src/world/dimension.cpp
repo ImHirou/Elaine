@@ -64,7 +64,10 @@ Dimension::Dimension(u32 type_id, std::string name, ChunkGenerator& gen, i32 com
       light_(map_, LightEngine::Layout{min_y_, min_y_ >> 4, sections_, has_sky_}) {}
 
 Dimension::~Dimension() {
-    map_.for_each([](Chunk& c) { std::free(c.frame); });
+    map_.for_each([](Chunk& c) {
+        std::free(c.frame);
+        std::free(c.block_entities);
+    });
 }
 
 // ---------------------------------------------------------------------------- pipeline
@@ -167,7 +170,8 @@ void Dimension::prime_heightmaps(Chunk& c) {
 void Dimension::update_heightmaps(Chunk& c, u32 lx, i32 y, u32 lz, BlockState s) {
     // Same order as LevelChunk.setBlockState (minus OCEAN_FLOOR, which only the server would read).
     update_column(c.motion_blocking, c, min_y_, lx, y, lz, s, state::kMotionBlocking, state::kMotionBlocking);
-    update_column(c.motion_blocking_no_leaves, c, min_y_, lx, y, lz, s, state::kMotionBlockingNoLeaves, state::kMotionBlockingNoLeaves);
+    update_column(c.motion_blocking_no_leaves, c, min_y_, lx, y, lz, s, state::kMotionBlockingNoLeaves,
+                  state::kMotionBlockingNoLeaves);
     update_column(c.world_surface, c, min_y_, lx, y, lz, s, state::kIsAir, 0);
 }
 
@@ -216,6 +220,43 @@ bool Dimension::set_block(i32 x, i32 y, i32 z, BlockState s) {
     return true;
 }
 
+// ---------------------------------------------------------------------------- block entities
+
+const BlockEntityRef* Dimension::block_entity(i32 x, i32 y, i32 z) const {
+    const Chunk* c = map_.find(x >> 4, z >> 4);
+    if (!c) return nullptr;
+    const u8 xz = static_cast<u8>((x & 15) << 4 | (z & 15));
+    for (u32 i = 0; i < c->block_entity_count; ++i)
+        if (c->block_entities[i].xz == xz && c->block_entities[i].y == y) return &c->block_entities[i];
+    return nullptr;
+}
+
+void Dimension::add_block_entity(i32 x, i32 y, i32 z, u32 type, u32 data) {
+    Chunk* c = map_.find(x >> 4, z >> 4);
+    DCHECK(c && !block_entity(x, y, z));
+    if (c->block_entity_count == c->block_entity_cap) {  // amortized: a chunk's list only grows by placing blocks
+        const u32 cap = c->block_entity_cap ? c->block_entity_cap * 2u : 4u;
+        if (cap > 0xFFFF) std::abort();  // 65 536 block entities in one chunk: there are 98 304 blocks
+        auto* grown = static_cast<BlockEntityRef*>(std::realloc(c->block_entities, cap * sizeof(BlockEntityRef)));
+        if (UNLIKELY(!grown)) std::abort();
+        c->block_entities = grown;
+        c->block_entity_cap = static_cast<u16>(cap);
+    }
+    c->block_entities[c->block_entity_count++] = {static_cast<u8>((x & 15) << 4 | (z & 15)), static_cast<u8>(type),
+                                                  static_cast<i16>(y), data};
+    c->frame_valid = false;
+}
+
+bool Dimension::remove_block_entity(i32 x, i32 y, i32 z, u32& data) {
+    Chunk* c = map_.find(x >> 4, z >> 4);
+    const BlockEntityRef* found = block_entity(x, y, z);
+    if (!found) return false;
+    data = found->data;
+    c->block_entities[found - c->block_entities] = c->block_entities[--c->block_entity_count];
+    c->frame_valid = false;
+    return true;
+}
+
 // ---------------------------------------------------------------------------- per tick
 
 void Dimension::update_light() {
@@ -246,7 +287,8 @@ void Dimension::end_tick() {
 }
 
 usize Dimension::memory_bytes() const {
-    return alloc_.reserved_bytes() + chunk_pool_.reserved_bytes() + const_cast<LightEngine&>(light_).layer_pool().reserved_bytes() + frame_bytes_;
+    return alloc_.reserved_bytes() + chunk_pool_.reserved_bytes() +
+           const_cast<LightEngine&>(light_).layer_pool().reserved_bytes() + frame_bytes_;
 }
 
 }  // namespace world

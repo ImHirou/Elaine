@@ -964,11 +964,12 @@ def plain(item: str, count: int = 1) -> tuple:
 
 
 def menu_click(c: Client, slot: int, button: int, kind: int, changed: dict | None = None, carried=None, state: int | None = None) -> None:
-    """container_click on the player's own menu. `changed` and `carried` are what a client reports
-    of its own prediction: {slot: (item, count) or None}. Reporting nothing makes the server
-    describe everything the click did."""
+    """container_click on the menu that is open - the player's own, or the one a block opened.
+    `changed` and `carried` are what a client reports of its own prediction: {slot: (item, count)
+    or None}. Reporting nothing makes the server describe everything the click did."""
     changed = changed or {}
-    body = varint(0) + varint(c.state_id if state is None else state) + struct.pack(">hb", slot, button) + varint(kind)
+    body = varint(c.window["id"] if c.window else 0) + varint(c.state_id if state is None else state)
+    body += struct.pack(">hb", slot, button) + varint(kind)
     body += varint(len(changed)) + b"".join(struct.pack(">h", k) + mc.hashed_stack(v) for k, v in changed.items())
     c.send("container_click", body + mc.hashed_stack(carried))
 
@@ -1002,7 +1003,8 @@ def creative_inventory(srv: Server):
     assert c.menu_log == [("set_held_slot", 0), ("container_set_content", 1)], c.menu_log
     assert c.slots == [None] * 46 and c.cursor is None and c.held_slot == 0
 
-    # The creative inventory screen owns its slots and tells the server: nothing comes back.
+    # The creative inventory screen owns its slots and tells the server: nothing comes back -
+    # but for the crafting result, which the server says again whenever the grid changes.
     give(c, 36, I["kStone"], 64)
     give(c, 9, I["kDirt"], 3)
     give(c, 1, I["kGlowstone"], 5)    # the crafting grid holds items too
@@ -1013,7 +1015,7 @@ def creative_inventory(srv: Server):
     give(c, 38, I["kEnderPearl"], 17)
     give(c, 38, I["kEnderPearl"], 16)
     settle(c)
-    assert len(c.menu_log) == 2 and not c.sounds, (c.menu_log, c.sounds)
+    assert c.menu_log[2:] == [("container_set_slot", 0, None)] and not c.sounds, (c.menu_log, c.sounds)   # glowstone makes nothing
     slots = server_menu(c)
     held = {i: s for i, s in enumerate(slots) if s}
     assert held == {1: plain("kGlowstone", 5), 6: plain("kStone", 2), 9: plain("kDirt", 3), 36: plain("kStone", 64),
@@ -1094,6 +1096,7 @@ def creative_inventory(srv: Server):
     for slot in range(1, 46):
         give(c, slot, 0, 0)
     give(c, 20, I["kDirt"], 5)
+    settle(c)             # emptying the crafting grid: its result is said each time
     under = (8, -61, 8)   # the grass block Alice stands on; dirt below it
     # Not in the inventory: creative makes one, in the hand's slot if that is free.
     assert pick(under) == [("set_held_slot", 0), ("container_set_slot", 36, plain("kGrassBlock"))]
@@ -1674,6 +1677,7 @@ def menu_clicks(srv: Server):
     give(c, 1, I["kGlowstone"], 3)
     give(c, 4, I["kGlowstone"], 2)
     c.slots[1], c.slots[4] = plain("kGlowstone", 3), plain("kGlowstone", 2)
+    settle(c)    # the result slot is said twice, empty both times
     assert click(31, 0, PICKUP) == [("container_set_slot", 31, None), ("set_cursor_item", plain("kStone", 63))]
     mark = len(c.menu_log)
     c.send("container_close", varint(0))
@@ -1690,6 +1694,369 @@ def menu_clicks(srv: Server):
     held = {i: st for i, st in enumerate(server_menu(c)) if st}
     assert c.cursor is None and held == {6: plain("kIronChestplate"), 33: plain("kStone", 64), 36: plain("kDirt", 5),
                                          37: plain("kStone", 10), 38: plain("kGlowstone", 5), 45: plain("kStone", 64)}, held
+
+
+# ----------------------------------------------------------------------------- chests, furnaces, crafting, TNT
+
+AIR = 0
+INPUT_SHIFT = 0x20   # player_input: the sneak key
+
+
+def collect(c: Client, ticks: int = 3) -> dict:
+    """Let `ticks` server ticks pass and return the block changes they brought: {pos: state}.
+    (Menus, entities, sounds, block events and explosions go into the client's model as always.)"""
+    out = {}
+    for i in range(ticks):
+        token = 0xB10C00 + i
+        c.send("ping_request", struct.pack(">q", token))
+        while True:
+            name, r = c.recv()
+            if name == "pong_response":
+                assert r.i64() == token
+                break
+            if name == "block_update":
+                pos, state = mc.parse_block_update(r)
+                out[pos] = state
+            elif name == "section_blocks_update":
+                out.update(mc.parse_section_blocks_update(r))
+            elif name == "keep_alive":       # a scenario that watches a furnace outlasts the 15 seconds
+                c.send("keep_alive", r.take(8))
+            else:
+                assert name in ("block_changed_ack", "light_update", "player_info_update"), f"unexpected {name}"
+    return out
+
+
+def close_window(c: Client) -> None:
+    """The client closes the screen: it tells the server and goes back to its own menu, with
+    nothing on the cursor (AbstractContainerMenu.removed runs on both sides)."""
+    c.send("container_close", varint(c.window["id"]))
+    c.window = None
+    c.cursor = None
+
+
+def of_type(c: Client, kind: str) -> dict:
+    return {i: e for i, e in c.entities.items() if e.type == mc.ENTITY_TYPE[kind]}
+
+
+@test()
+def chest(srv: Server):
+    """A chest: it faces whoever places it, two players have it open at once, its lid follows the
+    count, a second one makes it a double chest, and breaking it spills what it holds."""
+    a, b = srv.client(), srv.client()
+    join(a, "Alice")
+    join(b, "Bob")
+    a.expect("player_info_update")
+    for cl in (a, b):
+        cl.send("player_loaded")
+    settle(a, b)
+    # The join told the client what a furnace takes (update_recipes): nine property sets.
+    assert len(a.recipe_sets) == 9 and a.stonecutter_recipes == 0
+    assert {I["kCobblestone"], I["kIronOre"], I["kOakLog"]} <= a.recipe_sets["minecraft:furnace_input"]
+    assert I["kDirt"] not in a.recipe_sets["minecraft:furnace_input"]
+
+    ground, pos = (8, -61, 10), (8, -60, 10)
+    give(a, 36, I["kChest"], 2)
+    give(a, 37, I["kStone"], 20)
+    click(a, ground, 1, seq=1)
+    assert collect(a)[pos] == mc.BLOCK["kChest"]   # facing north: at Alice, who looks south
+    assert collect(b)[pos] == mc.BLOCK["kChest"]
+
+    # A click on it opens it, whatever is in hand: the sound, the screen, the contents, the lid.
+    click(a, pos, 1, seq=2)
+    collect(a), collect(b)
+    w = a.window
+    assert w and (w["id"], w["type"], w["title"]) == (1, "kGeneric9x3", {"translate": "container.chest"}), w
+    assert len(w["slots"]) == 63 and w["slots"][:27] == [None] * 27
+    assert w["slots"][54] == plain("kChest", 2) and w["slots"][55] == plain("kStone", 20)   # the hotbar, after 27 + 27
+    sound, source, where, volume, pitch = b.sounds[-1]
+    assert (sound, source, where, volume) == (mc.SOUND["kBlockChestOpen"], 4, (8.5, -59.5, 10.5), 0.5) and 0.9 <= pitch < 1.0
+    assert a.block_events[-1][:3] == (pos, 1, 1) and b.block_events[-1] == a.block_events[-1]
+    assert ("swing_animation", a.entity_id, (0, 1, 6)) in b.entity_log     # the others see the arm
+
+    menu_click(a, 55, 0, QUICK_MOVE)     # the stone, by shift-click
+    settle(a)
+    assert w["slots"][0] == plain("kStone", 20) and w["slots"][55] is None
+
+    # Bob opens the same chest: he sees the stone, and the lid counts two.
+    click(b, pos, 1, seq=1)
+    collect(b), collect(a)
+    assert b.window["id"] == 1 and b.window["slots"][0] == plain("kStone", 20)
+    assert a.block_events[-1][:3] == (pos, 1, 2)
+    menu_click(b, 0, 1, PICKUP)          # Bob takes half; Alice's screen follows a tick later
+    settle(b, a)
+    assert b.cursor == plain("kStone", 10) and a.window["slots"][0] == plain("kStone", 10)
+    # While it is open the chest says so again every five ticks (ChestBlock.tick).
+    n = len(a.block_events)
+    settle(a, ticks=12)
+    assert len(a.block_events) - n in (2, 3) and a.block_events[-1][:3] == (pos, 1, 2), a.block_events[n:]
+
+    close_window(a)
+    settle(a, b)
+    assert b.block_events[-1][:3] == (pos, 1, 1)
+    heard = len(a.sounds)
+    close_window(b)                      # what was on Bob's cursor goes back into his inventory
+    settle(a, b)
+    assert a.block_events[-1][:3] == (pos, 1, 0) and a.sounds[heard][0] == mc.SOUND["kBlockChestClose"]
+    assert b.slots[36] == plain("kStone", 10) and b.cursor is None and server_menu(b)[36] == plain("kStone", 10)
+
+    # A second chest beside it, facing the same way: both become halves of one.
+    pos2 = (9, -60, 10)
+    click(a, (9, -61, 10), 1, seq=3)
+    first = mc.BLOCK["kChest"] - 1       # facing north, single, waterlogged: the block's first state
+    changes = collect(a)
+    assert changes[pos] == first + 2 + 1 and changes[pos2] == first + 4 + 1, changes   # left, right
+    collect(b)
+    click(a, pos2, 1, seq=4)
+    collect(a), collect(b)
+    w = a.window
+    assert (w["id"], w["type"], w["title"]) == (2, "kGeneric9x6", {"translate": "container.chestDouble"}) and len(w["slots"]) == 90
+    assert w["slots"][27] == plain("kStone", 10)     # the right half comes first; the stone lies in the left one
+    assert [e[:3] for e in a.block_events[-2:]] == [(pos2, 1, 1), (pos, 1, 1)]
+
+    # Bob breaks the half with the stone in it: Alice's screen closes, the stone lies on the
+    # ground, the other half is a chest of its own again.
+    mark = len(a.menu_log)
+    dig(b, pos, seq=2)
+    changes = collect(a)
+    collect(b)
+    assert changes[pos] == AIR and changes[pos2] == mc.BLOCK["kChest"], changes
+    # (The menu shows the slot the stone fell out of before it closes: as in vanilla, where it
+    # looks at its container once more in the tick that finds it gone.)
+    assert a.menu_log[mark:] == [("container_set_slot", 27, None), ("container_close", 2)] and a.window is None, a.menu_log[mark:]
+    spilled = [e for e in of_type(a, "kItem").values() if e.data[D_ITEM] == (STACK, plain("kStone", 10))]
+    assert len(spilled) == 1 and all(lo <= v < lo + 1 for v, lo in zip(spilled[0].pos, pos)), [e.pos for e in spilled]
+
+    # Something solid on top keeps the lid shut: the click does nothing but swing the arm.
+    a.send("set_carried_item", struct.pack(">h", 1))
+    give(a, 37, I["kStone"], 20)
+    a.send("player_input", bytes([INPUT_SHIFT]))    # sneaking, the click goes to the block in hand
+    click(a, pos2, 1, seq=5)
+    assert collect(a)[(9, -59, 10)] == mc.BLOCK["kStone"]
+    a.send("player_input", bytes([0]))
+    click(a, pos2, 2, seq=6, cursor=(0.5, 0.5, 0.0))
+    collect(a), collect(b)
+    assert a.window is None
+
+    # Who joins now is told there is a block entity in the chunk: that is what draws a chest.
+    d = srv.client()
+    jd = join(d, "Dave", view=2)
+    assert jd["chunks"][(0, 0)]["block_entities"] == [((9, -60, 10), mc.BLOCK_ENTITY["kChest"], None)]
+    assert all(not ch["block_entities"] for at, ch in jd["chunks"].items() if at != (0, 0))
+
+
+def furnace_setup(srv: Server, stone: int, planks: int):
+    c = srv.client()
+    join(c, "Alice")
+    c.send("player_loaded")
+    ground, pos = (8, -61, 10), (8, -60, 10)
+    give(c, 36, I["kFurnace"])
+    give(c, 37, I["kCobblestone"], stone)
+    give(c, 38, I["kOakPlanks"], planks)
+    click(c, ground, 1, seq=1)
+    off = mc.BLOCK["kFurnace"]                      # the default state: facing north, not lit
+    assert collect(c)[pos] == off
+    click(c, pos, 1, seq=2)
+    collect(c)
+    w = c.window
+    assert (w["id"], w["type"], w["title"]) == (1, "kFurnace", {"translate": "container.furnace"}), w
+    assert len(w["slots"]) == 39 and w["data"] == {0: 0, 1: 0, 2: 0, 3: 0}
+    # Shift-clicks sort themselves: what smelts into the input, what burns into the fuel slot.
+    menu_click(c, 31, 0, QUICK_MOVE)
+    menu_click(c, 32, 0, QUICK_MOVE)
+    changes = collect(c, ticks=4)
+    assert changes[pos] == off - 1, changes         # lit
+    assert w["slots"][0] == plain("kCobblestone", stone) and w["slots"][2] is None
+    assert w["slots"][1] == (plain("kOakPlanks", planks - 1) if planks > 1 else None)
+    # The fire: 300 ticks for a plank, 200 to cook a stone - counting down and up as we look.
+    assert w["data"][1] == 300 and w["data"][3] == 200 and 0 < w["data"][2] <= 6 and 293 <= w["data"][0] < 300, w["data"]
+    return c, pos, off
+
+
+@test()
+def furnace(srv: Server):
+    """A furnace lights up when it has something to smelt and something to burn, and its menu
+    shows the fire."""
+    c, pos, off = furnace_setup(srv, stone=3, planks=2)
+    w = c.window
+    before = dict(w["data"])
+    settle(c, ticks=5)
+    assert w["data"][2] > before[2] and w["data"][0] < before[0]
+    # Taking the input out stops the cooking at once (AbstractFurnaceBlockEntity.setItem).
+    menu_click(c, 0, 0, PICKUP)
+    settle(c, ticks=3)
+    assert c.cursor == plain("kCobblestone", 3) and w["data"][2] == 0 and w["data"][0] > 0
+    # Breaking it spills the fuel and closes the screen.
+    mark = len(c.menu_log)
+    dig(c, pos, seq=3)
+    assert collect(c)[pos] == AIR
+    # The menu shows the fuel slot empty, then closes; what was on the cursor goes back.
+    log = c.menu_log[mark:]
+    assert ("container_set_slot", 1, None) in log and c.window is None, log
+    assert log.index(("container_set_slot", 1, None)) < log.index(("container_close", 1)) < log.index(("set_player_inventory", 1, plain("kCobblestone", 3))), log
+    assert [e.data[D_ITEM][1] for e in of_type(c, "kItem").values()] == [plain("kOakPlanks", 1)]
+    assert server_menu(c)[37] == plain("kCobblestone", 3)    # the cursor went back into the inventory: the slot it came from is the first free one
+
+
+@test(slow=True)
+def furnace_smelts(srv: Server):
+    """One cobblestone, one plank: a stone after 200 ticks, and the fire out after 300."""
+    c, pos, off = furnace_setup(srv, stone=1, planks=1)
+    w = c.window
+    changes = {}
+    for _ in range(70):
+        changes.update(collect(c, ticks=3))
+        if w["slots"][2]:
+            break
+    assert w["slots"][2] == plain("kStone", 1) and w["slots"][0] is None and w["data"][2] == 0, (w["slots"][:3], w["data"])
+    assert 80 < w["data"][0] <= 101 and pos not in changes, (w["data"], changes)     # still burning: the tick that lit it cooked too
+    for _ in range(40):
+        changes.update(collect(c, ticks=3))
+        if pos in changes:
+            break
+    assert changes[pos] == off and w["data"][0] == 0, (changes, w["data"])
+    menu_click(c, 2, 0, QUICK_MOVE)          # the stone into the inventory: the hotbar's far end first
+    settle(c)
+    assert w["slots"][2] is None and w["slots"][38] == plain("kStone", 1)
+
+
+@test()
+def crafting(srv: Server):
+    """The 2x2 grid of the inventory and the 3x3 of a crafting table: the result follows the grid,
+    taking it uses the ingredients up."""
+    c = srv.client()
+    join(c, "Alice")
+    c.send("player_loaded")
+    settle(c)
+    # A log in the inventory's grid (the creative screen has none, but the slots are there).
+    mark = len(c.menu_log)
+    give(c, 1, I["kOakLog"], 2)
+    c.slots[1] = plain("kOakLog", 2)
+    settle(c)
+    assert c.menu_log[mark:] == [("container_set_slot", 0, plain("kOakPlanks", 4))], c.menu_log[mark:]
+    mark = len(c.menu_log)
+    menu_click(c, 0, 0, PICKUP)              # take the planks: one log is used, the other makes four more
+    settle(c)
+    assert c.menu_log[mark:] == [("container_set_slot", 0, plain("kOakPlanks", 4)), ("container_set_slot", 1, plain("kOakLog", 1)),
+                                 ("set_cursor_item", plain("kOakPlanks", 4))], c.menu_log[mark:]
+    menu_click(c, 36, 0, PICKUP)             # put them down in the hotbar
+    settle(c)
+    assert c.slots[36] == plain("kOakPlanks", 4)
+
+    # A crafting table: placed with the planks' neighbour slot, opened by a click.
+    ground, pos = (8, -61, 10), (8, -60, 10)
+    give(c, 37, I["kCraftingTable"])
+    c.send("set_carried_item", struct.pack(">h", 1))
+    click(c, ground, 1, seq=1)
+    assert collect(c)[pos] == mc.BLOCK["kCraftingTable"]
+    click(c, pos, 1, seq=2)
+    collect(c)
+    w = c.window
+    assert (w["id"], w["type"], w["title"]) == (1, "kCrafting", {"translate": "container.crafting"}) and len(w["slots"]) == 46
+    assert w["slots"][37] == plain("kOakPlanks", 4)
+    # Four planks in a square, one at a time: a button, a pressure plate, nothing, a table.
+    menu_click(c, 37, 0, PICKUP)
+    seen = []
+    for slot in (1, 2, 4, 5):
+        mark = len(c.menu_log)
+        menu_click(c, slot, 1, PICKUP)
+        settle(c)
+        seen.append(next(m[2] for m in c.menu_log[mark:] if m[:2] == ("container_set_slot", 0)))
+    assert seen == [plain("kOakButton"), plain("kOakPressurePlate"), None, plain("kCraftingTable")], seen
+    menu_click(c, 0, 0, QUICK_MOVE)          # shift-click: onto the table already in the hotbar; the grid is used up
+    settle(c)
+    assert w["slots"][0] is None and w["slots"][1:10] == [None] * 9 and w["slots"][38] == plain("kCraftingTable", 2)
+
+    # What is left in the grid comes back when the screen closes.
+    menu_click(c, 38, 0, PICKUP)
+    menu_click(c, 9, 0, PICKUP)
+    settle(c)
+    assert w["slots"][9] == plain("kCraftingTable", 2) and w["slots"][0] is None     # two tables make nothing
+    close_window(c)
+    settle(c)
+    assert c.slots[36] == plain("kCraftingTable", 2) and server_menu(c)[36] == plain("kCraftingTable", 2)
+
+    # Walking away closes it from the server's side (CraftingMenu.stillValid: 4 blocks past reach).
+    click(c, pos, 1, seq=3)
+    collect(c)
+    assert c.window["id"] == 2
+    c.send("move_player_pos", struct.pack(">dddB", 0.5, SPAWN[1], 0.5, 1))     # twelve blocks off
+    settle(c)
+    assert c.window is None and c.menu_log[-1] == ("container_close", 2)
+
+
+@test()
+def tnt(srv: Server):
+    """TNT: lit with flint and steel it becomes an entity that hops, lands and - 80 ticks later -
+    takes the ground with it, sets off the TNT beside it and pushes who stands near."""
+    a, b = srv.client(), srv.client()
+    ja = join(a, "Alice")
+    jb = join(b, "Bob")
+    a.expect("player_info_update")
+    for cl in (a, b):
+        cl.send("player_loaded")
+    walk(b, jb, 8.5, 26.5, 10)               # Bob watches from 14 blocks behind the TNT
+    settle(a, b)
+    ground, pos, pos2 = (8, -61, 12), (8, -60, 12), (9, -60, 12)
+    give(a, 36, I["kTnt"], 2)
+    give(a, 37, I["kFlintAndSteel"])
+    click(a, ground, 1, seq=1)
+    click(a, (9, -61, 12), 1, seq=2)
+    changes = collect(a)
+    assert changes[pos] == mc.BLOCK["kTnt"] and changes[pos2] == mc.BLOCK["kTnt"]
+    collect(b)
+    assert not of_type(b, "kTnt")            # TNT is a block like any other until something lights it
+
+    a.send("set_carried_item", struct.pack(">h", 1))
+    click(a, pos, 1, seq=4)                  # flint and steel
+    assert collect(a)[pos] == AIR
+    collect(b)
+    (eid, e), = of_type(b, "kTnt").items()
+    assert abs(e.pos[0] - 8.5) < 0.2 and abs(e.pos[2] - 12.5) < 0.2, e.pos
+    sound, source, where, volume, pitch = b.sounds[-1]
+    assert (sound, source, where, volume, pitch) == (mc.SOUND["kEntityTntPrimed"], 4, (8.5, -60.0, 12.5), 1.0, 1.0)
+    settle(a, b, ticks=30)
+    e = b.entities[eid]
+    hops = [w[1][1] for n, i, w in b.entity_log if i == eid and n == "move_entity_pos"]
+    assert max(hops) > -59.7, hops                                       # it hopped: a third of a block up
+    assert e.pos[1] == -60.0 and e.on_ground, e.pos                      # ...and landed
+    assert 20 <= e.data[mc.TNT_DATA["kFuse"]][1] <= 60, e.data            # the fuse burns
+
+    changes, bchanges = {}, {}
+    for _ in range(40):
+        changes.update(collect(a, ticks=2))
+        bchanges.update(collect(b, ticks=2))
+        if len(a.explosions) == 2:
+            break
+    changes.update(collect(a))               # the blocks of an explosion follow it by a tick
+    bchanges.update(collect(b))
+    assert len(a.explosions) == 2 and len(b.explosions) == 2
+    ex = a.explosions[0]
+    assert abs(ex["center"][0] - 8.5) < 0.5 and abs(ex["center"][2] - 12.5) < 0.5 and abs(ex["center"][1] + 59.93875) < 1e-6, ex
+    assert ex["radius"] == 4.0 and ex["blocks"] > 50 and ex["play_sound"]
+    assert (ex["particle"], ex["sound"]) == (mc.PARTICLE["kExplosionEmitter"], mc.SOUND["kEntityGenericExplode"])
+    assert ex["block_particles"] == [(mc.PARTICLE["kPoof"], 0.5, 1.0, 1), (mc.PARTICLE["kSmoke"], 1.0, 1.0, 1)]
+    # Alice, four blocks off and on her feet, is pushed away from it; Bob is too far to feel it.
+    assert ex["knockback"] and ex["knockback"][2] < -0.1 and abs(ex["knockback"][0]) < 0.1, ex["knockback"]
+    assert b.explosions[0]["knockback"] is None and b.explosions[0]["center"] == ex["center"]
+    # The ground is gone - grass and dirt, not the bedrock under them - and lies about as items.
+    assert changes[ground] == AIR and changes[(8, -63, 12)] == AIR and (8, -64, 12) not in changes, sorted(changes)[:8]
+    assert bchanges == changes
+    dirt = sum(e.data[D_ITEM][1][1] for e in of_type(b, "kItem").values() if e.data[D_ITEM][1][0] == I["kDirt"])
+    assert dirt > 10 and not any(e.data[D_ITEM][1][0] == I["kGrassBlock"] for e in of_type(b, "kItem").values())
+    # The TNT beside it did not drop: it went off, on a short fuse, a little later and elsewhere.
+    assert not of_type(b, "kTnt") and not any(e.data[D_ITEM][1][0] == I["kTnt"] for e in of_type(b, "kItem").values())
+    assert a.explosions[1]["center"] != ex["center"]
+
+    # A block of redstone beside it sets TNT off the moment it is placed.
+    give(a, 38, I["kRedstoneBlock"])
+    a.send("set_carried_item", struct.pack(">h", 2))
+    click(a, (8, -61, 6), 1, seq=5)
+    assert collect(a)[(8, -60, 6)] == mc.BLOCK["kRedstoneBlock"]
+    a.send("set_carried_item", struct.pack(">h", 0))
+    click(a, (9, -61, 6), 1, seq=6)
+    assert collect(a).get((9, -60, 6), AIR) == AIR
+    collect(b)
+    assert len(of_type(b, "kTnt")) == 1
 
 
 def join_many(srv: Server, n: int, view: int, online: bool = False) -> list:

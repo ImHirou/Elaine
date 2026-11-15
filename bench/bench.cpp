@@ -107,5 +107,6 @@ int main(int argc, char** argv) {
     entity_benchmarks();
     item_benchmarks();
     nbt_benchmarks();
+    game_benchmarks();
     return 0;
 }

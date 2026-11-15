@@ -51,6 +51,8 @@ inline constexpr u16 kMoved = 1 << 3;         // who-sees-whom must be re-evalua
 inline constexpr u16 kLiving = 1 << 4;        // LivingEntity: movement is sent as stepped paths
 inline constexpr u16 kTrackDeltas = 1 << 5;   // EntityType.trackDeltas: velocity is sent with movement
 inline constexpr u16 kNoGravity = 1 << 6;     // Entity.DATA_NO_GRAVITY, synchronized: write it with set_no_gravity()
+inline constexpr u16 kPrecise = 1 << 7;       // Entity.requiresPrecisePosition: every update is an absolute position
+                                              // (a primed TNT that touches a block)
 }  // namespace flag
 
 // Entity.DATA_SHARED_FLAGS_ID bits (Entity.FLAG_*).
@@ -143,6 +145,13 @@ class Store {
             dirty[ei] |= 1u << proto::gen::entity_data::entity::kNoGravity;
         }
     }
+    // PrimedTnt.setFuse: ticks until it explodes.
+    void set_fuse(u32 ei, i32 v) {
+        if (v != fuse[ei]) {
+            fuse[ei] = v;
+            dirty[ei] |= 1u << proto::gen::entity_data::primed_tnt::kFuse;
+        }
+    }
     // The stack an item entity is (ItemEntity.setItem). Always dirty: vanilla compares the
     // objects, and a stack that was set is never the one that was there.
     void set_item(u32 ei, item::ItemStack v) {
@@ -168,13 +177,15 @@ class Store {
     u8* main_hand = nullptr;                             // Avatar.DATA_PLAYER_MAIN_HAND (players)
     item::ItemStack* item = nullptr;                     // ItemEntity.DATA_ITEM (item entities); change the count in place
                                                          // where vanilla does, anything else through set_item()
+    i32* fuse = nullptr;                                 // PrimedTnt.DATA_FUSE_ID (primed TNT): 4 bytes a row for one kind,
+                                                         // against a lookup per TNT and tick in the tracker's encode pass
     Uuid* uuid = nullptr;                                // cold: only read when the entity is shown to someone
 
   private:
     template <class F>
     void each_column(F&& f) {
         f(x), f(y), f(z), f(vx), f(vy), f(vz), f(yaw), f(pitch), f(head_yaw);
-        f(flags), f(type), f(slot), f(dirty), f(shared_flags), f(pose), f(skin_parts), f(main_hand), f(item), f(uuid);
+        f(flags), f(type), f(slot), f(dirty), f(shared_flags), f(pose), f(skin_parts), f(main_hand), f(item), f(fuse), f(uuid);
     }
     void grow(u32 cap);
     void move_row(u32 from, u32 to, Moves& moved);

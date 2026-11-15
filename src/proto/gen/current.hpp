@@ -16,6 +16,8 @@
 #define PROTO_GEN_ITEMS_HPP "proto/gen/v777/items.hpp"                      // item and data component ids by name
 #define PROTO_GEN_DIMENSION_TYPES_HPP "proto/gen/v777/dimension_types.hpp"  // height / skylight per dimension type
 #define PROTO_GEN_ENTITIES_HPP "proto/gen/v777/entities.hpp"                // entity types, entity-data ids, poses
+#define PROTO_GEN_RECIPES_HPP "proto/gen/v777/recipes.hpp"                  // crafting and smelting recipes (item/recipes.cpp only)
+#define PROTO_GEN_STATIC_IDS_HPP "proto/gen/v777/static_ids.hpp"            // menus, block entity types, sounds, particles
 
 namespace proto {
 namespace ids = gen::ids;

@@ -661,8 +661,8 @@ struct EntityEvent {
 // inline sound event).
 struct Sound {
     static constexpr u32 kId = ids::play::cb::kSound;
-    static constexpr u32 kSourcePlayers = 7;  // SoundSource ordinal
-    u32 sound;                                // sound_event registry id
+    static constexpr u32 kSourceBlocks = 4, kSourcePlayers = 7;  // SoundSource ordinals
+    u32 sound;                                                   // sound_event registry id
     u32 source;
     double x, y, z;  // sent as (int)(v * 8.0)
     float volume, pitch;
@@ -731,6 +731,80 @@ struct SetHeldSlot {
     u32 slot;  // hotbar index
     usize bound() const { return 5; }
     u8* encode(u8* p) const { return put_varint(p, slot); }
+};
+
+// A menu other than the player's own opens: its id (1..100, counted by the player), its type
+// (the menu registry) and the title - a text component, as the tag vanilla writes for it.
+struct OpenScreen {
+    static constexpr u32 kId = ids::play::cb::kOpenScreen;
+    u32 container_id;
+    u32 type;
+    std::span<const u8> title;  // a network NBT tag (text::transcode output)
+    usize bound() const { return 5 + 5 + title.size(); }
+    u8* encode(u8* p) const { return put_bytes(put_varint(put_varint(p, container_id), type), title.data(), title.size()); }
+};
+// One of a menu's numbers (ContainerData): for a furnace, how long the fire still burns and how
+// far the cooking is. Both the index and the value are shorts.
+struct ContainerSetData {
+    static constexpr u32 kId = ids::play::cb::kContainerSetData;
+    u32 container_id;
+    i16 id, value;
+    usize bound() const { return 5 + 4; }
+    u8* encode(u8* p) const {
+        return put_be16(put_be16(put_varint(p, container_id), static_cast<u16>(id)), static_cast<u16>(value));
+    }
+};
+// The server closes the menu the client has open (ServerPlayer.closeContainer).
+struct ContainerClose {
+    static constexpr u32 kId = ids::play::cb::kContainerClose;
+    u32 container_id;
+    usize bound() const { return 5; }
+    u8* encode(u8* p) const { return put_varint(p, container_id); }
+};
+
+// ---------------------------------------------------------------- the world
+// Level.blockEvent: two bytes for the block at a position, whose meaning is the block's own
+// (a chest: 1, the number of players that have it open - its lid). The block is named by its
+// id in the block registry, not by a state.
+struct BlockEvent {
+    static constexpr u32 kId = ids::play::cb::kBlockEvent;
+    i32 x, y, z;
+    u8 b0, b1;
+    u32 block;
+    usize bound() const { return 8 + 2 + 5; }
+    u8* encode(u8* p) const { return put_varint(put_u8(put_u8(put_be64(p, pack_block_pos(x, y, z)), b0), b1), block); }
+};
+
+// An explosion as a client shows it: the flash, the sound, the smoke - and what it does to the
+// receiving player, which is the only thing that moves it (the blocks arrive as block updates).
+struct ExplosionParticle {  // Weighted<ExplosionParticleInfo>: where the cloud's particles come from
+    u32 particle;           // particle_type id; only particles without options of their own
+    float scaling, speed;
+    u32 weight;
+};
+struct Explode {
+    static constexpr u32 kId = ids::play::cb::kExplode;
+    double x, y, z;
+    float radius;
+    i32 block_count;  // how many blocks it took: an int
+    bool knocked;     // Optional<Vec3> playerKnockback
+    double kx, ky, kz;
+    u32 particle;  // ParticleOptions of the explosion itself, by id
+    u32 sound;     // sound_event id
+    std::span<const ExplosionParticle> block_particles;
+    bool play_sound;
+    usize bound() const { return 24 + 4 + 4 + 1 + 24 + 5 + 5 + 5 + block_particles.size() * (5 + 8 + 5) + 1; }
+    u8* encode(u8* p) const {
+        p = put_f64(put_f64(put_f64(p, x), y), z);
+        p = put_be32(put_f32(p, radius), static_cast<u32>(block_count));
+        p = put_bool(p, knocked);
+        if (knocked) p = put_f64(put_f64(put_f64(p, kx), ky), kz);
+        p = put_varint(put_varint(p, particle), sound + 1);  // a holder: id + 1
+        p = put_varint(p, static_cast<u32>(block_particles.size()));
+        for (const ExplosionParticle& b : block_particles)
+            p = put_varint(put_f32(put_f32(put_varint(p, b.particle), b.scaling), b.speed), b.weight);
+        return put_bool(p, play_sound);
+    }
 };
 
 }  // namespace cb

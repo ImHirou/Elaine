@@ -57,5 +57,6 @@ void world_benchmarks();   // bench/world_bench.cpp
 void entity_benchmarks();  // bench/entity_bench.cpp
 void item_benchmarks();    // bench/item_bench.cpp
 void nbt_benchmarks();     // bench/nbt_bench.cpp
+void game_benchmarks();    // bench/game_bench.cpp
 
 }  // namespace benchmark

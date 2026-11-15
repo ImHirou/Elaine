@@ -27,8 +27,9 @@ namespace item_flag = world::item_flag;
 namespace {
 
 // Attributes.BLOCK_INTERACTION_RANGE is 4.5; ServerPlayer adds 0.5 in creative. The server then
-// checks with one block of slack (isWithinBlockInteractionRange(pos, 1.0)).
-constexpr double kReach = 4.5 + 0.5 + 1.0;
+// checks with some slack (isWithinBlockInteractionRange(pos, buffer)): one block for a click,
+// four for a menu that is open on a block.
+constexpr double kReach = 4.5 + 0.5;
 // Avatar.POSES: the two poses a creative player on foot can be in. Floats, widened exactly as
 // vanilla does (EntityDimensions.makeBoundingBox, Entity.getEyeY).
 constexpr float kEyeStanding = 1.62f, kEyeCrouching = 1.27f;
@@ -46,14 +47,20 @@ constexpr u32 kAxisOf[6] = {1, 1, 2, 2, 0, 0};
 // ---------------------------------------------------------------------------- helpers
 
 // Player.isWithinBlockInteractionRange: distance from the eyes to the block's unit cube.
-bool Game::within_reach(u32 pi, BlockPos pos) const {
+bool Game::within_reach(u32 pi, BlockPos pos, double buffer) const {
     const Player& p = players_[pi];
     const double ex = ents_.x[pi], ey = ents_.y[pi] + static_cast<double>(crouching(p) ? kEyeCrouching : kEyeStanding),
                  ez = ents_.z[pi];
     const double dx = std::max(std::max(pos.x - ex, ex - (pos.x + 1.0)), 0.0);
     const double dy = std::max(std::max(pos.y - ey, ey - (pos.y + 1.0)), 0.0);
     const double dz = std::max(std::max(pos.z - ez, ez - (pos.z + 1.0)), 0.0);
-    return dx * dx + dy * dy + dz * dz < kReach * kReach;
+    return dx * dx + dy * dy + dz * dz < (kReach + buffer) * (kReach + buffer);
+}
+
+// Direction.fromYRot: the horizontal direction a yaw looks in (Entity.getDirection).
+u32 Game::horizontal_direction(float yaw) {
+    static constexpr u32 k2d[4] = {world::kSouth, world::kWest, world::kNorth, world::kEast};  // Direction.from2DDataValue
+    return k2d[floor_int(static_cast<double>(yaw) / 90.0 + 0.5) & 3];
 }
 
 // Level.getBlockState as a packet needs it: void air outside the build height.
@@ -62,24 +69,37 @@ BlockState Game::state_for_client(BlockPos pos) const {
     return world_.block(pos.x, pos.y, pos.z);
 }
 
-// CollisionGetter.isUnobstructed, inverted: would this state's collision shape at `pos` overlap a
-// player? Players are the only entities there are; all of them block building.
+// CollisionGetter.isUnobstructed, inverted: would this state's collision shape at `pos` overlap an
+// entity that blocks building (Entity.blocksBuilding)? Players do, and primed TNT.
 bool Game::obstructed(BlockState s, BlockPos pos) const {
     bool dynamic = false;
     const std::span<const world::Box> boxes = world::collision_boxes(s, dynamic);
     if (boxes.empty()) return false;
-    const double w = static_cast<double>(kHalfWidth);
-    for (u32 i = 0; i < players_.size(); ++i) {
-        const double h = static_cast<double>(crouching(players_[i]) ? kHeightCrouching : kHeightStanding);
-        const double lo[3] = {ents_.x[i] - w, ents_.y[i], ents_.z[i] - w};
-        const double hi[3] = {ents_.x[i] + w, ents_.y[i] + h, ents_.z[i] + w};
-        const double origin[3] = {static_cast<double>(pos.x), static_cast<double>(pos.y), static_cast<double>(pos.z)};
+    const double origin[3] = {static_cast<double>(pos.x), static_cast<double>(pos.y), static_cast<double>(pos.z)};
+    const auto overlaps = [&](const double lo[3], const double hi[3]) {
         for (const world::Box& b : boxes) {
             bool overlap = true;
             for (int a = 0; a < 3; ++a)
                 overlap &= std::min(hi[a], origin[a] + b.max[a]) - std::max(lo[a], origin[a] + b.min[a]) > kShapeEpsilon;
             if (overlap) return true;
         }
+        return false;
+    };
+    const double w = static_cast<double>(kHalfWidth);
+    for (u32 i = 0; i < players_.size(); ++i) {
+        const double h = static_cast<double>(crouching(players_[i]) ? kHeightCrouching : kHeightStanding);
+        const double lo[3] = {ents_.x[i] - w, ents_.y[i], ents_.z[i] - w};
+        const double hi[3] = {ents_.x[i] + w, ents_.y[i] + h, ents_.z[i] + w};
+        if (overlaps(lo, hi)) return true;
+    }
+    const entity_type::Info& tnt = entity_type::kInfo[entity_type::kTnt];
+    const double tw = static_cast<double>(tnt.width / 2.0f), th = static_cast<double>(tnt.height);
+    for (const u32 slot : tnt_) {
+        if (slot == kNone) continue;
+        const u32 row = ents_.by_slot(slot);
+        const double lo[3] = {ents_.x[row] - tw, ents_.y[row], ents_.z[row] - tw};
+        const double hi[3] = {ents_.x[row] + tw, ents_.y[row] + th, ents_.z[row] + tw};
+        if (overlaps(lo, hi)) return true;
     }
     return false;
 }
@@ -131,7 +151,8 @@ bool Game::destroy_block(u32 pi, BlockPos pos) {
     // Command blocks and the like need operator rights; nobody is an operator yet.
     if (world::block_info_of(state).flags & block_flag::kGameMaster) return false;
     // Level.removeBlock: what stays is the block of the fluid the state held (air for a dry one).
-    world_.set_block(pos.x, pos.y, pos.z, static_cast<BlockState>(world::state::fluid_legacy_of(state)));
+    // (TntBlock.playerWillDestroy primes an `unstable` TNT - but not for a creative player.)
+    set_block(pos, static_cast<BlockState>(world::state::fluid_legacy_of(state)));
     return true;
 }
 
@@ -154,19 +175,24 @@ void Game::on_use_item_on(u32 pi, const sb::UseItemOn& u) {
 
     if (!p.awaiting_teleport) {
         const Inventory& inv = p.menu.inv;
-        const ItemStack& held = u.hand == 0 ? inv.selected_item() : inv.items[inv::kOffhand];
+        // A copy: a block that opens a menu puts what the old menu held back into the inventory.
+        const ItemStack held = u.hand == 0 ? inv.selected_item() : inv.items[inv::kOffhand];
         const bool hands_full = !inv.selected_item().empty() || !inv.items[inv::kOffhand].empty();
-        // The clicked block gets the click first unless the player sneaks with something in hand.
-        // No block with a use hook is placeable yet, so this cannot trigger; if a generator ever
+        // The clicked block gets the click first unless the player sneaks with something in hand
+        // (ServerPlayerGameMode.useItemOn: useItemOn, then - main hand - useWithoutItem).
+        const BlockState clicked = world_.block(pos.x, pos.y, pos.z);
+        const world::BlockInfo& block = world::block_info_of(clicked);
+        const bool takes_click = !(p.shift && hands_full) && (block.flags & block_flag::kInteractive);
+        // A block with a use hook that nobody has ported cannot be placed; if a generator ever
         // makes one, doing nothing is the only answer that does not invent behaviour.
-        const bool block_takes_click = !(p.shift && hands_full) &&
-                                       (world::block_info_of(world_.block(pos.x, pos.y, pos.z)).flags & block_flag::kInteractive);
-        // InteractionResult.SUCCESS of BlockItem.place: the arm swings. The client predicted it
-        // for itself; the others see the hand's interact animation, which no item changes
-        // (gen.py checks). Vanilla runs the swing twice here - the same branch stands twice in
-        // handleUseItemOn - and so sends two packets; the second begins the same swing again
-        // in the same tick, which no client can tell from one.
-        if (!block_takes_click && !held.empty() && place_block(pi, u, held)) swing(pi, u.hand, {}, false);
+        const bool unknown = takes_click && block.kind == gen::block_kind::kPlain;
+        // InteractionResult.SUCCESS - of the block, or of BlockItem.place: the arm swings. The
+        // client predicted it for itself; the others see the hand's interact animation, which no
+        // item changes (gen.py checks). Vanilla runs the swing twice here - the same branch
+        // stands twice in handleUseItemOn - and so sends two packets; the second begins the same
+        // swing again in the same tick, which no client can tell from one.
+        if ((takes_click && use_block(pi, pos, clicked, held, u.hand)) || (!unknown && !held.empty() && place_block(pi, u, held)))
+            swing(pi, u.hand, {}, false);
     }
     // Whatever happened, the client predicted something: tell it what the two blocks it may have
     // touched really are.
@@ -206,11 +232,17 @@ bool Game::place_block(u32 pi, const sb::UseItemOn& u, const ItemStack& held) {
     } else if (kind == block_flag::kPlaceSnowy) {  // SnowyBlock
         const BlockState above = state_for_client({at.x, at.y + 1, at.z});
         state = block.alt[(world::block_info_of(above).flags & block_flag::kSnowTag) ? 1 : 0];
+    } else if (kind == block_flag::kPlaceFacing) {  // AbstractFurnaceBlock: facing the one who places it, unlit
+        const u32 facing = world::opposite(horizontal_direction(ents_.yaw[pi]));
+        state = static_cast<BlockState>(gen::props::furnace::kFirst +
+                                        (facing - world::kNorth) * gen::props::furnace::kFacingStride + 1);
+    } else if (kind == block_flag::kPlaceChest) {
+        state = chest_for_placement(pi, at, u.direction);
     }
     // BlockItem.canPlace: canSurvive() is the default for every placeable block; what is left is
     // "nobody stands there".
     if (obstructed(state, at)) return false;
-    return world_.set_block(at.x, at.y, at.z, state);  // false above/below the build height
+    return set_block(at, state);  // false above/below the build height
 }
 
 // ---------------------------------------------------------------------------- picking

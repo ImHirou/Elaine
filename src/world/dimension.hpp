@@ -77,6 +77,15 @@ class Dimension {
     // broadcast. False when nothing changed (same state, outside the world, chunk not ticking).
     bool set_block(i32 x, i32 y, i32 z, BlockState s);
 
+    // ---- block entities (LevelChunk.blockEntities). The dimension keeps where they are and of
+    // which type - what a chunk packet says; `data` belongs to the caller.
+    // The block entity at a position, null if there is none.
+    const BlockEntityRef* block_entity(i32 x, i32 y, i32 z) const;
+    // LevelChunk.addAndRegisterBlockEntity. The position must be free and in a loaded chunk.
+    void add_block_entity(i32 x, i32 y, i32 z, u32 type, u32 data);
+    // LevelChunk.removeBlockEntity: false if there was none; `data` receives its handle.
+    bool remove_block_entity(i32 x, i32 y, i32 z, u32& data);
+
     // ---- per tick
     // Bring light up to date with this tick's block changes. Call once, after all set_block calls
     // and before reading the change lists.

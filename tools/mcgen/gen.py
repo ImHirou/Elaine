@@ -15,9 +15,13 @@ Emitted files (all deterministic, all committed):
   state_*.bin         one table per file, indexed by block state id
   block_info.hpp      layout + flag bits of the cold tables
   block_tables.hpp    COLD per-block / per-item / collision-shape tables (include from one .cpp)
+  recipes.hpp         crafting and smelting recipes (gen_game.py; include from one .cpp)
+  update_recipes.bin  pre-serialized play `update_recipes` packet body (recipe property sets)
+  static_ids.hpp      menu and block entity type ids, the sounds and particles the server sends
 
-Inputs beyond the jar itself: `mcgen.py reports` (ids, tags, item components) and `mcgen.py blockdata`
-(per-state light, fluid and shape properties). Both are required: a server without block ids cannot
+Inputs beyond the jar itself: `mcgen.py reports` (ids, tags, item components), `mcgen.py blockdata`
+(per-state light, fluid and shape properties) and `mcgen.py gamedata` (block classes and their
+hooks, loot table names, crafting remainders). All are required: a server without block ids cannot
 hold a world, and vanilla clients cannot join without tags.
 
 "Body" means packet id + payload, i.e. everything after the frame length; the
@@ -33,6 +37,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+import gen_game
 import mcgen
 from mcgen import ROOT, die, javap, jar_for, vdir, version_info
 
@@ -313,6 +318,11 @@ inline constexpr unsigned char kTagsBlob[] = {
 #embed "tags.bin"
 };
 
+// One play update_recipes packet body (packet id + payload): the recipe property sets.
+inline constexpr unsigned char kUpdateRecipesBlob[] = {
+#embed "update_recipes.bin"
+};
+
 }  // namespace proto::gen
 """
 
@@ -345,6 +355,7 @@ STATE_FLAGS = [
     ("kReplaceable", "BlockState.canBeReplaced(): placing a block here overwrites it"),
     ("kRandomTicks", "isRandomlyTicking()"),
     ("kBlockEntity", "hasBlockEntity()"),
+    ("kRedstoneConductor", "isRedstoneConductor(): a chest with this on top does not open"),
 ]
 
 # proto::gen::BlockInfo::flags. kPlace* is how BlockItem.place() picks the state; a block is given a
@@ -356,6 +367,8 @@ BLOCK_FLAGS = [
     ("kPlaceDefault", 1, "Block.getStateForPlacement(): the default state"),
     ("kPlaceAxis", 2, "RotatedPillarBlock: axis = clicked face's axis; alt = states for x, y, z"),
     ("kPlaceSnowy", 3, "SnowyBlock: snowy = block above is in #snow; alt = states for false, true"),
+    ("kPlaceChest", 4, "ChestBlock: faces the player, joins a single chest beside it (props::chest)"),
+    ("kPlaceFacing", 5, "AbstractFurnaceBlock: `facing` = opposite of the player's horizontal direction (props::furnace)"),
     ("kSnowTag", 0x8, "member of #minecraft:snow (makes the SnowyBlock below it snowy)"),
     ("kSnowyBelow", 0x10, "SnowyBlock.updateShape(): re-evaluates `snowy` when the block above changes"),
     ("kInteractive", 0x20, "overrides useItemOn/useWithoutItem: a click may be consumed by the block"),
@@ -370,6 +383,7 @@ ITEM_FLAGS = [
     ("kHasMaxDamage", 0x4, "default components hold MAX_DAMAGE"),
     ("kHasDamage", 0x8, "default components hold DAMAGE (always 0 there)"),
     ("kEquipRestricted", 0x10, "its EQUIPPABLE lists allowed_entities, and players are not among them"),
+    ("kExplosionProof", 0x20, "its DAMAGE_RESISTANT covers explosions: as an item entity it survives them (the nether star)"),
 ]
 
 # net.minecraft.world.entity.EquipmentSlot, by serialized name -> ordinal. The ordinal is what
@@ -388,8 +402,14 @@ def hook_default(block: dict, hook: str) -> bool:
     return block["hooks"][hook] == BASE_OF_HOOK.get(hook, "BlockBehaviour")
 
 
-def placement_kind(block: dict, item: dict | None) -> int:
-    if item is None or item["class"] != "BlockItem" or block["entity_block"] or block["game_master"]:
+def placement_kind(block: dict, item: dict | None, ported: tuple | None = None) -> int:
+    """`ported`: (kind, placement) from gen_game.PORTED_BLOCKS when the block's own class is one the
+    server implements in full - then its hooks are simulated, whatever they are."""
+    if item is None or item["class"] != "BlockItem" or block["game_master"]:
+        return 0
+    if ported and ported[1]:
+        return next(value for name, value, _ in BLOCK_FLAGS if name == ported[1])
+    if block["entity_block"]:
         return 0
     if not all(hook_default(block, h) for h in UNSIMULATED_HOOKS + ("canSurvive", "setPlacedBy", "playerWillDestroy")):
         return 0
@@ -478,7 +498,8 @@ def cfloat(x: float) -> str:
     return r if ("." in r or "e" in r or "n" in r) else r + ".0"
 
 
-def build_block_tables(v: dict, blocks: dict, data: dict, static_regs: dict, vanilla: "VanillaData", comp_dir: Path) -> dict:
+def build_block_tables(v: dict, blocks: dict, data: dict, static_regs: dict, vanilla: "VanillaData", comp_dir: Path,
+                       game: dict) -> dict:
     """Cross-check the three sources (blocks.json, registries.json, blockdata.json) and derive every
     table the C++ side embeds. Returns {file name: bytes | str}."""
     n = data["state_count"]
@@ -528,6 +549,11 @@ def build_block_tables(v: dict, blocks: dict, data: dict, static_regs: dict, van
 
     # ---- per-state tables
     bit = {name: 1 << i for i, (name, _) in enumerate(STATE_FLAGS)}
+    if len(STATE_FLAGS) > 8:
+        die("more than 8 state flags: kFlags is one byte per state")
+    conductor = game["states"]["columns"]["redstone_conductor"]
+    if game["states"]["state_count"] != n or len(conductor) != n or game["states"]["columns"]["block"] != st["block"]:
+        die("gamedata/states.json does not describe the same block states as blockdata.json - run: mcgen.py gamedata")
     flags = bytearray(n)
     light = bytearray(n)
     for i in range(n):
@@ -541,6 +567,7 @@ def build_block_tables(v: dict, blocks: dict, data: dict, static_regs: dict, van
         f |= bit["kReplaceable"] if st["replaceable"][i] else 0
         f |= bit["kRandomTicks"] if st["randomly_ticking"][i] else 0
         f |= bit["kBlockEntity"] if st["has_block_entity"][i] else 0
+        f |= bit["kRedstoneConductor"] if conductor[i] else 0
         flags[i] = f
         if not (0 <= st["emission"][i] <= 15 and 0 <= st["dampening"][i] <= 15):
             die(f"state {i}: light values out of nibble range")
@@ -673,6 +700,19 @@ struct BlockInfo {
     unsigned short alt[3];      // states the placement kind chooses between (see kPlace*)
     unsigned short place_sound, break_sound;  // sound_event registry ids
     float sound_volume, sound_pitch;
+    float explosion_resistance; // Block.getExplosionResistance()
+    float speed_factor;         // Block.getSpeedFactor(): what an entity in or on it keeps of its horizontal speed
+    float bounce;               // Block.getBounceRestitution(): what an entity landing on it keeps of its fall
+    // What an explosion without drop decay leaves of the block (its loot table for an empty tool):
+    // drop[0] with probability drop_chance, else drop[1]; item 0 = nothing. Only for blocks that
+    // can be in the world (placeable ones) - the others have none.
+    struct Drop {
+        unsigned short item;
+        unsigned char min, max;  // the count is uniform in [min, max]
+    } drop[2];
+    float drop_chance;
+    unsigned char kind;         // block_kind::*: the behaviour the server implements for its class
+    unsigned char block_entity; // block_entity_type id of its block entity, kNoBlockEntity without one
 };
 struct ItemInfo {
     unsigned short block;       // block a BlockItem places, kNoBlock = not a block item
@@ -681,8 +721,11 @@ struct ItemInfo {
     unsigned char flags;
     unsigned char equip_slot;   // EquipmentSlot ordinal of the default EQUIPPABLE, kNoEquipSlot without one
     unsigned char attack_swing; // default ATTACK_ANIMATION: SwingAnimationType id << kSwingTypeShift | ticks
+    unsigned short fuel_ticks;  // default COOKING_FUEL burn time in a furnace, 0 = not a fuel
+    unsigned short remainder;   // Item.getCraftingRemainder(): what crafting or burning it leaves, 0 = nothing
 };
 inline constexpr unsigned short kNoBlock = 0xFFFF;
+inline constexpr unsigned char kNoBlockEntity = 0xFF;
 inline constexpr unsigned char kNoEquipSlot = 0xFF;
 inline constexpr unsigned kSwingTypeShift = 6;
 inline constexpr unsigned char kSwingTicksMask = 0x3F;
@@ -697,7 +740,23 @@ namespace block_flag {
     info.append("}  // namespace block_flag\nnamespace item_flag {\n")
     for name, value, why in ITEM_FLAGS:
         info.append(f"inline constexpr unsigned char {name} = 0x{value:X};  // {why}\n")
-    info.append("}  // namespace item_flag\n\n}  // namespace proto::gen\n")
+    info.append("}  // namespace item_flag\n\n// BlockInfo::kind: block classes the server has a port of.\nnamespace block_kind {\n")
+    for i, kind in enumerate(gen_game.BLOCK_KINDS):
+        info.append(f"inline constexpr unsigned char {kind} = {i};\n")
+    info.append("}  // namespace block_kind\n\n"
+                "// Block state layouts the server computes states from:\n"
+                "//   state = kFirst + sum over properties of (value index * stride)\n"
+                "// with the values of each property in the order of its comment.\nnamespace props {\n")
+    for name, layout in gen_game.STATE_LAYOUTS.items():
+        gb = game["blocks"][name]
+        have = [(p["name"], p["values"]) for p in gb["properties"]]
+        if have != layout or gb["first_state"] != first[name]:
+            die(f"{name}: its block state properties are {have}, the server's port expects {layout}")
+        info.append(f"namespace {name.split(':', 1)[1]} {{\ninline constexpr unsigned kFirst = {gb['first_state']};\n")
+        for p in gb["properties"]:
+            info.append(f"inline constexpr unsigned k{p['name'].capitalize()}Stride = {p['stride']};  // {', '.join(p['values'])}\n")
+        info.append(f"}}  // namespace {name.split(':', 1)[1]}\n")
+    info.append("}  // namespace props\n\n}  // namespace proto::gen\n")
     files["block_info.hpp"] = "".join(info)
 
     t = [hdr, """
@@ -712,13 +771,40 @@ namespace proto::gen {
 
     bf = {name: value for name, value, _ in BLOCK_FLAGS}
     custom_clone = blocks_with_custom_clone(v["id"], {b["class"] for b in ext_blocks})
-    kinds = [0, 0, 0, 0]
+    kinds = [0] * 8
+    loot = gen_game.Loot(vanilla, item_ids)
+    be_ids = {n: e["protocol_id"] for n, e in static_regs["minecraft:block_entity_type"]["entries"].items()}
+    signal_hooks = ("isSignalSource", "ownSignal", "getSignal", "getDirectSignal")
+    drop_hooks = ("dropFromExplosion", "onExplosionHit", "getExplosionResistance", "getDrops", "getSpeedFactor",
+                  "getBounceRestitution")
     t.append(f"inline constexpr BlockInfo kBlocks[{len(ext_blocks)}] = {{\n")
     for b in ext_blocks:
         name = b["name"]
         item = ext_items.get(b["item"])
-        kind = placement_kind(b, item if b["item"] != "minecraft:air" else None)
+        gb = game["blocks"].get(name)
+        if gb is None or gb["id"] != b["id"]:
+            die(f"{name}: gamedata/blocks.json is from another version - run: mcgen.py gamedata")
+        ported = gen_game.ported_block(gb)
+        kind = placement_kind(b, item if b["item"] != "minecraft:air" else None, ported)
         kinds[kind] += 1
+        # What the entity and explosion code reads off a block that can be in the world. A hook
+        # that would answer otherwise than the tables below has to be ported first.
+        drops: list = []
+        if kind:
+            cls = gb["class"][0]
+            if any(h in gb["hooks"] for h in signal_hooks) and cls != "PoweredBlock":
+                die(f"{name}: a placeable block with a redstone signal of its own ({cls}) - TNT would have to know")
+            if any(h in gb["hooks"] for h in drop_hooks) and cls != "TntBlock":
+                die(f"{name}: a placeable block that overrides {[h for h in drop_hooks if h in gb['hooks']]}")
+            # TntBlock.dropFromExplosion is false: it is primed instead (wasExploded).
+            drops = [] if cls == "TntBlock" else loot.explosion_drops(name, gb.get("loot_table"))
+        drops += [(1.0, 0, 0, 0)] * (2 - len(drops))
+        be = gb.get("block_entity_type")
+        if (be is not None) != bool(b["entity_block"]) or (be is not None and be_ids[be] >= 0xFF):
+            die(f"{name}: block entity type {be} against entity_block={b['entity_block']}")
+        settings = gb["settings"]
+        if settings["explosionResistance"] != b["explosion_resistance"]:
+            die(f"{name}: blockdata.json and gamedata disagree on its explosion resistance")
         alt = [0, 0, 0]
         if kind == 2:
             alt = list(b["axis_states"])
@@ -737,10 +823,15 @@ namespace proto::gen {
         snd = b["sound"]
         t.append(f"    {{{first[name]}, {len(blocks[name]['states'])}, {b['default_state']}, {item_ids[b['item']]}, 0x{f:X}, "
                  f"{{{alt[0]}, {alt[1]}, {alt[2]}}}, {sound(snd['place'])}, {sound(snd['break'])}, "
-                 f"{cfloat(snd['volume'])}f, {cfloat(snd['pitch'])}f}},  // {name.split(':', 1)[1]}\n")
+                 f"{cfloat(snd['volume'])}f, {cfloat(snd['pitch'])}f, {cfloat(settings['explosionResistance'])}f, "
+                 f"{cfloat(settings['speedFactor'])}f, {cfloat(settings['bounceRestitution'])}f, "
+                 f"{{{{{drops[0][1]}, {drops[0][2]}, {drops[0][3]}}}, {{{drops[1][1]}, {drops[1][2]}, {drops[1][3]}}}}}, "
+                 f"{cfloat(drops[0][0])}f, block_kind::{ported[0] if ported else 'kPlain'}, "
+                 f"{be_ids[be] if be is not None else 'kNoBlockEntity'}}},  // {name.split(':', 1)[1]}\n")
     t.append("};\n\n")
 
     itf = {name: value for name, value, _ in ITEM_FLAGS}
+    damage_tags = vanilla.tags("damage_type")
     swing_types, swing_default_type, swing_default_ticks = swing_animations(v["id"])
     t.append(f"inline constexpr ItemInfo kItems[{len(item_ids)}] = {{\n")
     for name in sorted(item_ids, key=item_ids.get):
@@ -772,6 +863,19 @@ namespace proto::gen {
                 if "minecraft:player" in allowed or any(a.startswith("#") and "minecraft:player" in entity_tag(a[1:]) for a in allowed):
                     die(f"{name}: players are among its allowed_entities - kEquipRestricted would be wrong")
                 f |= itf["kEquipRestricted"]
+        # ItemStack.canBeHurtBy(an explosion): DAMAGE_RESISTANT names a damage type tag.
+        resistant = comps.get("minecraft:damage_resistant", {}).get("types")
+        if resistant is not None:
+            tag = damage_tags.get(with_ns(resistant.lstrip("#")))
+            if not resistant.startswith("#") or tag is None:
+                die(f"{name}: damage_resistant {resistant} is not a damage type tag of the jar")
+            members = {v if isinstance(v, str) else v["id"] for v in tag}
+            if any(m.startswith("#") for m in members):
+                die(f"damage type tag {resistant} nests another tag: resolve it")
+            hit = {"minecraft:explosion", "minecraft:player_explosion"} & members
+            if len(hit) == 1:
+                die(f"{name}: resists one kind of explosion and not the other")
+            f |= itf["kExplosionProof"] if hit else 0
         # ItemStack.getAttackAnimation(): the swing others see when the item's holder punches.
         # SwingAnimation.CODEC fills what the component leaves out from SwingAnimation.DEFAULT.
         anim = comps.get("minecraft:attack_animation", {})
@@ -782,8 +886,12 @@ namespace proto::gen {
         # so the server keeps no table of it (Game::on_use_item_on).
         if comps.get("minecraft:interact_animation", {}) != {}:
             die(f"{name}: an interact animation of its own - the server swings with SwingAnimation.DEFAULT")
+        remainder = game["items"][name].get("crafting_remainder")
+        if remainder is not None and set(remainder) != {"id"}:
+            die(f"{name}: a crafting remainder with a count or components: {remainder}")
         t.append(f"    {{{blk}, {equip_sound}, {stack}, 0x{f:X}, {equip_slot}, "
-                 f"0x{swing_types[swing_type] << 6 | swing_ticks:02X}}},  // {name.split(':', 1)[1]}\n")
+                 f"0x{swing_types[swing_type] << 6 | swing_ticks:02X}, {gen_game.fuel_ticks(vanilla, comps, name)}, "
+                 f"{item_ids[remainder['id']] if remainder else 0}}},  // {name.split(':', 1)[1]}\n")
     t.append("};\n\n")
 
     # Collision boxes: kCollisionBoxes[kCollisionFirst[id] .. kCollisionFirst[id + 1])
@@ -826,7 +934,7 @@ namespace proto::gen {
     it.append("\n}  // namespace proto::gen::static_registry\n")
     files["items.hpp"] = "".join(it)
 
-    files["_stats"] = {"placeable": kinds[1] + kinds[2] + kinds[3], "blocks": len(ext_blocks)}
+    files["_stats"] = {"placeable": sum(kinds[1:]), "blocks": len(ext_blocks)}
     return files
 
 
@@ -911,6 +1019,7 @@ ENTITY_DATA_CLASSES = [
     ("avatar", "net.minecraft.world.entity.Avatar", "living_entity"),
     ("player", "net.minecraft.world.entity.player.Player", "avatar"),
     ("item_entity", "net.minecraft.world.entity.item.ItemEntity", "entity"),
+    ("primed_tnt", "net.minecraft.world.entity.item.PrimedTnt", "entity"),
 ]
 LIVING = "net.minecraft.world.entity.LivingEntity"
 
@@ -1112,8 +1221,16 @@ def generate_into(version: str, out: Path, reports: Path | None = None) -> dict:
 
     blocks = json.loads(blk_report.read_text())
     (out / "blocks.hpp").write_text(emit_blocks(v, blocks))
-    tables = build_block_tables(v, blocks, json.loads(ext_report.read_text()), static_regs, data, comp_dir)
+    game = gen_game.load_gamedata(d)
+    tables = build_block_tables(v, blocks, json.loads(ext_report.read_text()), static_regs, data, comp_dir, game)
     stats.update(tables.pop("_stats"))
+    hdr = HEADER.format(id=v["id"], proto=v["protocol_version"])
+    item_ids = {n: e["protocol_id"] for n, e in static_regs["minecraft:item"]["entries"].items()}
+    comp_ids = {n: e["protocol_id"] for n, e in static_regs["minecraft:data_component_type"]["entries"].items()}
+    recipes = gen_game.Recipes(v, data, static_regs, flatten_tags(data.tags("item"), item_ids, "minecraft:item"), comp_ids)
+    tables.update(recipes.emit(hdr, packets))
+    stats.update(tables.pop("_stats"))
+    tables["static_ids.hpp"] = gen_game.emit_static_ids(hdr, static_regs)
     for name, content in tables.items():
         if isinstance(content, bytes):
             (out / name).write_bytes(content)
@@ -1131,6 +1248,7 @@ def cmd_generate(args) -> None:
     stats = generate_into(args.version, out)
     print(f"mcgen: wrote {out.relative_to(ROOT)}: {stats['registries']} registries, {stats['entries']} entries, "
           f"{stats['tags']} tags, {stats['blocks']} blocks ({stats['placeable']} placeable), {stats['entity_types']} entity types, "
+          f"{stats['crafting']} crafting and {stats['smelting']} smelting recipes ({stats['recipes_skipped']} of other kinds left out), "
           f"packet ids from {stats['packets']}")
 
 

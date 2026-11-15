@@ -8,6 +8,7 @@
 #include "base/log.hpp"
 #include "proto/packets.hpp"
 
+#include PROTO_GEN_BLOBS_HPP
 #include PROTO_GEN_DIMENSION_TYPES_HPP
 
 namespace server {
@@ -50,6 +51,9 @@ Game::Game(const Settings& s, std::vector<std::unique_ptr<net::Reactor>>& reacto
     border_.reserve(s.max_players);
     for (auto& r : reactors_) slot_to_player_.emplace_back(r->max_conns(), kNone);
     touched_.assign(reactors_.size(), 0);
+    // The same for every client: the recipe property sets (mcgen), framed once.
+    frame_raw(recipes_frame_, s.compression_threshold, {gen::kUpdateRecipesBlob, sizeof gen::kUpdateRecipesBlob});
+    init_titles();
 }
 
 Game::~Game() {
@@ -73,18 +77,23 @@ void Game::run(const std::atomic<bool>& stop) {
     u64 busy_ns = 0, worst_ns = 0, track_ns = 0, flush_ns = 0, sent_bytes = 0;
     while (!stop.load(std::memory_order_relaxed)) {
         const u64 t0 = base::now_ns();
-        // Same order as MinecraftServer.tickChildren: packets, then the level - block and light
-        // changes go out to whoever sees them (ServerChunkCache.broadcastChangedChunks), then the
-        // entities are shown (ChunkMap.tick) and ticked (items; ServerPlayer.tick, which is the
-        // menu) - then the per-connection tick (block change acks, the player's own tick), and
-        // one flush per player at the end.
+        // Same order as MinecraftServer.tickChildren: packets, then the level - scheduled block
+        // ticks, block and light changes go out to whoever sees them
+        // (ServerChunkCache.broadcastChangedChunks), the entities are shown (ChunkMap.tick),
+        // block events are sent, the entities tick (items, primed TNT; ServerPlayer.tick, which
+        // is the menu), then the block entities (furnaces) - then the per-connection tick (block
+        // change acks, the player's own tick), and one flush per player at the end.
         for (u32 ri = 0; ri < reactors_.size(); ++ri) drain(ri);
+        recheck_chests();  // ServerLevel.tick: scheduled block ticks come first
         broadcast_changes();
         const u64 t1 = base::now_ns();
         tracker_.tick(out_.data());
         track_ns += base::now_ns() - t1;
+        run_block_events();  // ...block events after the chunks and the tracker, before the entities
         tick_items();
+        tick_tnt();
         sync_menus();
+        tick_furnaces();  // block entities tick after the entities
         tick_players();
         // Not t0: a player who joined during drain() has keepalive_sent_ns > t0, and the unsigned
         // difference would wrap and send a keep-alive at once.
@@ -268,6 +277,9 @@ void Game::on_join(u32 ri, const InHeader& h, const u8* payload, u32 n) {
     send(pi, cb::PlayerAbilities{cb::PlayerAbilities::kInvulnerable | cb::PlayerAbilities::kCanFly |
                                  cb::PlayerAbilities::kInstabuild});
     send(pi, cb::SetHeldSlot{p.menu.inv.selected});
+    // What a client's screens ask about recipes: which items a furnace takes (the shift-click
+    // it predicts), and so on. The recipe book stays empty: nothing is unlocked.
+    out(pi).append(recipes_frame_.data, recipes_frame_.len);
 
     p.teleport_id = 1;
     p.awaiting_teleport = true;
@@ -319,6 +331,12 @@ void Game::remove_player(u32 pi) {
     Player& p = players_[pi];
     const Uuid uuid = p.uuid;
     slot_to_player_[p.reactor][p.slot] = kNone;
+    // Player.remove closes the open menu. What it would hand back is not kept - nothing of a
+    // player is - but a chest must not go on counting an opener who left.
+    if (p.menu.kind() == Menu::Kind::kChest) {
+        for (const u32 chest : p.open_data)
+            if (chest != kNone && chests_[chest].alive) chest_closed(chest);
+    }
 
     // PlayerList.remove: the entity goes first - whoever saw it gets remove_entities - then the
     // tab-list entry. The store fills the row with its last player, as we do with ours below.

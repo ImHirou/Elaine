@@ -26,7 +26,7 @@ using namespace proto;
 namespace {
 
 constexpr u64 kLifetime = 6000;   // ItemEntity.LIFETIME: age at which it is discarded
-constexpr u64 kPickupDelay = 40;  // LivingEntity.createItemStackToDrop: setPickUpDelay(40)
+constexpr i8 kHealth = 5;         // ItemEntity.health: what an explosion has to take before it is gone
 constexpr u64 kMergePeriod = 40;  // ItemEntity.tick: an item that did not change block looks for neighbours this often
 constexpr i32 kMergeLimit = 64;   // ItemEntity.merge(to, from): never beyond 64, whatever the stack allows
 // EntityTypes.ITEM: 0.25 x 0.25. (Exact in float and double alike.)
@@ -50,9 +50,11 @@ Box item_box(const entity::Store& e, u32 row) {  // EntityDimensions.makeBoundin
 
 }  // namespace
 
-// new ItemEntity(level, x, y, z, stack) + Level.addFreshEntity, as createItemStackToDrop sets it
-// up: a random yaw, 40 ticks before it can be picked up. At rest and without gravity (see top).
-void Game::spawn_item(ItemStack stack, double x, double y, double z) {
+// new ItemEntity(level, x, y, z, stack) + Level.addFreshEntity: a random yaw, and
+// `pickup_delay` ticks before it can be picked up - 40 for what a player drops
+// (createItemStackToDrop), 10 for what a block drops (setDefaultPickUpDelay), none for what
+// falls out of a chest. At rest and without gravity (see top).
+void Game::spawn_item(ItemStack stack, double x, double y, double z, u64 pickup_delay) {
     if (stack.empty() || ents_.size() >= entity::kMaxEntities) return;
     // Mth.createInsecureUUID, and the yaw the ItemEntity constructor draws: random.nextFloat() * 360.
     const Uuid uuid{(random() & ~0xF000ull) | 0x4000ull, (random() & 0x3FFFFFFFFFFFFFFFull) | 0x8000000000000000ull};
@@ -71,7 +73,8 @@ void Game::spawn_item(ItemStack stack, double x, double y, double z) {
     item_age_from_.push_back(tick_);
     // The delay counts down in the item's own tick, which runs before the players': 40 ticks
     // from one set while packets are handled, the 40th item tick has brought it to zero.
-    item_pickup_.push_back(tick_ + kPickupDelay - 1);
+    item_pickup_.push_back(pickup_delay ? tick_ + pickup_delay - 1 : tick_);
+    item_health_.push_back(kHealth);
 }
 
 // Entity.discard: whoever sees it is told at once, then the entity is gone.
@@ -89,6 +92,7 @@ void Game::remove_item(u32 slot) {
         item_born_[k] = item_born_[last];
         item_age_from_[k] = item_age_from_[last];
         item_pickup_[k] = item_pickup_[last];
+        item_health_[k] = item_health_[last];
         item_cell_[k] = item_cell_[last];
         item_of_slot_[item_slot_[k]] = k;
     }
@@ -96,6 +100,7 @@ void Game::remove_item(u32 slot) {
     item_born_.pop_back();
     item_age_from_.pop_back();
     item_pickup_.pop_back();
+    item_health_.pop_back();
     item_cell_.pop_back();
     item_of_slot_[slot] = kNone;
 }

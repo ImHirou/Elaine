@@ -50,7 +50,7 @@ struct LightLayer {
     bool present() const { return v != 0; }
     bool has_array() const { return v > 32; }
     u8* array() const { return reinterpret_cast<u8*>(v); }
-    bool vanilla_empty() const { return v == 1; }  // DataLayer.isEmpty()
+    bool vanilla_empty() const { return v == 1; }                       // DataLayer.isEmpty()
     u32 uniform_value() const { return static_cast<u32>(v - 1) & 15; }  // valid when present() && !has_array()
 
     ALWAYS_INLINE u32 get(u32 i) const {
@@ -82,6 +82,17 @@ struct LightLayer {
     void fold(BlockPool& pool);
 };
 
+// A block entity as its chunk knows it: where it is, of which type, and - for whoever keeps what
+// it holds (the server's chests and furnaces) - a handle to that. The chunk packet lists them:
+// a client only makes the block entity of a chest (which is what draws it) when told to.
+struct BlockEntityRef {
+    u8 xz;    // x << 4 | z inside the chunk: ClientboundLevelChunkPacketData.BlockEntityInfo.packedXZ
+    u8 type;  // block_entity_type id
+    i16 y;
+    u32 data;  // the owner's index
+};
+static_assert(sizeof(BlockEntityRef) == 8);
+
 enum class ChunkStatus : u8 {
     Generated,   // blocks, heightmaps and sky sources are final; unknown to the light engine
     LightReady,  // sections registered with the light engine (vanilla INITIALIZE_LIGHT)
@@ -91,9 +102,9 @@ enum class ChunkStatus : u8 {
 struct Chunk {
     i32 x = 0, z = 0;
     ChunkStatus status = ChunkStatus::Generated;
-    bool sky_on = false;      // vanilla "light enabled" for the column, per layer
+    bool sky_on = false;  // vanilla "light enabled" for the column, per layer
     bool block_on = false;
-    bool modified = false;    // differs from what the generator produced
+    bool modified = false;  // differs from what the generator produced
     // This chunk and its eight neighbours are lit: it may be sent, edited and broadcast. Until then
     // light changes in it are not recorded (ChunkHolder does the same for non-ticking chunks).
     bool ticking = false;
@@ -103,6 +114,10 @@ struct Chunk {
     u8 light_count = 0;
     u32 frame_len = 0;
     u8* frame = nullptr;  // cached level_chunk_with_light packet, framed and compressed
+    // The chunk's block entities, in no order. A handful at most in nearly every chunk that has
+    // any: finding one by position is a scan of this array.
+    BlockEntityRef* block_entities = nullptr;
+    u16 block_entity_count = 0, block_entity_cap = 0;
     // Light sections whose data changed since the last broadcast (bit = light section index).
     u32 sky_changed = 0, block_changed = 0;
     // Vanilla SkyLightSectionStorage.topSections for this column: highest light-storing section

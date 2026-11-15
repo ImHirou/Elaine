@@ -66,6 +66,14 @@ class Tracker {
     // Tells everyone who sees the entity that it is gone (ChunkMap.removeEntity), then frees it.
     void despawn(u32 ei, base::ByteBuf* const* outs, Store::Moves& moved);
 
+    // An entity that is created moving, right after spawn(): the ServerEntity constructor takes
+    // its velocity as the one viewers know - it is in the add_entity they get.
+    void created_with_velocity(u32 e) {
+        sent_[e].mx = s_.vx[e];
+        sent_[e].my = s_.vy[e];
+        sent_[e].mz = s_.vz[e];
+    }
+
     // ChunkMap.getPlayerViewDistance: a player is shown nothing further than its view distance.
     void set_view_distance(u32 player, u32 chunks);
 

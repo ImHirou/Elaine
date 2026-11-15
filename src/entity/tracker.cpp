@@ -26,6 +26,7 @@ constexpr double kMotionTolerance = 1.0E-7;
 // sent. Nothing damages a (creative) player yet, so it is a constant.
 constexpr float kPlayerHealth = 20.0f;
 constexpr usize kDataEntriesMax = 6 * cb::kEntityDataEntryMax;  // the fixed-size values; an item stack comes on top
+constexpr i32 kDefaultFuse = 80;  // PrimedTnt.defineSynchedData: DATA_FUSE_ID starts at DEFAULT_FUSE_TIME
 
 constexpr u32 bit_of(u32 accessor) { return 1u << accessor; }
 
@@ -215,6 +216,8 @@ u32 Tracker::non_default(u32 e) const {
         if (s_.skin_parts[e]) mask |= bit_of(ed::avatar::kPlayerModeCustomisation);
     } else if (s_.type[e] == entity_type::kItem) {
         if (!s_.item[e].empty()) mask |= bit_of(ed::item_entity::kItem);
+    } else if (s_.type[e] == entity_type::kTnt) {
+        if (s_.fuse[e] != kDefaultFuse) mask |= bit_of(ed::primed_tnt::kFuse);
     }
     return mask;
 }
@@ -228,6 +231,11 @@ u8* Tracker::put_data(u8* p, u32 e, u32 mask) const {
     if (mask & bit_of(ed::entity::kPose)) p = cb::put_entity_varint(p, ed::entity::kPose, ed::serializer::kPose, s_.pose[e]);
     if (s_.type[e] == entity_type::kItem) {
         if (mask & bit_of(ed::item_entity::kItem)) p = cb::put_entity_item(p, ed::item_entity::kItem, item::view(s_.item[e]));
+        return p;
+    }
+    if (s_.type[e] == entity_type::kTnt) {  // its block state is always the default one, TNT: never sent
+        if (mask & bit_of(ed::primed_tnt::kFuse))
+            p = cb::put_entity_varint(p, ed::primed_tnt::kFuse, ed::serializer::kInt, static_cast<u32>(s_.fuse[e]));
         return p;
     }
     if (mask & bit_of(ed::living_entity::kHealth)) p = cb::put_entity_float(p, ed::living_entity::kHealth, kPlayerHealth);
@@ -432,7 +440,7 @@ HOT void Tracker::send_changes(u32 e) {
         // createMovePacket decides; the velocity goes out in front of whatever it decided.
         enum { kNothing, kPos, kPosRot, kRot, kSync } kind = kNothing;
         i64 dx = 0, dy = 0, dz = 0;
-        if (t.teleport_delay > kForcedTeleportPeriod || t.was_on_ground != on_ground) {
+        if (t.teleport_delay > kForcedTeleportPeriod || t.was_on_ground != on_ground || (f & flag::kPrecise)) {
             t.was_on_ground = on_ground;
             t.teleport_delay = 0;
             kind = kSync;

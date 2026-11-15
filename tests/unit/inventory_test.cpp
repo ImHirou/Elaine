@@ -243,8 +243,8 @@ TEST(MenuClick, ArmourSlotsTakeWhatBelongsThereOneAtATime) {
     EXPECT_EQ(f.cursor(), kNothing);
     ASSERT_EQ(f.fx.size(), 1u);  // LivingEntity.onEquipItem: the sound of it going on
     EXPECT_EQ(f.fx[0].kind, Effect::kEquipSound);
-    EXPECT_EQ(f.fx[0].sound, world::item_info(it::kDiamondHelmet).equip_sound);
-    EXPECT_NE(f.fx[0].sound, 0);
+    EXPECT_EQ(f.fx[0].value, world::item_info(it::kDiamondHelmet).equip_sound);
+    EXPECT_NE(f.fx[0].value, 0);
     f.fx.clear();
 
     // A stack of pumpkins: one goes on the head. With one on already, the stack cannot trade places.
@@ -522,6 +522,10 @@ TEST(Menu, CreativeSlotAndClose) {
     f.fx.clear();
     f.m.set_creative(1, dirt(4), cx);
     f.m.set_creative(4, stone(10), cx);
+    ASSERT_EQ(f.fx.size(), 2u);  // the crafting grid changed twice: the result slot is sent each time
+    EXPECT_EQ(f.fx[0].kind, Effect::kSetSlot);
+    EXPECT_TRUE(f.fx[1].stack.empty());  // dirt and stone make nothing
+    f.fx.clear();
     f.m.carried = dirt(2);
     f.m.close(cx);  // the cursor and the grid return to the inventory
     EXPECT_EQ(f.cursor(), kNothing);

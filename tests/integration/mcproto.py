@@ -78,6 +78,11 @@ ITEM_DATA = _constants("entities.hpp", "item_entity")   # ...and of an item enti
 COMPONENT = _constants("items.hpp", "proto::gen::component")  # data component type ids: COMPONENT["kDamage"]
 EQUIPMENT_SLOT = _constants("entities.hpp", "proto::gen::equipment_slot")
 SWING = _constants("entities.hpp", "proto::gen::swing_animation")   # SwingAnimationType ids: SWING["kWhack"]
+TNT_DATA = _constants("entities.hpp", "primed_tnt")     # entity-data accessors of primed TNT: TNT_DATA["kFuse"]
+MENUS = _constants("static_ids.hpp", "menu")            # menu types: MENUS["kGeneric9x3"]
+BLOCK_ENTITY = _constants("static_ids.hpp", "block_entity_type")
+SOUND = _constants("static_ids.hpp", "sound")           # the sounds the server sends by itself: SOUND["kBlockChestOpen"]
+PARTICLE = _constants("static_ids.hpp", "particle")
 
 
 def load_item_table() -> dict[str, dict]:
@@ -85,10 +90,11 @@ def load_item_table() -> dict[str, dict]:
     text = (_gen_dir() / "block_tables.hpp").read_text()
     body = re.search(r"ItemInfo kItems\[\d+\] = \{\n(.*?)\n\};", text, re.S).group(1)
     out = {}
-    for m in re.finditer(r"\{(\d+), (\d+), (\d+), 0x([0-9A-F]+), (\d+), 0x([0-9A-F]+)\},  // (\w+)", body):
-        block, sound, stack, flags, slot, swing, name = m.groups()
+    for m in re.finditer(r"\{(\d+), (\d+), (\d+), 0x([0-9A-F]+), (\d+), 0x([0-9A-F]+), (\d+), (\d+)\},  // (\w+)", body):
+        block, sound, stack, flags, slot, swing, fuel, remainder, name = m.groups()
         out[name] = {"block": int(block), "equip_sound": int(sound), "max_stack": int(stack), "flags": int(flags, 16), "equip_slot": int(slot),
-                     "attack_swing": (int(swing, 16) >> 6, int(swing, 16) & 0x3F)}   # (SwingAnimationType, ticks)
+                     "attack_swing": (int(swing, 16) >> 6, int(swing, 16) & 0x3F),   # (SwingAnimationType, ticks)
+                     "fuel_ticks": int(fuel), "remainder": int(remainder)}
     assert len(out) == ITEM["kCount"], (len(out), ITEM["kCount"])
     return out
 
@@ -394,6 +400,13 @@ class Client:
         self.held_slot = None                  # from set_held_slot
         self.menu_log: list[tuple] = []        # (packet name, details) in arrival order
         self.sounds: list[tuple] = []          # (sound id, source, (x, y, z), volume, pitch)
+        # The menu a block opened (open_screen), None while only the player's own is there:
+        # {"id", "type", "title", "slots", "data"}. Its last 36 slots are the inventory - the
+        # very slots 9..44 of self.slots, as in the client, where both menus show one Inventory.
+        self.window = None
+        self.block_events: list[tuple] = []    # ((x, y, z), b0, b1, block id)
+        self.explosions: list[dict] = []
+        self.recipe_sets: dict[str, set] = {}  # update_recipes: property set name -> item ids
 
     def close(self) -> None:
         self.sock.close()
@@ -629,7 +642,10 @@ ENTITY_PACKETS = {"bundle_delimiter", "add_entity", "remove_entities", "set_enti
                   "move_entity_pos_rot", "move_entity_rot", "entity_position_sync", "rotate_head", "set_entity_motion",
                   "set_equipment", "take_item_entity", "swing_animation", "entity_event"}
 MENU_PACKETS = {"container_set_content", "container_set_slot", "set_cursor_item", "set_player_inventory", "set_held_slot",
-                "sound"}
+                "sound", "open_screen", "container_set_data", "container_close", "update_recipes", "block_event", "explode"}
+# Slots of the menus a block opens, by menu type (the menu registry): the container's own, then
+# the 36 of the inventory. From the constructors of ChestMenu, AbstractFurnaceMenu, CraftingMenu.
+WINDOW_SLOTS = {"kGeneric9x3": 27, "kGeneric9x6": 54, "kFurnace": 3, "kCrafting": 10}
 
 
 # ----------------------------------------------------------------------------- item stacks
@@ -738,19 +754,45 @@ def read_item(r: Reader):
 
 def _apply_menu_packet(self: "Client", name: str, r: Reader) -> None:
     """ClientPacketListener.handleContainerContent / handleContainerSetSlot / handleSetCursorItem /
-    handleSetPlayerInventory / handleSetHeldSlot, for the player's own menu (container id 0)."""
+    handleSetPlayerInventory / handleSetHeldSlot / handleOpenScreen / handleContainerSetData /
+    handleContainerClose, for the player's own menu (container id 0) and the one a block opened;
+    and the packets about the world around a menu: handleBlockEvent, handleExplosion,
+    handleUpdateRecipes, handleSoundEvent."""
+    def window_slot(slot: int, stack) -> None:
+        w = self.window
+        w["slots"][slot] = stack
+        if slot >= w["base"]:  # the inventory part: one Inventory behind both menus
+            self.slots[9 + slot - w["base"]] = stack
+
+    def own_slot(slot: int, stack) -> None:
+        self.slots[slot] = stack
+        if self.window and 9 <= slot < 45:
+            self.window["slots"][self.window["base"] + slot - 9] = stack
+
     if name == "container_set_content":
         cid, state = r.varint(), r.varint()
         items = [read_item(r) for _ in range(r.varint())]
         carried = read_item(r)
-        assert cid == 0 and len(items) == 46, (cid, len(items))
-        self.slots, self.cursor, self.state_id = items, carried, state
+        if cid == 0:
+            assert len(items) == 46, len(items)
+            for slot, stack in enumerate(items):
+                own_slot(slot, stack)
+        else:
+            assert self.window and cid == self.window["id"] and len(items) == len(self.window["slots"]), (cid, len(items))
+            for slot, stack in enumerate(items):
+                window_slot(slot, stack)
+        self.cursor, self.state_id = carried, state
         self.menu_log.append((name, state))
     elif name == "container_set_slot":
         cid, state, slot = r.varint(), r.varint(), r.i16()
         stack = read_item(r)
-        assert cid == 0 and 0 <= slot < 46, (cid, slot)
-        self.slots[slot], self.state_id = stack, state
+        if cid == 0:
+            assert 0 <= slot < 46, slot
+            own_slot(slot, stack)
+        else:
+            assert self.window and cid == self.window["id"] and 0 <= slot < len(self.window["slots"]), (cid, slot)
+            window_slot(slot, stack)
+        self.state_id = state
         self.menu_log.append((name, slot, stack))
     elif name == "set_cursor_item":
         self.cursor = read_item(r)
@@ -761,11 +803,51 @@ def _apply_menu_packet(self: "Client", name: str, r: Reader) -> None:
         # Inventory index -> menu slot: 0..8 hotbar, 9..35 as is, 36..39 feet..head, 40 off hand.
         slot = 36 + index if index < 9 else index if index < 36 else 8 - (index - 36) if index < 40 else 45
         assert index <= 40, index
-        self.slots[slot] = stack
+        own_slot(slot, stack)
         self.menu_log.append((name, index, stack))
     elif name == "set_held_slot":
         self.held_slot = r.varint()
         self.menu_log.append((name, self.held_slot))
+    elif name == "open_screen":
+        cid, kind = r.varint(), r.varint()
+        title = r.nbt()
+        types = {v: k for k, v in MENUS.items()}
+        assert 1 <= cid <= 100 and types.get(kind) in WINDOW_SLOTS, (cid, kind)
+        base = WINDOW_SLOTS[types[kind]]
+        # A new AbstractContainerMenu on the client: empty slots over the one inventory.
+        self.window = {"id": cid, "type": types[kind], "title": title, "base": base, "data": {},
+                       "slots": [None] * base + self.slots[9:45]}
+        self.menu_log.append((name, cid, types[kind], title))
+    elif name == "container_set_data":
+        cid, index, value = r.varint(), r.i16(), r.i16()
+        assert self.window and cid == self.window["id"], cid
+        self.window["data"][index] = value
+        self.menu_log.append((name, index, value))
+    elif name == "container_close":
+        cid = r.varint()
+        assert self.window and cid == self.window["id"], (cid, self.window)
+        self.window = None
+        self.menu_log.append((name, cid))
+    elif name == "update_recipes":
+        for _ in range(r.varint()):
+            key = r.str()
+            self.recipe_sets[key] = {r.varint() for _ in range(r.varint())}
+        self.stonecutter_recipes = r.varint()
+        if self.stonecutter_recipes:
+            r.take(r.remaining())  # SelectableRecipe entries: slot displays, which this client does not read
+    elif name == "block_event":
+        pos = unpack_block_pos(r.u64())
+        self.block_events.append((pos, r.u8(), r.u8(), r.varint()))
+    elif name == "explode":
+        e = {"center": (r.f64(), r.f64(), r.f64()), "radius": r.f32(), "blocks": r.i32()}
+        e["knockback"] = (r.f64(), r.f64(), r.f64()) if r.bool() else None
+        e["particle"] = r.varint()
+        holder = r.varint()
+        assert holder != 0, "an inline sound event"
+        e["sound"] = holder - 1
+        e["block_particles"] = [(r.varint(), r.f32(), r.f32(), r.varint()) for _ in range(r.varint())]
+        e["play_sound"] = r.bool()
+        self.explosions.append(e)
     elif name == "sound":
         holder = r.varint()
         assert holder != 0, "an inline sound event"
@@ -1116,8 +1198,16 @@ def parse_chunk(r: Reader, sections: int = 24) -> dict:
         c["sections"].append({"non_air": data.i16(), "fluids": data.i16(),
                               "blocks": _paletted(data, 4096, 9), "biomes": _paletted(data, 64, 4)})
     data.done()
-    c["block_entities"] = r.varint()
-    assert c["block_entities"] == 0
+    # BlockEntityInfo: packed x << 4 | z, y, type, and the update tag (TAG_End for none).
+    c["block_entities"] = []
+    for _ in range(r.varint()):
+        xz, y, kind = r.u8(), r.i16(), r.varint()
+        tag = None
+        if r.d[r.i] == 0:
+            r.take(1)
+        else:
+            tag = r.nbt()
+        c["block_entities"].append(((xz >> 4, y, xz & 15), kind, tag))
     c["light"] = _light_data(r)
     r.done()
     return c

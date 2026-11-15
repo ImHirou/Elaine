@@ -33,8 +33,8 @@ Reading the diff:
   * Entity ids, UUIDs and sound seeds differ by nature and are replaced or cut.
   * Known differences that remain: vanilla shows a new entity to its viewers the moment it is
     created (ours at the end of the tick, so a swing and the item it threw swap places in the
-    stream); its falling items merge after two ticks instead of forty; its crafting grid makes
-    results (slot 0); it sends entity event 24 (the permission level) at join.
+    stream); its falling items merge after two ticks instead of forty; it sends entity event 24
+    (the permission level) at join.
 """
 from __future__ import annotations
 

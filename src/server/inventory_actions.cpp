@@ -9,8 +9,9 @@
 // The menu itself - what a click does - is server/inventory.cpp.
 //
 // Everyone is in creative mode, which decides two things here: the creative inventory screen
-// keeps its own copy and reports slots with set_creative_mode_slot (container_click only comes
-// from other screens, of which there are none yet), and what does not fit an inventory vanishes.
+// keeps its own copy and reports slots with set_creative_mode_slot (container_click comes from
+// the other screens: a chest, a furnace, a crafting table), and what does not fit an inventory
+// vanishes.
 #include "base/log.hpp"
 #include "server/game.hpp"
 
@@ -27,7 +28,6 @@ constexpr u32 kDropSpamStep = 20, kDropSpamLimit = 1480;
 constexpr double kDropBelowEyes = 0.30000001192092896;  // (double) 0.3f
 // Avatar.POSES: eye heights. Entity.eyeHeight follows the pose.
 constexpr float kEyeStanding = 1.62f, kEyeCrouching = 1.27f, kEyeLow = 0.4f;
-constexpr double kSoundRange = 16.0;  // SoundEvent.getRange for a volume of 1 and no fixed range
 
 float eye_height(u32 pose) { return pose == pose::kStanding ? kEyeStanding : pose == pose::kCrouching ? kEyeCrouching : kEyeLow; }
 
@@ -45,16 +45,16 @@ void Game::on_creative_slot(u32 pi, i32 slot, ItemStack stack, bool unsupported)
         // taken. The client shows it in the slot already, so the slot is sent back as it is here.
         LOG_DEBUG("%s: an item stack with components that are not supported yet was refused", p.name.c_str());
         if (valid_slot) {
-            p.menu.remote_is_unknown(slot);
-            p.menu.send_changes(out(pi), p.threshold);
+            p.menu.own_remote_is_unknown(slot);
+            p.menu.send_own_changes(out(pi), p.threshold);
         }
         return;
     }
     if (!stack.empty() && stack.count() > stack.max_stack()) return;  // "validData"
     if (valid_slot) {
-        p.menu.set_creative(slot, std::move(stack), menu_ctx());
+        p.menu.set_creative(slot, std::move(stack), menu_ctx(pi));
         apply_effects(pi);
-        p.menu.send_changes(out(pi), p.threshold);  // broadcastChanges: nothing, unless something else was pending
+        p.menu.send_own_changes(out(pi), p.threshold);  // broadcastChanges: nothing, unless something else was pending
         dirty_[pi] |= kEquipDirty;
     } else if (slot < 0) {
         p.drop_spam -= static_cast<u32>(std::min<u64>(p.drop_spam, tick_ - p.drop_spam_tick));  // TickThrottler.tick, caught up
@@ -72,9 +72,12 @@ void Game::on_creative_slot(u32 pi, i32 slot, ItemStack stack, bool unsupported)
 void Game::on_container_click(u32 pi, const sb::ContainerClick& c) {
     Player& p = players_[pi];
     Menu& menu = p.menu;
-    if (c.container_id != Menu::kContainerId) return;  // not the menu that is open
+    if (c.container_id != menu.container_id()) return;  // not the menu that is open
+    // containerMenu.stillValid: a click on a chest that is out of reach by now does nothing.
+    if (menu.kind() != Menu::Kind::kInventory && !menu_still_valid(pi)) return;
     // AbstractContainerMenu.isValidSlotIndex: -1 and -999 pass by name, the other negatives by oversight.
-    if (c.slot >= menu_slot::kCount) return;
+    const i32 slots = menu.slot_count();
+    if (c.slot >= slots) return;
     // What HashedStack.STREAM_CODEC throws on: ids that are in no registry.
     const auto decodable = [](const sb::HashedStack& h) {
         return !h.present || (h.item < world::item_count() && h.highest_type < item::component::kCount);
@@ -82,7 +85,7 @@ void Game::on_container_click(u32 pi, const sb::ContainerClick& c) {
     bool ok = decodable(c.carried);
     for (u32 i = 0; i < c.changed_count; ++i) ok &= decodable(c.changed[i].stack);
     const bool resync = c.state_id != menu.state_id();  // the client clicked on something older than what it was sent
-    if (ok) ok = menu.click(c.slot, c.button, c.input, menu_ctx());
+    if (ok) ok = menu.click(c.slot, c.button, c.input, menu_ctx(pi));
     if (!ok) {
         effects_.clear();
         kick(pi, "Invalid container click");
@@ -103,7 +106,7 @@ void Game::on_container_click(u32 pi, const sb::ContainerClick& c) {
     ItemStack believed;
     for (u32 i = 0; i < c.changed_count; ++i) {
         const i32 slot = c.changed[i].slot;
-        if (slot < 0 || slot >= menu_slot::kCount) continue;  // setRemoteSlotUnsafe
+        if (slot < 0 || slot >= slots) continue;  // setRemoteSlotUnsafe
         if (known(c.changed[i].stack, believed))
             menu.remote_is(slot, believed);
         else
@@ -114,19 +117,16 @@ void Game::on_container_click(u32 pi, const sb::ContainerClick& c) {
     else
         menu.remote_carried_is_unknown();
     if (resync)
-        menu.send_all(out(pi), p.threshold);  // broadcastFullState
+        menu.send_all(out(pi), p.threshold, containers(p));  // broadcastFullState
     else
-        menu.send_changes(out(pi), p.threshold);
+        menu.send_changes(out(pi), p.threshold, containers(p));
     dirty_[pi] |= kEquipDirty;
 }
 
-// handleContainerClose -> ServerPlayer.doCloseContainer. The only menu there is closes: what
-// was on the cursor and in the crafting grid goes back into the inventory.
-void Game::on_container_close(u32 pi) {
-    players_[pi].menu.close(menu_ctx());
-    apply_effects(pi);
-    touch_inventory(pi);
-}
+// handleContainerClose -> ServerPlayer.doCloseContainer. Whatever menu is open closes (the
+// packet's container id is not looked at): what was on the cursor and in a crafting grid goes
+// back into the inventory, and the player's own menu is the open one again.
+void Game::on_container_close(u32 pi) { close_menu(pi, false); }
 
 // handlePlayerAction DROP_ITEM / DROP_ALL_ITEMS -> ServerPlayer.drop(all): the Q key.
 void Game::on_drop_key(u32 pi, bool all) {
@@ -136,7 +136,7 @@ void Game::on_drop_key(u32 pi, bool all) {
 
 // handlePlayerAction SWAP_ITEM_WITH_OFFHAND: the F key. The client waits to be told.
 void Game::on_swap_hands(u32 pi) {
-    players_[pi].menu.swap_hands(menu_ctx());
+    players_[pi].menu.swap_hands(menu_ctx(pi));
     apply_effects(pi);
     touch_inventory(pi);
 }
@@ -147,12 +147,22 @@ void Game::on_swap_hands(u32 pi) {
 // client was last told (an item picked up, hands swapped) goes out now, ahead of the player's
 // own tick. Vanilla compares every slot of every player every tick; here only the menus
 // something has touched.
+//
+// A menu on a chest or a furnace is looked at every tick while it is open - somebody else may
+// have a hand in the same chest, and a furnace burns - and closed when its block is gone or
+// out of reach (containerMenu.stillValid).
 void Game::sync_menus() {
     const u32 n = static_cast<u32>(players_.size());
     for (u32 pi = 0; pi < n; ++pi) {
         if (LIKELY(!(dirty_[pi] & kMenuDirty))) continue;
         dirty_[pi] &= static_cast<u8>(~kMenuDirty);
-        players_[pi].menu.send_changes(out(pi), players_[pi].threshold);
+        Player& p = players_[pi];
+        p.menu.send_changes(out(pi), p.threshold, containers(p));
+        if (p.menu.kind() == Menu::Kind::kInventory) continue;
+        if (menu_still_valid(pi))
+            dirty_[pi] |= kMenuDirty;
+        else
+            close_menu(pi, true);
     }
 }
 
@@ -179,8 +189,9 @@ void Game::apply_effects(u32 pi) {
         Effect& fx = effects_[i];
         switch (fx.kind) {
             case Effect::kDrop: drop(pi, std::move(fx.stack), fx.thrown, fx.predicted); break;
-            case Effect::kEquipSound: play_sound(fx.sound, ents_.x[pi], ents_.y[pi], ents_.z[pi]); break;
+            case Effect::kEquipSound: play_sound(fx.value, ents_.x[pi], ents_.y[pi], ents_.z[pi]); break;
             case Effect::kInventorySlot: send(pi, cb::SetPlayerInventory{fx.slot, item::view(fx.stack)}); break;
+            case Effect::kSetSlot: send(pi, cb::ContainerSetSlot{fx.slot, fx.value, 0, item::view(fx.stack)}); break;
         }
     }
     effects_.clear();
@@ -234,13 +245,7 @@ bool Game::swing(u32 pi, u32 hand, proto::Swing how, bool to_self) {
 // ServerLevel.playSeededSound(null, x, y, z, sound, PLAYERS, 1, 1, seed) -> PlayerList.broadcast:
 // everyone closer than the sound's range, whoever caused it included.
 void Game::play_sound(u32 sound, double x, double y, double z) {
-    scratch_.clear();
-    write_packet(scratch_, s_.compression_threshold, cb::Sound{sound, cb::Sound::kSourcePlayers, x, y, z, 1.0f, 1.0f, random()});
-    const u32 n = static_cast<u32>(players_.size());
-    for (u32 i = 0; i < n; ++i) {
-        const double dx = x - ents_.x[i], dy = y - ents_.y[i], dz = z - ents_.z[i];
-        if (dx * dx + dy * dy + dz * dz < kSoundRange * kSoundRange) out(i).append(scratch_.data, scratch_.len);
-    }
+    play_sound(sound, cb::Sound::kSourcePlayers, x, y, z, 1.0f, 1.0f);
 }
 
 }  // namespace server

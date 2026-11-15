@@ -25,6 +25,7 @@
 #include "server/inventory.hpp"
 #include "server/prelogin.hpp"
 #include "server/settings.hpp"
+#include "world/collide.hpp"
 #include "world/dimension.hpp"
 #include "world/generator.hpp"
 
@@ -76,7 +77,23 @@ class Game {
         // stack thrown out of the creative inventory, -1 a tick.
         u32 drop_spam = 0;
         u64 drop_spam_tick = 0;
-        Menu menu;  // the inventory, and what the client knows of it
+        Menu menu;  // the inventory, the menu that is open, and what the client knows of both
+        // The menu that is open, when it is not the player's own: its number
+        // (ServerPlayer.containerCounter, 1..100), the block it was opened on, and for a chest
+        // or a furnace the block entities behind it (chests_ / furnaces_; a double chest has two).
+        u32 container_counter = 0;
+        proto::BlockPos open_pos{};
+        u32 open_data[2] = {kNone, kNone};
+    };
+    // Level.blockEvent: (b0, b1) for the block at a position, sent to who is near after the
+    // tracker (ServerLevel.runBlockEvents).
+    struct BlockEventData {
+        i32 x, y, z;
+        u8 b0, b1;
+    };
+    struct Recheck {  // a scheduled ChestBlock.tick
+        u64 tick;
+        i32 x, y, z;
     };
 
     void drain(u32 ri);
@@ -90,6 +107,7 @@ class Game {
     void remove_player(u32 pi);
     void refuse(u32 ri, const net::InHeader& h, const net::JoinTransport& t, std::string_view reason);
     void post(u32 ri, const net::OutMsg& m);
+    void init_titles();
 
     // ---- the player as an entity (server/players.cpp)
     void on_move(u32 pi, const proto::sb::MovePlayer& m, bool has_pos, bool has_rot);
@@ -112,7 +130,8 @@ class Game {
     void on_punch(u32 pi);
     bool swing(u32 pi, u32 hand, proto::Swing how, bool to_self);
     void play_sound(u32 sound, double x, double y, double z);
-    Menu::Ctx menu_ctx() { return {true, effects_}; }  // everyone is in creative mode
+    Containers containers(const Player& p);
+    Menu::Ctx menu_ctx(u32 pi) { return {true, effects_, containers(players_[pi])}; }  // everyone is in creative mode
     // Something changed, or may have, in a player's inventory.
     void touch_inventory(u32 pi) { dirty_[pi] |= kMenuDirty | kEquipDirty; }
     u64 random() {  // xorshift64*: for what vanilla draws from an entity's RandomSource
@@ -123,11 +142,40 @@ class Game {
     }
 
     // ---- item entities (server/item_entities.cpp)
-    void spawn_item(ItemStack stack, double x, double y, double z);
+    void spawn_item(ItemStack stack, double x, double y, double z, u64 pickup_delay = 40);
     void remove_item(u32 slot);
     void tick_items();
     void merge_item(u32 k);
     void pick_up_items(u32 pi);
+
+    // ---- block entities and the menus on them (server/block_entities.cpp)
+    bool set_block(proto::BlockPos pos, world::BlockState state);
+    void neighbour_changed(proto::BlockPos pos, u32 from_direction, world::BlockState changed);
+    bool use_block(u32 pi, proto::BlockPos pos, world::BlockState state, const ItemStack& held, u32 hand);
+    world::BlockState chest_for_placement(u32 pi, proto::BlockPos at, u32 face) const;
+    void open_menu(u32 pi, Menu::Kind kind, u32 menu_type, std::span<const u8> title, u32 rows);
+    void close_menu(u32 pi, bool tell_client);
+    bool menu_still_valid(u32 pi);
+    void close_menus_on(u32 kind, u32 data);
+    void chest_opened(u32 chest);
+    void chest_closed(u32 chest);
+    void chest_sound(const Chest& c, u32 sound);
+    void recheck_chests();
+    void run_block_events();
+    void tick_furnaces();
+    void drop_contents(proto::BlockPos pos, ItemStack* items, u32 n);
+    void play_sound(u32 sound, u32 source, double x, double y, double z, float volume, float pitch);
+    float random_float() { return static_cast<float>(random() >> 40) * (1.0f / 16777216.0f); }           // RandomSource.nextFloat
+    double random_double() { return static_cast<double>(random() >> 11) * (1.0 / 9007199254740992.0); }  // nextDouble
+    u32 random_int(u32 bound) { return static_cast<u32>((random() >> 32) * bound >> 32); }               // nextInt(bound)
+
+    // ---- TNT and explosions (server/explosion.cpp)
+    bool has_neighbour_signal(proto::BlockPos pos) const;
+    void prime_tnt(proto::BlockPos pos, i32 fuse, bool sound);
+    void tick_tnt();
+    bool move_tnt(u32 row);
+    void explode(double x, double y, double z, float radius);
+    float seen_percent(double cx, double cy, double cz, const world::Aabb& box) const;
 
     // ---- blocks (server/block_actions.cpp)
     void on_player_action(u32 pi, const proto::sb::PlayerAction& a);
@@ -135,7 +183,8 @@ class Game {
     void on_pick_block(u32 pi, const proto::sb::PickItemFromBlock& pk);
     bool client_loaded(const Player& p) const { return tick_ >= p.loaded_at_tick; }
     bool crouching(const Player& p) const { return p.shift && !p.flying; }
-    bool within_reach(u32 pi, proto::BlockPos pos) const;
+    bool within_reach(u32 pi, proto::BlockPos pos, double buffer = 1.0) const;
+    static u32 horizontal_direction(float yaw);
     bool destroy_block(u32 pi, proto::BlockPos pos);
     bool place_block(u32 pi, const proto::sb::UseItemOn& u, const ItemStack& held);
     bool obstructed(world::BlockState s, proto::BlockPos pos) const;
@@ -208,7 +257,38 @@ class Game {
     ItemGrid item_grid_;
     std::vector<u32> item_scratch_;  // candidates of one spatial query, as entity slots
     std::vector<u32> item_dead_;     // entity slots to remove at the end of tick_items()
+    std::vector<i8> item_health_;    // ItemEntity.health: 5, less what explosions took
     Effects effects_;                // what the menu operation being handled asks of the world
+
+    // Block entities: what a chest and a furnace hold. A world::BlockEntityRef's `data` is the
+    // index here; entries are reused (alive = false in between), never moved, so that the menus
+    // open on them can name them by index. Furnaces are walked every tick: the ones that
+    // neither burn nor could start to are skipped by one test (Furnace::idle).
+    std::vector<Chest> chests_;
+    std::vector<Furnace> furnaces_;
+    std::vector<u32> chest_free_, furnace_free_;
+    std::vector<BlockEventData> block_events_;
+    std::vector<Recheck> rechecks_;  // in the order they are due: the delay is always the same
+    usize recheck_head_ = 0;
+    // Menu titles, as the text components vanilla sends (text::transcode), and update_recipes.
+    std::vector<u8> title_chest_, title_double_chest_, title_furnace_, title_crafting_;
+    base::ByteBuf recipes_frame_;
+
+    // Primed TNT: the entities (by slot) that tick_tnt() moves and counts down.
+    std::vector<u32> tnt_;
+    std::vector<world::Aabb> collide_scratch_;
+    std::vector<world::BlockAt> blown_;  // explode(): the blocks one explosion reaches
+    world::BlastScratch blast_scratch_;
+    struct Collected {  // ServerExplosion.StackCollector
+        proto::BlockPos pos;
+        ItemStack stack;
+    };
+    std::vector<Collected> collected_;
+    struct Knock {  // ServerExplosion.hitPlayers: what an explosion gives a player's velocity
+        bool hit = false;
+        double v[3] = {0, 0, 0};
+    };
+    std::vector<Knock> knock_;
 };
 
 }  // namespace server
