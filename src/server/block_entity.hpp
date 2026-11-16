@@ -26,6 +26,9 @@ struct Chest {
     u16 open = 0;          // ContainerOpenersCounter.openCount: players that have it open
     bool recheck = false;  // a recount of them is scheduled (ChestBlock.tick, every 5 ticks while open)
     bool alive = false;    // false: a free entry of the store
+    // What its saved tag held that nothing here reads and nothing here needs to act as vanilla
+    // does (an imported block entity's `components`...): an entry of Game::opaque_, ~0 for none.
+    u32 keep = ~0u;
 };
 
 struct Furnace {
@@ -47,6 +50,7 @@ struct Furnace {
     i32 cook_total = 0;     // cookingTotalTime: ticks it takes
     i32 x = 0, y = 0, z = 0;
     bool alive = false;
+    u32 keep = ~0u;  // as Chest::keep: the recipes it has used (experience it owes), for one
 
     i32 data(u32 i) const { return i == 0 ? lit_remaining : i == 1 ? lit_total : i == 2 ? cook : cook_total; }
     // Nothing a tick would change: not burning, nothing cooked half-way, and not both an input

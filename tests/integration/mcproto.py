@@ -48,6 +48,7 @@ def load_meta() -> dict:
     return {
         "protocol": int(re.search(r"kProtocolVersion = (\d+)", text).group(1)),
         "version": re.search(r'kVersionName = "([^"]+)"', text).group(1),
+        "world_version": int(re.search(r"kWorldVersion = (\d+)", text).group(1)),
     }
 
 
@@ -407,6 +408,16 @@ class Client:
         self.window = None
         self.block_events: list[tuple] = []    # ((x, y, z), b0, b1, block id)
         self.explosions: list[dict] = []
+        # The chunks the client holds (ClientChunkCache), kept up to date by recv() like the
+        # entities: position -> the chunk as parse_chunk() reads it. A batch is answered as a
+        # client answers it (ClientPacketListener.handleChunkBatchFinished), asking for
+        # chunks_per_tick more.
+        self.chunks = ChunkCache()
+        self.chunk_center = None               # set_chunk_cache_center
+        self.chunk_log: list[tuple] = []       # ("center", x, z) | ("batch", [positions]) | ("forget", x, z) in arrival order
+        self.chunks_per_tick = 64.0
+        self._batch = None
+        self._backlog: list[tuple] = []        # packets sync_chunks() read past: recv() hands them out first
         self.recipe_sets: dict[str, set] = {}  # update_recipes: property set name -> item ids
         self.permission_level = None           # entity event 24 + level about the player itself
         self.commands = None                   # the last `commands` packet, as parse_commands() returns it
@@ -445,6 +456,11 @@ class Client:
     def recv(self) -> tuple[str, Reader]:
         """The next packet that is not about an entity; those are applied to self.entities."""
         while True:
+            if self._backlog:
+                name, r = self._backlog.pop(0)
+                if name in self.ignore:
+                    continue
+                return name, r
             name, r = self.recv_any()
             if self.state != "play":
                 return name, r
@@ -452,8 +468,70 @@ class Client:
                 self.apply_entity_packet(name, r)
             elif name in MENU_PACKETS:
                 self.apply_menu_packet(name, r)
+            elif name in CHUNK_PACKETS:
+                self.apply_chunk_packet(name, r)
             elif name not in self.ignore:
                 return name, r
+
+    def apply_chunk_packet(self, name: str, r: Reader) -> None:
+        """What ClientPacketListener does with the packets that bring and take chunks."""
+        def signed(v: int) -> int:
+            return struct.unpack(">i", struct.pack(">I", v & 0xFFFFFFFF))[0]
+        if name == "set_chunk_cache_center":
+            self.chunk_center = (signed(r.varint()), signed(r.varint()))
+            r.done()
+            self.chunk_log.append(("center", *self.chunk_center))
+        elif name == "chunk_batch_start":
+            r.done()
+            assert self._batch is None, "a chunk batch inside a chunk batch"
+            self._batch = []
+        elif name == "level_chunk_with_light":
+            assert self._batch is not None, "a chunk outside a batch"
+            pos = struct.unpack(">ii", r.d[r.i:r.i + 8])
+            assert pos not in self.chunks, f"chunk {pos} sent twice"
+            self.chunks.put(pos, bytes(r.d[r.i:]))
+            self._batch.append(pos)
+        elif name == "chunk_batch_finished":
+            assert self._batch is not None and r.varint() == len(self._batch), "chunk_batch_finished does not count its batch"
+            r.done()
+            self.chunk_log.append(("batch", self._batch))
+            self._batch = None
+            self.send("chunk_batch_received", struct.pack(">f", self.chunks_per_tick))
+        else:  # forget_level_chunk: a ChunkPos as one long, z in the high half
+            packed = r.u64()
+            r.done()
+            pos = (signed(packed), signed(packed >> 32))
+            self.chunks.drop(pos)
+            self.chunk_log.append(("forget", *pos))
+
+    def sync_chunks(self, distance: int, center: tuple | None = None, ticks: int = 600) -> None:
+        """Wait until the chunks held are exactly the view (ChunkTrackingView) at this view distance
+        around chunk_center - which has to be `center`, if one is given. Whatever else arrives
+        meanwhile is kept for recv(), in order."""
+        def settled() -> bool:
+            return (self.chunk_center is not None and (center is None or self.chunk_center == tuple(center))
+                    and set(self.chunks) == view_chunks(*self.chunk_center, distance))
+        seen = []
+        backlog, self._backlog = self._backlog, []
+        try:
+            for i in range(ticks):
+                if settled():
+                    return
+                self.send("ping_request", struct.pack(">q", 0xC4000 + i))
+                while True:
+                    name, r = self.recv()
+                    if name == "pong_response" and r.d[r.i:r.i + 8] == struct.pack(">q", 0xC4000 + i):
+                        break
+                    if name == "keep_alive":
+                        self.send("keep_alive", r.take(8))
+                    else:
+                        seen.append((name, r))
+        finally:
+            self._backlog = backlog + seen
+        want = view_chunks(*self.chunk_center, distance) if self.chunk_center else set()
+        raise AssertionError(f"the view never settled around {center or self.chunk_center}: {len(self.chunks)} chunks held, "
+                             f"{len(want)} wanted; missing {sorted(want - set(self.chunks))[:8]}, "
+                             f"extra {sorted(set(self.chunks) - want)[:8]}")
 
     def ticks(self, n: int) -> None:
         """Let at least n - 1 whole server ticks pass, and receive everything they sent.
@@ -483,6 +561,8 @@ class Client:
                     self.apply_entity_packet(name, r)
                 elif name in MENU_PACKETS:
                     self.apply_menu_packet(name, r)
+                elif name in CHUNK_PACKETS:
+                    self.apply_chunk_packet(name, r)
                 elif name == "keep_alive":
                     self.send("keep_alive", r.take(8))
         finally:
@@ -669,6 +749,49 @@ class Client:
 ENTITY_PACKETS = {"bundle_delimiter", "add_entity", "remove_entities", "set_entity_data", "move_entity_pos",
                   "move_entity_pos_rot", "move_entity_rot", "entity_position_sync", "rotate_head", "set_entity_motion",
                   "set_equipment", "take_item_entity", "swing_animation", "entity_event", "teleport_entity"}
+CHUNK_PACKETS = {"set_chunk_cache_center", "chunk_batch_start", "level_chunk_with_light", "chunk_batch_finished",
+                 "forget_level_chunk"}
+
+
+def view_chunks(cx: int, cz: int, distance: int) -> set:
+    """ChunkTrackingView.Positioned: the chunks a player at chunk (cx, cz) is shown with this view
+    distance - isWithinDistance(..., includeNeighbors = true): a square one chunk wider than the
+    distance, with its corners cut."""
+    return {(x, z) for x in range(cx - distance - 1, cx + distance + 2) for z in range(cz - distance - 1, cz + distance + 2)
+            if max(0, abs(x - cx) - 2) ** 2 + max(0, abs(z - cz) - 2) ** 2 < distance * distance}
+
+
+class ChunkCache(dict):
+    """position -> chunk. A chunk is kept as its packet's bytes and parsed when it is asked for:
+    a scenario joins with hundreds of chunks and looks at two."""
+
+    def __init__(self):
+        super().__init__()
+        self._parsed = {}
+
+    def put(self, pos: tuple, packet: bytes) -> None:
+        super().__setitem__(pos, packet)
+        self._parsed.pop(pos, None)
+
+    def drop(self, pos: tuple) -> None:
+        super().pop(pos, None)
+        self._parsed.pop(pos, None)
+
+    def raw(self, pos: tuple) -> bytes:
+        return super().__getitem__(pos)
+
+    def __getitem__(self, pos: tuple) -> dict:
+        if pos not in self._parsed:
+            self._parsed[pos] = parse_chunk(Reader(super().__getitem__(pos)))
+        return self._parsed[pos]
+
+    def values(self):
+        return [self[k] for k in self]
+
+    def items(self):
+        return [(k, self[k]) for k in self]
+
+
 MENU_PACKETS = {"container_set_content", "container_set_slot", "set_cursor_item", "set_player_inventory", "set_held_slot",
                 "sound", "open_screen", "container_set_data", "container_close", "update_recipes", "block_event", "explode",
                 "commands", "stop_sound"}

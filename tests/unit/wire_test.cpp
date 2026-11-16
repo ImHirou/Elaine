@@ -528,6 +528,17 @@ TEST(Packets, ContainerAndExplosionLayoutsAreWhatVanillaSent) {
     EXPECT_EQ(body_hex(e), sent);
 }
 
+// ServerboundChunkBatchReceivedPacket: one float, how many chunks a tick the client would like.
+TEST(Packets, ChunkBatchReceivedLayout) {
+    const u8 body[] = {0x41, 0x48, 0x00, 0x00};  // 12.5f
+    Reader r(body, sizeof body);
+    EXPECT_EQ(sb::ChunkBatchReceived::decode(r).desired_chunks_per_tick, 12.5f);
+    EXPECT_TRUE(r.done());
+    Reader cut(body, 3);
+    sb::ChunkBatchReceived::decode(cut);
+    EXPECT_FALSE(cut.ok);
+}
+
 TEST(Packets, ContainerClickLayout) {
     // ServerboundContainerClickPacket: container id, state id, slot (short), button (byte), input,
     // the changed slots as a map short -> HashedStack, the carried HashedStack. A HashedStack is

@@ -59,13 +59,9 @@ void Game::on_move(u32 pi, const sb::MovePlayer& m, bool has_pos, bool has_rot) 
     ents_.y[pi] = std::clamp(m.y, -kMaxVertical, kMaxVertical);
     ents_.z[pi] = z;
     move_in_push_grid(ents_.slot[pi], x, z);
+    // ChunkMap.move: the view follows the chunk the player is in.
     const i32 cx = chunk_of(x), cz = chunk_of(z);
-    if (UNLIKELY(cx != pcx_[pi] || cz != pcz_[pi])) {
-        const i32 ocx = pcx_[pi], ocz = pcz_[pi];
-        pcx_[pi] = cx;
-        pcz_[pi] = cz;
-        send_view(pi, ocx, ocz, false);
-    }
+    if (UNLIKELY(cx != pcx_[pi] || cz != pcz_[pi])) apply_view(pi, cx, cz, pview_[pi]);
 }
 
 // handlePlayerCommand. Everything but sprinting acts on things that do not exist yet (beds,
@@ -78,11 +74,13 @@ void Game::on_player_command(u32 pi, const sb::PlayerCommand& c) {
         ents_.set_shared_flag(pi, shared_flag::kSprinting, false);
 }
 
-// handleClientInformation -> ServerPlayer.updateOptions, the part other players can see. The
-// view distance is not applied yet: the chunk view would have to grow or shrink with it.
+// handleClientInformation -> ServerPlayer.updateOptions: the part other players can see, and the
+// view distance - the view grows or shrinks with it (ChunkMap.getPlayerViewDistance: what the
+// client asks for, within 2 and the server's own; vanilla applies it at the next ChunkMap.tick).
 void Game::on_client_information(u32 pi, const sb::ClientInformation& info) {
     ents_.set_skin_parts(pi, info.skin_parts);
     ents_.set_main_hand(pi, info.main_hand == entity::kMainHandRight ? entity::kMainHandRight : entity::kMainHandLeft);
+    apply_view(pi, pcx_[pi], pcz_[pi], std::clamp<i32>(info.view_distance, 2, static_cast<i32>(s_.view_distance)));
 }
 
 // The per-connection half of the tick: ServerGamePacketListenerImpl.tick acknowledges block

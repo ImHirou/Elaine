@@ -104,10 +104,24 @@ bool Game::obstructed(BlockState s, BlockPos pos) const {
     return false;
 }
 
-void Game::find_viewers(i32 cx, i32 cz) {
+// ChunkMap.getPlayers(pos, borderOnly): viewers_ gets the players that track the chunk - it is in
+// their view and has been sent - and, when asked for, border_ those of them for whom one of the
+// eight chunks around it is not tracked (isChunkOnTrackedBorder).
+void Game::find_viewers(i32 cx, i32 cz, bool want_border) {
     viewers_.clear();
     border_.clear();
-    server::find_viewers(pcx_.data(), pcz_.data(), pview_.data(), static_cast<u32>(players_.size()), cx, cz, viewers_, border_);
+    find_in_view(pcx_.data(), pcz_.data(), pview_.data(), static_cast<u32>(players_.size()), cx, cz, kViewMargin, viewers_);
+    usize kept = 0;
+    for (const u32 pi : viewers_) {
+        if (UNLIKELY(senders_[pi].pending != 0) && senders_[pi].test(cx, cz)) continue;
+        viewers_[kept++] = pi;
+        if (!want_border) continue;
+        bool border = false;
+        for (i32 dz = -1; dz <= 1 && !border; ++dz)
+            for (i32 dx = -1; dx <= 1 && !border; ++dx) border = (dx || dz) && !chunk_tracked(pi, cx + dx, cz + dz);
+        if (border) border_.push_back(pi);
+    }
+    viewers_.resize(kept);
 }
 
 // ---------------------------------------------------------------------------- breaking
@@ -183,15 +197,20 @@ void Game::on_use_item_on(u32 pi, const sb::UseItemOn& u) {
         const BlockState clicked = world_.block(pos.x, pos.y, pos.z);
         const world::BlockInfo& block = world::block_info_of(clicked);
         const bool takes_click = !(p.shift && hands_full) && (block.flags & block_flag::kInteractive);
-        // A block with a use hook that nobody has ported cannot be placed; if a generator ever
-        // makes one, doing nothing is the only answer that does not invent behaviour.
-        const bool unknown = takes_click && block.kind == gen::block_kind::kPlain;
+        // A block with a use hook that nobody has ported cannot be placed; where a world that was
+        // imported holds one, doing nothing is the only answer that does not invent behaviour.
+        // The same for a block entity that is kept as the tag it came with: a chest whose
+        // contents this server does not read is not opened as if it were empty.
+        const world::BlockEntityRef* be =
+            block.block_entity != gen::kNoBlockEntity ? world_.block_entity(pos.x, pos.y, pos.z) : nullptr;
+        const bool unknown = takes_click && (block.kind == gen::block_kind::kPlain || (be && (be->data & kOpaqueBlockEntity)));
         // InteractionResult.SUCCESS - of the block, or of BlockItem.place: the arm swings. The
         // client predicted it for itself; the others see the hand's interact animation, which no
         // item changes (gen.py checks). Vanilla runs the swing twice here - the same branch
         // stands twice in handleUseItemOn - and so sends two packets; the second begins the same
         // swing again in the same tick, which no client can tell from one.
-        if ((takes_click && use_block(pi, pos, clicked, held, u.hand)) || (!unknown && !held.empty() && place_block(pi, u, held)))
+        if ((takes_click && !unknown && use_block(pi, pos, clicked, held, u.hand)) ||
+            (!unknown && !held.empty() && place_block(pi, u, held)))
             swing(pi, u.hand, {}, false);
     }
     // Whatever happened, the client predicted something: tell it what the two blocks it may have
@@ -284,7 +303,7 @@ void Game::broadcast_changes() {
     // change itself.
     for (world::Chunk* c : world_.light_changes()) {
         if (!(c->sky_changed | c->block_changed)) continue;
-        find_viewers(c->x, c->z);
+        find_viewers(c->x, c->z, true);
         if (border_.empty()) continue;
         scratch_.clear();
         world::write_light_update(scratch_, threshold, *c, c->sky_changed, c->block_changed);
@@ -297,7 +316,7 @@ void Game::broadcast_changes() {
         world::Chunk* c = changes[i].chunk;
         usize end = i;
         while (end < changes.size() && changes[end].chunk == c) ++end;
-        find_viewers(c->x, c->z);
+        find_viewers(c->x, c->z, false);
         if (!viewers_.empty()) {
             scratch_.clear();
             for (usize j = i; j < end;) {

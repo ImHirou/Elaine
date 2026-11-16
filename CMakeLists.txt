@@ -99,6 +99,7 @@ find_package(Threads REQUIRED)
 # ---------------------------------------------------------------------------- targets
 add_library(core STATIC
   src/base/log.cpp
+  src/base/workers.cpp
   src/proto/wire.cpp
   src/proto/frame.cpp
   src/proto/static_data.cpp
@@ -113,7 +114,11 @@ add_library(core STATIC
   src/world/block.cpp
   src/world/section.cpp
   src/world/light.cpp
+  src/world/chunk.cpp
   src/world/chunk_codec.cpp
+  src/world/chunk_io.cpp
+  src/world/region.cpp
+  src/world/store.cpp
   src/world/generator.cpp
   src/world/dimension.cpp
   src/world/collide.cpp
@@ -125,6 +130,10 @@ add_library(core STATIC
   src/entity/tracker.cpp
   src/server/prelogin.cpp
   src/server/block_entity.cpp
+  src/server/chunks.cpp
+  src/server/import.cpp
+  src/server/persist.cpp
+  src/server/world_setup.cpp
   src/server/inventory.cpp
   src/server/inventory_actions.cpp
   src/server/item_entities.cpp
@@ -161,6 +170,7 @@ if(MC_TESTS)
       tests/unit/crypto_test.cpp
       tests/unit/spsc_test.cpp
       tests/unit/world_test.cpp
+      tests/unit/store_test.cpp
       tests/unit/physics_test.cpp
       tests/unit/light_test.cpp
       tests/unit/entity_test.cpp
@@ -176,7 +186,7 @@ if(MC_TESTS)
     if(Python3_FOUND)
       add_test(NAME integration
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/integration/run.py $<TARGET_FILE:server_exe>)
-      set_tests_properties(integration PROPERTIES TIMEOUT 240)
+      set_tests_properties(integration PROPERTIES TIMEOUT 480)
     endif()
   else()
     message(WARNING "GoogleTest not found: unit tests are not built")

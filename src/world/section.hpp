@@ -24,17 +24,28 @@
 
 namespace world {
 
+// Where sections get their blocks. The world's own allocator is a pool per size, owned by the
+// tick thread. A worker that builds a chunk outside the world has an ChunkArena instead: its sections
+// are copied into the pools when the chunk is adopted (Section::copy_from), and the arena goes.
 class SectionAllocator {
   public:
     SectionAllocator();
-    void* alloc(u32 bits) { return pools_[pool_of(bits)].alloc(); }
-    void free(u32 bits, void* p) { pools_[pool_of(bits)].free(p); }
+    explicit SectionAllocator(ChunkArena& arena) : arena_(&arena) {}
+    ALWAYS_INLINE void* alloc(u32 bits) {
+        if (UNLIKELY(arena_ != nullptr)) return arena_->alloc(block_size(bits));
+        return pools_[pool_of(bits)].alloc();
+    }
+    ALWAYS_INLINE void free(u32 bits, void* p) {
+        if (LIKELY(arena_ == nullptr)) pools_[pool_of(bits)].free(p);
+    }
     usize reserved_bytes() const;
     usize live_blocks() const;
 
   private:
     static u32 pool_of(u32 bits) { return bits <= 8 ? bits - 1 : 8; }
+    static u32 block_size(u32 bits);
     BlockPool pools_[9];
+    ChunkArena* arena_ = nullptr;
 };
 
 struct Section {
@@ -80,11 +91,15 @@ struct Section {
     void fill(SectionAllocator& a, BlockState s);                // every block = s
     void assign(SectionAllocator& a, const BlockState* states);  // all 4096 at once (generators, loaders)
     void copy_from(SectionAllocator& a, const Section& o);
-    void unpack(BlockState* RESTRICT out) const;                 // all 4096 states
+    // A section as it was saved: 4096 dense `bits`-wide indices into `pal` (bits 1..8), or raw
+    // states (bits 16, `pal` unused). False - and the section is left as it was - when that is not
+    // a section: a width that does not exist, an index past the palette, a state that is none.
+    bool load(SectionAllocator& a, u32 new_bits, const u16* pal, u32 pal_len, const u8* packed);
+    void unpack(BlockState* RESTRICT out) const;  // all 4096 states
     // Drop dead palette slots and shrink to the narrowest width that still fits. Never changes what
     // get() returns; cheap to call when nothing is to be gained.
     void compact(SectionAllocator& a);
-    void release(SectionAllocator& a);                           // free the block; the section becomes uniform air
+    void release(SectionAllocator& a);  // free the block; the section becomes uniform air
 
     // Slot holding state s, or kNoSlot. Valid for bits 1..8.
     ALWAYS_INLINE u32 find(BlockState s) const {

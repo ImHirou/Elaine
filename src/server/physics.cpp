@@ -20,7 +20,8 @@
 // Both are exactly what the full tick would have done - as long as what that tick reads stays
 // as it is. So whatever changes it wakes the entity: a block set within reach (Game::set_block
 // -> wake_near), a push or a teleport, another entity put where it stands, a player in its box.
-// (Chunks do not stop ticking yet. When they can, that wakes what is in them.)
+// A chunk that stops ticking wakes the items in it (Game::tend_chunks): at rest or not, nothing
+// is ticked where chunks do not tick.
 //
 // What is NOT here (docs/architecture.md has the reasons):
 //   * a brain: a living entity is moved as LivingEntity.travel moves one that wants nothing -
@@ -94,11 +95,15 @@ void Game::tick_entities() {
         const u32 row = ents_.by_slot(slot);
         // inEntityTickingRange: not in a chunk that is not loaded with its neighbours - there
         // would be nothing to stand on. (Vanilla draws that line at the simulation distance of
-        // the nearest player; here a chunk ticks from the moment someone has seen it.)
+        // the nearest player; here a chunk ticks while every chunk around it is loaded and lit,
+        // which is so within a view and for a while after the last player has gone.)
         const world::Chunk* chunk = world_.find(chunk_of(ents_.x[row]), chunk_of(ents_.z[row]));
         const u8 kind = movers_[slot].kind;
         if (UNLIKELY(!chunk || !chunk->ticking)) {
             if (kind == gp::kMoverItem) freeze_item(slot);
+            // Thrown past everything that is loaded: the chunk it is over is brought in, so that
+            // there is a chunk to keep it - an entity is saved with the chunk it stands in.
+            if (UNLIKELY(!chunk)) world_.request(chunk_of(ents_.x[row]), chunk_of(ents_.z[row]));
             continue;
         }
         if (kind == gp::kMoverItem)

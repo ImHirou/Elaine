@@ -26,21 +26,35 @@ constexpr u8 kCreative = 1;
 constexpr std::string_view kOverworld = "minecraft:overworld";
 // ServerGamePacketListenerImpl: a client that never sends player_loaded counts as loaded after 60 ticks.
 constexpr u64 kClientLoadTimeoutTicks = 60;
-constexpr double kSpawnX = 8.5, kSpawnZ = 8.5;
 
 constexpr proto::gen::dimension::Type kOverworldType = proto::gen::dimension::kTypes[reg::dimension_type::kOverworld];
 }  // namespace
 
-Game::Game(const Settings& s, std::vector<std::unique_ptr<net::Reactor>>& reactors, std::atomic<u32>& online, Console* console)
+Game::Game(const Settings& s, std::vector<std::unique_ptr<net::Reactor>>& reactors, std::atomic<u32>& online, Console* console,
+           const WorldInfo& world, base::Workers& workers)
     : s_(s),
       reactors_(reactors),
       online_(online),
-      generator_(kOverworldType.min_y, static_cast<u32>(kOverworldType.height) / 16, world::FlatGenerator::default_layers(),
-                 static_cast<u16>(reg::worldgen_biome::kPlains)),
-      world_(reg::dimension_type::kOverworld, std::string(kOverworld), generator_, s.compression_threshold),
+      workers_(workers),
+      info_(world),
+      flat_generator_(kOverworldType.min_y, static_cast<u32>(kOverworldType.height) / 16, world.layers, world.biome),
+      empty_generator_(world.sea_level, world.biome),
+      generator_(world.flat ? static_cast<world::ChunkGenerator&>(flat_generator_) : empty_generator_),
+      world_(reg::dimension_type::kOverworld, std::string(kOverworld), generator_, s.compression_threshold, &workers,
+             world.chunk_dir, s.sync_chunk_writes),
       tracker_(ents_, s.compression_threshold, s.entity_broadcast_range),
       rng_(base::now_ns() | 1),
       console_(console) {
+    world_.keep_adopted(true);
+    // Where players appear: on top of what stands at the world's spawn (the chunk is read for
+    // it, once, here), or where the world says when nothing stands there.
+    const i32 sx = world.has_spawn ? world.spawn[0] : 8, sz = world.has_spawn ? world.spawn[2] : 8;
+    const world::Chunk& at_spawn = world_.load(sx >> 4, sz >> 4);
+    const u32 top = at_spawn.motion_blocking.get(static_cast<u32>(sx & 15) + static_cast<u32>(sz & 15) * 16);
+    spawn_[0] = sx + 0.5;
+    spawn_[1] = top ? world_.min_y() + static_cast<i32>(top) : world.has_spawn ? world.spawn[1] : generator_.spawn_height();
+    spawn_[2] = sz + 0.5;
+    pump_chunks(0);  // (what the spawn chunk holds of the game's)
     pcx_.reserve(s.max_players);
     pcz_.reserve(s.max_players);
     pview_.reserve(s.max_players);
@@ -87,11 +101,19 @@ void Game::run(const std::atomic<bool>& stop) {
         // is the menu), then the block entities (furnaces) - then the per-connection tick (block
         // change acks, the player's own tick), and one flush per player at the end.
         entities_ticked_ = false;
+        pump_chunks(t0);  // the chunks the workers have ready enter the world
         for (u32 ri = 0; ri < reactors_.size(); ++ri) drain(ri);
         run_console();     // DedicatedServer.tickConnection: the console's lines after the players' packets
         recheck_chests();  // ServerLevel.tick: scheduled block ticks come first
         broadcast_changes();
+        tend_chunks();  // ChunkMap.tick: what nobody needs is saved and leaves (the change lists are empty here)
         const u64 t1 = base::now_ns();
+        pending_views_.resize(players_.size());
+        for (u32 pi = 0; pi < players_.size(); ++pi) {
+            const ChunkSender& cs = senders_[pi];
+            pending_views_[pi] = {cs.bits, cs.x0, cs.z0, cs.side, cs.pending};
+        }
+        tracker_.set_pending_chunks(pending_views_.data());
         tracker_.tick(out_.data());
         track_ns += base::now_ns() - t1;
         run_block_events();  // ...block events after the chunks and the tracker, before the entities
@@ -108,6 +130,8 @@ void Game::run(const std::atomic<bool>& stop) {
             for (u32 pi = 0; pi < players_.size(); ++pi) send_commands(pi);
             commands_sent_ = commands_.version();
         }
+        send_chunks();  // MinecraftServer.tickChildren ends with "send chunks"
+        workers_.kick();
         const u64 t2 = base::now_ns();
         sent_bytes += flush();
         const u64 t3 = base::now_ns();
@@ -119,11 +143,12 @@ void Game::run(const std::atomic<bool>& stop) {
             LOG_DEBUG(
                 "tick: %.3f ms avg, %.3f ms worst, %.3f ms of it the entity tracker, %.3f ms the entities' own ticks, %.3f ms "
                 "flush; "
-                "%.1f KiB/tick sent; %zu players, %u entities (%u at rest), %zu chunks, %.1f MiB of world",
+                "%.1f KiB/tick sent; %zu players, %u entities (%u at rest), %zu chunks (%zu on their way, %zu to be written), "
+                "%.1f MiB of world",
                 static_cast<double>(busy_ns) / kStatsEvery / 1e6, static_cast<double>(worst_ns) / 1e6,
                 static_cast<double>(track_ns) / kStatsEvery / 1e6, static_cast<double>(move_ns) / kStatsEvery / 1e6,
                 static_cast<double>(flush_ns) / kStatsEvery / 1e6, static_cast<double>(sent_bytes) / kStatsEvery / 1024.0,
-                players_.size(), ents_.size(), asleep_, world_.chunk_count(),
+                players_.size(), ents_.size(), asleep_, world_.chunk_count(), world_.loading_count(), world_.store().waiting(),
                 static_cast<double>(world_.memory_bytes()) / (1024.0 * 1024.0));
             busy_ns = worst_ns = track_ns = move_ns = flush_ns = sent_bytes = 0;
         }
@@ -139,6 +164,7 @@ void Game::run(const std::atomic<bool>& stop) {
     }
     while (!players_.empty()) kick(static_cast<u32>(players_.size()) - 1, "Server closed");
     for (auto& r : reactors_) r->wake();
+    save_world();
 }
 
 void Game::drain(u32 ri) {
@@ -247,21 +273,23 @@ void Game::on_join(u32 ri, const InHeader& h, const u8* payload, u32 n) {
     p.keepalive_sent_ns = base::now_ns();  // first keep-alive one interval from now
     p.loaded_at_tick = tick_ + kClientLoadTimeoutTicks;
     if (const u32 op = find_op(p.uuid); op != kNone) p.level = ops_[op].level;  // MinecraftServer.getProfilePermissions
-    const double spawn_y = generator_.spawn_height();
+    const double spawn_y = spawn_[1];
     // The entity: a player's row in the entity table is its index here (the store keeps players
     // in front). Whoever is near is shown it by the tracker at the end of this tick, after the
     // tab-list entry below - a client drops an add_entity for a player it has no entry for.
     entity::Store::Moves moved;
-    const u32 ei = tracker_.spawn(entity_type::kPlayer, true, p.uuid, kSpawnX, spawn_y, kSpawnZ, 0, 0, moved);
+    const u32 ei = tracker_.spawn(entity_type::kPlayer, true, p.uuid, spawn_[0], spawn_y, spawn_[2], 0, 0, moved);
     DCHECK(ei == pi);
     (void)ei;
-    enter_push_grid(ents_.slot[pi], kSpawnX, kSpawnZ, entity_type::kInfo[entity_type::kPlayer].width);
+    enter_push_grid(ents_.slot[pi], spawn_[0], spawn_[2], entity_type::kInfo[entity_type::kPlayer].width);
     ents_.set_skin_parts(pi, j.skin_parts);  // ServerPlayer.updateOptions
     ents_.set_main_hand(pi, j.main_hand);
-    pcx_.push_back(chunk_of(kSpawnX));
-    pcz_.push_back(chunk_of(kSpawnZ));
+    pcx_.push_back(chunk_of(spawn_[0]));
+    pcz_.push_back(chunk_of(spawn_[2]));
+    // ChunkMap.getPlayerViewDistance: what the client asked for, within 2 and the server's own.
     pview_.push_back(std::min<i32>(std::max<i32>(j.view_distance, 2), static_cast<i32>(s_.view_distance)));
     tracker_.set_view_distance(pi, static_cast<u32>(pview_[pi]));
+    senders_.emplace_back();
     ack_.push_back(-1);
     dirty_.push_back(0);
     out_.push_back(pool_.get(kOutInitial));
@@ -311,11 +339,12 @@ void Game::on_join(u32 ri, const InHeader& h, const u8* payload, u32 n) {
     const cb::PlayerInfoEntry self{p.profile_wire, kCreative, true, 0};
     broadcast(cb::PlayerInfoAdd{{&self, 1}});
 
-    send(pi, cb::SetDefaultSpawnPosition{kOverworld, static_cast<i32>(kSpawnX), static_cast<i32>(spawn_y),
-                                         static_cast<i32>(kSpawnZ), 0, 0});
+    send(pi,
+         cb::SetDefaultSpawnPosition{kOverworld, floor_int(spawn_[0]), static_cast<i32>(spawn_y), floor_int(spawn_[2]), 0, 0});
     send(pi, cb::GameEvent{cb::GameEvent::kLevelChunksLoadStart, 0});
-    send_view(pi, pcx_[pi], pcz_[pi], true);
-    // send_view may have generated chunks: `p` is still valid (players_ is not touched), re-read nothing.
+    // ServerLevel.addNewPlayer -> ChunkMap.updatePlayerStatus: the view is the player's from here
+    // on. Its chunks go out batch by batch, from the end of this tick on (send_chunks).
+    apply_view(pi, pcx_[pi], pcz_[pi], pview_[pi]);
     // ServerPlayer.initInventoryMenu: the whole menu, which is empty - nothing is saved yet.
     p.menu.send_all(out(pi), p.threshold);
     send(pi, cb::SystemChat{"Welcome, " + players_[pi].name + "!"});
@@ -366,6 +395,7 @@ void Game::remove_player(u32 pi) {
         pcx_[pi] = pcx_[last];
         pcz_[pi] = pcz_[last];
         pview_[pi] = pview_[last];
+        senders_[pi] = senders_[last];
         ack_[pi] = ack_[last];
         dirty_[pi] = dirty_[last];
         out_[pi] = out_[last];
@@ -375,6 +405,7 @@ void Game::remove_player(u32 pi) {
     pcx_.pop_back();
     pcz_.pop_back();
     pview_.pop_back();
+    senders_.pop_back();
     ack_.pop_back();
     dirty_.pop_back();
     out_.pop_back();
@@ -425,6 +456,11 @@ HOT void Game::on_packet(u32 pi, const u8* body, u32 n) {
             break;
         }
         case sbid::kPlayerLoaded: p.loaded_at_tick = 0; break;
+        case sbid::kChunkBatchReceived: {
+            const auto b = sb::ChunkBatchReceived::decode(rd);
+            if (rd.ok) on_chunk_batch_received(pi, b.desired_chunks_per_tick);
+            break;
+        }
         case sbid::kPlayerInput: {
             const auto in = sb::PlayerInput::decode(rd);
             if (rd.ok && client_loaded(p)) {
@@ -508,36 +544,6 @@ HOT void Game::on_packet(u32 pi, const u8* body, u32 n) {
             if (rd.done()) on_punch(pi);
             break;
         default: break;  // not handled yet: the packet is skipped, not an error
-    }
-}
-
-// Send the chunks that entered the view square around the player's chunk and forget those that left.
-void Game::send_view(u32 pi, i32 ocx, i32 ocz, bool initial) {
-    Player& p = players_[pi];
-    const i32 r = pview_[pi], pcx = pcx_[pi], pcz = pcz_[pi];
-    base::ByteBuf& o = out(pi);
-    write_packet(o, p.threshold, cb::SetChunkCacheCenter{pcx, pcz});
-    write_packet(o, p.threshold, cb::ChunkBatchStart{});
-    u32 sent = 0;
-    // Rings outward from the centre, so the chunk under the player's feet arrives first.
-    for (i32 d = 0; d <= r; ++d) {
-        for (i32 dx = -d; dx <= d; ++dx) {
-            for (i32 dz = -d; dz <= d; ++dz) {
-                if (std::max(std::abs(dx), std::abs(dz)) != d) continue;
-                const i32 x = pcx + dx, z = pcz + dz;
-                if (!initial && std::abs(x - ocx) <= r && std::abs(z - ocz) <= r) continue;  // client already has it
-                // One cached frame per chunk, whoever asks: encoded and compressed once.
-                const std::span<const u8> frame = world_.frame(x, z);
-                o.append(frame.data(), frame.size());
-                ++sent;
-            }
-        }
-    }
-    write_packet(o, p.threshold, cb::ChunkBatchFinished{sent});
-    if (!initial) {
-        for (i32 x = ocx - r; x <= ocx + r; ++x)
-            for (i32 z = ocz - r; z <= ocz + r; ++z)
-                if (std::abs(x - pcx) > r || std::abs(z - pcz) > r) write_packet(o, p.threshold, cb::ForgetLevelChunk{x, z});
     }
 }
 

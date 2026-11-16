@@ -1,10 +1,11 @@
 # Architecture
 
-What exists today is the network stack, a flat world that can be built in, the entity layer
-that lets players see each other, items - stacks, the player's inventory, what is held and
-worn, what lies on the ground - and the first blocks that do something: a chest, a furnace, a
-crafting table, TNT. This document explains how the pieces fit and why; `AGENTS.md` has the
-rules in short form, `docs/blocks-roadmap.md` the blocks that are still to come.
+What exists today is the network stack, a world that can be built in - kept on disk, loaded and
+unloaded around the players, or imported from vanilla - the entity layer that lets players see
+each other, items - stacks, the player's inventory, what is held and worn, what lies on the
+ground - and the first blocks that do something: a chest, a furnace, a crafting table, TNT. This
+document explains how the pieces fit and why; `AGENTS.md` has the rules in short form,
+`docs/blocks-roadmap.md` the blocks that are still to come.
 
 ## Threads and the data between them
 
@@ -21,6 +22,8 @@ rules in short form, `docs/blocks-roadmap.md` the blocks that are still to come.
                  │ 3. flush: encrypt all dirty streams in one batch, post Send per player, wake ──────┼─┘
                  └────────────────────────────────────────────────────────────────────────────────────┘
                    auth workers (2 threads, libcurl): session-server HTTPS, result → Reactor::run_on_loop
+                   workers "work-N": files, deflate, the generator - a task out, its result back,
+                   each through an SPSC ring of that worker's (see "The world's life cycle")
 ```
 
 There is no shared mutable state on any hot path. Each arrow between threads is a single-producer /
@@ -74,9 +77,10 @@ new connection.
 One tick, in vanilla's order (`MinecraftServer.tickChildren`):
 
 ```
-drain packets ─▶ block ticks ─▶ block + light changes ─▶ entity tracker ─▶ block events ─▶ entity ticks ─▶ block entities ─▶ per-player tick ─▶ flush
-(move, click…)   (a chest's     (ChunkHolder             (ChunkMap.tick)   (a chest's      (items, primed   (furnaces)       (ack, equipment,
-                  recount)        .broadcastChanges)                         lid)            TNT; menus)                       head, pickup, pose)
+chunks in ─▶ drain packets ─▶ block ticks ─▶ block + light changes ─▶ chunks out ─▶ entity tracker ─▶ block events ─▶ entity ticks ─▶ block entities ─▶ per-player tick ─▶ send chunks ─▶ flush
+(what the    (move, click…)   (a chest's     (ChunkHolder             (saved,        (ChunkMap.tick)   (a chest's      (items, primed   (furnaces)       (ack, equipment,     (PlayerChunk
+ workers                       recount)        .broadcastChanges)       unloaded)                        lid)            TNT; menus)                       head, pickup, pose)  Sender)
+ finished)
 ```
 
 The order is observable, so it is copied: a block change reaches a client before the entity
@@ -223,8 +227,10 @@ across workers.
 - A pair is evaluated once per tick, with the positions everyone ended up at, instead of at the
   moment each movement packet is handled. Same result; a pair that flickered inside one tick is
   not announced twice.
-- A newcomer is shown the entities around it at the end of its join tick (after its chunks),
-  not as each chunk goes out: chunks are not paced yet.
+- (Until chunks were paced, a newcomer was shown everything around it at the end of its join
+  tick. Now it is vanilla's rule: an entity is shown once the chunk it stands in has gone out -
+  `ChunkMap.isChunkTracked` - and the pair is looked at again when the player next says where it
+  is, which a client does every tick and at the least once a second.)
 
 ### What is not there yet
 
@@ -819,6 +825,232 @@ latter, and one cache miss an item was two thirds of the pass.
 - Entities that collide with each other (boats, shulkers), the world border, pistons, powder
   snow, climbing.
 
+## The world's life cycle (src/world/dimension.*, store.*, region.*, chunk_io.*, src/base/workers.*, src/server/chunks.cpp, persist.cpp, import.cpp)
+
+A world is larger than memory and older than the process. Chunks come from somewhere when
+somebody approaches - a file, or the generator - go somewhere when everybody has left, and are
+on disk when the server stops; and none of that may hold up a tick.
+
+```
+ tick thread                                          a worker
+ request(chunk) ── where is it? ──────────────────▶   read, check, inflate, decode - or generate;
+                                                      heightmaps, sky sources, palette counts
+ adopt: copy into the pools, tell the light  ◀──────  a chunk outside the world, in its own arena
+ engine; lit, then ticking, as neighbours come
+ a frame is wanted: write the packet's body ───────▶  deflate, frame
+ cache it, send it  ◀──────────────────────────────   the frame
+ idle, or changed long ago: the chunk as bytes ────▶  (with others of its region) deflate, write,
+ the region's new table  ◀─────────────────────────   sync, switch the entries, sync
+```
+
+### Workers (`base::Workers`)
+
+N threads, and for each of them one SPSC ring of tasks going out and one coming back - the same
+rings the reactors use, and the same rule: nothing mutable is shared. A task is a small record
+with two functions: `work` runs on a worker, `done` runs on the tick thread when it next polls,
+with whatever `work` left in the record. What a task points at is the task's while it is out. A
+task goes to the worker with the least outstanding work (the caller says how heavy each is): one
+queue per worker means a short task can stand behind a long one, and this keeps that rare.
+
+A worker is handed a whole thing - bytes, a file descriptor and an offset, a generator to run -
+and hands a whole thing back. It never sees the world, the pools the world's sections and light
+come from (`world::BlockPool` is the tick thread's), or the patch store of item stacks. A chunk it
+builds lives in an arena of its own (`world::LoadedChunk`); adopting it copies its sections into
+the pools - what is copied is the packed form, a few kilobytes a section - and the arena goes.
+
+`Workers(0)` has no threads: the work runs inside `submit`, the answers come with `poll`. The unit
+tests drive the whole pipeline that way, and the same tests run it with threads.
+
+### The tick thread knows where everything is (`world::ChunkStore`)
+
+Which regions exist, where each chunk lies in its file, what is waiting to be written: all of it
+is the tick thread's, in memory - a copy of every open region's table (16 KiB). So "is there a
+chunk here?" never touches the disk (a chunk without an entry goes straight to the generator),
+a reader needs nothing but a descriptor and a copied entry (`pread`), and there is one writer per
+region at a time, which owns that region's `RegionFile` - its table and its map of free sectors -
+for as long as it runs. Loads are handed on in the order they were asked for, whichever worker
+finished first: what the world makes of two neighbours depends on which came first (below), and
+this way it is the same on every run.
+
+A chunk that is saved is first only bytes held by the store. Its region is written when the first
+of them has waited five seconds, or 256 have gathered, or the server stops. A chunk that is asked
+for while its bytes wait, or are being written, is decoded from those bytes: they are newer than
+the file.
+
+### Region files (`world/region.hpp`)
+
+One file per 32 x 32 chunks, as in Anvil, and little else as in Anvil: a table of 1024 entries
+(first sector, stored bytes, raw bytes, CRC-32), then chunks in runs of 512-byte sectors,
+deflated. A chunk of a flat world is some seventy bytes and takes one such sector, where Anvil's
+smallest unit is 4 KiB; a chunk can be any size; bytes that are not what the table says are found
+by their checksum instead of being parsed.
+
+A chunk is never overwritten in place. Its new bytes go to free sectors; the file is synced; the
+table is written (an entry is 16 bytes inside one disk sector); the file is synced again; only
+then are the old sectors free. Whenever the process or the machine stops, every entry points at a
+whole chunk - the new one or the one before. (`sync-chunk-writes=false` leaves the syncing to
+the kernel: a crash of the process loses nothing, a crash of the machine may lose a batch.)
+
+A chunk's bytes (`world/chunk_io.hpp`) are its sections in the layout they have in memory, its
+biomes, its light layers as they are - a layer that stores nothing is saved as such - and three
+parts nobody in `world` reads: the game's block entities, the game's entities
+(`server/persist.cpp`), and whatever an import kept. Heightmaps, sky sources and counts are not
+stored; the worker that reads a chunk derives them. Ids are this version's: `world.json` names
+the data version a world was saved by, and another version refuses it until there is a converter.
+
+### The stages of a chunk
+
+A chunk's light depends on its neighbours' blocks, so a chunk has the stages vanilla's has:
+*loaded* (its sections registered with the light engine), *lit* (its own sources propagated - all
+eight neighbours must be loaded), *ticking* (all eight neighbours lit: its light is final, it may
+be sent, edited, ticked). A chunk that arrives is promoted as far as its neighbours allow, and so
+are they. For a view to tick, then, the chunks around it are lit and the chunks around those
+loaded: the game asks for the view widened by two.
+
+A chunk leaves through the same door. The chunks around it stop ticking - light can no longer
+cross into it - until it is back.
+
+### Views, and sending (`server/chunks.cpp`)
+
+What a client is sent, and when, is vanilla's:
+
+- **The view** is `ChunkTrackingView`: around the chunk the player is in, the chunks with
+  `max(0, |dx| - 2)^2 + max(0, |dz| - 2)^2 < distance^2` - a square one chunk wider than the
+  view distance, with its corners cut. When the player crosses into another chunk the client is
+  told the new centre, then what left the view (`forget_level_chunk`, in the order
+  `ChunkTrackingView.difference` walks: x, then z); what entered it is marked to be sent.
+- **Sending** is `PlayerChunkSender`, the last thing in a tick: the nearest of what is marked, as
+  many as the client's pace allows - nine a tick until its first `chunk_batch_received`, then
+  what it asks for, at most ten batches unanswered. A chunk whose frame a worker has not made
+  yet waits a tick; nothing goes out before the chunk the player stands in.
+- **Tracked** (`ChunkMap.isChunkTracked`) is "in the view and sent". Block changes go to those
+  who track the chunk, light to those who have it on the edge of what they track, and an entity
+  is shown only in a tracked chunk.
+
+There is still no list of viewers per chunk: three columns (centre x, centre z, distance) of all
+players are scanned, eight players a step, for "who has this chunk in view" as for "does anybody
+still need it".
+
+### Leaving, and being saved
+
+The chunks are walked a few a tick (`ChunkMap::scan`), all of them in half of
+`chunk-unload-seconds`. One that the walk has found in nobody's widened view for that long
+(10 s by default) is saved and leaves: its bytes go to the store, the block entities in it and
+the entities standing on it are written into them and taken out of the game, the light engine is
+told. One that stays is saved when the walk finds it changed (`Chunk::dirty`: a block, a light
+value, a block entity, anything standing in it) and last written `autosave-seconds` ago or more -
+vanilla's autosave period, 300 s, without the wave of writes every five minutes. At shutdown
+everything that is loaded is written, and the server waits for it.
+
+An entity is saved with the chunk it stands in, and comes back as vanilla's does: a new entity
+with the state `Entity.saveWithoutId` keeps - where it is, how it moves, how far it has fallen,
+an item's age and pickup delay, a fuse - and everything a tick works out again left to the next
+tick. One that is thrown past everything that is loaded has the chunk under it brought in, so
+that there is a chunk to keep it. A stack - in a chest, on the ground - is written in the form a
+client sends one in, and read back by the reader that reads a client's: a file is trusted no
+further.
+
+`level-name` is the world's directory; `session.lock` in it is vanilla's file, held with
+vanilla's kind of lock, so a world is run by one server of either kind. An empty `level-name` is
+a world that is not kept: nothing is written, and no chunk ever leaves memory.
+
+### Light, across leaving and coming back
+
+The light engine is a port, and so is this half of it (`ThreadedLevelLightEngine.updateChunkStatus`,
+`LayerLightSectionStorage.queueSectionData` / `markNewInconsistencies`): a chunk that leaves has
+its sections count as empty - the sections around it that stored light only because of its
+blocks stop storing it; a chunk that comes brings the layers it was saved with, which wait
+(`Chunk::queued`) until their section stores light - the section beside it that makes it do so
+may be in a chunk that has not arrived yet. A chunk that was saved lit is not lit again.
+
+Two things are this server's own. Every layer is saved as it is, also one that was created and
+never written (vanilla leaves those out, and creates them again by rules that depend on what is
+around at that moment). And a layer that goes because *the chunk beside it left* is kept, queued,
+for the day that chunk is back: vanilla drops it, and has it on disk by then because it unloads
+a dozen chunks further out, where nothing is ticking or being built on; here the two chunks can
+be neighbours at the edge of what is loaded. With both, a chunk comes back as it left. That is
+tested, not argued: hills with glowstone in them and towers on chunk borders, built on, every
+frame a client would get recorded; then all of it saved, unloaded and read back in another order
+- and, twelve times over, random chunks unloaded and read back while their neighbours stay -
+and every frame compared byte for byte (`tests/unit/store_test.cpp`, `Persistence.*`).
+
+### A vanilla world, imported (`server/import.cpp`)
+
+A directory with a `level.dat` and no `world.json` is a vanilla world, and is imported before
+the server starts to listen: every chunk of its region files is written into ours, by the
+workers, region by region. The vanilla files are read and never changed. Only a world of this
+version's data version is taken - an older one is upgraded by vanilla first, and the error says so.
+
+What nobody documents about 26.x was read from the jar: the world's layout
+(`dimensions/minecraft/overworld/region`, `data/minecraft/world_gen_settings.dat`), and that a
+block state is saved as its block's name alone when it is the default one and as
+`{id, properties}` otherwise (it was `{Name, Properties}`).
+
+- **Blocks and biomes** as they are, palette order included: a chunk that has just been loaded
+  goes out with the palettes vanilla would send.
+- **Light**: the saved layers, queued as vanilla queues them when it loads the chunk.
+- **A chunk vanilla had not finished generating** (any `Status` but `minecraft:full`) holds
+  nothing anyone made, and is left to the generator here.
+- **Block entities**: a chest or a furnace whose tag says nothing this server would not act on -
+  stacks without components, no name, no lock, no loot table - becomes one of ours. Every other
+  one is kept as its tag: a client is told that it is there, and it does nothing - a chest with
+  an enchanted sword in it stays shut rather than open as if it were something else.
+- **Entities**, and **the rest of a chunk's tag** (structures, scheduled ticks, `InhabitedTime`...):
+  kept as tags, with the chunk. No entity of an imported world is in the game yet.
+- **The generator**: a flat world goes on as it was made (its layers and biome are read from
+  `world_gen_settings.dat`). For vanilla's terrain there is no generator here: beyond what was
+  explored there, the world ends (`world::EmptyGenerator`). What a stand-in generates is marked as
+  never changed (`Chunk::modified`), so a real generator can take those chunks over.
+
+Nothing is dropped that a later export could not write back: what is not read is kept, and what
+is neither - heightmaps - follows from the blocks.
+
+### Compared with vanilla
+
+`tools/vanilla/world_probe.py` has a vanilla 26.3 server build a world from its console - states
+with properties, light sources at chunk borders and a roof across one, sections with two and with
+nine biomes, chests plain, double, named and with a damaged sword in one, a furnace, a sign,
+entities - save it and stop; then starts vanilla on it again, and this server on a copy, and
+compares every `level_chunk_with_light` a bot is sent. Of the 42 chunks both bots were sent:
+
+| | chunks |
+|---|---|
+| the same in every part: blocks, palettes, biomes, heightmaps, light masks and layers, block entities | 41 |
+| ...of those, the same bytes | 0: the heightmaps are a map on the wire, and vanilla writes them in the order of a `HashMap` of enums - another one each time a JVM starts |
+| one sky light layer, the one below the world, sent as 2048 zeros instead of "empty" | 1 |
+
+The last is the bookkeeping mentioned above, and vanilla has it too - two chunks of the recording
+carry such a layer on both servers: when a chunk is the first of its neighbourhood to be
+registered with the light engine, the layer under its lowest section is made by copying the
+bottom of the layer above (`SkyLightSectionStorage.createDataLayer`), which gives stored zeros;
+when a neighbour was there first, it is made empty. Which chunk is first is the order of loading.
+No light value differs.
+
+What does differ, and is a gap rather than a difference of the import:
+
+- **Update tags.** Vanilla sends a sign's text, a banner's patterns, a skull's owner with the
+  chunk (`BlockEntity.getUpdateTag`); here every block entity goes out without a tag - right for
+  the chests and furnaces, which have none, and a blank sign for a sign. It needs each kind's
+  `getUpdateTag`, read from the jar.
+- **Entities** of the imported world are not shown (the armor stand and the emeralds of the
+  fixture): they are kept, unread.
+- **Blocks the server does not simulate** stand as they were saved: water does not flow, a lamp
+  does not react, a door does not open. (`AGENTS.md`, rule 9: a block whose class is not ported
+  does nothing rather than something invented.)
+
+### What is not there
+
+- **Players.** Nothing of a player is saved: where it was, what it had. `players/` of an imported
+  world is left alone.
+- **A terrain generator.** Flat ground, or nothing.
+- **Export** back to Anvil; a converter for worlds saved by another data version.
+- **lz4** region files (`region-file-compression=lz4`): the import says so and stops.
+- **Other dimensions**: one dimension is all there is; the nether and the end of an imported world
+  are not read.
+- **`save-all`, `save-off`**: the server saves on its own schedule and at shutdown.
+- A chunk is lit on the tick thread, as before. For the flat generator that is nothing; a
+  generator of real terrain will want the first lighting off the tick thread too.
+
 ## NBT and text components (src/nbt/, src/text/)
 
 ### A tag stays the bytes it is (`nbt::Doc`, `nbt::Writer`)
@@ -1153,13 +1385,14 @@ LuaJIT, one state, tick thread only. The intended shape:
 Roughly in dependency order:
 
 1. **Mojang reports** (`mcgen.py reports`) → real tags and block ids. Until then vanilla clients cannot join.
-2. **World**: chunk storage (paletted sections, bit-packed, SoA across sections), a framed-chunk cache
-   keyed by chunk with invalidation on change, light, region file I/O on workers.
+2. **World**: chunks are stored, lit, cached as frames, loaded, saved and unloaded (see "The world's
+   life cycle"). Next: a terrain generator - and with it the first lighting of a chunk on a worker -
+   players' data, the update tags of the block entities that are kept as tags, export to Anvil.
 3. **Entities**: the table, the tracker and physics exist (see "Entities", "Physics"). Next:
    attributes, the inferred jump, then mobs - spawning, AI; fluids. Known headroom in the tracker at 20 000 mobs: a
    summary bitmap over each row (the fan-out and the "what do I see" walk scan 320 mostly-zero words
    per player: 17 % and part of 53 % of that tick).
-4. **Chunk pacing**: honour `chunk_batch_received` instead of sending the whole view at once.
+4. (Chunk pacing is there: `PlayerChunkSender`.)
 5. Network follow-ups, none needed for correctness: `SEND_ZC` for chunk bursts, VAES (4 streams per
    zmm) for `cfb8_encrypt_batch` on AVX-512 machines, per-connection rate limits, thread pinning, proxy
    forwarding (Velocity modern forwarding), IPv6 dual-stack by default.

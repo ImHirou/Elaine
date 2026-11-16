@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "base/buf.hpp"
+#include "base/workers.hpp"
 #include "crypto/cfb8.hpp"
 #include "entity/grid.hpp"
 #include "entity/store.hpp"
@@ -28,6 +29,7 @@
 #include "server/inventory.hpp"
 #include "server/prelogin.hpp"
 #include "server/settings.hpp"
+#include "server/world_info.hpp"
 #include "world/collide.hpp"
 #include "world/dimension.hpp"
 #include "world/generator.hpp"
@@ -39,9 +41,11 @@ inline i32 chunk_of(double v) { return proto::floor_int(v) >> 4; }
 
 class Game {
   public:
-    // `console`: where the server's own command lines come from, null for none.
-    Game(const Settings& s, std::vector<std::unique_ptr<net::Reactor>>& reactors, std::atomic<u32>& online,
-         Console* console = nullptr);
+    // `console`: where the server's own command lines come from, null for none. `world`: where
+    // the world is kept and what makes its chunks (server/world_info.hpp); `workers`: the threads
+    // that read, write and generate them.
+    Game(const Settings& s, std::vector<std::unique_ptr<net::Reactor>>& reactors, std::atomic<u32>& online, Console* console,
+         const WorldInfo& world, base::Workers& workers);
     ~Game();
 
     void run(const std::atomic<bool>& stop);  // blocks; call on the tick thread
@@ -120,11 +124,56 @@ class Game {
         i32 x, y, z;
     };
 
+    // PlayerChunkSender: the chunks of a player's view that are ready and have not gone out yet,
+    // and how fast its client takes them. `bits` is a window over the view: a bit per chunk of
+    // [x0, x0 + side) x [z0, z0 + side), side = 2 * (view distance + 1) + 1.
+    struct ChunkSender {
+        static constexpr u32 kMaxSide = 2 * (32 + 1) + 1;  // a view distance is at most 32
+        static constexpr u32 kWords = (kMaxSide * kMaxSide + 63) / 64;
+        float desired = 9.0f;   // desiredChunksPerTick: START_CHUNKS_PER_TICK until the client says
+        float quota = 0.0f;     // batchQuota
+        i32 unacked = 0;        // unacknowledgedBatches...
+        i32 max_unacked = 1;    // ...and how many there may be: one until the first is acknowledged
+        bool has_view = false;  // a view has been applied (ChunkTrackingView.EMPTY before)
+        u32 pending = 0;        // bits set
+        i32 x0 = 0, z0 = 0;
+        u32 side = 0;
+        u64 bits[kWords] = {};
+        bool test(i32 cx, i32 cz) const {
+            const u32 dx = static_cast<u32>(cx - x0), dz = static_cast<u32>(cz - z0);
+            return dx < side && dz < side && ((bits[(dz * side + dx) >> 6] >> ((dz * side + dx) & 63)) & 1);
+        }
+    };
+    // A block entity's handle (world::BlockEntityRef::data) with this bit names an entry of
+    // opaque_: one that came with an imported world and is kept as the tag it was (server/persist.cpp).
+    static constexpr u32 kOpaqueBlockEntity = 1u << 31;
+
     void drain(u32 ri);
     void on_join(u32 ri, const net::InHeader& h, const u8* payload, u32 n);
     void on_leave(u32 ri, const net::InHeader& h);
     void on_packet(u32 pi, const u8* body, u32 n);
-    void send_view(u32 pi, i32 ocx, i32 ocz, bool initial);
+
+    // ---- chunks: who sees which, what is loaded, what is saved (server/chunks.cpp)
+    void apply_view(u32 pi, i32 cx, i32 cz, i32 distance);
+    void chunk_ready(world::Chunk& c);
+    void send_chunks();
+    void on_chunk_batch_received(u32 pi, float desired);
+    bool chunk_tracked(u32 pi, i32 cx, i32 cz) const;
+    void pump_chunks(u64 tick_start_ns);
+    void tend_chunks();
+    void save_chunk(world::Chunk& c, bool leaving);
+    void save_world();
+    void collect_entities(bool all);
+
+    // ---- what a chunk holds of the game's, as bytes (server/persist.cpp)
+    void write_block_entities(const world::Chunk& c, base::ByteBuf& out) const;
+    void write_entities(u64 chunk_key, base::ByteBuf& out);
+    void read_block_entities(world::Chunk& c, std::span<const u8> bytes);
+    void read_entities(world::Chunk& c, std::span<const u8> bytes);
+    void drop_block_entities(world::Chunk& c);
+    void free_block_entity(u32 kind, u32 data);
+    u32 new_chest(proto::BlockPos pos);
+    u32 new_furnace(proto::BlockPos pos);
     void keepalives(u64 now);
     u64 flush();  // returns the bytes handed to the reactors
     void kick(u32 pi, std::string_view reason);
@@ -172,6 +221,8 @@ class Game {
     void spawn_item(ItemStack stack, double x, double y, double z, u64 pickup_delay = 40, u64 age = 0);
     void spawn_item(ItemStack stack, double x, double y, double z, double vx, double vy, double vz, u64 pickup_delay,
                     u64 age = 0);
+    u32 add_item(Uuid uuid, float yaw, ItemStack stack, double x, double y, double z, double vx, double vy, double vz,
+                 u64 pickup_delay, u64 age, i8 health);
     void remove_item(u32 slot);
     void tick_item(u32 slot, u32 row);
     void rest_item(u32 slot);
@@ -303,9 +354,9 @@ class Game {
     bool obstructed(world::BlockState s, proto::BlockPos pos) const;
     world::BlockState state_for_client(proto::BlockPos pos) const;
     void ack(u32 pi, i32 sequence) { ack_[pi] = std::max(ack_[pi], sequence); }
-    // Fill viewers_ with the players whose view contains chunk (cx, cz), and border_ with those
-    // who have it on the edge of their view.
-    void find_viewers(i32 cx, i32 cz);
+    // Fill viewers_ with the players that have been sent chunk (cx, cz), and - if asked - border_
+    // with those of them who have it on the edge of what they have been sent.
+    void find_viewers(i32 cx, i32 cz, bool want_border);
     void broadcast_changes();
 
     // This tick's outbound bytes of a player (plaintext until flush). Always there while the
@@ -327,8 +378,13 @@ class Game {
     const Settings& s_;
     std::vector<std::unique_ptr<net::Reactor>>& reactors_;
     std::atomic<u32>& online_;
-    world::FlatGenerator generator_;
+    base::Workers& workers_;
+    const WorldInfo& info_;
+    world::FlatGenerator flat_generator_;
+    world::EmptyGenerator empty_generator_;
+    world::ChunkGenerator& generator_;
     world::Dimension world_;
+    double spawn_[3] = {8.5, 0, 8.5};  // where a player joins
 
     // Every entity of the world; rows [0, players_.size()) are the players, in our order.
     entity::Store ents_;
@@ -340,6 +396,7 @@ class Game {
     std::vector<u8> dirty_;               // k*Dirty bits: almost always 0, so a tick skips the inventories
     std::vector<base::ByteBuf*> out_;     // this tick's output, never null
     // cold, same index
+    std::vector<ChunkSender> senders_;
     std::vector<Player> players_;
     std::vector<std::vector<u32>> slot_to_player_;  // [reactor][slot] -> player index
 
@@ -349,6 +406,22 @@ class Game {
     std::vector<crypto::Cfb8Job> jobs_;
     std::vector<u8> touched_;  // per reactor: needs a wake after flush
     std::vector<u32> viewers_, border_;
+    std::vector<entity::PendingChunks> pending_views_;  // what the tracker reads of senders_
+    struct Nearest {                                    // send_chunks(): a pending chunk and how far it is
+        i32 d2, x, z;
+    };
+    std::vector<Nearest> nearest_;
+    // Chunk upkeep: what the walk over the chunks picked this tick, and the entities found in them.
+    std::vector<world::Chunk*> leaving_, saving_;
+    struct EntityAt {
+        u64 chunk;  // packed chunk position
+        u32 slot;
+    };
+    std::vector<EntityAt> entities_at_;
+    base::ByteBuf part_blocks_, part_entities_;
+    // Block entities that are kept as the tag they came as: the tag's bytes, by index.
+    std::vector<std::vector<u8>> opaque_;
+    std::vector<u32> opaque_free_;
     std::vector<u16> update_pos_, update_state_;
     u64 tick_ = 0;
     u64 rng_;

@@ -562,7 +562,8 @@ def emit_static_ids(header: str, static_regs: dict) -> str:
     def ident(name: str) -> str:
         return "k" + "".join(p[:1].upper() + p[1:] for p in name.replace(".", "_").split("_") if p)
 
-    o = [header, "\n// Ids of static registries (Mojang's registries.json) that the server names in packets.\nnamespace proto::gen {\n"]
+    o = [header, "\n#include <string_view>\n\n// Ids of static registries (Mojang's registries.json) that the server names in packets.\n"
+                 "namespace proto::gen {\n"]
     for ns, reg, names in (("menu", "menu", None), ("block_entity_type", "block_entity_type", None),
                            ("sound", "sound_event", SOUNDS), ("particle", "particle_type", PARTICLES)):
         table = ids(reg)
@@ -573,6 +574,12 @@ def emit_static_ids(header: str, static_regs: dict) -> str:
             o.append(f"inline constexpr unsigned {ident(name)} = {table[name]};\n")
         if names is None:
             o.append(f"inline constexpr unsigned kCount = {len(table)};\n")
+        if ns == "block_entity_type":  # by id: what a saved block entity names its type by ("id": "minecraft:chest")
+            if sorted(table.values()) != list(range(len(table))):
+                die("minecraft:block_entity_type: protocol ids are not 0..n-1")
+            o.append("inline constexpr std::string_view kNames[kCount] = {\n")
+            o.extend(f'    "minecraft:{name}",\n' for name in sorted(table, key=table.get))
+            o.append("};\n")
         o.append(f"}}  // namespace {ns}\n")
     o.append("\n}  // namespace proto::gen\n")
     return "".join(o)

@@ -71,6 +71,16 @@ bool set_key(Settings& s, std::string_view k, std::string_view v, std::string& e
         ok = parse_num(v, s.command_spam_threshold, 0, 1000000);
     else if (k == "ops-file")
         s.ops_file = std::string(v);
+    else if (k == "level-name")
+        s.level_name = std::string(v);
+    else if (k == "sync-chunk-writes")
+        ok = parse_bool(v, s.sync_chunk_writes);
+    else if (k == "worker-threads")
+        ok = parse_num(v, s.worker_threads, 0, 64);
+    else if (k == "chunk-unload-seconds")
+        ok = parse_num(v, s.chunk_unload_seconds, 1, 86400);
+    else if (k == "autosave-seconds")
+        ok = parse_num(v, s.autosave_seconds, 1, 86400);
     else
         return true;  // unknown keys (vanilla has many we do not implement yet) are ignored
     if (!ok) err = "invalid value for " + std::string(k) + ": '" + std::string(v) + "'";

@@ -95,6 +95,14 @@ void Game::on_container_click(u32 pi, const sb::ContainerClick& c) {
         return;
     }
     apply_effects(pi);
+    // Container.setChanged: what a chest or a furnace holds may have changed - their chunks are
+    // to be saved again.
+    if (menu.kind() == Menu::Kind::kChest) {
+        for (const u32 chest : p.open_data)
+            if (chest != kNone) world_.mark_dirty(chests_[chest].x, chests_[chest].z);
+    } else if (menu.kind() == Menu::Kind::kFurnace) {
+        world_.mark_dirty(p.open_pos.x, p.open_pos.z);
+    }
 
     // The client says what its own prediction left in the slots it touched. Where that can be
     // checked against a stack (no components: their hashes are not computed here yet) and it

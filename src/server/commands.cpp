@@ -500,13 +500,7 @@ bool Game::teleport(u32 row, double x, double y, double z, u32 relatives, float 
         if (++p.teleport_id == 0x7FFFFFFF) p.teleport_id = 0;
         p.awaiting_teleport = true;
         send(row, cb::PlayerPosition{p.teleport_id, rx, ry, rz, 0, 0, 0, ryaw, rpitch, relatives});
-        const i32 cx = chunk_of(ents_.x[row]), cz = chunk_of(ents_.z[row]);
-        if (cx != pcx_[row] || cz != pcz_[row]) {
-            const i32 ocx = pcx_[row], ocz = pcz_[row];
-            pcx_[row] = cx;
-            pcz_[row] = cz;
-            send_view(row, ocx, ocz, false);
-        }
+        apply_view(row, chunk_of(ents_.x[row]), chunk_of(ents_.z[row]), pview_[row]);  // ChunkMap.move
     } else if (const u32 slot = ents_.slot[row]; slot < item_of_slot_.size() && item_of_slot_[slot] != kNone) {
         move_item_cell(slot, old_x, old_z);  // an item lies in the grid cell of where it is
     }

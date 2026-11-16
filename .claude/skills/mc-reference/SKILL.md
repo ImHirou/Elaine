@@ -191,6 +191,25 @@ How to read it:
 - Generated C++ does not read these files yet. When a feature needs a table, teach `gen.py` to take it from
   here and to `die()` when a field it relies on is missing, as it does for `blockdata.json`.
 
+## A saved world
+
+What a vanilla server writes to disk is read by `Codec`s and by hand-written loaders, like everything else; what
+was read for 26.3 when the import was written (`src/server/import.*`, `tools/vanilla/world_probe.py`):
+
+| In the jar | On disk |
+|---|---|
+| `LevelStorageSource`, a world made by 26.x | `level.dat` (gzip, a named compound: `Data.DataVersion`, `Data.spawn {pos [I; x, y, z], dimension, yaw, pitch}`), `data/minecraft/*.dat` (`world_gen_settings.dat`: `data.dimensions["minecraft:overworld"].generator {type, settings}`; game rules, weather...), `players/data/<uuid>.dat`, and per dimension `dimensions/<namespace>/<path>/{region,entities,poi}/r.X.Z.mca`. Before 26.1 the overworld's `region/` was at the top |
+| `RegionFile` | 4 KiB of locations (big-endian `sector << 8 \| sectors`, entry = x + z * 32), 4 KiB of timestamps, chunks in 4 KiB sectors: i32 length, u8 compression (`RegionFileVersion`: 1 gzip, 2 zlib, 3 none, 4 lz4, 127 custom; `\| 128` = the bytes are in `c.X.Z.mcc`), a *named* compound |
+| `SerializableChunkData.parse` / `write` | `DataVersion`, `Status` (only `minecraft:full` is a finished chunk), `xPos`, `yPos`, `zPos`, `LastUpdate`, `InhabitedTime`, `isLightOn`, `sections [{Y, block_states, biomes, SkyLight, BlockLight}]` (also for the light sections below and above the world, which have light only), `block_entities`, `block_ticks`, `fluid_ticks`, `PostProcessing`, `structures`, `Heightmaps` |
+| `BlockState.CODEC` (26.x) | `Codec.either(block name, FULL_CODEC)`: a plain string for a block's default state, else `{id, properties: {name: value}}` - it was `{Name, Properties}`. A property that is missing or has no such value takes the default state's. In a palette the two forms mix, so the list holds compounds and the names travel as `{"": name}` |
+| `PalettedContainer.codec`, `Strategy` | `palette` + `data` (longs; absent for one entry). Bits on disk: blocks `max(4, ceillog2(n))`, biomes `ceillog2(n)`; entries never span two longs. The palette is in order of first appearance (`pack` re-encodes), which is also the order a freshly loaded chunk goes out to a client in |
+| `DataLayer`, `SerializableChunkData.copyOf` | `SkyLight` / `BlockLight`: 2048 bytes, nibble index `y << 8 \| z << 4 \| x`; a layer whose `isEmpty()` (no array and default 0) is not written. `read` queues what is there (`queueSectionData`); `ChunkStatusTasks.isLighted` = status at least `light` and `isLightOn` |
+| `BlockEntity.saveWithFullMetadata`, `ContainerHelper`, `ItemStack.CODEC` | `{id, x, y, z, components, keepPacked, ...}`; a container's `Items: [{Slot, id, count (1 when absent), components}]`; a furnace's `lit_time_remaining`, `lit_total_time`, `cooking_time_spent`, `cooking_total_time`, `speed_multiplier`, `RecipesUsed`; `CustomName`, `lock`, `LootTable` / `LootTableSeed` |
+| `EntityStorage` | `entities/r.X.Z.mca`, the same file format: `{DataVersion, Position [I; x, z], Entities [...]}` |
+
+The vanilla server takes `--world <name>` (and `--universe <dir>`): another world without touching
+`server.properties` - how `world_probe.py` keeps its fixture apart from the other probes' world.
+
 ## Limits
 
 - Static block/item/entity ids are assigned at runtime: they come only from `mcgen.py reports`, which executes the

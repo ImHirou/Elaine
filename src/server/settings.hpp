@@ -26,6 +26,13 @@ struct Settings {
     u32 op_permission_level = 4;                                      // op-permission-level: what /op gives
     u32 command_spam_threshold = 10;    // command-spam-threshold-seconds: commands in a row that get a player thrown out
     std::string ops_file = "ops.json";  // ops-file: the operators (vanilla's ops.json)
+    // level-name: the world's directory (server/world_info.hpp). Empty: the world is not kept -
+    // nothing is written and no chunk leaves memory.
+    std::string level_name = "world";
+    bool sync_chunk_writes = true;  // sync-chunk-writes: fdatasync around every write of a region (world/region.hpp)
+    u32 worker_threads = 0;         // worker-threads: threads that read, write and generate chunks; 0 = by the machine
+    u32 chunk_unload_seconds = 10;  // chunk-unload-seconds: how long a chunk stays loaded once nobody is near
+    u32 autosave_seconds = 300;     // autosave-seconds: how long a chunk that changed may wait to be written
 };
 
 // Missing file is not an error (defaults apply). Returns false + err on a malformed value.

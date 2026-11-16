@@ -3,6 +3,7 @@
 #include PROTO_GEN_BLOCK_TABLES_HPP
 #include PROTO_GEN_COMMAND_DATA_HPP
 #include PROTO_GEN_ENTITIES_HPP
+#include PROTO_GEN_STATIC_IDS_HPP
 
 namespace world {
 
@@ -62,6 +63,24 @@ u32 find_item(std::string_view name) {
 u32 find_entity_type(std::string_view name) {
     return find_by_name(cmd::kEntityTypesByName, name, [](u32 i) { return gen::entity_type::kNames[i]; });
 }
+u32 find_biome(std::string_view name) {
+    // Network ids of a synchronized registry are its names in order (registries.hpp).
+    const auto* end = gen::reg::worldgen_biome::kNames + gen::reg::worldgen_biome::kCount;
+    const auto* at = std::lower_bound(gen::reg::worldgen_biome::kNames, end, name);
+    return at != end && *at == name ? static_cast<u32>(at - gen::reg::worldgen_biome::kNames) : kNoId;
+}
+u32 find_block_entity_type(std::string_view name) {
+    for (u32 i = 0; i < gen::block_entity_type::kCount; ++i)
+        if (gen::block_entity_type::kNames[i] == name) return i;
+    return kNoId;
+}
+std::string_view biome_name(u32 biome) {
+    return biome < gen::reg::worldgen_biome::kCount ? gen::reg::worldgen_biome::kNames[biome] : "?";
+}
+std::string_view block_entity_type_name(u32 type) {
+    return type < gen::block_entity_type::kCount ? gen::block_entity_type::kNames[type] : "?";
+}
+u32 biome_count() { return gen::reg::worldgen_biome::kCount; }
 std::string_view item_name(u32 item) { return item < std::size(cmd::kItems) ? cmd::kItems[item].name : "?"; }
 std::string_view item_text_key(u32 item) { return item < std::size(cmd::kItems) ? cmd::kItems[item].key : "?"; }
 u32 item_rarity(u32 item) { return item < std::size(cmd::kItems) ? cmd::kItems[item].rarity : 0; }

@@ -90,4 +90,43 @@ class BlockPool {
     usize live_ = 0;
 };
 
+// ChunkArena: memory for something that is built in one place and given away whole - a chunk a worker
+// reads from disk or generates. Blocks are 64-byte aligned, never freed one by one, and all go
+// with the arena. No pool, no free list: whoever ends up owning the arena may be another thread
+// than the one that filled it.
+class ChunkArena {
+  public:
+    ChunkArena() = default;
+    ChunkArena(const ChunkArena&) = delete;
+    ChunkArena& operator=(const ChunkArena&) = delete;
+    ~ChunkArena() {
+        for (void* s : slabs_) std::free(s);
+    }
+
+    void* alloc(usize bytes) {
+        bytes = (bytes + 63u) & ~usize{63};
+        if (UNLIKELY(bytes > left_)) refill(bytes);
+        void* p = at_;
+        at_ += bytes;
+        left_ -= bytes;
+        return p;
+    }
+    usize reserved_bytes() const { return reserved_; }
+
+  private:
+    static constexpr usize kSlabBytes = 64 * 1024;
+    NOINLINE void refill(usize need) {
+        const usize n = std::max(need, kSlabBytes);
+        at_ = static_cast<u8*>(std::aligned_alloc(64, n));
+        if (UNLIKELY(!at_)) std::abort();
+        slabs_.push_back(at_);
+        left_ = n;
+        reserved_ += n;
+    }
+
+    u8* at_ = nullptr;
+    usize left_ = 0, reserved_ = 0;
+    std::vector<void*> slabs_;
+};
+
 }  // namespace world

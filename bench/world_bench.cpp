@@ -43,12 +43,14 @@ struct TerrainGenerator final : ChunkGenerator {
         return h ^ (h >> 12);
     }
     static i32 height(i32 x, i32 z) {
-        return 64 + static_cast<i32>(std::lround(6.0 * std::sin(x * 0.07) + 5.0 * std::cos(z * 0.05) + 3.0 * std::sin((x + z) * 0.11)));
+        return 64 + static_cast<i32>(
+                        std::lround(6.0 * std::sin(x * 0.07) + 5.0 * std::cos(z * 0.05) + 3.0 * std::sin((x + z) * 0.11)));
     }
     void generate(Chunk& c, SectionAllocator& a) override {
-        static constexpr unsigned kOres[] = {blk::kCoalOre, blk::kIronOre, blk::kCopperOre, blk::kGoldOre,
+        static constexpr unsigned kOres[] = {blk::kCoalOre,     blk::kIronOre,  blk::kCopperOre,  blk::kGoldOre,
                                              blk::kRedstoneOre, blk::kLapisOre, blk::kDiamondOre, blk::kEmeraldOre};
-        static constexpr unsigned kStones[] = {blk::kStone, blk::kStone, blk::kStone, blk::kGranite, blk::kDiorite, blk::kAndesite, blk::kGravel};
+        static constexpr unsigned kStones[] = {blk::kStone,   blk::kStone,    blk::kStone, blk::kGranite,
+                                               blk::kDiorite, blk::kAndesite, blk::kGravel};
         BlockState states[Section::kVolume];
         for (u32 si = 0; si < c.sections_count; ++si) {
             c.biome[si] = 0;
@@ -58,7 +60,8 @@ struct TerrainGenerator final : ChunkGenerator {
                 continue;
             }
             for (u32 i = 0; i < Section::kVolume; ++i) {
-                const i32 x = c.x * 16 + static_cast<i32>(i & 15), z = c.z * 16 + static_cast<i32>((i >> 4) & 15), y = base + static_cast<i32>(i >> 8);
+                const i32 x = c.x * 16 + static_cast<i32>(i & 15), z = c.z * 16 + static_cast<i32>((i >> 4) & 15),
+                          y = base + static_cast<i32>(i >> 8);
                 const i32 h = height(x, z);
                 BlockState s = kAir;
                 if (y > h) {
@@ -122,9 +125,12 @@ void section_benchmarks(std::mt19937& rng) {
     std::shuffle(order.begin(), order.end(), rng);
 
     if (selected("section memory")) {
-        std::printf("section memory, bytes by distinct states:    1: 0   2: %u   4: %u   8: %u   16: %u   32: %u   64: %u   128: %u   256: %u   more: %u\n",
-                    Section::block_bytes(1), Section::block_bytes(2), Section::block_bytes(3), Section::block_bytes(4), Section::block_bytes(5),
-                    Section::block_bytes(6), Section::block_bytes(7), Section::block_bytes(8), Section::block_bytes(16));
+        std::printf(
+            "section memory, bytes by distinct states:    1: 0   2: %u   4: %u   8: %u   16: %u   32: %u   64: %u   128: %u   "
+            "256: %u   more: %u\n",
+            Section::block_bytes(1), Section::block_bytes(2), Section::block_bytes(3), Section::block_bytes(4),
+            Section::block_bytes(5), Section::block_bytes(6), Section::block_bytes(7), Section::block_bytes(8),
+            Section::block_bytes(16));
         std::printf("  (vanilla keeps 2048 for 2..16 states, then 2736 / 3280 / 3648 / 4096, then 8192)\n");
     }
 
@@ -180,7 +186,8 @@ void section_benchmarks(std::mt19937& rng) {
             g_sink = t.bits;
         });
         std::vector<u8> wire(section_wire_size(s, 0) + 64);
-        bench(("section to wire (" + tag + ")").c_str(), Section::kVolume, "M blocks/s", [&] { g_sink = static_cast<u64>(put_section(wire.data(), s, 0) - wire.data()); });
+        bench(("section to wire (" + tag + ")").c_str(), Section::kVolume, "M blocks/s",
+              [&] { g_sink = static_cast<u64>(put_section(wire.data(), s, 0) - wire.data()); });
         t.release(a);
         s.release(a);
     }
@@ -195,7 +202,8 @@ void chunk_map_benchmarks(std::mt19937& rng) {
     stl.reserve(static_cast<usize>(kSide) * kSide);
     for (i32 x = 0; x < kSide; ++x)
         for (i32 z = 0; z < kSide; ++z) {
-            Chunk* fake = reinterpret_cast<Chunk*>(static_cast<uintptr_t>(0x1000 + (static_cast<u32>(x) * kSide + static_cast<u32>(z)) * 64));
+            Chunk* fake = reinterpret_cast<Chunk*>(
+                static_cast<uintptr_t>(0x1000 + (static_cast<u32>(x) * kSide + static_cast<u32>(z)) * 64));
             map.slot(x - kSide / 2, z - kSide / 2) = fake;
             flat.insert(x - kSide / 2, z - kSide / 2, fake);
             stl[FlatChunkHash::key(x - kSide / 2, z - kSide / 2)] = fake;
@@ -285,25 +293,28 @@ void pipeline(const char* world, ChunkGenerator& source) {
             generate = gen.seconds;
         }
         light = std::min(light, best_seconds(1, [&] {
-            for (i32 x = -r - 1; x <= r + 1; ++x)
-                for (i32 z = -r - 1; z <= r + 1; ++z) dim.lit(x, z);
-        }));
+                             for (i32 x = -r - 1; x <= r + 1; ++x)
+                                 for (i32 z = -r - 1; z <= r + 1; ++z) dim.lit(x, z);
+                         }));
         frames = 0;
         encode = std::min(encode, best_seconds(1, [&] {
-            for (i32 x = -r; x <= r; ++x)
-                for (i32 z = -r; z <= r; ++z) frames += dim.frame(x, z).size();
-        }));
+                              for (i32 x = -r; x <= r; ++x)
+                                  for (i32 z = -r; z <= r; ++z) frames += dim.frame(x, z).size();
+                          }));
         memory = dim.memory_bytes();
         chunks = dim.chunk_count();
     }
     const double n_load = (2 * r + 5) * (2 * r + 5), n_light = (2 * r + 3) * (2 * r + 3), n_enc = (2 * r + 1) * (2 * r + 1);
-    std::printf("%-44s %12.2f ms   (%.1f us/chunk)\n", (prefix + ": generator, 625 chunks").c_str(), generate * 1e3, generate * 1e6 / n_load);
+    std::printf("%-44s %12.2f ms   (%.1f us/chunk)\n", (prefix + ": generator, 625 chunks").c_str(), generate * 1e3,
+                generate * 1e6 / n_load);
     std::printf("%-44s %12.2f ms   (%.1f us/chunk)\n", (prefix + ": heightmaps, sky sources").c_str(), (load - generate) * 1e3,
                 (load - generate) * 1e6 / n_load);
-    std::printf("%-44s %12.2f ms   (%.1f us/chunk)\n", (prefix + ": light 529 chunks").c_str(), light * 1e3, light * 1e6 / n_light);
+    std::printf("%-44s %12.2f ms   (%.1f us/chunk)\n", (prefix + ": light 529 chunks").c_str(), light * 1e3,
+                light * 1e6 / n_light);
     std::printf("%-44s %12.2f ms   (%.1f us/chunk, %.0f bytes/frame)\n", (prefix + ": encode+deflate 441").c_str(), encode * 1e3,
                 encode * 1e6 / n_enc, static_cast<double>(frames) / n_enc);
-    std::printf("%-44s %12.2f ms   for a first join at view distance 10\n", (prefix + ": total").c_str(), (load + light + encode) * 1e3);
+    std::printf("%-44s %12.2f ms   for a first join at view distance 10\n", (prefix + ": total").c_str(),
+                (load + light + encode) * 1e3);
     std::printf("%-44s %12.2f KiB per loaded chunk (%zu chunks, frames included)\n", (prefix + ": memory").c_str(),
                 static_cast<double>(memory) / 1024.0 / static_cast<double>(chunks), chunks);
 }
@@ -371,14 +382,12 @@ void viewer_benchmark(std::mt19937& rng) {
         xs[i] = static_cast<i32>(rng() % 64) - 32;  // a busy spawn region: many overlapping views
         zs[i] = static_cast<i32>(rng() % 64) - 32;
     }
-    std::vector<u32> inside, edge;
+    std::vector<u32> inside;
     inside.reserve(kPlayers);
-    edge.reserve(kPlayers);
     bench("viewer scan, 500 players, one chunk", 1, "M scans/s", [&] {
         inside.clear();
-        edge.clear();
-        server::find_viewers(xs.data(), zs.data(), views.data(), kPlayers, 3, -7, inside, edge);
-        g_sink = inside.size() + edge.size();
+        server::find_in_view(xs.data(), zs.data(), views.data(), kPlayers, 3, -7, server::kViewMargin, inside);
+        g_sink = inside.size();
     });
 }
 

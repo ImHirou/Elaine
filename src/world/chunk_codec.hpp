@@ -2,6 +2,8 @@
 // Strategy, SimpleBitStorage, ClientboundLevelChunkPacketData, ClientboundLightUpdatePacketData):
 //
 //   section        i16 non-air count, i16 fluid count (26.x), block states, biomes
+//   biomes         the same container over the 64 cells of a section (4x4x4): bits 0 one biome,
+//                  1..3 a palette, otherwise ceillog2 of the biome count and raw ids
 //   container      u8 bits | palette | longs WITHOUT a count
 //                    bits 0        single value: VarInt id, no longs
 //                    bits 4..8     VarInt n + n VarInt ids, then ceil(4096 / (64/bits)) longs
@@ -24,8 +26,9 @@
 
 namespace world {
 
-usize section_wire_size(const Section& s, u32 biome);  // exactly what put_section writes
-u8* put_section(u8* p, const Section& s, u32 biome);
+// `biomes`: the section's 64 cells when they are not all `biome`.
+usize section_wire_size(const Section& s, u32 biome, const BiomeSection* biomes = nullptr);  // exactly what put_section writes
+u8* put_section(u8* p, const Section& s, u32 biome, const BiomeSection* biomes = nullptr);
 
 usize chunk_wire_bound(const Chunk& c);
 u8* put_chunk(u8* p, const Chunk& c);  // level_chunk_with_light payload

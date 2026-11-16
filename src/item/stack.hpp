@@ -191,5 +191,8 @@ inline proto::ItemView view(const ItemStack& s) {
 // for air). kUnsupported: a well-formed stack with a component this server does not read yet;
 // the reader stands behind it and `out` is empty.
 Verdict read_untrusted(proto::Reader& r, ItemStack& out);
+// The same form written: what read_untrusted takes back. It is how a stack is kept on disk -
+// whatever a file says goes through the door a client's stacks go through.
+void write_untrusted(base::ByteBuf& out, const ItemStack& s);
 
 }  // namespace item

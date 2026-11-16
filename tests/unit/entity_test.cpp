@@ -673,6 +673,56 @@ TEST(Tracker, RangeIsHorizontalInclusiveAndTheSmallerOfViewAndType) {
     EXPECT_FALSE(half.shown(p, far));
 }
 
+// ChunkMap.isChunkTracked: an entity that stands in a chunk the player has not been sent yet is
+// not shown - and is, when the player next says where it is after the chunk has gone out.
+TEST(Tracker, WhatStandsInAChunkStillToComeIsNotShown) {
+    World w;
+    const u32 a = w.add_player(8.5, 64, 8.5, 4);
+    const u32 b = w.add_player(40.5, 64, 8.5, 4);     // chunk (2, 0)
+    const u32 cow = w.add(et::kCow, 24.5, 64, 8.5);   // chunk (1, 0)
+    const u32 pig = w.add(et::kPig, 12.5, 64, 12.5);  // chunk (0, 0)
+    // a's window: 11 x 11 chunks around (0, 0); chunks (1, 0) and (2, 0) are waiting to be sent.
+    constexpr u32 kSide = 11;
+    u64 bits[2] = {};
+    const auto set = [&](i32 cx, i32 cz, bool on) {
+        const u32 i = static_cast<u32>(cz + 5) * kSide + static_cast<u32>(cx + 5);
+        bits[i >> 6] = on ? bits[i >> 6] | 1ull << (i & 63) : bits[i >> 6] & ~(1ull << (i & 63));
+    };
+    set(1, 0, true);
+    set(2, 0, true);
+    entity::PendingChunks pending[2] = {{bits, -5, -5, kSide, 2}, {}};
+    w.tracker.set_pending_chunks(pending);
+    w.tick();
+    EXPECT_TRUE(w.shown(a, pig));
+    EXPECT_FALSE(w.shown(a, cow));
+    EXPECT_FALSE(w.shown(a, b));
+    EXPECT_TRUE(w.shown(b, a)) << "b has every chunk";
+    EXPECT_TRUE(w.shown(b, cow));
+    // The cow's chunk goes out. Nothing is looked at again until a says where it is...
+    set(1, 0, false);
+    pending[0].count = 1;
+    w.ticks(3);
+    EXPECT_FALSE(w.shown(a, cow));
+    w.move(a, 8.5, 64, 8.5);
+    w.tick();
+    EXPECT_TRUE(w.shown(a, cow));
+    EXPECT_FALSE(w.shown(a, b));
+    // ...and the same for the player in the last chunk.
+    set(2, 0, false);
+    pending[0].count = 0;
+    w.move(a, 8.5, 64, 8.5);
+    w.tick();
+    EXPECT_TRUE(w.shown(a, b));
+    // An entity that walks into a chunk that waits goes out of sight like one that leaves.
+    set(1, 0, true);
+    pending[0].count = 1;
+    w.move(pig, 24.5, 64, 12.5);
+    w.tick();
+    EXPECT_FALSE(w.shown(a, pig));
+    EXPECT_TRUE(w.shown(a, cow)) << "what is shown stays until it is looked at again";
+    w.tracker.set_pending_chunks(nullptr);
+}
+
 TEST(Tracker, OnlyWhatMovedIsLookedAtAgain) {
     // Vanilla re-evaluates a pair when the player sends a movement packet or the entity changes
     // section - not when a mob shuffles inside its section.

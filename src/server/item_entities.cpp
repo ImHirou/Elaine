@@ -67,6 +67,13 @@ void Game::spawn_item(ItemStack stack, double x, double y, double z, double vx, 
     // Mth.createInsecureUUID, and the yaw the ItemEntity constructor draws: random.nextFloat() * 360.
     const Uuid uuid{(random() & ~0xF000ull) | 0x4000ull, (random() & 0x3FFFFFFFFFFFFFFFull) | 0x8000000000000000ull};
     const float yaw = static_cast<float>(random() >> 40) / static_cast<float>(1 << 24) * 360.0f;
+    add_item(uuid, yaw, std::move(stack), x, y, z, vx, vy, vz, pickup_delay, age, kHealth);
+}
+
+// An item entity with everything about it said: a new one (spawn_item), or one that comes back
+// with its chunk (server/persist.cpp). Returns its slot.
+u32 Game::add_item(Uuid uuid, float yaw, ItemStack stack, double x, double y, double z, double vx, double vy, double vz,
+                   u64 pickup_delay, u64 age, i8 health) {
     entity::Store::Moves moved;
     const u32 row = tracker_.spawn(entity_type::kItem, false, uuid, x, y, z, yaw, 0, moved);
     ents_.set_item(row, std::move(stack));
@@ -86,8 +93,9 @@ void Game::spawn_item(ItemStack stack, double x, double y, double z, double vx, 
     // The delay counts down in the item's own tick, which runs before the players': after its
     // 40th tick an item with a delay of 40 can be taken. kNever: ItemEntity.setNeverPickUp.
     item_pickup_.push_back(pickup_delay == kNever ? kNever : pickup_delay ? first + pickup_delay - 1 : tick_);
-    item_health_.push_back(kHealth);
+    item_health_.push_back(health);
     start_ticking(slot, proto::gen::physics::kMoverItem);
+    return slot;
 }
 
 // Entity.discard: whoever sees it is told at once, then the entity is gone.

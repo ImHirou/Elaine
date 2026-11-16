@@ -13,6 +13,7 @@ __pycache__/
 /server.properties
 /ops.json
 /logs/
+/world/
 
 # Profiling
 perf.data*

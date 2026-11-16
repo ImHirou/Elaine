@@ -1,5 +1,6 @@
 #include <pthread.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -9,12 +10,14 @@
 #include <vector>
 
 #include "base/log.hpp"
+#include "base/workers.hpp"
 #include "net/reactor.hpp"
 #include "proto/gen/current.hpp"
 #include "server/console.hpp"
 #include "server/game.hpp"
 #include "server/prelogin.hpp"
 #include "server/settings.hpp"
+#include "server/world_info.hpp"
 
 namespace {
 std::atomic<bool> g_stop{false};
@@ -38,6 +41,17 @@ int main(int argc, char** argv) {
     // The console reads stdin. A background job that tries is stopped by the terminal unless
     // it says it does not mind: then the read fails and the server runs without a console.
     std::signal(SIGTTIN, SIG_IGN);
+
+    // The world before the sockets: opening it may mean importing it, and nobody should be
+    // waiting in a login for that. Workers by the machine: half its threads less the tick
+    // thread's, four at most - they are idle but for bursts, and must not crowd the tick.
+    const u32 hw = std::thread::hardware_concurrency();
+    base::Workers workers(s.worker_threads ? s.worker_threads : std::clamp<u32>(hw / 2, 2, 5) - 1);
+    server::WorldInfo world;
+    if (!server::open_world(s, workers, world, err)) {
+        LOG_ERROR("%s", err.c_str());
+        return 1;
+    }
 
     std::atomic<u32> online{0};
     server::Prelogin prelogin(s, online);
@@ -72,7 +86,7 @@ int main(int argc, char** argv) {
     {
         server::Console console;
         console.start();
-        server::Game game(s, reactors, online, &console);
+        server::Game game(s, reactors, online, &console, world, workers);
         game.run(g_stop);
     }
     LOG_INFO("stopping");

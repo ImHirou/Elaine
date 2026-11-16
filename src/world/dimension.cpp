@@ -2,11 +2,14 @@
 
 #include <algorithm>
 #include <new>
+#include <thread>
 
+#include "base/clock.hpp"
+#include "proto/frame.hpp"
+#include "proto/varint.hpp"
 #include "world/chunk_codec.hpp"
 
 #include PROTO_GEN_DIMENSION_TYPES_HPP
-#include PROTO_GEN_PHYSICS_HPP
 
 namespace world {
 
@@ -51,33 +54,20 @@ bool update_column(ColumnMap& map, const Chunk& c, i32 min_y, u32 lx, i32 y, u32
     return false;
 }
 
-namespace physics = proto::gen::physics;
-
-// What collision queries and entity physics want to know of a dimension before they look at
-// its blocks one by one: bit 0, a state whose collision shape reaches out of its block
-// (BlockState.hasLargeCollisionShape); bit 1, one that acts on an entity in it or on it.
-// ...bit 2, one that breaks a fall (#fall_damage_resetting).
-ALWAYS_INLINE u32 traits_of(BlockState s) {
-    const u32 p = physics::kState[s];
-    const physics::Material& m = physics::kMaterials[p >> physics::kMaterialShift];
-    return ((p & physics::kLarge) ? 1u : 0u) | ((m.inside != physics::kInsideNone || (m.flags & physics::kStepSlime)) ? 2u : 0u) |
-           ((m.flags & physics::kFallResetting) ? 4u : 0u);
-}
-u32 traits_of(const Section& s) {
-    if (s.bits == 0) return traits_of(s.single);
-    u32 t = 0;
-    if (s.bits == Section::kDirectBits) {
-        for (u32 i = 0; i < Section::kVolume; ++i) t |= traits_of(s.get(i));
-        return t;
-    }
-    for (u32 i = 0; i < s.palette_len; ++i)
-        if (s.palette[i] != Section::kNoState) t |= traits_of(s.palette[i]);
-    return t;
-}
-
 }  // namespace
 
-Dimension::Dimension(u32 type_id, std::string name, ChunkGenerator& gen, i32 compression_threshold)
+// A frame on its way through a worker: the packet's body as the tick thread wrote it, and what
+// the worker makes of it.
+struct Dimension::FrameJob {
+    Dimension* dim;
+    i32 cx, cz;
+    u64 version;
+    i32 threshold;
+    base::ByteBuf body, out;
+};
+
+Dimension::Dimension(u32 type_id, std::string name, ChunkGenerator& gen, i32 compression_threshold, base::Workers* workers,
+                     std::string dir, bool sync)
     : type_id_(type_id),
       name_(std::move(name)),
       gen_(gen),
@@ -86,39 +76,136 @@ Dimension::Dimension(u32 type_id, std::string name, ChunkGenerator& gen, i32 com
       max_y_(dim::kTypes[type_id].min_y + dim::kTypes[type_id].height - 1),
       sections_(static_cast<u32>(dim::kTypes[type_id].height) / 16),
       has_sky_(dim::kTypes[type_id].has_skylight),
-      light_(map_, LightEngine::Layout{min_y_, min_y_ >> 4, sections_, has_sky_}) {}
+      layout_{min_y_, min_y_ >> 4, sections_, has_sky_},
+      light_(map_, layout_),
+      workers_(workers ? *workers : own_workers_),
+      store_(workers_, layout_, gen_, std::move(dir), sync) {}
 
 Dimension::~Dimension() {
-    map_.for_each([](Chunk& c) {
+    store_.finish();  // what waits to be written is written; nothing of ours is out with a worker after this
+    release_adopted();
+    map_.for_each([this](Chunk& c) {
         std::free(c.frame);
         std::free(c.block_entities);
+        std::free(c.biomes);
+        std::free(c.keep.bytes);
+        light_.release_chunk(c);
     });
 }
 
-// ---------------------------------------------------------------------------- pipeline
+// ---------------------------------------------------------------------------- coming
 
-Chunk& Dimension::load(i32 cx, i32 cz) {
-    if (Chunk* have = map_.find(cx, cz)) return *have;
-    Chunk* c = new (chunk_pool_.alloc()) Chunk();
-    c->x = cx;
-    c->z = cz;
-    c->sections_count = static_cast<u8>(sections_);
-    c->light_count = static_cast<u8>(sections_ + 2);
-    gen_.generate(*c, alloc_);
+// A chunk a worker made becomes a chunk of the world: its sections and light layers are copied out
+// of the worker's arena into the pools here, and the light engine is told of it - with the layers
+// it was saved with queued, to be taken up section by section (LightEngine::init_chunk).
+Chunk& Dimension::adopt(LoadedChunk& lc) {
+    const Chunk& from = lc.chunk;
+    Chunk* c = new (chunk_pool_.alloc()) Chunk(from);
     for (u32 si = 0; si < sections_; ++si) {
-        const u32 traits = traits_of(c->sections[si]), bit = 1u << si;
-        if (!c->sections[si].only_air()) c->filled_sections |= bit;
-        if (traits & 1) c->large_sections |= bit;
-        if (traits & 2) c->entity_sections |= bit;
-        if (traits & 4) c->fall_sections |= bit;
-        large_shapes_ |= (traits & 1) != 0;
-        entity_blocks_ |= (traits & 2) != 0;
+        c->sections[si] = Section{};
+        c->sections[si].copy_from(alloc_, from.sections[si]);
     }
-    prime_heightmaps(*c);
-    if (has_sky_) light_.fill_sky_sources(*c);
+    for (u32 li = 0; li < kMaxLightSections; ++li) c->sky[li].v = c->block[li].v = 0;
+    for (u32 li = 0; li < sections_ + 2; ++li) {
+        if (has_sky_) light_.queue_layer(*c, LightEngine::kSky, li, from.sky[li]);
+        light_.queue_layer(*c, LightEngine::kBlock, li, from.block[li]);
+    }
+    if (from.biomes) {
+        c->biomes = static_cast<BiomeSection*>(std::malloc(sizeof(BiomeSection) * kMaxSections));
+        if (UNLIKELY(!c->biomes)) std::abort();
+        std::memcpy(static_cast<void*>(c->biomes), from.biomes, sizeof(BiomeSection) * kMaxSections);
+    }
+    if (from.keep.len) {
+        c->keep.bytes = static_cast<u8*>(std::malloc(from.keep.len));
+        if (UNLIKELY(!c->keep.bytes)) std::abort();
+        std::memcpy(c->keep.bytes, from.keep.bytes, from.keep.len);
+    }
+    c->status = ChunkStatus::Generated;
+    c->frame_version = ++versions_;
+    c->saved_tick = tick_;
+    large_shapes_ |= (lc.traits & 1) != 0;
+    entity_blocks_ |= (lc.traits & 2) != 0;
+    map_.set_loading(c->x, c->z, false);
     map_.insert(c);
     light_.init_chunk(*c);
     return *c;
+}
+
+// Around a chunk that has just come: what can be lit now is lit, what can tick now ticks.
+void Dimension::promote_around(i32 cx, i32 cz) {
+    const auto all_around = [&](i32 x, i32 z, ChunkStatus at_least) {
+        for (i32 dz = -1; dz <= 1; ++dz) {
+            for (i32 dx = -1; dx <= 1; ++dx) {
+                const Chunk* n = map_.find(x + dx, z + dz);
+                if (!n || n->status < at_least) return false;
+            }
+        }
+        return true;
+    };
+    for (i32 dz = -1; dz <= 1; ++dz) {
+        for (i32 dx = -1; dx <= 1; ++dx) {
+            Chunk* c = map_.find(cx + dx, cz + dz);
+            if (c && c->status == ChunkStatus::LightReady && all_around(c->x, c->z, ChunkStatus::LightReady))
+                light_.light_chunk(*c);
+        }
+    }
+    for (i32 dz = -2; dz <= 2; ++dz) {
+        for (i32 dx = -2; dx <= 2; ++dx) {
+            Chunk* c = map_.find(cx + dx, cz + dz);
+            if (!c || c->ticking || c->status != ChunkStatus::Lit || !all_around(c->x, c->z, ChunkStatus::Lit)) continue;
+            c->ticking = true;
+            ready_.push_back(c);
+        }
+    }
+}
+
+void Dimension::pump(u64 tick, u64 deadline_ns) {
+    tick_ = tick;
+    workers_.poll();
+    std::vector<LoadedChunk*>& loaded = store_.loaded();
+    usize taken = 0;
+    while (taken < loaded.size()) {
+        LoadedChunk* lc = loaded[taken++];
+        Chunk& c = adopt(*lc);
+        if (keep_adopted_)
+            adopted_.push_back({&c, lc});
+        else
+            delete lc;
+        promote_around(c.x, c.z);
+        if (deadline_ns && base::now_ns() >= deadline_ns) break;
+    }
+    loaded.erase(loaded.begin(), loaded.begin() + static_cast<std::ptrdiff_t>(taken));
+    store_.tick(tick);
+    workers_.kick();
+}
+
+void Dimension::release_adopted() {
+    for (const Adopted& a : adopted_) delete a.from;
+    adopted_.clear();
+}
+
+Chunk& Dimension::load(i32 cx, i32 cz) {
+    if (Chunk* have = map_.find(cx, cz)) return *have;
+    request(cx, cz);
+    for (;;) {
+        workers_.kick();
+        workers_.poll();
+        std::vector<LoadedChunk*>& loaded = store_.loaded();
+        for (LoadedChunk* lc : loaded) {
+            const bool mine = lc->chunk.x == cx && lc->chunk.z == cz;
+            Chunk& c = adopt(*lc);
+            if (keep_adopted_)
+                adopted_.push_back({&c, lc});
+            else
+                delete lc;
+            // One that was asked for through request() goes its usual way; the one asked for here
+            // is the caller's to light.
+            if (!mine) promote_around(c.x, c.z);
+        }
+        loaded.clear();
+        if (Chunk* c = map_.find(cx, cz)) return *c;
+        std::this_thread::yield();
+    }
 }
 
 Chunk& Dimension::lit(i32 cx, i32 cz) {
@@ -127,7 +214,7 @@ Chunk& Dimension::lit(i32 cx, i32 cz) {
     for (i32 dz = -1; dz <= 1; ++dz)
         for (i32 dx = -1; dx <= 1; ++dx) load(cx + dx, cz + dz);
     c = map_.find(cx, cz);
-    light_.light_chunk(*c);
+    if (c->status != ChunkStatus::Lit) light_.light_chunk(*c);
     return *c;
 }
 
@@ -140,6 +227,47 @@ Chunk& Dimension::ticking(i32 cx, i32 cz) {
     c->ticking = true;
     return *c;
 }
+
+// ---------------------------------------------------------------------------- going
+
+void Dimension::save(Chunk& c, const ChunkParts& parts) {
+    light_.fold_layers(c);
+    scratch_.clear();
+    encode_chunk(c, parts, scratch_);
+    store_.save(c.x, c.z, {scratch_.data, scratch_.len});
+    c.dirty = false;
+    c.saved_tick = tick_;
+}
+
+void Dimension::unload(Chunk& c) {
+    // Light can no longer cross into this chunk, so what is around it is no longer final: it does
+    // not tick until the chunk is back.
+    for (i32 dz = -1; dz <= 1; ++dz) {
+        for (i32 dx = -1; dx <= 1; ++dx) {
+            Chunk* n = map_.find(c.x + dx, c.z + dz);
+            if (!n || !n->ticking) continue;
+            n->ticking = false;
+            invalidate(*n);
+            if (n != &c) stopped_.push_back(n);
+        }
+    }
+    std::erase(ready_, &c);
+    std::erase(stopped_, &c);
+    DCHECK(std::none_of(changes_.begin(), changes_.end(), [&](const BlockChange& b) { return b.chunk == &c; }));
+    DCHECK(!c.light_listed);
+    light_.unload_chunk(c);
+    for (u32 si = 0; si < sections_; ++si) c.sections[si].release(alloc_);
+    frame_bytes_ -= c.frame_len;
+    std::free(c.frame);
+    std::free(c.block_entities);
+    std::free(c.biomes);
+    std::free(c.keep.bytes);
+    map_.remove(c.x, c.z);
+    c.~Chunk();
+    chunk_pool_.free(&c);
+}
+
+// ---------------------------------------------------------------------------- frames
 
 std::span<const u8> Dimension::frame(i32 cx, i32 cz) {
     // A block changed earlier this tick may still be waiting for its light: a frame built now would
@@ -167,38 +295,50 @@ void Dimension::encode(Chunk& c) {
     c.frame_valid = true;
 }
 
-// Heightmap.primeHeightmaps for the three client heightmaps: highest block per column matching each
-// map's predicate, stored as (y + 1 - min_y), 0 when the column has none.
-void Dimension::prime_heightmaps(Chunk& c) {
-    c.world_surface.fill(0);
-    c.motion_blocking.fill(0);
-    c.motion_blocking_no_leaves.fill(0);
-    u8 need[256];
-    std::memset(need, 7, sizeof need);
-    u32 remaining = 3 * 256;
-    BlockState states[Section::kVolume];
-    for (i32 si = static_cast<i32>(sections_) - 1; si >= 0 && remaining; --si) {
-        const Section& s = c.sections[si];
-        if (s.only_air()) continue;
-        s.unpack(states);
-        for (i32 ly = 15; ly >= 0 && remaining; --ly) {
-            const BlockState* layer = states + ly * 256;
-            const u32 h = static_cast<u32>(si * 16 + ly + 1);
-            for (u32 col = 0; col < 256; ++col) {
-                const u32 n = need[col];
-                if (!n) continue;
-                const u32 f = flags_of(layer[col]);
-                const u32 hit = n & (((f & state::kIsAir) ? 0u : 1u) | ((f & state::kMotionBlocking) ? 2u : 0u) |
-                                     ((f & state::kMotionBlockingNoLeaves) ? 4u : 0u));
-                if (!hit) continue;
-                if (hit & 1) c.world_surface.set(col, h);
-                if (hit & 2) c.motion_blocking.set(col, h);
-                if (hit & 4) c.motion_blocking_no_leaves.set(col, h);
-                need[col] = static_cast<u8>(n & ~hit);
-                remaining -= static_cast<u32>(std::popcount(hit));
-            }
-        }
+// The packet's body - id and payload - for a worker to frame and deflate.
+void Dimension::write_body(Chunk& c, base::ByteBuf& to) {
+    for (u32 si = 0; si < sections_; ++si) c.sections[si].compact(alloc_);
+    light_.fold_layers(c);
+    u8* p = to.reserve(chunk_wire_bound(c) + proto::kVarIntMaxBytes);
+    p = proto::put_varint(p, proto::ids::play::cb::kLevelChunkWithLight);
+    p = put_chunk(p, c);
+    to.commit(p);
+}
+
+std::span<const u8> Dimension::frame_if_ready(Chunk& c) {
+    if (LIKELY(c.frame_valid)) return {c.frame, c.frame_len};
+    if (c.frame_job == c.frame_version) return {};    // a worker is at it
+    if (UNLIKELY(light_.has_work())) update_light();  // as in frame(); may make the version a newer one
+    auto* job = new FrameJob{this, c.x, c.z, c.frame_version, threshold_, {}, {}};
+    write_body(c, job->body);
+    c.frame_job = c.frame_version;
+    workers_.submit({&frame_work, &frame_done, this, job, 0, 0, 0, 0}, 1);
+    return {};
+}
+
+void Dimension::frame_work(base::Task& t) {
+    auto* job = static_cast<FrameJob*>(t.data);
+    proto::frame_raw(job->out, job->threshold, {job->body.data, job->body.len});
+}
+
+void Dimension::frame_done(base::Task& t) {
+    auto* job = static_cast<FrameJob*>(t.data);
+    Dimension& d = *job->dim;
+    // The chunk may have changed since, or gone, or gone and come back: the frame is of the
+    // version it was made of, and versions are never used twice.
+    Chunk* c = d.map_.find(job->cx, job->cz);
+    if (c && c->frame_job == job->version) c->frame_job = 0;
+    if (c && c->frame_version == job->version && !c->frame_valid) {
+        d.frame_bytes_ += job->out.len;
+        d.frame_bytes_ -= c->frame_len;
+        std::free(c->frame);
+        c->frame = job->out.data;  // the buffer's memory is the frame's from here on
+        c->frame_len = job->out.len;
+        c->frame_valid = true;
+        job->out.data = nullptr;
+        job->out.len = job->out.cap = 0;
     }
+    delete job;
 }
 
 void Dimension::update_heightmaps(Chunk& c, u32 lx, i32 y, u32 lz, BlockState s) {
@@ -220,7 +360,7 @@ bool Dimension::set_block_raw(Chunk& c, i32 x, i32 y, i32 z, BlockState s) {
     if (was_empty && is_air(s)) return false;
     const BlockState old = sec.set(alloc_, Section::index(lx, ly, lz), s);
     if (old == s) return false;
-    if (const u32 traits = traits_of(s); UNLIKELY(traits)) {
+    if (const u32 traits = section_traits(s); UNLIKELY(traits)) {
         large_shapes_ |= (traits & 1) != 0;
         entity_blocks_ |= (traits & 2) != 0;
         if (traits & 1) c.large_sections |= 1u << si;
@@ -238,7 +378,8 @@ bool Dimension::set_block_raw(Chunk& c, i32 x, i32 y, i32 z, BlockState s) {
         light_.check_block(x, y, z);
     }
     c.modified = true;
-    c.frame_valid = false;
+    c.dirty = true;
+    invalidate(c);
     changes_.push_back({&c, static_cast<u16>(si), static_cast<u16>((lx << 8) | (lz << 4) | ly)});
     changes_sorted_ = false;
     return true;
@@ -288,7 +429,8 @@ void Dimension::add_block_entity(i32 x, i32 y, i32 z, u32 type, u32 data) {
     }
     c->block_entities[c->block_entity_count++] = {static_cast<u8>((x & 15) << 4 | (z & 15)), static_cast<u8>(type),
                                                   static_cast<i16>(y), data};
-    c->frame_valid = false;
+    c->dirty = true;
+    invalidate(*c);
 }
 
 bool Dimension::remove_block_entity(i32 x, i32 y, i32 z, u32& data) {
@@ -297,7 +439,8 @@ bool Dimension::remove_block_entity(i32 x, i32 y, i32 z, u32& data) {
     if (!found) return false;
     data = found->data;
     c->block_entities[found - c->block_entities] = c->block_entities[--c->block_entity_count];
-    c->frame_valid = false;
+    c->dirty = true;
+    invalidate(*c);
     return true;
 }
 
@@ -305,7 +448,7 @@ bool Dimension::remove_block_entity(i32 x, i32 y, i32 z, u32& data) {
 
 void Dimension::update_light() {
     if (light_.has_work()) light_.run_updates();
-    for (Chunk* c : light_.changed()) c->frame_valid = false;
+    for (Chunk* c : light_.changed()) invalidate(*c);
 }
 
 std::vector<Dimension::BlockChange>& Dimension::block_changes() {

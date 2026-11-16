@@ -11,7 +11,8 @@ namespace world {
 class ChunkGenerator {
   public:
     // Fill c.sections[0 .. c.sections_count) and c.biome[]. Called once per chunk; one virtual call
-    // per chunk is noise next to the work behind it.
+    // per chunk is noise next to the work behind it. With workers it is called on their threads,
+    // for several chunks at once: a generator keeps nothing that two calls would share.
     virtual void generate(Chunk& c, SectionAllocator& a) = 0;
     virtual i32 sea_level() const = 0;     // ChunkGenerator.getSeaLevel(): sent in the login packet
     virtual i32 spawn_height() const = 0;  // ChunkGenerator.getSpawnHeight(): first free y at spawn
@@ -45,6 +46,24 @@ class FlatGenerator final : public ChunkGenerator {
     u32 sections_;
     u16 biome_;
     std::vector<BlockState> column_;  // one state per y, from the bottom up (FlatLevelGeneratorSettings.getLayers)
+};
+
+// Nothing: air from the bottom to the top. What stands in for the terrain of a world that was
+// imported from vanilla and whose generator this server does not have - beyond what was explored
+// there, the world ends.
+class EmptyGenerator final : public ChunkGenerator {
+  public:
+    EmptyGenerator(i32 sea_level, u16 biome) : sea_level_(sea_level), biome_(biome) {}
+    void generate(Chunk& c, SectionAllocator&) override {
+        for (u32 si = 0; si < c.sections_count; ++si) c.biome[si] = biome_;
+    }
+    i32 sea_level() const override { return sea_level_; }
+    i32 spawn_height() const override { return sea_level_ + 1; }
+    bool is_flat() const override { return false; }
+
+  private:
+    i32 sea_level_;
+    u16 biome_;
 };
 
 }  // namespace world

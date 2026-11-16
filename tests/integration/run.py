@@ -14,6 +14,7 @@ import json
 import math
 import os
 import re
+import shutil
 import socket
 import struct
 import subprocess
@@ -45,18 +46,23 @@ def free_port() -> int:
 
 
 class Server:
-    def __init__(self, exe: str, **args):
+    def __init__(self, exe: str, world: str | None = None, **args):
+        """`world`: the directory of a world to run (and to leave behind); without one the server
+        gets a new world of its own, which goes when it stops."""
         self.port = free_port()
         # The operators' file: none to begin with, and nothing of a test left in the working directory.
         self.ops_file = os.path.join(tempfile.gettempdir(), f"ops-{os.getpid()}-{self.port}.json")
+        self.own_world = None if world else tempfile.mkdtemp(prefix="world-")
+        self.world = world or self.own_world
         opts = {"server-ip": "127.0.0.1", "server-port": self.port, "online-mode": "false", "debug": "true",
-                "config": "/nonexistent/server.properties", "ops-file": self.ops_file}
+                "config": "/nonexistent/server.properties", "ops-file": self.ops_file, "level-name": self.world}
+        start_timeout = float(args.pop("start_timeout", 5))  # (importing a world takes its time)
         opts.update({k.replace("_", "-"): v for k, v in args.items()})
         self.log = tempfile.NamedTemporaryFile("w+", suffix=".log", delete=False)
         # stdin is the server's console: a pipe, so that a test can type on it.
         self.proc = subprocess.Popen([exe] + [f"--{k}={v}" for k, v in opts.items()], stderr=self.log, stdout=self.log,
                                      stdin=subprocess.PIPE)
-        deadline = time.time() + 5
+        deadline = time.time() + start_timeout
         while True:
             if self.proc.poll() is not None:
                 raise RuntimeError(f"server exited with {self.proc.returncode}:\n{self.read_log()}")
@@ -110,6 +116,8 @@ class Server:
             self.proc.stdin.close()
         if os.path.exists(self.ops_file):
             os.unlink(self.ops_file)
+        if self.own_world:
+            shutil.rmtree(self.own_world, ignore_errors=True)
         return self.proc.returncode
 
 
@@ -170,7 +178,6 @@ def join(c: Client, name: str, online: bool = False, view: int = 10) -> dict:
     c.send("accept_teleportation", varint(tp["id"]) + struct.pack(">dddff", *tp["pos"], *tp["rot"]))
 
     out["tab"] = []
-    out["chunks"] = {}
     while True:
         got, r = c.recv()
         if got == "player_info_update":
@@ -193,25 +200,25 @@ def join(c: Client, name: str, online: bool = False, view: int = 10) -> dict:
         elif got == "game_event":
             out["game_event"] = (r.u8(), r.f32())
             r.done()
-        elif got == "set_chunk_cache_center":
-            out["center"] = (r.varint(), r.varint())
-            r.done()
-        elif got == "chunk_batch_start":
-            r.done()
-        elif got == "level_chunk_with_light":
-            ch = mc.parse_chunk(r)
-            assert (ch["x"], ch["z"]) not in out["chunks"], "chunk sent twice"
-            out["chunks"][(ch["x"], ch["z"])] = ch
-            out.setdefault("first_chunk", (ch["x"], ch["z"]))
-        elif got == "chunk_batch_finished":
-            assert r.varint() == len(out["chunks"])
-            r.done()
         elif got == "system_chat":
             out["chat"] = (r.nbt_text(), r.bool())
             r.done()
-            return out
+            break
         else:
             raise AssertionError(f"unexpected play packet {got}")
+    # The chunks come batch by batch from the end of the join's tick on (PlayerChunkSender): the
+    # client's own cache (c.chunks) takes them; here the view is waited for.
+    assert c.chunk_center is not None, "no set_chunk_cache_center before the first chunk"
+    out["view"] = min(max(view, 2), out["login"]["view_distance"])
+    c.sync_chunks(out["view"])
+    # A client says where it is every tick, at the least once a second. A server looks again at
+    # who sees whom on each such packet (ChunkMap.move) - which is when what stands in the chunks
+    # that have just come is shown.
+    c.send("move_player_status_only", b"\x00")
+    out["center"] = c.chunk_center
+    out["chunks"] = c.chunks
+    out["first_chunk"] = next(e[1][0] for e in c.chunk_log if e[0] == "batch")
+    return out
 
 
 def check_join(j: dict, name: str, view: int = 10, online: bool = False) -> None:
@@ -239,11 +246,11 @@ def check_join(j: dict, name: str, view: int = 10, online: bool = False) -> None
     assert j["game_event"] == (13, 0.0)
     assert j["chat"] == (f"Welcome, {name}!", False)
 
-    r = view
-    assert len(j["chunks"]) == (2 * r + 1) ** 2, len(j["chunks"])
     cx, cz = j["center"]
     assert j["first_chunk"] == (cx, cz), "the player's own chunk must be sent first"
-    assert set(j["chunks"]) == {(cx + dx, cz + dz) for dx in range(-r, r + 1) for dz in range(-r, r + 1)}
+    # ChunkTrackingView: a square of the view distance + 1 with its corners cut (a square for small ones).
+    assert set(j["chunks"]) == mc.view_chunks(cx, cz, view)
+    assert len(j["chunks"]) == {2: 49, 3: 81, 10: 473}.get(view, len(j["chunks"])), len(j["chunks"])
     plains = mc.load_registry("worldgen_biome").index("minecraft:plains")
     for ch in j["chunks"].values():
         check_flat_chunk(ch, plains)
@@ -352,29 +359,30 @@ def movement_streams_chunks(srv: Server):
     c = srv.client()
     j = join(c, "Walker", view=3)
     cx, cz = j["center"]
-    # Walk +x across a chunk border: one new column of 7 chunks appears, the far column is dropped.
+    # Walk +x across a chunk border: the view moves with the player (ChunkMap.move). The centre
+    # first, then - at once - what left the view; what entered it comes in batches from this
+    # tick's end on.
+    before = set(c.chunks)
+    assert before == mc.view_chunks(cx, cz, 3)
+    mark = len(c.chunk_log)
     x, y, z = j["teleport"]["pos"]
     c.send("move_player_pos", struct.pack(">dddB", x + 16.0, y, z, 1))
-    r = c.expect("set_chunk_cache_center")
-    assert (r.varint(), r.varint()) == (cx + 1, cz)
-    c.expect("chunk_batch_start")
-    new = set()
-    while True:
-        got, r = c.recv()
-        if got == "chunk_batch_finished":
-            assert r.varint() == len(new)
-            break
-        assert got == "level_chunk_with_light", got
-        ch = mc.parse_chunk(r)
-        new.add((ch["x"], ch["z"]))
-    assert new == {(cx + 4, cz + dz) for dz in range(-3, 4)}, new
-    gone = set()
-    for _ in range(7):
-        r = c.expect("forget_level_chunk")
-        packed = r.u64()
-        gone.add((struct.unpack(">i", struct.pack(">I", packed & 0xFFFFFFFF))[0],
-                  struct.unpack(">i", struct.pack(">I", packed >> 32))[0]))
-    assert gone == {(cx - 3, cz + dz) for dz in range(-3, 4)}, gone
+    c.sync_chunks(3, (cx + 1, cz))
+    after = mc.view_chunks(cx + 1, cz, 3)
+    assert c.chunk_center == (cx + 1, cz) and set(c.chunks) == after
+    log = c.chunk_log[mark:]
+    assert log[0] == ("center", cx + 1, cz), log[0]
+    gone = [e[1:] for e in log if e[0] == "forget"]
+    assert set(gone) == before - after and len(gone) == len(before - after), gone
+    assert gone == sorted(gone), "ChunkTrackingView.difference walks x, then z"
+    new = [pos for e in log if e[0] == "batch" for pos in e[1]]
+    assert set(new) == after - before and len(new) == len(after - before), new
+    assert all(e[0] != "forget" for e in log[1 + len(gone):]), "what leaves the view is forgotten before anything is sent"
+    # Within a batch the nearest first (PlayerChunkSender.collectChunksToSend).
+    for e in log:
+        if e[0] == "batch":
+            dist = [(px - cx - 1) ** 2 + (pz - cz) ** 2 for px, pz in e[1]]
+            assert dist == sorted(dist), dist
     # F3 ping graph
     c.send("ping_request", struct.pack(">q", 42))
     assert c.expect("pong_response").i64() == 42
@@ -548,19 +556,12 @@ def skip_tab_updates(c: Client, n: int) -> None:
 
 
 def walk_to_chunk(c: Client, j: dict, x: float, z: float, view: int) -> None:
-    """Move and swallow the chunk stream that follows; returns once the view is settled."""
-    old = j["center"]
+    """Move and take the chunk stream that follows; returns once the view is settled."""
     c.send("move_player_pos", struct.pack(">dddB", x, j["teleport"]["pos"][1], z, 1))
     new = (int(x // 16), int(z // 16))
-    r = c.expect("set_chunk_cache_center")
-    assert (struct.unpack(">i", struct.pack(">I", r.varint()))[0], struct.unpack(">i", struct.pack(">I", r.varint()))[0]) == new
-    c.expect("chunk_batch_start")
-    while c.recv()[0] != "chunk_batch_finished":
-        pass
-    left = sum(1 for cx in range(old[0] - view, old[0] + view + 1) for cz in range(old[1] - view, old[1] + view + 1)
-               if abs(cx - new[0]) > view or abs(cz - new[1]) > view)
-    for _ in range(left):
-        c.expect("forget_level_chunk")
+    c.sync_chunks(j["view"], new)
+    # ...and, as a client would, says where it is again: what stands in the new chunks is shown.
+    c.send("move_player_pos", struct.pack(">dddB", x, j["teleport"]["pos"][1], z, 1))
     j["center"] = new
 
 
@@ -579,7 +580,7 @@ def place_and_break_blocks(srv: Server):
     skip_tab_updates(b, 1)
     for cl in (a, b, c):
         cl.send("player_loaded")
-    walk_to_chunk(c, jc, -24.0, 8.5, view=2)  # chunk (-2, 0): chunk (0, 0) is now on the border of Carol's view
+    walk_to_chunk(c, jc, -40.0, 8.5, view=2)  # chunk (-3, 0): chunk (0, 0) is now on the border of Carol's view
 
     ground = (8, -61, 10)                      # a grass block two steps from Alice
     above = (8, -60, 10)
@@ -2775,7 +2776,7 @@ def join_many(srv: Server, n: int, view: int, online: bool = False) -> list:
         try:
             c = srv.client(timeout=60)
             j = join(c, f"Bot{i:03d}", online=online, view=view)
-            assert len(j["chunks"]) == (2 * view + 1) ** 2
+            assert set(j["chunks"]) == mc.view_chunks(*j["center"], j["view"])
             clients[i] = c
         except Exception as e:  # noqa: BLE001
             errors.append(f"Bot{i:03d}: {e!r}")
@@ -2999,7 +3000,7 @@ def many_players(srv: Server):
         try:
             c = srv.client(timeout=30)
             j = join(c, f"Bot{i:03d}", view=5)
-            assert len(j["chunks"]) == 121
+            assert set(j["chunks"]) == mc.view_chunks(*j["center"], 5)
             clients[i] = c
         except Exception as e:  # noqa: BLE001
             errors.append(f"Bot{i:03d}: {e!r}")
@@ -3062,6 +3063,405 @@ def keepalive_timeout_kicks(srv: Server):
 # ----------------------------------------------------------------------------- runner
 
 EXE = ""
+
+
+# ----------------------------------------------------------------------------- the world's life cycle
+
+def build_something(a: Client) -> dict:
+    """Alice leaves her mark near the spawn: a chest with twenty stone in it, a stone on the
+    ground, a glowstone at the edge of the chunk (its light crosses into the next). Returns where."""
+    chest, glow = (8, -60, 10), (15, -60, 8)
+    give(a, 36, I["kChest"])
+    give(a, 37, I["kStone"], 21)
+    give(a, 38, I["kGlowstone"])
+    click(a, (8, -61, 10), 1, seq=1)
+    assert collect(a)[chest] == mc.BLOCK["kChest"]
+    click(a, chest, 1, seq=2)
+    collect(a)
+    assert a.window and a.window["type"] == "kGeneric9x3"
+    a.send("set_carried_item", struct.pack(">h", 1))
+    menu_click(a, 55, 0, QUICK_MOVE)        # the stone into the chest...
+    settle(a)
+    assert a.window["slots"][0] == plain("kStone", 21)
+    menu_click(a, 0, 1, PICKUP)             # ...and (right click: half, rounded up) eleven of it out again,
+    menu_click(a, 55, 1, PICKUP)            # one of them back into the hand
+    menu_click(a, 0, 0, PICKUP)             # and the other ten back
+    settle(a)
+    assert a.window["slots"][0] == plain("kStone", 20) and a.window["slots"][55] == plain("kStone", 1), a.window["slots"][:1]
+    close_window(a)
+    settle(a)
+    a.send("move_player_pos", struct.pack(">dddB", 13.5, SPAWN[1], 8.5, 1))   # within reach of the chunk's edge
+    a.send("set_carried_item", struct.pack(">h", 2))
+    click(a, (15, -61, 8), 1, seq=3)
+    assert collect(a, ticks=6)[glow] == mc.BLOCK["kGlowstone"]
+    a.send("set_carried_item", struct.pack(">h", 1))
+    look(a, 0.0, DOWN)
+    action(a, DROP_ONE)                     # the one stone, at her feet - and away from it before it can be taken again
+    settle(a)
+    a.send("move_player_pos", struct.pack(">dddB", 9.5, SPAWN[1], 8.5, 1))
+    return {"chest": chest, "glow": glow}
+
+
+def near(p: tuple, q: tuple) -> bool:
+    """The same place, give or take what a watcher does not know: an item's last slide before it
+    lay still reaches a client with its next update, a second later, and rounded to 1 / 4096."""
+    return all(abs(u - v) < 0.02 for u, v in zip(p, q))
+
+
+def frames(c: Client) -> dict:
+    """The chunks a client holds, as the bytes they came as."""
+    return {pos: c.chunks.raw(pos) for pos in c.chunks}
+
+
+def the_stone(c: Client):
+    lying = list(of_type(c, "kItem").values())
+    assert len(lying) == 1, [e.data for e in lying]
+    assert lying[0].data[D_ITEM] == (STACK, plain("kStone", 1)), lying[0].data
+    return lying[0]
+
+
+def open_and_check_chest(c: Client, pos: tuple, seq: int) -> None:
+    click(c, pos, 1, seq=seq)
+    collect(c)
+    assert c.window and c.window["type"] == "kGeneric9x3", c.window
+    assert c.window["slots"][0] == plain("kStone", 20) and c.window["slots"][1:27] == [None] * 26, c.window["slots"][:3]
+    close_window(c)
+    settle(c)
+
+
+@test()
+def the_world_is_kept():
+    """What was built is there when the server starts again: every chunk a client is sent is the
+    same bytes as before - blocks, heightmaps, light, block entities - a chest holds what it
+    held, and what lay on the ground lies there."""
+    world = tempfile.mkdtemp(prefix="world-kept-")
+    srv = None
+    try:
+        srv = Server(EXE, world=world)
+        a = srv.client()
+        join(a, "Alice", view=3)
+        a.send("player_loaded")
+        settle(a)
+        made = build_something(a)
+        # Bob comes to look: his chunks are the world as it is now.
+        b = srv.client()
+        join(b, "Bob", view=3)
+        a.expect("player_info_update")
+        settle(b, a, ticks=30)              # the stone has come to rest
+        before = frames(b)
+        # (The frames hold the light as well; two values by hand: beside the glowstone, and across the border.)
+        assert mc.light_get(b.chunks[(0, 0)]["light"]["block"][1], 14, 4, 8) == 14
+        assert mc.light_get(b.chunks[(1, 0)]["light"]["block"][1], 0, 4, 8) == 14
+        stone = the_stone(b)
+        where = stone.pos
+        assert srv.stop() == 0, srv.read_log()
+        assert "world saved" in srv.read_log()
+        os.unlink(srv.log.name)
+        assert os.path.exists(os.path.join(world, "world.json")) and os.path.exists(os.path.join(world, "session.lock"))
+        regions = os.listdir(os.path.join(world, "chunks", "minecraft", "overworld"))
+        assert regions and all(re.fullmatch(r"r\.-?\d+\.-?\d+\.rgn", name) for name in regions), regions
+
+        srv = Server(EXE, world=world)
+        assert "a new flat world" not in srv.read_log()
+        c = srv.client()
+        join(c, "Carol", view=3)
+        c.send("player_loaded")
+        settle(c, ticks=6)
+        after = frames(c)
+        assert set(after) == set(before)
+        differ = [pos for pos in before if before[pos] != after[pos]]
+        assert not differ, f"chunks that came back different: {differ}"
+        assert c.chunks[(0, 0)]["block_entities"] == [((8, -60, 10), mc.BLOCK_ENTITY["kChest"], None)]
+        back = the_stone(c)
+        assert near(back.pos, where), (back.pos, where)
+        open_and_check_chest(c, made["chest"], 1)
+        # ...and a world is one server's: a second one on it does not start.
+        try:
+            Server(EXE, world=world)
+            raise AssertionError("two servers on one world")
+        except RuntimeError as e:
+            assert "in use by another server" in str(e), e
+        assert srv.stop() == 0, srv.read_log()
+        os.unlink(srv.log.name)
+    finally:
+        if srv:
+            srv.stop()   # (whatever went wrong: no server is left behind)
+        shutil.rmtree(world, ignore_errors=True)
+
+
+@test(chunk_unload_seconds=1, view_distance=3)
+def chunks_leave_and_return(srv: Server):
+    """Nobody near: the chunks are saved and leave the world, with the block entities in them
+    and the entities on them. Somebody comes back: they are as they were - from what is still
+    waiting to be written, or from the file."""
+    a = srv.client()
+    ja = join(a, "Alice", view=3)
+    a.send("player_loaded")
+    settle(a)
+    made = build_something(a)
+    b = srv.client()
+    join(b, "Bob", view=3)
+    a.expect("player_info_update")
+    settle(b, a, ticks=30)
+    before = frames(b)
+    where = the_stone(b).pos
+    b.close()
+    a.expect("player_info_remove")
+
+    for far, wait in ((16 * 40 + 8.5, 3.0), (16 * 80 + 8.5, 8.0)):
+        # Away, far beyond every chunk that was loaded - and until those have left.
+        walk_to_chunk(a, ja, far, 8.5, 3)
+        settle(a)
+        assert not of_type(a, "kItem")
+        a.pump(wait)                       # (keeps the connection alive)
+        log = srv.read_log()
+        assert "left the world" in log, log[-2000:]
+        # Back: the same chunks, byte for byte, the stone where it lay, the chest with its stone.
+        walk_to_chunk(a, ja, 8.5, 8.5, 3)
+        settle(a, ticks=6)
+        after = frames(a)
+        differ = [pos for pos in before if before[pos] != after[pos]]
+        assert set(after) == set(before) and not differ, f"chunks that came back different: {differ}"
+        assert near(the_stone(a).pos, where), (the_stone(a).pos, where)
+        open_and_check_chest(a, made["chest"], 10 + int(wait))
+        # The first time round they came from what waited to be written - a region is written five
+        # seconds after the first of its chunks was saved; the second time from the file.
+        written = os.path.isdir(os.path.join(srv.world, "chunks", "minecraft", "overworld")) and \
+            os.listdir(os.path.join(srv.world, "chunks", "minecraft", "overworld"))
+        assert bool(written) == (wait > 5), (wait, written)
+
+
+@test(level_name="", chunk_unload_seconds=1, view_distance=2)
+def a_world_that_is_not_kept(srv: Server):
+    """level-name= (empty): nothing is written anywhere, and so nothing leaves memory - what was
+    built is still there when its builder comes back from far away."""
+    assert "the world is not kept" in srv.read_log()
+    a = srv.client()
+    ja = join(a, "Alice", view=2)
+    a.send("player_loaded")
+    settle(a)
+    give(a, 36, I["kStone"])
+    click(a, (8, -61, 10), 1, seq=1)
+    assert collect(a)[(8, -60, 10)] == mc.BLOCK["kStone"]
+    walk_to_chunk(a, ja, 16 * 30 + 8.5, 8.5, 2)
+    a.pump(3.0)
+    assert "left the world" not in srv.read_log()
+    walk_to_chunk(a, ja, 8.5, 8.5, 2)
+    assert mc.chunk_block(a.chunks[(0, 0)], 8, -60, 10) == mc.BLOCK["kStone"]
+    assert os.listdir(srv.own_world) == []
+
+
+# A vanilla world written by hand, from the layouts of the 26.3 jar (LevelStorageSource, RegionFile,
+# SerializableChunkData, PalettedContainer, BlockState.CODEC): what the import is given to read.
+
+def anvil_named(tag: dict) -> bytes:
+    """A tag as a file holds it: the root compound with a name (the empty one)."""
+    return b"\x0a\x00\x00" + mc.nbt(tag)[1:]
+
+
+def anvil_container(palette: list, indices: list, least_bits: int) -> dict:
+    """PalettedContainer over NBT: the palette, and - for more than one entry - the indices in
+    longs, max(least_bits, ceillog2(n)) bits each, none across two longs (SimpleBitStorage)."""
+    if len(palette) == 1:
+        return {"palette": palette}
+    bits = max(least_bits, (len(palette) - 1).bit_length())
+    per = 64 // bits
+    longs = []
+    for at in range(0, len(indices), per):
+        v = 0
+        for k, index in enumerate(indices[at:at + per]):
+            v |= index << (k * bits)
+        longs.append(v - (1 << 64) if v >> 63 else v)
+    return {"palette": palette, "data": mc.LongArray(longs)}
+
+
+def anvil_chunk(cx: int, cz: int, blocks: dict | None = None, block_entities: list | None = None, biomes=None,
+                status: str = "minecraft:full", ground: str = "minecraft:sandstone", light: dict | None = None) -> dict:
+    """A chunk of flat ground (bedrock, three of `ground`) with `blocks` {(x, y, z): state} in its
+    lowest section - coordinates in the chunk, y from the bottom of the world; a state is a block's
+    name, or {id, properties}. `light`: {"sky"/"block": {section Y: bytes}} makes it a lit chunk."""
+    palette = ["minecraft:bedrock", ground, "minecraft:air"]
+    indices = [0 if i < 256 else 1 if i < 1024 else 2 for i in range(4096)]
+    for (x, y, z), state in (blocks or {}).items():
+        if state not in palette:
+            palette.append(state)
+        indices[y << 8 | z << 4 | x] = palette.index(state)
+    sections = []
+    for y in range(-4, 20):
+        section = {"Y": mc.Byte(y), "block_states": anvil_container(palette, indices, 4) if y == -4 else {"palette": ["minecraft:air"]},
+                   "biomes": (biomes or {}).get(y) or {"palette": ["minecraft:desert"]}}
+        for kind, name in (("sky", "SkyLight"), ("block", "BlockLight")):
+            if light and y in light.get(kind, {}):
+                section[name] = mc.ByteArray(light[kind][y])
+        sections.append(section)
+    chunk = {"DataVersion": mc.META["world_version"], "xPos": cx, "yPos": -4, "zPos": cz, "Status": status,
+             "LastUpdate": mc.Long(1234), "InhabitedTime": mc.Long(77), "sections": sections,
+             "block_entities": block_entities or [], "structures": {"References": {}, "starts": {}}, "Heightmaps": {}}
+    if light:
+        chunk["isLightOn"] = mc.Byte(1)
+    return chunk
+
+
+def anvil_region(path: str, chunks: dict) -> None:
+    """RegionFile: 4 KiB of locations (sector << 8 | sectors), 4 KiB of timestamps, then per chunk
+    an i32 length, the compression's id (2: zlib) and the bytes, in whole 4 KiB sectors."""
+    import zlib
+    header, body, sector = bytearray(8192), bytearray(), 2
+    for (lx, lz), tag in chunks.items():
+        data = zlib.compress(anvil_named(tag))
+        entry = struct.pack(">IB", len(data) + 1, 2) + data
+        entry += b"\x00" * (-len(entry) % 4096)
+        struct.pack_into(">I", header, 4 * (lx + lz * 32), sector << 8 | len(entry) // 4096)
+        body += entry
+        sector += len(entry) // 4096
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(header + body)
+
+
+def anvil_world(path: str) -> dict:
+    """The world: nine chunks of a flat desert around the origin's north-east, with things in the
+    first; one chunk in the region across the origin; one that vanilla had not finished."""
+    import gzip
+    version = mc.META["world_version"]
+    os.makedirs(os.path.join(path, "data", "minecraft"))
+    with open(os.path.join(path, "level.dat"), "wb") as f:
+        f.write(gzip.compress(anvil_named({"Data": {
+            "DataVersion": version, "LevelName": "by hand", "version": 19133,
+            "spawn": {"dimension": "minecraft:overworld", "pos": mc.IntArray([4, -60, 4]), "yaw": mc.Float(0), "pitch": mc.Float(0)}}})))
+    with open(os.path.join(path, "data", "minecraft", "world_gen_settings.dat"), "wb") as f:
+        f.write(gzip.compress(anvil_named({"DataVersion": version, "data": {"seed": mc.Long(42), "dimensions": {
+            "minecraft:overworld": {"type": "minecraft:overworld", "generator": {"type": "minecraft:flat", "settings": {
+                "biome": "minecraft:desert", "features": mc.Byte(0), "lakes": mc.Byte(0),
+                "layers": [{"block": "minecraft:bedrock", "height": 1}, {"block": "minecraft:sandstone", "height": 3}]}}}}}})))
+
+    lit_furnace = {"id": "minecraft:furnace", "properties": {"facing": "north", "lit": "true"}}
+    things = {
+        (1, 4, 1): {"id": "minecraft:chest", "properties": {"facing": "north", "type": "single", "waterlogged": "false"}},
+        (3, 4, 1): "minecraft:chest",                      # the default state by its name alone
+        (5, 4, 1): lit_furnace,
+        (7, 4, 1): "minecraft:oak_sign",
+        (9, 4, 1): {"id": "minecraft:oak_stairs", "properties": {"shape": "no such shape"}},   # an unknown value: the default's
+        (11, 4, 1): "minecraft:glowstone",
+    }
+    block_entities = [
+        {"id": "minecraft:chest", "x": 1, "y": -60, "z": 1, "keepPacked": mc.Byte(0), "components": {},
+         "Items": [{"Slot": mc.Byte(0), "id": "minecraft:stone", "count": 20}, {"Slot": mc.Byte(26), "id": "minecraft:diamond"}]},
+        {"id": "minecraft:chest", "x": 3, "y": -60, "z": 1, "CustomName": "Treasure",
+         "Items": [{"Slot": mc.Byte(0), "id": "minecraft:gold_ingot", "count": 9}]},
+        {"id": "minecraft:furnace", "x": 5, "y": -60, "z": 1, "Items": [{"Slot": mc.Byte(0), "id": "minecraft:iron_ore", "count": 3}],
+         "cooking_time_spent": mc.Short(0), "cooking_total_time": mc.Short(200), "lit_time_remaining": mc.Short(0),
+         "lit_total_time": mc.Short(0), "RecipesUsed": {"minecraft:iron_ingot_from_smelting_iron_ore": 2}},
+        {"id": "minecraft:sign", "x": 7, "y": -60, "z": 1, "is_waxed": mc.Byte(0),
+         "front_text": {"messages": ["hello", "", "", ""]}},
+    ]
+    two_biomes = {-4: anvil_container(["minecraft:desert", "minecraft:jungle"], [(i >> 2) & 1 for i in range(64)], 1)}
+    # A chunk that says its light is right: it is believed. (No server would compute this light.)
+    odd_light = {"sky": {-4: bytes([0x00] * 512 + [0xFF] * 1536), -3: bytes([0xFF] * 2048)}, "block": {-4: bytes([0x55] * 2048)}}
+    region = {(x, z): anvil_chunk(x, z) for x in range(3) for z in range(3)}
+    region[(0, 0)] = anvil_chunk(0, 0, things, block_entities, two_biomes)
+    region[(2, 2)] = anvil_chunk(2, 2, light=odd_light)
+    region[(3, 3)] = anvil_chunk(3, 3, status="minecraft:features", ground="minecraft:stone")
+    overworld = os.path.join(path, "dimensions", "minecraft", "overworld")
+    anvil_region(os.path.join(overworld, "region", "r.0.0.mca"), region)
+    anvil_region(os.path.join(overworld, "region", "r.-1.-1.mca"), {(31, 31): anvil_chunk(-1, -1, {(15, 4, 15): "minecraft:glass"})})
+    anvil_region(os.path.join(overworld, "entities", "r.0.0.mca"), {(0, 0): {
+        "DataVersion": version, "Position": mc.IntArray([0, 0]),
+        "Entities": [{"id": "minecraft:pig", "Pos": [mc.Double(8.5), mc.Double(-60.0), mc.Double(8.5)]}]}})
+    return {"lit_furnace": mc.BLOCK["kFurnace"] - 1}   # facing north, lit: the state before the default (props::furnace)
+
+
+@test()
+def a_vanilla_world_is_imported():
+    """A vanilla world in the server's directory becomes the server's own, once: its blocks,
+    biomes and light, its chests and furnaces; what the server does not read is kept and inert.
+    The vanilla files are left as they were."""
+    world = tempfile.mkdtemp(prefix="world-anvil-")
+    srv = None
+    try:
+        made = anvil_world(world)
+        vanilla = {}
+        for root, _, names in os.walk(world):
+            for name in names:
+                with open(os.path.join(root, name), "rb") as f:
+                    vanilla[os.path.join(root, name)] = f.read()
+        srv = Server(EXE, world=world, start_timeout=30)
+        log = srv.read_log()
+        assert "imported 10 chunks" in log and "(1 more were not finished" in log, log
+        assert "2 chests and furnaces, 2 other block entities and 1 entities kept" in log, log
+        c = srv.client()
+        j = join(c, "Alice", view=3)
+        c.send("player_loaded")
+        settle(c)
+        # The world's own spawn and its own generator: flat, sandstone, desert.
+        assert j["teleport"]["pos"] == (4.5, -60.0, 4.5), j["teleport"]["pos"]
+        assert j["login"]["is_flat"] is True
+        desert, jungle = (mc.load_registry("worldgen_biome").index(f"minecraft:{b}") for b in ("desert", "jungle"))
+        sand = mc.BLOCK["kSandstone"]
+        beyond = c.chunks[(-3, 1)]                       # never in the vanilla world: the generator's
+        assert [mc.chunk_block(beyond, 5, y, 5) for y in range(-64, -59)] == [mc.BLOCK["kBedrock"], sand, sand, sand, 0]
+        assert beyond["sections"][0]["biomes"]["palette"] == [desert]
+        unfinished = c.chunks[(3, 3)]                    # vanilla had not finished it: not its stone, the generator's sandstone
+        assert mc.chunk_block(unfinished, 5, -62, 5) == sand
+
+        ch = c.chunks[(0, 0)]
+        at = lambda x, z: mc.chunk_block(ch, x, -60, z)  # noqa: E731
+        assert (at(1, 1), at(3, 1), at(5, 1), at(11, 1)) == (mc.BLOCK["kChest"], mc.BLOCK["kChest"], made["lit_furnace"],
+                                                              mc.BLOCK["kGlowstone"]), (at(1, 1), at(3, 1), at(5, 1))
+        assert at(7, 1) == mc.BLOCK["kOakSign"] and at(9, 1) == mc.BLOCK["kOakStairs"]
+        assert mc.chunk_block(c.chunks[(-1, -1)], 15, -60, 15) == mc.BLOCK["kGlass"]
+        # Two biomes in the lowest section, cell by cell; the palette in the file's order.
+        biomes = ch["sections"][0]["biomes"]
+        assert biomes["bits"] == 1 and biomes["palette"] == [desert, jungle], biomes
+        assert [mc.paletted_get(biomes, i) for i in range(64)] == [(desert, jungle)[(i >> 2) & 1] for i in range(64)]
+        # Every block entity is listed - a client draws a chest only if it is told of one.
+        kinds = {pos: kind for pos, kind, tag in ch["block_entities"]}
+        assert kinds == {(1, -60, 1): mc.BLOCK_ENTITY["kChest"], (3, -60, 1): mc.BLOCK_ENTITY["kChest"],
+                         (5, -60, 1): mc.BLOCK_ENTITY["kFurnace"], (7, -60, 1): mc.BLOCK_ENTITY["kSign"]}, kinds
+        # Light: a chunk that was not lit is lit here (the glowstone shines); one that was is believed.
+        assert mc.light_get(ch["light"]["block"][1], 10, 4, 1) == 14
+        odd = c.chunks[(2, 2)]["light"]
+        assert odd["block"][1] == bytes([0x55] * 2048) and odd["sky"][1] == bytes([0x00] * 512 + [0xFF] * 1536)
+        assert not c.entities, "an entity of the vanilla world is kept, not shown"
+
+        # The plain chest is a chest: it opens, with what it held.
+        click(c, (1, -60, 1), 1, seq=1)
+        collect(c)
+        assert c.window and c.window["type"] == "kGeneric9x3"
+        assert c.window["slots"][0] == plain("kStone", 20) and c.window["slots"][26] == plain("kDiamond", 1)
+        assert c.window["slots"][1:26] == [None] * 25
+        close_window(c)
+        # The furnace as well: three iron ore, nothing burning.
+        click(c, (5, -60, 1), 1, seq=2)
+        collect(c)
+        assert c.window and c.window["type"] == "kFurnace" and c.window["slots"][0] == plain("kIronOre", 3), c.window
+        close_window(c)
+        # The chest with a name is kept as it is and stays shut: nothing opens, nothing is placed against it.
+        give(c, 36, I["kStone"], 5)
+        click(c, (3, -60, 1), 1, seq=3)
+        assert collect(c) == {(3, -60, 1): mc.BLOCK["kChest"], (3, -59, 1): 0} and c.window is None
+        first = frames(c)
+        assert srv.stop() == 0, srv.read_log()
+        os.unlink(srv.log.name)
+
+        # Once: the next start reads the server's own files, and every chunk is the same bytes.
+        for path, content in vanilla.items():
+            with open(path, "rb") as f:
+                assert f.read() == content, f"{path} was changed"
+        srv = Server(EXE, world=world)
+        log = srv.read_log()
+        assert "importing" not in log and "imported from vanilla" in log, log
+        c = srv.client()
+        join(c, "Bob", view=3)
+        again = frames(c)
+        differ = [pos for pos in first if first[pos] != again.get(pos)]
+        assert not differ, f"chunks that came back different: {differ}"
+        assert srv.stop() == 0, srv.read_log()
+        os.unlink(srv.log.name)
+    finally:
+        if srv:
+            srv.stop()
+        shutil.rmtree(world, ignore_errors=True)
 
 
 def main() -> int:

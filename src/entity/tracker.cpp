@@ -370,6 +370,16 @@ void Tracker::unpair(u32 w, u32 e, base::ByteBuf& out) {
     ++stats_.removed;
 }
 
+// ChunkMap.isChunkTracked, for a player that still has chunks to be sent: is the chunk the entity
+// stands in one of them? (What is in range lies in the view: only a chunk that waits can fail this.)
+bool Tracker::chunk_sent(u32 w, u32 e) const {
+    const PendingChunks& p = pending_[w];
+    const u32 dx = static_cast<u32>((floor_int(s_.x[e]) >> 4) - p.x0), dz = static_cast<u32>((floor_int(s_.z[e]) >> 4) - p.z0);
+    if (dx >= p.side || dz >= p.side) return true;
+    const u32 i = dz * p.side + dx;
+    return !((p.bits[i >> 6] >> (i & 63)) & 1);
+}
+
 // The player moved: every entity may have entered or left its view.
 void Tracker::full_row(u32 w, base::ByteBuf& out) {
     const u32 n = s_.size(), nwords = (n + 63) / 64;
@@ -379,6 +389,14 @@ void Tracker::full_row(u32 w, base::ByteBuf& out) {
     visible_words(s_.x, s_.z, range2_, pwords, s_.x[w], s_.z[w], view2_[w], vis_.data());
     vis_[w >> 6] &= ~(1ull << (w & 63));                                       // nobody is shown itself
     if (scanned == n && (n & 63)) vis_[pwords - 1] &= (1ull << (n & 63)) - 1;  // rows past the end
+    if (UNLIKELY(pending_ && pending_[w].count)) {  // ...and nobody that stands in a chunk still to come
+        for (u32 k = 0; k < pwords; ++k) {
+            for (u64 bits = vis_[k]; bits; bits &= bits - 1) {
+                const u32 e = k * 64 + static_cast<u32>(std::countr_zero(bits));
+                if (!chunk_sent(w, e)) vis_[k] &= ~(1ull << (e & 63));
+            }
+        }
+    }
     u64* seen = row(w);
     for (u32 k = 0; k < pwords; ++k) {
         const u64 diff = vis_[k] ^ seen[k];

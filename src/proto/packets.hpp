@@ -1180,6 +1180,14 @@ struct PlayerCommand {
     }
 };
 
+// The client has taken a batch of chunks (chunk_batch_start ... chunk_batch_finished) and says
+// how many a tick it would like from here on (ChunkBatchSizeCalculator): PlayerChunkSender paces
+// by it.
+struct ChunkBatchReceived {
+    float desired_chunks_per_tick;
+    static ChunkBatchReceived decode(Reader& r) { return {r.f32()}; }
+};
+
 struct PlayerInput {  // which movement keys are held
     static constexpr u8 kForward = 1, kBackward = 2, kLeft = 4, kRight = 8, kJump = 16, kShift = 32, kSprint = 64;
     u8 flags;

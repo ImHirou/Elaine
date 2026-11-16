@@ -82,6 +82,30 @@ struct LightLayer {
     void fold(BlockPool& pool);
 };
 
+// How a dimension is laid out vertically: what everything that works on a chunk outside the world
+// (a generator, a loader, the light engine) has to know of it.
+struct Layout {
+    i32 min_y = 0;
+    i32 min_section = 0;  // min_y >> 4
+    u32 sections = 0;
+    bool has_skylight = true;
+};
+
+// The biomes of one section when they are not all one: vanilla keeps a biome per 4x4x4 cell
+// (QuartPos), 64 to a section, index = y<<4 | z<<2 | x - the layout of its PalettedContainer. The
+// palette is in order of first appearance, which is the order vanilla writes one in, to disk and to
+// a client. Nothing here changes biomes yet; they come with a chunk that was imported.
+struct BiomeSection {
+    u8 count = 0;  // palette entries, 2..64; 0: the section has the one biome Chunk::biome names
+    u8 index[64] = {};
+    u16 palette[64] = {};  // network ids (worldgen/biome)
+};
+
+// Light layers that were loaded for a chunk and are waiting for their section to store light:
+// LayerLightSectionStorage.queuedSections. A section stores light while a section around it holds
+// a block; the one around it may be in a chunk that has not been loaded yet.
+struct LightQueue;
+
 // A block entity as its chunk knows it: where it is, of which type, and - for whoever keeps what
 // it holds (the server's chests and furnaces) - a handle to that. The chunk packet lists them:
 // a client only makes the block entity of a chest (which is what draws it) when told to.
@@ -92,6 +116,13 @@ struct BlockEntityRef {
     u32 data;  // the owner's index
 };
 static_assert(sizeof(BlockEntityRef) == 8);
+
+// Chunk::keep: what came with an imported chunk and nobody here reads - the rest of its NBT, its
+// entities - kept as bytes so that nothing of a world is lost on the way in (world/anvil.hpp).
+struct KeptData {
+    u32 len = 0;
+    u8* bytes = nullptr;
+};
 
 enum class ChunkStatus : u8 {
     Generated,   // blocks, heightmaps and sky sources are final; unknown to the light engine
@@ -104,7 +135,7 @@ struct Chunk {
     ChunkStatus status = ChunkStatus::Generated;
     bool sky_on = false;  // vanilla "light enabled" for the column, per layer
     bool block_on = false;
-    bool modified = false;  // differs from what the generator produced
+    bool modified = false;  // differs from what the generator produced (kept with the chunk when it is saved)
     // This chunk and its eight neighbours are lit: it may be sent, edited and broadcast. Until then
     // light changes in it are not recorded (ChunkHolder does the same for non-ticking chunks).
     bool ticking = false;
@@ -112,8 +143,25 @@ struct Chunk {
     bool light_listed = false;  // queued in the light engine's changed list
     u8 sections_count = 0;
     u8 light_count = 0;
+    // Differs from what is on disk (ChunkAccess.isUnsaved): a block, a light value, a block entity
+    // changed - or it has never been saved. What it holds that the game owns (containers, entities)
+    // is the game's to mark.
+    bool dirty = false;
+    // It was lit when it was saved: its light came with it, and lighting it is not to be done again
+    // (ChunkStatusTasks.isLighted).
+    bool loaded_lit = false;
+    bool unloading = false;       // picked to leave the world in this pass (Dimension::unload)
+    bool saved_entities = false;  // its copy on disk holds entities of the game's: one without them has to replace it
     u32 frame_len = 0;
     u8* frame = nullptr;  // cached level_chunk_with_light packet, framed and compressed
+    // Bumped whenever the frame goes stale; a frame that a worker compressed is taken only if it
+    // was made of this version. frame_job: the version a worker is at work on, 0 for none.
+    u64 frame_version = 0, frame_job = 0;
+    u64 saved_tick = 0;              // when it was last written out, or loaded
+    u64 idle_tick = 0;               // when it was first found in nobody's reach; 0 while someone wants it
+    BiomeSection* biomes = nullptr;  // [sections_count], or null while every section has one biome
+    LightQueue* queued = nullptr;
+    KeptData keep;
     // The chunk's block entities, in no order. A handful at most in nearly every chunk that has
     // any: finding one by position is a scan of this array.
     BlockEntityRef* block_entities = nullptr;
@@ -132,7 +180,10 @@ struct Chunk {
 
     // Per light section: vanilla LayerLightSectionStorage.SectionState (neighbour count in the low
     // 5 bits, kHasData when the section itself has blocks), plus our pending-removal mark.
-    static constexpr u8 kNeighbourMask = 31, kHasData = 32, kPendingRemoval = 64;
+    // kRetain goes with kPendingRemoval: the section stops storing light because a chunk beside it
+    // left the world, not because a block went - its layers are kept (queued) for when that chunk is back.
+    static constexpr u8 kNeighbourMask = 31, kHasData = 32, kPendingRemoval = 64, kRetain = 128;
+    static constexpr u8 kMarks = kPendingRemoval | kRetain;
     u8 light_state[kMaxLightSections] = {};
     LightLayer sky[kMaxLightSections];
     LightLayer block[kMaxLightSections];
@@ -142,6 +193,33 @@ struct Chunk {
 
     ColumnMap world_surface, motion_blocking, motion_blocking_no_leaves;
     ColumnMap sky_sources;  // lowest y that still has direct sky light, stored minus (min_y - 1)
+
+    // The layer a client is sent and a file is written for a light section: the stored one, or the
+    // one that waits to be (LayerLightSectionStorage.getDataLayerData).
+    inline const LightLayer& sky_layer(u32 li) const;
+    inline const LightLayer& block_layer(u32 li) const;
 };
+
+struct LightQueue {
+    LightLayer sky[kMaxLightSections];
+    LightLayer block[kMaxLightSections];
+};
+inline const LightLayer& Chunk::sky_layer(u32 li) const { return sky[li].present() || !queued ? sky[li] : queued->sky[li]; }
+inline const LightLayer& Chunk::block_layer(u32 li) const {
+    return block[li].present() || !queued ? block[li] : queued->block[li];
+}
+
+// ---- what a chunk's blocks say about it (world/chunk.cpp). Pure functions of the chunk: a worker
+// runs them on a chunk it has just read or generated.
+// Heightmap.primeHeightmaps for the three heightmaps a client is sent.
+void prime_heightmaps(Chunk& c);
+// Chunk::filled_sections and the three masks beside it. Returns bit 0 if any section holds a shape
+// that reaches out of its cell, bit 1 if any holds a block that acts on entities.
+u32 fill_section_masks(Chunk& c);
+// ChunkSkyLightSources.fillFrom.
+void fill_sky_sources(Chunk& c, const Layout& l);
+// All of the above, and the non-air counts are the sections' own: after this a chunk whose
+// sections, biomes and light are in place is ready to be adopted.
+u32 derive(Chunk& c, const Layout& l);
 
 }  // namespace world

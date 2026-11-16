@@ -114,13 +114,7 @@ bool Game::set_block(BlockPos pos, BlockState state, u32 flags) {
         // neighbours have heard of the change - the other half of a double chest is a chest of
         // its own by the time its lid is heard to fall.
         close_menus_on(gone_kind, gone);
-        if (gone_kind == block_kind::kChest) {
-            chests_[gone] = {};
-            chest_free_.push_back(gone);
-        } else {
-            furnaces_[gone] = {};
-            furnace_free_.push_back(gone);
-        }
+        free_block_entity(gone_kind, gone);
     };
     if (&was != &now) {  // LevelChunk.setBlockState: another block, not another state of the same
         if ((world::flags_of(old) & world::state::kBlockEntity) && world_.remove_block_entity(pos.x, pos.y, pos.z, gone)) {
@@ -128,35 +122,21 @@ bool Game::set_block(BlockPos pos, BlockState state, u32 flags) {
             // ...unless the change says to leave that out: then what it held is gone with it.
             gone_kind = was.kind;
             const bool spill = !(flags & kUpdateSkipContainer);
-            if (gone_kind == block_kind::kChest) {
+            if (gone & kOpaqueBlockEntity) {
+                // One that is kept as the tag it came with: nobody here knows what it held. It
+                // goes with its block and spills nothing.
+                free_block_entity(gone_kind, gone);
+                gone_kind = block_kind::kPlain;
+            } else if (gone_kind == block_kind::kChest) {
                 chests_[gone].alive = false;  // ChestBlockEntity.stopOpen does nothing for a removed chest
                 if (spill) drop_contents(pos, chests_[gone].items, Chest::kSlots);
-            } else {
+            } else if (gone_kind == block_kind::kFurnace) {
                 furnaces_[gone].alive = false;
                 if (spill) drop_contents(pos, furnaces_[gone].items, Furnace::kSlots);
             }
         }
         if (now.kind == block_kind::kChest || now.kind == block_kind::kFurnace) {  // EntityBlock.newBlockEntity
-            const bool chest = now.kind == block_kind::kChest;
-            std::vector<u32>& free = chest ? chest_free_ : furnace_free_;
-            u32 data;
-            if (!free.empty()) {
-                data = free.back();
-                free.pop_back();
-            } else if (chest) {
-                data = static_cast<u32>(chests_.size());
-                chests_.emplace_back();
-            } else {
-                data = static_cast<u32>(furnaces_.size());
-                furnaces_.emplace_back();
-            }
-            if (chest) {
-                chests_[data].alive = true;
-                chests_[data].x = pos.x, chests_[data].y = pos.y, chests_[data].z = pos.z;
-            } else {
-                furnaces_[data].alive = true;
-                furnaces_[data].x = pos.x, furnaces_[data].y = pos.y, furnaces_[data].z = pos.z;
-            }
+            const u32 data = now.kind == block_kind::kChest ? new_chest(pos) : new_furnace(pos);
             world_.add_block_entity(pos.x, pos.y, pos.z, now.block_entity, data);
         }
         // BlockState.onPlace. TntBlock: next to a redstone signal it goes off at once.
@@ -332,7 +312,8 @@ bool Game::use_block(u32 pi, BlockPos pos, BlockState state, const ItemStack& he
                     const ChestState o = chest_state(os);
                     const world::BlockEntityRef* obe = world_.block_entity(other.x, other.y, other.z);
                     if (o.type != kSingle && o.type != c.type && o.facing == c.facing) {
-                        if (blocked(other)) return true;
+                        // (A half that is kept as the tag it came with keeps the pair shut.)
+                        if (blocked(other) || (obe && (obe->data & kOpaqueBlockEntity))) return true;
                         // The right half is the first 27 slots (DoubleBlockCombiner.BlockType.FIRST).
                         if (obe) second = obe->data;
                         if (obe && c.type != kRight) std::swap(first, second);
@@ -474,7 +455,7 @@ void Game::recheck_chests() {
     while (recheck_head_ < rechecks_.size() && rechecks_[recheck_head_].tick <= tick_) {
         const Recheck r = rechecks_[recheck_head_++];
         const world::BlockEntityRef* be = world_.block_entity(r.x, r.y, r.z);
-        if (!be || be->type != be_type::kChest) continue;  // the chest is gone
+        if (!be || be->type != be_type::kChest || (be->data & kOpaqueBlockEntity)) continue;  // the chest is gone
         const u32 chest = be->data;
         Chest& c = chests_[chest];
         c.recheck = false;
@@ -529,6 +510,10 @@ void Game::tick_furnaces() {
     for (u32 i = 0; i < n; ++i) {
         Furnace& f = furnaces_[i];
         if (LIKELY(f.idle()) || !f.alive) continue;
+        // Level.shouldTickBlocksAt: block entities tick where chunks do.
+        world::Chunk* chunk = world_.find(f.x >> 4, f.z >> 4);
+        if (UNLIKELY(!chunk || !chunk->ticking)) continue;
+        chunk->dirty = true;  // BlockEntity.setChanged: what it holds is no longer what is on disk
         Furnace::Ticked t = f.tick();
         const BlockPos pos{f.x, f.y, f.z};
         if (UNLIKELY(t.lit_changed)) {  // the block's `lit` follows: it glows, and the light with it

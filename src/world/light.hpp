@@ -26,12 +26,7 @@ namespace world {
 
 class LightEngine {
   public:
-    struct Layout {
-        i32 min_y = 0;
-        i32 min_section = 0;
-        u32 sections = 0;
-        bool has_skylight = true;
-    };
+    using Layout = world::Layout;
     enum Kind : u32 { kBlock, kSky };
 
     LightEngine(ChunkMap& chunks, const Layout& layout);
@@ -41,9 +36,13 @@ class LightEngine {
     void init_chunk(Chunk& c);        // ThreadedLevelLightEngine.initializeLight
     void light_chunk(Chunk& c);       // ThreadedLevelLightEngine.lightChunk (+ the updates it triggers)
     void release_chunk(Chunk& c);     // free the chunk's light arrays (chunk is being destroyed)
+    void unload_chunk(Chunk& c);      // ThreadedLevelLightEngine.updateChunkStatus, then release_chunk
+    // LevelLightEngine.queueSectionData, before init_chunk: a layer that was saved with the chunk.
+    void queue_layer(Chunk& c, Kind k, u32 li, const LightLayer& loaded);
 
     // ---- block changes (LevelChunk.setBlockState calls these in this order)
-    void update_section_status(Chunk& c, u32 section_index, bool empty);
+    // `retain`: the section is "empty" because its chunk leaves the world (see unload_chunk).
+    void update_section_status(Chunk& c, u32 section_index, bool empty, bool retain = false);
     bool update_sky_sources(Chunk& c, u32 lx, i32 y, u32 lz);  // ChunkSkyLightSources.update
     void check_block(i32 x, i32 y, i32 z);
     // LevelLightEngine.runLightUpdates: block engine, then sky engine. Returns queue entries processed.
@@ -106,7 +105,7 @@ class LightEngine {
     void list(Chunk* c);
 
     // LayerLightSectionStorage
-    void put_section_state(Chunk& c, u32 li, u8 state);
+    void put_section_state(Chunk& c, u32 li, u8 state, bool retain = false);
     void initialize_section(Chunk& c, u32 li);
     void process_removals(Kind k);
     LightLayer create_sky_layer(Chunk& c, u32 li);
@@ -138,7 +137,6 @@ class LightEngine {
 
     // ChunkSkyLightSources
     i32 raw_source(const Chunk& c, u32 i) const { return static_cast<i32>(c.sky_sources.get(i)) + source_base_; }
-    i32 find_lowest_source(const Chunk& c, i32 top_section, u32 lx, u32 lz) const;
     i32 find_lowest_source_below(const Chunk& c, u32 lx, i32 start_y, u32 lz, BlockState start_state) const;
     bool update_source_edge(Chunk& c, u32 i, i32 old_edge, u32 lx, u32 lz, i32 top_y, BlockState top, BlockState bottom);
 
@@ -147,12 +145,13 @@ class LightEngine {
     i32 min_y_, min_section_, min_light_section_;
     u32 sections_, light_sections_;
     bool has_sky_;
-    i32 source_base_;  // ChunkSkyLightSources.minY = level min y - 1
+    i32 source_base_;             // ChunkSkyLightSources.minY = level min y - 1
     i32 sky_lowest_ = INT32_MAX;  // SkyDataLayerStorageMap.currentLowestY
+    Layout layout_;
 
     Fifo dec_[2], inc_[2];
-    std::vector<Node> check_;       // block positions to re-check (both engines look at each)
-    std::vector<Pending> removals_; // sections that lost their last neighbour with blocks
+    std::vector<Node> check_;        // block positions to re-check (both engines look at each)
+    std::vector<Pending> removals_;  // sections that lost their last neighbour with blocks
     std::vector<Chunk*> changed_;
     bool inconsistent_ = false;
 };

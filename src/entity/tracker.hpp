@@ -44,6 +44,17 @@
 
 namespace entity {
 
+// What a player has not been sent yet of the chunks its view holds
+// (PlayerChunkSender.pendingChunks): a bit per chunk of the window [x0, x0 + side) x
+// [z0, z0 + side), row by row. An entity that stands in such a chunk is not shown to that player
+// until the chunk has gone out (ChunkMap.isChunkTracked).
+struct PendingChunks {
+    const u64* bits = nullptr;
+    i32 x0 = 0, z0 = 0;
+    u32 side = 0;
+    u32 count = 0;  // bits set: 0 for nearly every player nearly always, and then nothing is tested
+};
+
 class Tracker {
   public:
     struct Stats {                   // of the last tick()
@@ -76,6 +87,9 @@ class Tracker {
 
     // ChunkMap.getPlayerViewDistance: a player is shown nothing further than its view distance.
     void set_view_distance(u32 player, u32 chunks);
+
+    // One entry per player row, read by tick(); null: every chunk counts as sent.
+    void set_pending_chunks(const PendingChunks* per_player) { pending_ = per_player; }
 
     void tick(base::ByteBuf* const* outs);
 
@@ -117,8 +131,10 @@ class Tracker {
     void full_row(u32 w, base::ByteBuf& out);
     bool in_range(u32 w, u32 e) const {  // ChunkMap.TrackedEntity.updatePlayer's test, for one pair
         const double dx = s_.x[w] - s_.x[e], dz = s_.z[w] - s_.z[e];
-        return !(dx * dx + dz * dz > std::min(range2_[e], view2_[w]));
+        if (dx * dx + dz * dz > std::min(range2_[e], view2_[w])) return false;
+        return LIKELY(!pending_ || pending_[w].count == 0) || chunk_sent(w, e);
     }
+    bool chunk_sent(u32 w, u32 e) const;
     void regrid(u32 e, u64 from_section, u64 to_section);
     void partial_row(u32 w, base::ByteBuf& out);
     void pair(u32 w, u32 e, base::ByteBuf& out);
@@ -132,6 +148,7 @@ class Tracker {
     void drop_equipment(u32 e);
 
     Store& s_;
+    const PendingChunks* pending_ = nullptr;
     i32 threshold_;
     u32 range_percent_;
 

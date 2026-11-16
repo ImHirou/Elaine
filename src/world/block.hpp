@@ -54,6 +54,15 @@ ALWAYS_INLINE bool light_differs(BlockState a, BlockState b) {
     return a != b && (state::kLight[a] != state::kLight[b] || state::kOcclusion[a] != 0 || state::kOcclusion[b] != 0);
 }
 
+// ChunkSkyLightSources.isEdgeOccluded(): does full sky light stop between these two stacked blocks?
+ALWAYS_INLINE bool sky_edge_occluded(BlockState top, BlockState bottom) {
+    return dampening(bottom) != 0 || shape_occludes(top, bottom, kDown);
+}
+// What a state means to the queries that ask a chunk about its sections first (Chunk::large_sections
+// and the masks beside it): bit 0 a collision shape that reaches out of its cell, bit 1 it acts on
+// an entity in it or on it, bit 2 it breaks a fall. (world/chunk.cpp)
+u32 section_traits(BlockState s);
+
 // ---- cold tables (world/block.cpp)
 u32 block_of(BlockState s);
 const BlockInfo& block_info(u32 block);
@@ -63,9 +72,14 @@ u32 item_count();
 const ItemInfo& item_info(u32 item);  // item < item_count()
 // ---- by name (cold: commands, text components). A name is a whole identifier, "minecraft:stone".
 inline constexpr u32 kNoId = ~0u;
-u32 find_block(std::string_view name);        // a block id, kNoId
-u32 find_item(std::string_view name);         // an item id, kNoId
-u32 find_entity_type(std::string_view name);  // an entity type id, kNoId
+u32 find_block(std::string_view name);              // a block id, kNoId
+u32 find_item(std::string_view name);               // an item id, kNoId
+u32 find_entity_type(std::string_view name);        // an entity type id, kNoId
+u32 find_biome(std::string_view name);              // a worldgen/biome network id, kNoId
+u32 find_block_entity_type(std::string_view name);  // a block_entity_type id, kNoId
+std::string_view biome_name(u32 biome);
+std::string_view block_entity_type_name(u32 type);
+u32 biome_count();
 std::string_view item_name(u32 item);
 std::string_view item_text_key(u32 item);  // the translation key of its default ITEM_NAME component
 u32 item_rarity(u32 item);                 // Rarity ordinal of its default RARITY: common, uncommon, rare, epic

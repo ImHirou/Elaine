@@ -37,10 +37,7 @@ constexpr u32 kAddSkySource = increase_skip_one(15, false, kUp);
 // LightEngine.getState(): a chunk the engine cannot see is solid.
 constexpr BlockState kUnloaded = proto::gen::block::kBedrock;
 
-// ChunkSkyLightSources.isEdgeOccluded(): does full sky light stop between these two stacked blocks?
-ALWAYS_INLINE bool edge_occluded(BlockState top, BlockState bottom) {
-    return dampening(bottom) != 0 || shape_occludes(top, bottom, kDown);
-}
+ALWAYS_INLINE bool edge_occluded(BlockState top, BlockState bottom) { return sky_edge_occluded(top, bottom); }
 
 ALWAYS_INLINE bool crossed_chunk(i32 a, i32 b) { return ((a ^ b) & ~15) != 0; }
 
@@ -63,7 +60,8 @@ LightEngine::LightEngine(ChunkMap& chunks, const Layout& l)
       sections_(l.sections),
       light_sections_(l.sections + 2),
       has_sky_(l.has_skylight),
-      source_base_(l.min_y - 1) {
+      source_base_(l.min_y - 1),
+      layout_(l) {
     DCHECK(l.sections <= kMaxSections);
 }
 
@@ -124,18 +122,19 @@ void LightEngine::mark_section_and_neighbours(Kind k, i32 cx, i32 sy, i32 cz) {
 // LayerLightSectionStorage.setStoredLevel
 ALWAYS_INLINE void LightEngine::set_level(Kind k, Chunk* c, u32 li, i32 x, i32 y, i32 z, u32 level) {
     layers(c, k)[li].set(pool_, nibble(x, y, z), level);
+    c->dirty = true;  // ChunkHolder.sectionLightChanged: a chunk whose light changed is saved again
     mark_block_and_around(k, c, x, y, z);
 }
 
 // ---------------------------------------------------------------------------- section states
 
 // LayerLightSectionStorage.updateSectionStatus
-void LightEngine::update_section_status(Chunk& c, u32 section_index, bool empty) {
+void LightEngine::update_section_status(Chunk& c, u32 section_index, bool empty, bool retain) {
     const u32 li = section_index + 1;  // light sections start one below the world
-    const u8 state = c.light_state[li] & static_cast<u8>(~Chunk::kPendingRemoval);
+    const u8 state = c.light_state[li] & static_cast<u8>(~Chunk::kMarks);
     const u8 updated = empty ? static_cast<u8>(state & ~Chunk::kHasData) : static_cast<u8>(state | Chunk::kHasData);
     if (state == updated) return;
-    put_section_state(c, li, updated);
+    put_section_state(c, li, updated, retain);
     const i32 inc = empty ? -1 : 1;
     for (i32 dx = -1; dx <= 1; ++dx) {
         for (i32 dy = -1; dy <= 1; ++dy) {
@@ -146,26 +145,26 @@ void LightEngine::update_section_status(Chunk& c, u32 section_index, bool empty)
                 if (!n || n->status < ChunkStatus::LightReady) continue;
                 const u32 nli = li + static_cast<u32>(dy);
                 if (nli >= light_sections_) continue;
-                const u8 ns = n->light_state[nli] & static_cast<u8>(~Chunk::kPendingRemoval);
+                const u8 ns = n->light_state[nli] & static_cast<u8>(~Chunk::kMarks);
                 const i32 count = (ns & Chunk::kNeighbourMask) + inc;
                 DCHECK(count >= 0 && count <= 26);
-                put_section_state(*n, nli, static_cast<u8>((ns & ~Chunk::kNeighbourMask) | count));
+                put_section_state(*n, nli, static_cast<u8>((ns & ~Chunk::kNeighbourMask) | count), retain);
             }
         }
     }
 }
 
 // LayerLightSectionStorage.putSectionState
-void LightEngine::put_section_state(Chunk& c, u32 li, u8 state) {
+void LightEngine::put_section_state(Chunk& c, u32 li, u8 state, bool retain) {
     u8& slot = c.light_state[li];
-    const u8 pending = slot & Chunk::kPendingRemoval;
-    const u8 old = slot & static_cast<u8>(~Chunk::kPendingRemoval);
-    slot = state | pending;
+    const u8 marks = slot & Chunk::kMarks;
+    const u8 old = slot & static_cast<u8>(~Chunk::kMarks);
+    slot = state | marks;
     if (state != 0) {
         if (old == 0) initialize_section(c, li);
     } else if (old != 0) {  // removeSection: the layers go away at the end of the next run
-        slot |= Chunk::kPendingRemoval;
-        if (!pending) removals_.push_back({&c, li});
+        slot |= static_cast<u8>(Chunk::kPendingRemoval | (retain ? Chunk::kRetain : 0));
+        if (!(marks & Chunk::kPendingRemoval)) removals_.push_back({&c, li});
         inconsistent_ = true;
     }
 }
@@ -173,14 +172,26 @@ void LightEngine::put_section_state(Chunk& c, u32 li, u8 state) {
 // LayerLightSectionStorage.initializeSection, for both layers
 void LightEngine::initialize_section(Chunk& c, u32 li) {
     if (c.light_state[li] & Chunk::kPendingRemoval) {  // toRemove.remove(): it never lost its layers
-        c.light_state[li] &= static_cast<u8>(~Chunk::kPendingRemoval);
+        c.light_state[li] &= static_cast<u8>(~Chunk::kMarks);
         return;
     }
     const i32 sy = static_cast<i32>(li) + min_light_section_;
-    c.block[li].v = 1;  // new DataLayer()
+    // createDataLayer: the layer that was loaded for this section and has been waiting, if there is one.
+    LightQueue* q = c.queued;
+    if (q && q->block[li].present()) {
+        c.block[li] = q->block[li];
+        q->block[li].v = 0;
+    } else {
+        c.block[li].v = 1;  // new DataLayer()
+    }
     mark_section_and_neighbours(kBlock, c.x, sy, c.z);
     if (has_sky_) {
-        c.sky[li] = create_sky_layer(c, li);
+        if (q && q->sky[li].present()) {
+            c.sky[li] = q->sky[li];
+            q->sky[li].v = 0;
+        } else {
+            c.sky[li] = create_sky_layer(c, li);
+        }
         // SkyLightSectionStorage.onNodeAdded
         if (sky_lowest_ > sy) sky_lowest_ = sy;
         if (sky_top(c) < sy + 1) c.sky_top = sy + 1;
@@ -222,7 +233,23 @@ void LightEngine::process_removals(Kind) {
     for (const Pending& p : removals_) {
         Chunk& c = *p.c;
         if (!(c.light_state[p.li] & Chunk::kPendingRemoval)) continue;  // became needed again in the meantime
-        c.light_state[p.li] &= static_cast<u8>(~Chunk::kPendingRemoval);
+        // columnsToRetainQueuedDataFor: a layer that goes because the chunk beside it left the
+        // world is kept, queued, for the day that chunk is back - vanilla has it on disk by then,
+        // where a chunk this near the edge of what is loaded is not held long enough to matter.
+        const bool retain = (c.light_state[p.li] & Chunk::kRetain) != 0;
+        c.light_state[p.li] &= static_cast<u8>(~Chunk::kMarks);
+        if (retain && (c.block[p.li].present() || c.sky[p.li].present())) {
+            if (!c.queued) c.queued = new LightQueue();
+            c.queued->block[p.li].drop(pool_);
+            c.queued->sky[p.li].drop(pool_);
+            c.queued->block[p.li] = c.block[p.li];
+            c.queued->sky[p.li] = c.sky[p.li];
+            c.block[p.li].v = c.sky[p.li].v = 0;
+        } else if (c.queued) {  // queuedSections.remove(node)
+            c.queued->block[p.li].drop(pool_);
+            c.queued->sky[p.li].drop(pool_);
+        }
+        if (!retain) c.dirty = true;  // what it has on disk still names the layer
         c.block[p.li].drop(pool_);
         list(&c);  // the cached frame names this section; the client is not told (vanilla does not either)
         if (!has_sky_) continue;
@@ -261,13 +288,19 @@ void LightEngine::init_chunk(Chunk& c) {
     // ThreadedLevelLightEngine.initializeLight
     for (u32 si = 0; si < sections_; ++si)
         if (!c.sections[si].only_air()) update_section_status(c, si, false);
+    // ...and after the update: setLightEnabled(pos, lighted). A chunk that was saved lit has its
+    // light on from here; what is created in its column later starts as it does in a lit one.
+    if (c.loaded_lit) c.sky_on = c.block_on = true;
 }
 
 void LightEngine::light_chunk(Chunk& c) {
     DCHECK(c.status == ChunkStatus::LightReady);
-    // LevelLightEngine.propagateLightSources: block engine first, then sky
-    block_propagate_sources(c);
-    if (has_sky_) sky_propagate_sources(c);
+    // "if (!lighted) propagateLightSources": a chunk that came lit from disk keeps the light it came with.
+    if (!c.loaded_lit) {
+        // LevelLightEngine.propagateLightSources: block engine first, then sky
+        block_propagate_sources(c);
+        if (has_sky_) sky_propagate_sources(c);
+    }
     c.status = ChunkStatus::Lit;
     inconsistent_ = true;
     run_updates();
@@ -277,6 +310,40 @@ void LightEngine::release_chunk(Chunk& c) {
     for (u32 li = 0; li < kMaxLightSections; ++li) {
         c.sky[li].drop(pool_);
         c.block[li].drop(pool_);
+        if (c.queued) {
+            c.queued->sky[li].drop(pool_);
+            c.queued->block[li].drop(pool_);
+        }
+    }
+    delete c.queued;
+    c.queued = nullptr;
+}
+
+// ThreadedLevelLightEngine.updateChunkStatus: the chunk leaves the world. Its light is off, its
+// sections count as empty - the sections of the chunks around it that stored light only because
+// of its blocks stop doing so (their layers are kept, see process_removals) - and its own layers go.
+void LightEngine::unload_chunk(Chunk& c) {
+    c.sky_on = c.block_on = false;
+    for (u32 si = 0; si < sections_; ++si)
+        if (c.light_state[si + 1] & Chunk::kHasData) update_section_status(c, si, true, true);
+    std::erase_if(removals_, [&](const Pending& p) { return p.c == &c; });
+    release_chunk(c);
+    c.status = ChunkStatus::Generated;
+}
+
+// A layer that was loaded for light section `li` of a chunk that is not registered yet
+// (LevelLightEngine.queueSectionData): the array is copied into the engine's pool.
+void LightEngine::queue_layer(Chunk& c, Kind k, u32 li, const LightLayer& loaded) {
+    if (!loaded.present()) return;
+    if (!c.queued) c.queued = new LightQueue();
+    LightLayer& to = (k == kSky ? c.queued->sky : c.queued->block)[li];
+    to.drop(pool_);
+    if (loaded.has_array()) {
+        u8* a = static_cast<u8*>(pool_.alloc());
+        std::memcpy(a, loaded.array(), LightLayer::kBytes);
+        to.v = reinterpret_cast<uintptr_t>(a);
+    } else {
+        to.v = loaded.v;
     }
 }
 
@@ -297,7 +364,8 @@ u32 LightEngine::run_updates() {
         std::sort(check_.begin(), check_.end(), [](const Node& a, const Node& b) {
             return a.x != b.x ? a.x < b.x : a.z != b.z ? a.z < b.z : a.y < b.y;
         });
-        check_.erase(std::unique(check_.begin(), check_.end(), [](const Node& a, const Node& b) { return a.x == b.x && a.y == b.y && a.z == b.z; }),
+        check_.erase(std::unique(check_.begin(), check_.end(),
+                                 [](const Node& a, const Node& b) { return a.x == b.x && a.y == b.y && a.z == b.z; }),
                      check_.end());
     }
     u32 n = run(kBlock);
@@ -379,7 +447,8 @@ void LightEngine::block_propagate_increase(const Node& n, u32 from_level) {
         }
         if (shape_occludes(from_state, to_state, d)) continue;
         set_level(kBlock, c, li, x, y, z, static_cast<u32>(new_level));
-        if (new_level > 1) inc_[kBlock].push(x, y, z, increase_skip_one(static_cast<u32>(new_level), has_empty_shape(to_state), opposite(d)));
+        if (new_level > 1)
+            inc_[kBlock].push(x, y, z, increase_skip_one(static_cast<u32>(new_level), has_empty_shape(to_state), opposite(d)));
     }
 }
 
@@ -450,39 +519,8 @@ i32 LightEngine::lowest_source_at(i32 x, i32 z, i32 fallback) const {
     return c ? lowest_source_y(*c, static_cast<u32>(x & 15), static_cast<u32>(z & 15)) : fallback;
 }
 
-// ChunkSkyLightSources.findLowestSourceY
-i32 LightEngine::find_lowest_source(const Chunk& c, i32 top_section, u32 lx, u32 lz) const {
-    i32 top_y = (min_section_ + top_section + 1) * 16;  // the block whose state is `top`
-    BlockState top = kAir;
-    for (i32 si = top_section; si >= 0; --si) {
-        const Section& s = c.sections[si];
-        if (s.only_air()) {
-            top = kAir;
-            top_y = (min_section_ + si) * 16;
-            continue;
-        }
-        for (i32 ly = 15; ly >= 0; --ly) {
-            const BlockState bottom = s.get(lx, static_cast<u32>(ly), lz);
-            if (edge_occluded(top, bottom)) return top_y;
-            top = bottom;
-            --top_y;
-        }
-    }
-    return source_base_;
-}
-
 // ChunkSkyLightSources.fillFrom
-void LightEngine::fill_sky_sources(Chunk& c) {
-    i32 top = static_cast<i32>(sections_) - 1;
-    while (top >= 0 && c.sections[top].only_air()) --top;  // getHighestFilledSectionIndex
-    if (top < 0) {
-        c.sky_sources.fill(0);
-        return;
-    }
-    for (u32 z = 0; z < 16; ++z)
-        for (u32 x = 0; x < 16; ++x)
-            c.sky_sources.set(x + z * 16, static_cast<u32>(std::max(find_lowest_source(c, top, x, z), source_base_) - source_base_));
-}
+void LightEngine::fill_sky_sources(Chunk& c) { world::fill_sky_sources(c, layout_); }
 
 // ChunkSkyLightSources.findLowestSourceBelow
 i32 LightEngine::find_lowest_source_below(const Chunk& c, u32 lx, i32 start_y, u32 lz, BlockState start_state) const {
@@ -498,7 +536,8 @@ i32 LightEngine::find_lowest_source_below(const Chunk& c, u32 lx, i32 start_y, u
 }
 
 // ChunkSkyLightSources.updateEdge
-bool LightEngine::update_source_edge(Chunk& c, u32 i, i32 old_edge, u32 lx, u32 lz, i32 top_y, BlockState top, BlockState bottom) {
+bool LightEngine::update_source_edge(Chunk& c, u32 i, i32 old_edge, u32 lx, u32 lz, i32 top_y, BlockState top,
+                                     BlockState bottom) {
     if (edge_occluded(top, bottom)) {
         if (top_y > old_edge) {
             c.sky_sources.set(i, static_cast<u32>(top_y - source_base_));
@@ -599,7 +638,8 @@ u32 LightEngine::sky_empty_sections_below(const Node& n) const {
     if (lx != 0 && lx != 15 && lz != 0 && lz != 15) return 0;
     const i32 cx = n.x >> 4, sy = n.y >> 4, cz = n.z >> 4;
     u32 empty = 0;
-    while (!storing(kSky, cx, sy - static_cast<i32>(empty) - 1, cz) && sky_data_at_or_below(sy - static_cast<i32>(empty) - 1)) ++empty;
+    while (!storing(kSky, cx, sy - static_cast<i32>(empty) - 1, cz) && sky_data_at_or_below(sy - static_cast<i32>(empty) - 1))
+        ++empty;
     return empty;
 }
 
@@ -609,7 +649,11 @@ u32 LightEngine::sky_empty_sections_below(const Node& n) const {
 void LightEngine::sky_propagate_from_empty_sections(i32 x, i32 y, i32 z, u32 dir, u32 level, bool increase, u32 empty_below) {
     if (empty_below == 0) return;
     const i32 lx = x & 15, lz = z & 15;
-    const bool crossed = dir == kNorth ? lz == 15 : dir == kSouth ? lz == 0 : dir == kWest ? lx == 15 : dir == kEast ? lx == 0 : false;
+    const bool crossed = dir == kNorth   ? lz == 15
+                         : dir == kSouth ? lz == 0
+                         : dir == kWest  ? lx == 15
+                         : dir == kEast  ? lx == 0
+                                         : false;
     if (!crossed) return;
     Chunk* c = chunk_at(x >> 4, z >> 4);
     if (!c) return;
@@ -655,7 +699,8 @@ void LightEngine::sky_propagate_increase(const Node& n, u32 from_level) {
         }
         if (shape_occludes(from_state, to_state, d)) continue;
         set_level(kSky, c, li, x, y, z, static_cast<u32>(new_level));
-        if (new_level > 1) inc_[kSky].push(x, y, z, increase_skip_one(static_cast<u32>(new_level), has_empty_shape(to_state), opposite(d)));
+        if (new_level > 1)
+            inc_[kSky].push(x, y, z, increase_skip_one(static_cast<u32>(new_level), has_empty_shape(to_state), opposite(d)));
         sky_propagate_from_empty_sections(x, y, z, d, static_cast<u32>(new_level), true, empty_below);
     }
 }

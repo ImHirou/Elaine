@@ -10,6 +10,8 @@ SectionAllocator::SectionAllocator() {
     pools_[8].init(Section::block_bytes(Section::kDirectBits));
 }
 
+u32 SectionAllocator::block_size(u32 bits) { return Section::block_bytes(bits); }
+
 usize SectionAllocator::reserved_bytes() const {
     usize n = 0;
     for (const BlockPool& p : pools_) n += p.reserved_bytes();
@@ -253,6 +255,51 @@ void Section::copy_from(SectionAllocator& a, const Section& o) {
     std::memcpy(bits == kDirectBits ? static_cast<void*>(data) : static_cast<void*>(palette), src, block_bytes(bits));
     palette_len = o.palette_len;
     dead = o.dead;
+}
+
+bool Section::load(SectionAllocator& a, u32 new_bits, const u16* pal, u32 pal_len, const u8* packed) {
+    if (new_bits == kDirectBits) {
+        for (u32 i = 0; i < kVolume; ++i)
+            if (load_le<u16>(packed + 2 * i) >= state::kCount) return false;
+        detach(a);
+        attach(a, kDirectBits);
+        std::memcpy(data, packed, kVolume * 2);
+        recount();
+        return true;
+    }
+    if (new_bits < 1 || new_bits > kMaxPaletteBits || pal_len < 1 || pal_len > (1u << new_bits)) return false;
+    for (u32 i = 0; i < pal_len; ++i)
+        if (pal[i] >= state::kCount) return false;
+    alignas(64) u8 idx[kVolume];
+    u16 cnt[256] = {};
+    {
+        // A copy with slack behind it: the kernel reads whole words, `packed` may end at its last byte.
+        alignas(64) u8 dense[kVolume + kPackedSlack];
+        std::memcpy(dense, packed, packed_bytes(new_bits));
+        std::memset(dense + packed_bytes(new_bits), 0, kPackedSlack);
+        unpack_indices(dense, new_bits, idx);
+    }
+    for (u32 i = 0; i < kVolume; ++i) {
+        if (idx[i] >= pal_len) return false;
+        ++cnt[idx[i]];
+    }
+    detach(a);
+    attach(a, new_bits);
+    const u32 cap = palette_cap(bits);
+    std::fill_n(palette, cap, kNoState);
+    std::copy_n(pal, pal_len, palette);
+    std::memcpy(data, packed, packed_bytes(bits));
+    u16* r = refs();
+    std::fill_n(r, cap, u16{0});
+    u32 none = 0;
+    for (u32 i = 0; i < pal_len; ++i) {
+        r[i] = cnt[i];
+        none += cnt[i] == 0;
+    }
+    palette_len = static_cast<u16>(pal_len);
+    dead = static_cast<u16>(none);
+    recount();
+    return true;
 }
 
 void Section::unpack(BlockState* RESTRICT out) const {

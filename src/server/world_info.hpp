@@ -1,0 +1,54 @@
+// The world a server runs: where it is kept and what it is made of.
+//
+//   <level-name>/                      the world's directory
+//     session.lock                     held (fcntl) while a server runs the world: vanilla's file, and
+//                                      vanilla's kind of lock - neither takes a world the other has
+//     world.json                       what this server knows of the world: the format and data
+//                                      version it was saved by, its generator, its spawn
+//     chunks/minecraft/overworld/      region files of this server's own format (world/region.hpp)
+//
+// A directory that holds a vanilla world (level.dat) and no world.json is imported: every chunk of
+// its region files is written into ours, once, before the server starts to listen
+// (server/import.cpp). The vanilla files are not changed and not read again.
+//
+// An empty level-name is a world that is not kept: nothing is written, and no chunk ever leaves
+// memory.
+#pragma once
+
+#include <string>
+#include <vector>
+
+#include "base/workers.hpp"
+#include "server/settings.hpp"
+#include "world/generator.hpp"
+
+namespace server {
+
+struct WorldInfo {
+    std::string dir;        // empty: nothing is kept
+    std::string chunk_dir;  // the overworld's regions; empty with `dir`
+    // The generator. Flat: `layers` from the bottom of the world up, in `biome`. Not flat: nothing
+    // (world::EmptyGenerator) - the stand-in for a vanilla terrain generator this server has not got.
+    bool flat = true;
+    std::vector<world::FlatGenerator::Layer> layers = world::FlatGenerator::default_layers();
+    u16 biome = 0;
+    i32 sea_level = -63;  // ChunkGenerator.getSeaLevel(): -63 for a flat world, 63 for the overworld's noise
+    // Where players appear: a block position, and the middle of that block is where they stand.
+    // Without one it is (8, top of the generator's ground, 8).
+    bool has_spawn = false;
+    i32 spawn[3] = {0, 0, 0};
+    bool imported = false;  // made from a vanilla world
+    int lock_fd = -1;
+
+    WorldInfo() = default;
+    WorldInfo(const WorldInfo&) = delete;
+    WorldInfo& operator=(const WorldInfo&) = delete;
+    ~WorldInfo();
+};
+
+// Open the world `s.level_name` names: lock it, read what is known of it - or import the vanilla
+// world that is there, or begin a new one. False with `err` when the world cannot be used: it is
+// in use, was saved by another version, or its import failed.
+bool open_world(const Settings& s, base::Workers& workers, WorldInfo& out, std::string& err);
+
+}  // namespace server

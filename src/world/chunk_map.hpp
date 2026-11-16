@@ -63,6 +63,49 @@ class ChunkMap {
     usize size() const { return size_; }
     usize regions() const { return regions_; }
 
+    // Chunks that are being loaded: one bit per chunk beside its pointer. A chunk is asked for
+    // once; the bit says that it has been.
+    bool loading(i32 cx, i32 cz) const {
+        const Region* r = region(cx >> kRegionShift, cz >> kRegionShift);
+        return r && ((r->loading[local(cx, cz) >> 6] >> (local(cx, cz) & 63)) & 1);
+    }
+    void set_loading(i32 cx, i32 cz, bool on) {
+        const i32 rx = cx >> kRegionShift, rz = cz >> kRegionShift;
+        Region* r = const_cast<Region*>(region(rx, rz));
+        if (!r) r = add_region(rx, rz);
+        u64& w = r->loading[local(cx, cz) >> 6];
+        const u64 bit = 1ull << (local(cx, cz) & 63);
+        loading_ += on && !(w & bit);
+        loading_ -= !on && (w & bit);
+        w = on ? w | bit : w & ~bit;
+    }
+    usize loading_count() const { return loading_; }
+
+    // Visit up to `budget` chunks, going on from where the last call stopped and around again:
+    // with nothing coming or going every chunk is seen once in size() visits. `f` must not add or
+    // remove chunks (collect, then act).
+    template <class F>
+    void scan(u32 budget, F&& f) {
+        const usize slots = table_.size() * (kRegionSize * kRegionSize);
+        for (usize walked = 0; budget && size_ && walked < slots;) {
+            if (scan_ >= slots) scan_ = 0;
+            const Slot& s = table_[scan_ / (kRegionSize * kRegionSize)];
+            if (!s.region) {
+                const usize next = (scan_ / (kRegionSize * kRegionSize) + 1) * (kRegionSize * kRegionSize);
+                walked += next - scan_;
+                scan_ = next;
+                continue;
+            }
+            Chunk* c = s.region->chunks[scan_ % (kRegionSize * kRegionSize)];
+            ++scan_;
+            ++walked;
+            if (c) {
+                --budget;
+                f(*c);
+            }
+        }
+    }
+
     template <class F>
     void for_each(F&& f) const {
         for (const Slot& s : table_) {
@@ -75,6 +118,7 @@ class ChunkMap {
   private:
     struct Region {
         Chunk* chunks[kRegionSize * kRegionSize] = {};
+        u64 loading[kRegionSize * kRegionSize / 64] = {};
     };
     struct Slot {
         u64 key = 0;
@@ -96,9 +140,7 @@ class ChunkMap {
     ALWAYS_INLINE static u64 key_of(i32 rx, i32 rz) {
         return (static_cast<u64>(static_cast<u32>(rx)) << 32) | static_cast<u32>(rz);
     }
-    ALWAYS_INLINE static u32 hash(u64 key) {
-        return static_cast<u32>((key * 0x9E3779B97F4A7C15ull) >> 32);
-    }
+    ALWAYS_INLINE static u32 hash(u64 key) { return static_cast<u32>((key * 0x9E3779B97F4A7C15ull) >> 32); }
 
     ALWAYS_INLINE const Region* region(i32 rx, i32 rz) const {
         const u64 key = key_of(rx, rz);
@@ -144,6 +186,8 @@ class ChunkMap {
     mutable Slot cache_[kCacheSize];
     usize size_ = 0;
     usize regions_ = 0;
+    usize loading_ = 0;
+    usize scan_ = 0;
 };
 
 }  // namespace world
