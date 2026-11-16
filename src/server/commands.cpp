@@ -17,8 +17,8 @@
 //   * /setblock, /fill: only blocks the server can simulate (rule 9: the placeable ones, and
 //     air), dry, without block entity data; no particles or sound of a destroyed block;
 //   * /tp: no `facing`; "^" coordinates use the processor's sine, not Mth's table;
-//   * /give: no components; /summon: no NBT, and what is summoned is not ticked - nothing
-//     here moves or thinks but primed TNT - so a mob stands where it was put;
+//   * /give: no components; /summon: no NBT, and what is summoned has no brain - a mob falls
+//     to the ground and stands where it was put;
 //   * /kill: entities vanish at once (no death animation), and players cannot die yet;
 //   * /kick: the reason is plain text (selectors in it are not resolved);
 //   * /op, /deop: a player who is not online is found by name only in offline mode.
@@ -32,6 +32,7 @@
 #include "crypto/auth.hpp"
 #include "server/game.hpp"
 
+#include PROTO_GEN_PHYSICS_HPP
 #include PROTO_GEN_STATIC_IDS_HPP
 
 namespace server {
@@ -472,10 +473,25 @@ bool Game::teleport(u32 row, double x, double y, double z, u32 relatives, float 
     ents_.yaw[row] = (relatives & kRelYRot ? ents_.yaw[row] : 0.0f) + ryaw;
     ents_.pitch[row] = std::clamp((relatives & kRelXRot ? ents_.pitch[row] : 0.0f) + rpitch, -90.0f, 90.0f);
     if (ents_.flags[row] & entity::flag::kLiving) ents_.head_yaw[row] = ents_.yaw[row];  // setYHeadRot
-    // The velocity stays along the axes that moved relatively; then performTeleport takes the
-    // fall out of it and puts the entity on the ground.
-    if (!(relatives & kRelDeltaX)) ents_.vx[row] = 0;
-    if (!(relatives & kRelDeltaZ)) ents_.vz[row] = 0;
+    // The velocity stays along the axes that moved relatively (calculateDelta: the transition's own is zero).
+    ents_.vx[row] = relatives & kRelDeltaX ? ents_.vx[row] + 0.0 : 0.0;
+    ents_.vy[row] = relatives & kRelDeltaY ? ents_.vy[row] + 0.0 : 0.0;
+    ents_.vz[row] = relatives & kRelDeltaZ ? ents_.vz[row] + 0.0 : 0.0;
+    // Entity.sendTeleportTransitionToPlayers: whoever sees an entity that clients move by
+    // themselves (an item, a primed TNT), or one that is never updated otherwise, is told at
+    // once - with what it is at this point; the others hear of it at its next update.
+    if (row >= players_.size()) {
+        const u32 type = ents_.type[row];
+        if (entity_type::kInfo[type].update_interval == 0 || proto::gen::physics::kEntity[type].simulated) {
+            scratch_.clear();
+            write_packet(scratch_, s_.compression_threshold,
+                         cb::TeleportEntity{ents_.net_id(row), ents_.x[row], ents_.y[row], ents_.z[row], ents_.vx[row],
+                                            ents_.vy[row], ents_.vz[row], ents_.yaw[row], ents_.pitch[row], 0,
+                                            (ents_.flags[row] & entity::flag::kOnGround) != 0});
+            tracker_.broadcast(row, {scratch_.data, scratch_.len}, out_.data());
+        }
+    }
+    // ...then TeleportCommand.performTeleport takes the fall out of it and puts it on the ground.
     ents_.vy[row] = 0;
     ents_.flags[row] |= entity::flag::kOnGround | entity::flag::kMoved;
 
@@ -492,26 +508,49 @@ bool Game::teleport(u32 row, double x, double y, double z, u32 relatives, float 
             send_view(row, ocx, ocz, false);
         }
     } else if (const u32 slot = ents_.slot[row]; slot < item_of_slot_.size() && item_of_slot_[slot] != kNone) {
-        // An item lies in the grid cell of where it is.
-        const u32 k = item_of_slot_[slot];
-        const u32 filler = item_grid_.remove(item_cell_of(old_x), item_cell_of(old_z), item_cell_[k]);
-        if (filler != ~0u) item_cell_[item_of_slot_[filler]] = item_cell_[k];
-        item_cell_[k] = item_grid_.add(item_cell_of(ents_.x[row]), item_cell_of(ents_.z[row]), slot);
+        move_item_cell(slot, old_x, old_z);  // an item lies in the grid cell of where it is
+    }
+    // Where it stands now: the grid of what can be pushed, and - for what moves by itself -
+    // TeleportCommand.performTeleport's setOnGround(true), which looks for the block under it.
+    const u32 slot = ents_.slot[row];
+    wake(slot);
+    {
+        const entity_type::Info& info = entity_type::kInfo[ents_.type[row]];
+        wake_touching(world::entity_box(ents_.x[row], ents_.y[row], ents_.z[row], info.width, info.height), slot);
+    }
+    if (slot < movers_.size()) {
+        Mover& mv = movers_[slot];
+        if (mv.in_grid) move_in_push_grid(slot, ents_.x[row], ents_.z[row]);
+        if (mv.kind != proto::gen::physics::kMoverNone) {
+            const entity_type::Info& info = entity_type::kInfo[ents_.type[row]];
+            phys::World w{world_, phys_scratch_};
+            phys::set_on_ground(w, info.width, info.height, motion_of(row), mv.body, true);
+        }
     }
     return true;
 }
 
 // EntityType.create + Level.addFreshEntity, for what /summon makes: the entity's slot. A
-// primed TNT ticks as any other; nothing else is ticked, and what a client would let fall by
-// itself is told that it does not (as an item on the ground is).
+// primed TNT ticks as any other; a living thing falls, slides and is pushed as one that wants
+// nothing does (no brain: server/physics.cpp says which types). What nothing here moves stays
+// where it is put, and if a client would let it fall by itself, it is told that it does not.
 u32 Game::summon(u32 type, double x, double y, double z) {
+    namespace gp = proto::gen::physics;
     const Uuid uuid{(random() & ~0xF000ull) | 0x4000ull, (random() & 0x3FFFFFFFFFFFFFFFull) | 0x8000000000000000ull};
     entity::Store::Moves moved;
     const u32 row = tracker_.spawn(type, false, uuid, x, y, z, 0, 0, moved);
     const u32 slot = ents_.slot[row];
+    const u8 mover = gp::kEntity[type].mover;
     if (type == entity_type::kTnt) {
         ents_.fuse[row] = 80;  // PrimedTnt.DEFAULT_FUSE_TIME: the value clients assume
         tnt_.push_back(slot);
+        start_ticking(slot, gp::kMoverTnt);
+    } else if (mover == gp::kMoverLiving || mover == gp::kMoverArmorStand) {
+        start_ticking(slot, mover);
+        enter_push_grid(slot, x, z, entity_type::kInfo[type].width);
+        wake_touching(world::entity_box(x, y, z, entity_type::kInfo[type].width, entity_type::kInfo[type].height), slot);
+    } else if (type == entity_type::kItem) {
+        start_ticking(slot, kMoverEmptyItem);  // an item of nothing: gone with its first tick
     } else if (!entity_type::kInfo[type].living) {
         ents_.set_no_gravity(row, true);
     }
@@ -522,6 +561,8 @@ u32 Game::summon(u32 type, double x, double y, double z) {
 void Game::remove_entity(u32 slot) {
     if (slot < item_of_slot_.size() && item_of_slot_[slot] != kNone) return remove_item(slot);
     std::erase(tnt_, slot);
+    stop_ticking(slot);
+    leave_push_grid(slot);
     entity::Store::Moves moved;
     tracker_.despawn(ents_.by_slot(slot), out_.data(), moved);
 }

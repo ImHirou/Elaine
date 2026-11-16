@@ -1,25 +1,21 @@
-// TNT: the primed entity, its fall, and the explosion.
+// TNT: the primed entity, its fuse, and the explosion.
 //
 // The rules are vanilla's, read from the 26.3 jar; each function names the method it follows:
 //   TntBlock (prime, wasExploded, onPlace / neighborChanged: a redstone signal),
 //   SignalGetter.hasNeighborSignal
-//   PrimedTnt (constructor, tick, explode), Entity.move / collide /
-//   restituteMovementAfterCollisions / getBlockSpeedFactor / checkSupportingBlock / getOnPos
+//   PrimedTnt (constructor, tick, explode) - how it falls and hops is phys::tnt_tick
 //   ServerExplosion (calculateExplodedPositions, hurtEntities, getSeenPercent,
 //   interactWithBlocks), ExplosionDamageCalculator, BlockBehaviour.onExplosionHit,
-//   Block.popResource, ItemEntity.hurtServer, ServerLevel.explode (the packet)
+//   Block.popResource, ItemEntity.hurtServer, ArmorStand.hurtServer, Entity.pushFromExplosion,
+//   ServerLevel.explode (the packet)
 //
-// This is the first thing in the server that moves by itself, and it moves as vanilla's does:
-// a client simulates primed TNT too (MoveSimulationType.SERVER_AND_CLIENT), and what the two
+// A client simulates primed TNT too (MoveSimulationType.SERVER_AND_CLIENT), and what the two
 // disagree on shows as a jump at the next position update.
 //
 // What is NOT here:
-//   * what blocks do to an entity inside them (Entity.applyEffectsFromBlocks): a cobweb does
-//     not slow a falling TNT, honey does not let it slide; water does not carry it;
-//   * a bounce off a slime block is computed, but its position is not sent as the two-step
-//     path vanilla sends (Entity.syncPosition; see entity/tracker.cpp);
-//   * items are not thrown about by the blast (nothing moves items yet) - they are destroyed or
-//     stay; a player's own velocity is not kept, so the knock-back is the client's alone;
+//   * damage: nothing has health. An item has (five points), an armor stand breaks; a mob is
+//     only thrown;
+//   * a player's own velocity is not kept, so its knock-back is the client's alone;
 //   * blocks that give experience when blown up by a player's TNT give none (no orbs);
 //   * fire (Explosion.fire) and the wind charge's block triggers: no explosion here makes them.
 #include <algorithm>
@@ -30,6 +26,7 @@
 #include "base/log.hpp"
 #include "server/game.hpp"
 
+#include PROTO_GEN_PHYSICS_HPP
 #include PROTO_GEN_STATIC_IDS_HPP
 
 namespace server {
@@ -43,8 +40,6 @@ namespace {
 
 constexpr i32 kFuse = 80;                        // PrimedTnt.DEFAULT_FUSE_TIME
 constexpr float kPower = 4.0f;                   // PrimedTnt.DEFAULT_EXPLOSION_POWER
-constexpr double kGravity = 0.04;                // PrimedTnt.getDefaultGravity
-constexpr double kAirDrag = 0.9800000190734863;  // (double) Entity.getAirDrag(): 0.98f
 constexpr double kTwoPi = 6.2831854820251465;    // (double) ((float) Math.PI * 2)
 constexpr double kLaunch = 0.20000000298023224;  // (double) 0.2f
 constexpr double kExplodePacketRange2 = 4096.0;  // ServerLevel.explode: 64 blocks
@@ -54,18 +49,11 @@ constexpr u64 kPopPickupDelay = 10;              // ItemEntity.setDefaultPickUpD
 constexpr float kPlayerWidth = 0.6f, kStandingHeight = 1.8f, kCrouchingHeight = 1.5f, kLowHeight = 0.6f;
 constexpr float kEyeStanding = 1.62f, kEyeCrouching = 1.27f, kEyeLow = 0.4f;
 
-// EntityDimensions.makeBoundingBox
-Aabb entity_box(double x, double y, double z, float width, float height) {
-    const double w = static_cast<double>(width / 2.0f), h = static_cast<double>(height);
-    return {{x - w, y, z - w}, {x + w, y + h, z + w}};
-}
+using world::entity_box;
+using world::intersects;
 Aabb tnt_box(const entity::Store& e, u32 row) {
     const auto& info = entity_type::kInfo[entity_type::kTnt];
     return entity_box(e.x[row], e.y[row], e.z[row], info.width, info.height);
-}
-bool intersects(const Aabb& a, const Aabb& b) {  // AABB.intersects: touching is not intersecting
-    return a.min[0] < b.max[0] && a.max[0] > b.min[0] && a.min[1] < b.max[1] && a.max[1] > b.min[1] && a.min[2] < b.max[2] &&
-           a.max[2] > b.min[2];
 }
 
 }  // namespace
@@ -99,115 +87,33 @@ void Game::prime_tnt(BlockPos pos, i32 fuse, bool sound) {
     ents_.fuse[row] = kFuse;  // what the synchronized value starts at: only another fuse is sent
     ents_.set_fuse(row, fuse);
     tnt_.push_back(ents_.slot[row]);
+    start_ticking(ents_.slot[row], proto::gen::physics::kMoverTnt);
     if (sound) play_sound(gen::sound::kEntityTntPrimed, cb::Sound::kSourceBlocks, x, y, z, 1.0f, 1.0f);
 }
 
 // ---------------------------------------------------------------------------- the entity
 
-// PrimedTnt.tick for every primed TNT: gravity, the move, drag, the fuse - and the explosion,
-// then and there, so that the ones ticking after it already feel it.
-void Game::tick_tnt() {
-    const u32 n = static_cast<u32>(tnt_.size());  // what is primed during this pass ticks from the next one on
-    if (LIKELY(n == 0)) return;
-    for (u32 k = 0; k < n; ++k) {
-        const u32 row = ents_.by_slot(tnt_[k]);
-        ents_.vy[row] -= kGravity;  // applyGravity
-        const bool on_ground = move_tnt(row);
-        ents_.vx[row] *= kAirDrag;
-        ents_.vy[row] *= kAirDrag;
-        ents_.vz[row] *= kAirDrag;
-        if (on_ground) {
-            ents_.vx[row] *= 0.7;
-            ents_.vy[row] *= -0.5;
-            ents_.vz[row] *= 0.7;
-        }
-        const i32 fuse = ents_.fuse[row] - 1;
-        ents_.set_fuse(row, fuse);
-        if (fuse > 0) continue;
-        // discard(), then explode() a sixteenth of its height up.
-        const double x = ents_.x[row], z = ents_.z[row];
-        const double y = ents_.y[row] + static_cast<double>(entity_type::kInfo[entity_type::kTnt].height) * 0.0625;
-        entity::Store::Moves moved;
-        tracker_.despawn(row, out_.data(), moved);
-        tnt_[k] = kNone;
-        explode(x, y, z, kPower);
-    }
-    tnt_.erase(std::remove(tnt_.begin(), tnt_.end(), kNone), tnt_.end());
-}
-
-// Entity.move(MoverType.SELF, deltaMovement) for a primed TNT: as far as the blocks allow, then
-// what the collision does to its velocity. True when it ends up on the ground.
-bool Game::move_tnt(u32 row) {
-    const double delta[3] = {ents_.vx[row], ents_.vy[row], ents_.vz[row]};
-    double moved[3];
-    world::collide(world_, tnt_box(ents_, row), delta, moved, collide_scratch_);
-    const double moved2 = moved[0] * moved[0] + moved[1] * moved[1] + moved[2] * moved[2];
-    const double delta2 = delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2];
-    if (moved2 > 1.0e-7 || delta2 - moved2 < 1.0e-7) {
-        ents_.x[row] += moved[0];
-        ents_.y[row] += moved[1];
-        ents_.z[row] += moved[2];
-    }
-    const auto differs = [](double a, double b) { return !(std::fabs(b - a) < 9.999999747378752e-6); };  // !Mth.equal
-    const bool x_hit = differs(delta[0], moved[0]), z_hit = differs(delta[2], moved[2]);
-    const bool vertical_hit = delta[1] != moved[1], on_ground = vertical_hit && delta[1] < 0;
-    // PrimedTnt.tick: setRequiresPrecisePosition(horizontalCollision || verticalCollision) - while
-    // it touches a block its viewers get its exact position, not steps of 1/4096.
-    u16 flags = static_cast<u16>(ents_.flags[row] & ~(entity::flag::kOnGround | entity::flag::kPrecise));
-    if (on_ground) flags |= entity::flag::kOnGround;
-    if (vertical_hit || x_hit || z_hit) flags |= entity::flag::kPrecise;
-    ents_.flags[row] = flags;
-
-    // checkSupportingBlock: the block it stands on - what a box a hair below its feet touches,
-    // nearest first; found where it came from if it slid off the edge this very tick.
-    const double x = ents_.x[row], y = ents_.y[row], z = ents_.z[row];
-    i32 support[3];
-    bool supported = false;
-    if (on_ground) {
-        Aabb feet = tnt_box(ents_, row);
-        feet.max[1] = feet.min[1];
-        feet.min[1] -= 1.0e-6;
-        supported = world::supporting_block(world_, feet, x, y, z, support);
-        if (!supported) {
-            feet.min[0] -= moved[0], feet.max[0] -= moved[0];
-            feet.min[2] -= moved[2], feet.max[2] -= moved[2];
-            supported = world::supporting_block(world_, feet, x, y, z, support);
-        }
-    }
-    // Entity.getOnPos(offset): the supporting block's column, or the one under its middle.
-    const auto block_below = [&](double offset) {
-        const i32 by = floor_int(y - offset);
-        return supported ? world_.block(support[0], by, support[2]) : world_.block(floor_int(x), by, floor_int(z));
-    };
-
-    if (vertical_hit || x_hit || z_hit) {  // restituteMovementAfterCollisions
-        double vx = ents_.vx[row], vy = ents_.vy[row], vz = ents_.vz[row];
-        double restitution = 0;  // Entity.getEntityBounciness
-        if (x_hit) vx = -vx * restitution;
-        if (z_hit) vz = -vz * restitution;
-        if (vertical_hit) {
-            // Landing harder than gravity alone would: the block decides (getBlockBounciness -
-            // four fifths of the block's restitution for what is not alive; slime has 1).
-            if (on_ground && -vy > kGravity)
-                restitution = static_cast<double>(world::block_info_of(block_below(0.2f)).bounce * 0.8f);  // getOnPosLegacy
-            double gravity_back = 0, drag = 1;
-            if (restitution > 0) {
-                const double portion = moved[1] / vy;
-                gravity_back = portion * kGravity;
-                drag = 1.0 + portion * (kAirDrag - 1.0);  // Mth.lerp(portion, 1, airDrag)
-            }
-            vy = (gravity_back - vy) * drag * restitution;
-        }
-        ents_.vx[row] = vx;
-        ents_.vy[row] = vy;
-        ents_.vz[row] = vz;
-    }
-    // Entity.getBlockSpeedFactor: the block it is in, or else the one it stands on (soul sand, honey).
-    float factor = world::block_info_of(world_.block(floor_int(x), floor_int(y), floor_int(z))).speed_factor;
-    if (factor == 1.0f) factor = world::block_info_of(block_below(0.500001f)).speed_factor;
-    ents_.vx[row] *= static_cast<double>(factor);
-    ents_.vz[row] *= static_cast<double>(factor);
-    return on_ground;
+// PrimedTnt.tick: it moves (phys::tnt_tick), its fuse burns - and at its end the explosion, then
+// and there, so that what ticks after it already feels it.
+void Game::tick_tnt(u32 slot, u32 row) {
+    phys::Body& body = movers_[slot].body;
+    phys::Motion m = motion_of(row);
+    phys::World w{world_, phys_scratch_};
+    phys::tnt_tick(w, m, body);
+    // setRequiresPrecisePosition(horizontalCollision || verticalCollision): while it touches a
+    // block its viewers get its exact position, not steps of 1/4096.
+    const bool touching = body.horizontal_collision || body.vertical_collision;
+    store_motion(row, m, body);
+    ents_.flags[row] =
+        static_cast<u16>(touching ? ents_.flags[row] | entity::flag::kPrecise : ents_.flags[row] & ~entity::flag::kPrecise);
+    const i32 fuse = ents_.fuse[row] - 1;
+    ents_.set_fuse(row, fuse);
+    if (fuse > 0) return;
+    // discard(), then explode() a sixteenth of its height up.
+    const double x = m.pos[0], z = m.pos[2];
+    const double y = m.pos[1] + static_cast<double>(entity_type::kInfo[entity_type::kTnt].height) * 0.0625;
+    remove_entity(slot);
+    explode(x, y, z, kPower);
 }
 
 // ---------------------------------------------------------------------------- the explosion
@@ -292,19 +198,14 @@ void Game::explode(double x, double y, double z, float radius) {
         if (!h.in_reach || players_[pi].flying) continue;
         knock_[pi] = {true, {h.dir[0] * h.power, h.dir[1] * h.power, h.dir[2] * h.power}};
     }
-    // Primed TNT: never hurt, pushed (Entity.push: the velocity, and viewers hear it at once).
+    // Primed TNT: never hurt, pushed (Entity.pushFromExplosion: the velocity, and viewers hear it at once).
     for (const u32 slot : tnt_) {
-        if (slot == kNone) continue;
         const u32 row = ents_.by_slot(slot);
         const Hit h = hit(tnt_box(ents_, row), ents_.x[row], ents_.y[row], ents_.z[row], ents_.y[row]);
-        if (!h.in_reach) continue;
-        ents_.vx[row] += h.dir[0] * h.power;
-        ents_.vy[row] += h.dir[1] * h.power;
-        ents_.vz[row] += h.dir[2] * h.power;
-        ents_.flags[row] |= entity::flag::kNeedsSync;
+        if (h.in_reach) push(row, h.dir[0] * h.power, h.dir[1] * h.power, h.dir[2] * h.power);
     }
     // Items: ItemEntity.hurtServer - five points of health, and an explosion this close takes
-    // more. (What resists explosions stays: the nether star.)
+    // more (what resists explosions stays: the nether star) - and what is left is thrown.
     if (!item_slot_.empty()) {
         item_scratch_.clear();
         item_grid_.for_each(item_cell_of(area.min[0] - 0.125), item_cell_of(area.min[2] - 0.125),
@@ -317,6 +218,7 @@ void Game::explode(double x, double y, double z, float radius) {
             const Hit h = hit(entity_box(ents_.x[row], ents_.y[row], ents_.z[row], 0.25f, 0.25f), ents_.x[row], ents_.y[row],
                               ents_.z[row], ents_.y[row] + static_cast<double>(0.25f * 0.85f));
             if (!h.in_reach) continue;
+            push(row, h.dir[0] * h.power, h.dir[1] * h.power, h.dir[2] * h.power);
             const bool proof =
                 (stack.info().flags & world::item_flag::kExplosionProof) &&
                 !(stack.has_patch() &&
@@ -326,7 +228,32 @@ void Game::explode(double x, double y, double z, float radius) {
             const float damage = static_cast<float>((h.power * h.power + h.power) / 2.0 * 7.0 * reach + 1.0);
             i8& health = item_health_[item_of_slot_[slot]];
             health = static_cast<i8>(static_cast<i32>(static_cast<float>(health) - damage));
+            ents_.flags[row] |= entity::flag::kSyncVelocity;  // markHurt
             if (health <= 0) remove_item(slot);
+        }
+    }
+    // The living: thrown from where their eyes are. An armor stand in reach is broken by it
+    // (ArmorStand.hurtServer: any explosion), whether or not the centre can see it.
+    if (push_grid_.size() > np) {
+        const double wide = static_cast<double>(push_half_width_);
+        push_scratch_.clear();
+        push_grid_.for_each(push_cell_of(area.min[0] - wide), push_cell_of(area.min[2] - wide), push_cell_of(area.max[0] + wide),
+                            push_cell_of(area.max[2] + wide), [&](u32 slot) { push_scratch_.push_back(slot); });
+        for (const u32 slot : push_scratch_) {
+            const u32 row = ents_.by_slot(slot);
+            if (row < np) continue;
+            const entity_type::Info& info = entity_type::kInfo[ents_.type[row]];
+            const Hit h = hit(entity_box(ents_.x[row], ents_.y[row], ents_.z[row], info.width, info.height), ents_.x[row],
+                              ents_.y[row], ents_.z[row], ents_.y[row] + static_cast<double>(info.eye_height));
+            if (!h.in_reach) continue;
+            if (movers_[slot].kind == proto::gen::physics::kMoverArmorStand) {
+                // brokenByAnything (it holds nothing to drop), then kill.
+                play_sound(gen::sound::kEntityArmorStandBreak, cb::Sound::kSourceNeutral, ents_.x[row], ents_.y[row],
+                           ents_.z[row], 1.0f, 1.0f);
+                remove_entity(slot);
+            } else {
+                push(row, h.dir[0] * h.power, h.dir[1] * h.power, h.dir[2] * h.power);
+            }
         }
     }
 
@@ -368,8 +295,7 @@ void Game::explode(double x, double y, double z, float radius) {
         const double px = c.pos.x + 0.5 + (random_double() * 0.5 - 0.25);
         const double py = c.pos.y + 0.5 + (random_double() * 0.5 - 0.25) - 0.125;
         const double pz = c.pos.z + 0.5 + (random_double() * 0.5 - 0.25);
-        // Made while entities tick: its own first tick, which starts the count, is the next one.
-        spawn_item(std::move(c.stack), px, py, pz, kPopPickupDelay + 1);
+        spawn_item(std::move(c.stack), px, py, pz, kPopPickupDelay);
     }
     collected_.clear();
 

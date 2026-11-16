@@ -77,7 +77,7 @@ void Game::post(u32 ri, const OutMsg& m) {
 void Game::run(const std::atomic<bool>& stop) {
     constexpr u64 kStatsEvery = 100;  // ticks: 5 s
     u64 next = base::now_ns();
-    u64 busy_ns = 0, worst_ns = 0, track_ns = 0, flush_ns = 0, sent_bytes = 0;
+    u64 busy_ns = 0, worst_ns = 0, track_ns = 0, move_ns = 0, flush_ns = 0, sent_bytes = 0;
     while (!stop.load(std::memory_order_relaxed) && !stop_requested_) {
         const u64 t0 = base::now_ns();
         // Same order as MinecraftServer.tickChildren: packets, then the level - scheduled block
@@ -86,6 +86,7 @@ void Game::run(const std::atomic<bool>& stop) {
         // block events are sent, the entities tick (items, primed TNT; ServerPlayer.tick, which
         // is the menu), then the block entities (furnaces) - then the per-connection tick (block
         // change acks, the player's own tick), and one flush per player at the end.
+        entities_ticked_ = false;
         for (u32 ri = 0; ri < reactors_.size(); ++ri) drain(ri);
         run_console();     // DedicatedServer.tickConnection: the console's lines after the players' packets
         recheck_chests();  // ServerLevel.tick: scheduled block ticks come first
@@ -94,8 +95,9 @@ void Game::run(const std::atomic<bool>& stop) {
         tracker_.tick(out_.data());
         track_ns += base::now_ns() - t1;
         run_block_events();  // ...block events after the chunks and the tracker, before the entities
-        tick_items();
-        tick_tnt();
+        const u64 t_entities = base::now_ns();
+        tick_entities();
+        move_ns += base::now_ns() - t_entities;
         sync_menus();
         tick_furnaces();  // block entities tick after the entities
         tick_players();
@@ -115,13 +117,15 @@ void Game::run(const std::atomic<bool>& stop) {
         worst_ns = std::max(worst_ns, took);
         if (tick_ % kStatsEvery == 0) {
             LOG_DEBUG(
-                "tick: %.3f ms avg, %.3f ms worst, %.3f ms of it entities, %.3f ms flush; %.1f KiB/tick sent; %zu players, "
-                "%u entities, %zu chunks, %.1f MiB of world",
+                "tick: %.3f ms avg, %.3f ms worst, %.3f ms of it the entity tracker, %.3f ms the entities' own ticks, %.3f ms "
+                "flush; "
+                "%.1f KiB/tick sent; %zu players, %u entities (%u at rest), %zu chunks, %.1f MiB of world",
                 static_cast<double>(busy_ns) / kStatsEvery / 1e6, static_cast<double>(worst_ns) / 1e6,
-                static_cast<double>(track_ns) / kStatsEvery / 1e6, static_cast<double>(flush_ns) / kStatsEvery / 1e6,
-                static_cast<double>(sent_bytes) / kStatsEvery / 1024.0, players_.size(), ents_.size(), world_.chunk_count(),
+                static_cast<double>(track_ns) / kStatsEvery / 1e6, static_cast<double>(move_ns) / kStatsEvery / 1e6,
+                static_cast<double>(flush_ns) / kStatsEvery / 1e6, static_cast<double>(sent_bytes) / kStatsEvery / 1024.0,
+                players_.size(), ents_.size(), asleep_, world_.chunk_count(),
                 static_cast<double>(world_.memory_bytes()) / (1024.0 * 1024.0));
-            busy_ns = worst_ns = track_ns = flush_ns = sent_bytes = 0;
+            busy_ns = worst_ns = track_ns = move_ns = flush_ns = sent_bytes = 0;
         }
 
         next += kTickNs;
@@ -251,6 +255,7 @@ void Game::on_join(u32 ri, const InHeader& h, const u8* payload, u32 n) {
     const u32 ei = tracker_.spawn(entity_type::kPlayer, true, p.uuid, kSpawnX, spawn_y, kSpawnZ, 0, 0, moved);
     DCHECK(ei == pi);
     (void)ei;
+    enter_push_grid(ents_.slot[pi], kSpawnX, kSpawnZ, entity_type::kInfo[entity_type::kPlayer].width);
     ents_.set_skin_parts(pi, j.skin_parts);  // ServerPlayer.updateOptions
     ents_.set_main_hand(pi, j.main_hand);
     pcx_.push_back(chunk_of(kSpawnX));
@@ -351,6 +356,7 @@ void Game::remove_player(u32 pi) {
     // PlayerList.remove: the entity goes first - whoever saw it gets remove_entities - then the
     // tab-list entry. The store fills the row with its last player, as we do with ours below.
     const u32 last = static_cast<u32>(players_.size()) - 1;
+    leave_push_grid(ents_.slot[pi]);
     entity::Store::Moves moved;
     tracker_.despawn(pi, out_.data(), moved);
     DCHECK(pi == last ? (moved.n == 0 || moved.m[0].from > last) : (moved.m[0].from == last && moved.m[0].to == pi));

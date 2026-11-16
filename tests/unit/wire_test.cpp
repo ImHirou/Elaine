@@ -353,6 +353,29 @@ TEST(EntityCodec, LpVec3) {
     EXPECT_NEAR(out[1], -1.7179869183E10, 1.0e6);
 }
 
+TEST(Packets, TeleportEntityLayout) {
+    // ClientboundTeleportEntityPacket.STREAM_CODEC: VAR_INT id, PositionMoveRotation.STREAM_CODEC
+    // (Vec3 position, Vec3 deltaMovement, FLOAT yRot, FLOAT xRot), Relative.SET_STREAM_CODEC (an
+    // INT of bits), BOOL onGround.
+    const cb::TeleportEntity t{300, 8.5, -57.0, -1000.25, 0.125, -0.0784, 0.0, 90.0f, -45.0f, 0, true};
+    u8 buf[96];
+    const u8* end = t.encode(buf);
+    ASSERT_LE(static_cast<usize>(end - buf), t.bound());
+    Reader r(buf, static_cast<usize>(end - buf));
+    EXPECT_EQ(r.varint(), 300u);
+    EXPECT_EQ(r.f64(), 8.5);
+    EXPECT_EQ(r.f64(), -57.0);
+    EXPECT_EQ(r.f64(), -1000.25);
+    EXPECT_EQ(r.f64(), 0.125);
+    EXPECT_EQ(r.f64(), -0.0784);
+    EXPECT_EQ(r.f64(), 0.0);
+    EXPECT_EQ(r.f32(), 90.0f);
+    EXPECT_EQ(r.f32(), -45.0f);
+    EXPECT_EQ(r.be32(), 0u);  // no Relative: everything is absolute
+    EXPECT_TRUE(r.boolean());
+    EXPECT_TRUE(r.done());
+}
+
 TEST(Packets, PlayerCommandAndMoveStatus) {
     u8 buf[16];
     const u8* end = put_varint(put_varint(put_varint(buf, 300), sb::PlayerCommand::kStartSprinting), 0);
@@ -409,7 +432,7 @@ TEST(Packets, InventoryLayoutsAreWhatVanillaSent) {
     const u8* q = cb::put_entity_item(e, entity_data::item_entity::kItem, ItemView{1, 1, {}});
     EXPECT_EQ(body_hex(cb::SetEntityData{16, {e, static_cast<usize>(q - e)}}), "10080701010000ff");
     EXPECT_EQ(body_hex(cb::TakeItemEntity{19, 15, 64}), "130f40");
-    // Ours alone, by the same rules: an item that does not fall says so (accessor 5, a boolean).
+    // Ours alone, by the same rules: an entity that does not fall says so (accessor 5, a boolean).
     q = cb::put_entity_item(cb::put_entity_bool(e, entity_data::entity::kNoGravity, true), entity_data::item_entity::kItem,
                             stone64);
     EXPECT_EQ(body_hex(cb::SetEntityData{16, {e, static_cast<usize>(q - e)}}), "10050801080740010000ff");

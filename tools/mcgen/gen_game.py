@@ -58,7 +58,8 @@ STATE_LAYOUTS = {
 }
 
 # Sounds and particles the server sends by id (static registries: sound_event, particle_type).
-SOUNDS = ["block.chest.open", "block.chest.close", "entity.tnt.primed", "entity.generic.explode", "entity.item.pickup"]
+SOUNDS = ["block.chest.open", "block.chest.close", "entity.tnt.primed", "entity.generic.explode", "entity.item.pickup",
+          "entity.armor_stand.break"]
 PARTICLES = ["explosion", "explosion_emitter", "poof", "smoke"]
 
 
@@ -75,6 +76,10 @@ def load_gamedata(d) -> dict:
     if not path.exists():
         die("gamedata/states.json is missing - run: mcgen.py gamedata")
     out["states"] = json.loads(path.read_text())  # per-state columns, indexed by state id
+    path = d / "gamedata" / "entities.json"
+    if not path.exists():
+        die("gamedata/entities.json is missing - run: mcgen.py gamedata")
+    out["entities"] = json.loads(path.read_text())  # entity types: class chains, default attributes
     return out
 
 

@@ -727,37 +727,69 @@ TEST(Blocks, GeneratedTablesAgreeWithEachOther) {
 
 // ---------------------------------------------------------------------------- boxes against blocks
 
+TEST(Collide, WhatTheSectionsAroundHold) {
+    // Dimension::holds is asked before any block is read: it may say "nothing but air" only of
+    // sections that are, and must say "a shape that reaches out of its cell" of every section
+    // that has one. The flat world fills the lowest section (y -64 .. -49) and nothing above.
+    FlatGenerator gen(-64, 24, FlatGenerator::default_layers(), 39);
+    Dimension dim(proto::reg::dimension_type::kOverworld, "minecraft:overworld", gen, proto::kNoCompression);
+    dim.ticking(0, 0);
+    dim.ticking(1, 0);
+    EXPECT_EQ(dim.holds(3, -60, 3, 4, -59, 4), Dimension::kBlocks);
+    EXPECT_EQ(dim.holds(3, -48, 3, 4, 20, 4), 0u);  // the sections above the ground
+    EXPECT_EQ(dim.holds(3, -49, 3, 4, -48, 4), Dimension::kBlocks) << "a range that reaches down into the first section";
+    EXPECT_EQ(dim.holds(3, 400, 3, 4, 500, 4), 0u);  // above the world
+    EXPECT_EQ(dim.holds(3, -90, 3, 4, -70, 4), 0u);  // below it
+    EXPECT_EQ(dim.holds(3, -70, 3, 4, -64, 4), Dimension::kBlocks);
+    EXPECT_EQ(dim.holds(1000, -60, 1000, 1001, -59, 1001), 0u) << "a chunk that is not loaded";
+
+    const BlockState fence = static_cast<BlockState>(block_info(find_block("minecraft:oak_fence")).default_state);
+    const BlockState web = static_cast<BlockState>(block_info(find_block("minecraft:cobweb")).default_state);
+    ASSERT_TRUE(dim.set_block(20, 40, 5, fence));  // chunk (1, 0), the section of y 32 .. 47
+    EXPECT_EQ(dim.holds(3, 40, 3, 4, 41, 4), 0u);  // not this chunk's
+    EXPECT_EQ(dim.holds(15, 40, 5, 16, 41, 5), Dimension::kBlocks | Dimension::kLarge) << "a range across the chunks' border";
+    EXPECT_EQ(dim.holds(20, 48, 5, 20, 49, 5), 0u);  // the section above the fence's
+    EXPECT_EQ(dim.holds(20, 47, 5, 20, 48, 5), Dimension::kBlocks | Dimension::kLarge);
+    ASSERT_TRUE(dim.set_block(20, 41, 5, web));
+    EXPECT_EQ(dim.holds(20, 40, 5, 20, 40, 5),
+              Dimension::kBlocks | Dimension::kLarge | Dimension::kEntityBlocks | Dimension::kFallBlocks);
+    // Taken away again: the section is air and says so; what it once held it may hold again.
+    ASSERT_TRUE(dim.set_block(20, 40, 5, kAir));
+    ASSERT_TRUE(dim.set_block(20, 41, 5, kAir));
+    EXPECT_EQ(dim.holds(20, 40, 5, 20, 40, 5) & Dimension::kBlocks, 0u);
+}
+
 TEST(Collide, ABoxAgainstTheGroundAndAWall) {
     // The flat world's top block is grass at y = -61: the ground is the plane y = -60.
     FlatGenerator gen(-64, 24, FlatGenerator::default_layers(), 39);
     Dimension dim(proto::reg::dimension_type::kOverworld, "minecraft:overworld", gen, proto::kNoCompression);
     dim.ticking(0, 0);
-    std::vector<Aabb> scratch;
+    CollideScratch scratch;
     double out[3];
     // A box the size of a primed TNT, half a block up, falling a whole block: it stops on the ground,
     // and keeps what it moved sideways.
     const Aabb box{{8.01, -59.5, 8.01}, {8.99, -58.52, 8.99}};
     const double fall[3] = {0.1, -1.0, -0.2};
-    collide(dim, box, fall, out, scratch);
+    collide(dim, box, fall, 0.0f, false, out, scratch);
     EXPECT_DOUBLE_EQ(out[0], 0.1);
     EXPECT_DOUBLE_EQ(out[1], -0.5);
     EXPECT_DOUBLE_EQ(out[2], -0.2);
     // Resting on it, gravity moves it nowhere; in the air nothing stops it.
     const Aabb resting{{8.01, -60.0, 8.01}, {8.99, -59.02, 8.99}};
     const double gravity[3] = {0.0, -0.04, 0.0}, up[3] = {0.0, 0.16, 0.0};
-    collide(dim, resting, gravity, out, scratch);
+    collide(dim, resting, gravity, 0.0f, false, out, scratch);
     EXPECT_EQ(out[1], 0.0);
-    collide(dim, resting, up, out, scratch);
+    collide(dim, resting, up, 0.0f, false, out, scratch);
     EXPECT_EQ(out[1], 0.16);
     // A wall two blocks to the east: one block and a hundredth of free way.
     ASSERT_TRUE(dim.set_block(10, -60, 8, static_cast<BlockState>(blk::kStone)));
     const double east[3] = {2.0, 0.0, 0.0};
-    collide(dim, resting, east, out, scratch);
+    collide(dim, resting, east, 0.0f, false, out, scratch);
     EXPECT_NEAR(out[0], 1.01, 1e-12);
     // ...which a box one block higher passes over.
     Aabb above = resting;
     above.min[1] += 1.0, above.max[1] += 1.0;
-    collide(dim, above, east, out, scratch);
+    collide(dim, above, east, 0.0f, false, out, scratch);
     EXPECT_EQ(out[0], 2.0);
 
     // What it stands on: the block under its middle - and, hanging over an edge, the nearest one.

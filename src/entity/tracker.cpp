@@ -50,6 +50,18 @@ ALWAYS_INLINE i32 cell_z(u64 section) {
     return static_cast<i32>(static_cast<i64>(section << 22) >> 42) >> (Grid::kCellShift - 4);
 }
 
+// ServerEntity.isFullPrecisionEncodingRequired: an item that lies against a block is not shown
+// 1/4096 of a block into it - when a step of that grid would lose some of where it is along the
+// block's face, it is sent as it is (entity_position_sync) instead.
+ALWAYS_INLINE bool full_precision_required(u16 flags, u32 type, double x, double z, i64 dx, i64 dz) {
+    if (type != entity_type::kItem || !(flags & (flag::kVerticalCollision | flag::kHorizontalCollision))) return false;
+    const auto loss = [](double v) {
+        return static_cast<double>(delta_units(v)) / 4096.0 - v;
+    };  // VecDeltaCodec.encodingPrecisionLoss
+    if ((flags & flag::kVerticalCollision) && ((dx != 0 && loss(x) != 0) || (dz != 0 && loss(z) != 0))) return true;
+    return (flags & flag::kHorizontalCollision) && ((dx != 0 && loss(z) != 0) || (dz != 0 && loss(x) != 0));
+}
+
 }  // namespace
 
 Tracker::Tracker(Store& store, i32 threshold, u32 range_percent)
@@ -410,14 +422,26 @@ void Tracker::partial_row(u32 w, base::ByteBuf& out) {
 // ServerEntity.sendChanges for one entity, into the arena. Everything it writes goes to all
 // viewers; the ranges recorded in self_ also go to the entity's own client
 // (sendToTrackingPlayersAndSelf). Not ported because nothing can be in those states yet:
-// passengers, minecarts on rails, arrows, item frames, and paths of more than one step
-// (Entity.syncPosition, a bounce off a slime block).
+// passengers, minecarts on rails, arrows, item frames - and paths of more than one step (what
+// a living entity that bounces off a slime block is sent as).
 HOT void Tracker::send_changes(u32 e) {
     Sent& t = sent_[e];
-    const u16 f = s_.flags[e];
+    u16 f = s_.flags[e];
     const u32 dirty = s_.dirty[e];
     if (f & flag::kLiving) t.since_step = static_cast<i16>(std::min<i32>(t.since_step + 1, INT16_MAX));  // updateTracking
 
+    // Entity.syncPosition (a bounce) brings the next update forward to this tick:
+    // tickCount = updateInterval.nextInterval(tickCount). (For a living entity vanilla records
+    // a step of its path instead - SteppedInterpolationTracker.updateTracking; paths of more
+    // than one step are not sent here, so that bounce goes out with the next update.)
+    if (UNLIKELY(f & flag::kSyncPosition)) {
+        if (!(f & flag::kLiving)) {
+            t.tick_count = t.period ? (t.tick_count / t.period) * t.period + t.period : 0;
+            if (t.period) t.to_next = 0;
+        }
+        f = static_cast<u16>(f & ~flag::kSyncPosition);
+        s_.flags[e] = f;
+    }
     const bool due = t.to_next == 0;  // UpdateInterval.test(tickCount)
     if (t.to_next != kNever) t.to_next = due ? static_cast<u8>(t.period - 1) : static_cast<u8>(t.to_next - 1);
     if (due | ((f & flag::kNeedsSync) != 0) | (dirty != 0)) {
@@ -448,7 +472,9 @@ HOT void Tracker::send_changes(u32 e) {
             dx = delta_units(x) - delta_units(t.bx);
             dy = delta_units(y) - delta_units(t.by);
             dz = delta_units(z) - delta_units(t.bz);
-            kind = !delta_fits(dx, dy, dz) ? kSync : rotated ? kPosRot : kPos;
+            kind = !delta_fits(dx, dy, dz) || full_precision_required(f, s_.type[e], x, z, dx, dz) ? kSync
+                   : rotated                                                                       ? kPosRot
+                                                                                                   : kPos;
         } else if (rotated) {
             kind = kRot;
         }

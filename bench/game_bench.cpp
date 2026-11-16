@@ -71,16 +71,16 @@ void game_benchmarks() {
         world::FlatGenerator gen(-64, 24, world::FlatGenerator::default_layers(), 39);
         world::Dimension dim(proto::reg::dimension_type::kOverworld, "minecraft:overworld", gen, proto::kNoCompression);
         dim.ticking(0, 0);
-        std::vector<world::Aabb> scratch;
+        world::CollideScratch scratch;
         const world::Aabb resting{{8.01, -60.0, 8.01}, {8.99, -59.02, 8.99}}, flying{{8.01, -50.0, 8.01}, {8.99, -49.02, 8.99}};
         const double fall[3] = {0.01, -0.04, 0.01};
         double out[3];
         bench("collide: a TNT resting on the ground", 1, "M/s", [&] {
-            world::collide(dim, resting, fall, out, scratch);
+            world::collide(dim, resting, fall, 0.0f, false, out, scratch);
             g_sink = static_cast<u64>(out[1] * 1e9);
         });
         bench("collide: a TNT in the air", 1, "M/s", [&] {
-            world::collide(dim, flying, fall, out, scratch);
+            world::collide(dim, flying, fall, 0.0f, false, out, scratch);
             g_sink = static_cast<u64>(out[1] * -1e9);
         });
         // The rays of one TNT lying on the ground - and the same asking the world for the block

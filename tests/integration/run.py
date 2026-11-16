@@ -11,7 +11,9 @@ from __future__ import annotations
 import argparse
 import http.server
 import json
+import math
 import os
+import re
 import socket
 import struct
 import subprocess
@@ -802,6 +804,13 @@ def walk(c: Client, j: dict, x: float, z: float, view: int, y: float = SPAWN[1],
         c.send("move_player_pos", struct.pack(">dddB", x, y, z, 1 if ground else 0))
 
 
+def look(c: Client, yaw: float, pitch: float) -> None:
+    c.send("move_player_rot", struct.pack(">ffB", yaw, pitch, 1))
+
+
+DOWN = 90.0     # the pitch of a player that looks at its feet: what it drops lands there
+
+
 def log_of(c: Client, eid: int, since: int = 0) -> list:
     return [(name, what) for name, e, what in c.entity_log[since:] if e == eid]
 
@@ -977,7 +986,7 @@ OUTSIDE = -999
 DROP_ALL, DROP_ONE, SWAP_HANDS = 4, 5, 7                                      # ServerboundPlayerActionPacket.Action
 MAINHAND, OFFHAND, FEET, LEGS, CHEST, HEAD = (mc.EQUIPMENT_SLOT[k] for k in ("kMainhand", "kOffhand", "kFeet", "kLegs", "kChest", "kHead"))
 I = mc.ITEM
-D_NO_GRAVITY, D_ITEM = mc.DATA["kNoGravity"], mc.ITEM_DATA["kItem"]
+D_ITEM = mc.ITEM_DATA["kItem"]
 BOOL, STACK = mc.SERIALIZER["kBoolean"], mc.SERIALIZER["kItemStack"]
 EYE = 1.62            # a standing player's eyes; an item appears 0.3 (as a float) below them
 DROP_Y = SPAWN[1] + struct.unpack(">f", struct.pack(">f", EYE))[0] - struct.unpack(">f", struct.pack(">f", 0.3))[0]
@@ -1277,6 +1286,7 @@ def drop_and_pick_up(srv: Server):
     for cl in (a, b):
         cl.send("player_loaded")
     walk(a, ja, 12.5, 12.5, 10)     # Alice watches from a few blocks away
+    look(b, 0.0, DOWN)              # Bob looks at his feet: what he drops falls there
     settle(b, a)
     item_type = mc.ENTITY_TYPE["kItem"]
 
@@ -1284,7 +1294,8 @@ def drop_and_pick_up(srv: Server):
         return {i: e for i, e in c.entities.items() if e.type == item_type}
 
     # ---- Q: one stone leaves the hand. Bob's client took it out itself; Alice sees the arm swing
-    # and the item appear below Bob's eyes - at rest and without gravity, since nothing moves it yet.
+    # and the item appear below Bob's eyes, thrown the way he looks: down, a fifth of a block a
+    # tick give or take a tenth, and up to a fiftieth of one sideways (createItemStackToDrop).
     give(b, 36, I["kStone"], 3)
     settle(b, a)
     mark, mmark = len(a.entity_log), len(b.menu_log)
@@ -1292,8 +1303,16 @@ def drop_and_pick_up(srv: Server):
     settle(b, a)
     assert len(items(a)) == 1 and len(items(b)) == 1
     eid, e = next(iter(items(a).items()))
-    assert e.pos == (SPAWN[0], DROP_Y, SPAWN[2]) and e.velocity == (0.0, 0.0, 0.0) and e.bundled, (e.pos, DROP_Y)
-    assert e.data == {D_NO_GRAVITY: (BOOL, True), D_ITEM: (STACK, plain("kStone", 1))}, e.data
+    where, (vx, vy, vz) = e.spawned
+    assert where == (SPAWN[0], DROP_Y, SPAWN[2]) and e.bundled, (where, DROP_Y)
+    assert abs(vx) < 0.0201 and abs(vz) < 0.0201 and -0.3001 < vy < -0.0999, e.spawned
+    assert e.data == {D_ITEM: (STACK, plain("kStone", 1))}, e.data
+    # It falls (a client lets it fall by itself, and is put right when it lands): half a second
+    # later it lies on the ground by Bob's feet, and both clients know exactly how high.
+    settle(b, a, ticks=12)
+    for cl in (a, b):
+        x, y, z = cl.entities[eid].pos
+        assert y == SPAWN[1] and cl.entities[eid].on_ground and abs(x - SPAWN[0]) < 0.3 and abs(z - SPAWN[2]) < 0.3, (x, y, z)
     assert ("swing_animation", idb, (0, 1, 6)) in a.entity_log[mark:]     # main hand, WHACK, 6 ticks
     assert not [x for x in b.entity_log if x[0] == "swing_animation"]     # Bob's client swung by itself
     assert b.menu_log[mmark:] == [] and a.entities[idb].equipment == {MAINHAND: plain("kStone", 2)}
@@ -1305,7 +1324,9 @@ def drop_and_pick_up(srv: Server):
     b.ticks(45)
     settle(b, a)
     assert not items(a) and not items(b)
-    assert [x for x in a.entity_log[mark:] if x[1] == eid] == [("take_item_entity", eid, (idb, 1)), ("remove_entities", eid, None)]
+    # (Meanwhile Alice heard of it every so often, as of any item that lies somewhere: every
+    # fourth tick it tries the ground under it, and its velocity is news each time.)
+    assert [x for x in a.entity_log[mark:] if x[1] == eid][-2:] == [("take_item_entity", eid, (idb, 1)), ("remove_entities", eid, None)]
     assert [x for x in b.entity_log if x[1] == eid][-2:] == [("take_item_entity", eid, (idb, 1)), ("remove_entities", eid, None)]
     assert b.menu_log[mmark:] == [("container_set_slot", 36, plain("kStone", 3))], b.menu_log[mmark:]
     assert a.entities[idb].equipment == {MAINHAND: plain("kStone", 3)}
@@ -1322,16 +1343,21 @@ def drop_and_pick_up(srv: Server):
     # ---- Bob walks off before it can be picked up. Thrown out of the creative inventory (slot -1),
     # two more stacks land on the same spot... which is where Bob is now, so walk first.
     walk(b, jb, 2.5, 2.5, 10)
+    mark = len(a.entity_log)
     b.send("set_creative_mode_slot", struct.pack(">h", -1) + mc.item_stack(I["kDirt"], 5))
     b.send("set_creative_mode_slot", struct.pack(">h", -1) + mc.item_stack(I["kDirt"], 7))
     settle(b, a)
+    # Both appeared at the same place below his eyes. (Two items that fall through the same
+    # blocks may become one on the way down already: see below.)
+    thrown = [where for name, _, where in a.entity_log[mark:] if name == "add_entity"]
+    assert thrown == [(2.5, DROP_Y, 2.5)] * 2, thrown
     dirt = {i: e for i, e in items(a).items() if e.data[D_ITEM][1][0] == I["kDirt"]}
-    assert sorted(e.data[D_ITEM][1][1] for e in dirt.values()) == [5, 7] and len(items(a)) == 3
-    assert all(e.pos == (2.5, DROP_Y, 2.5) for e in dirt.values())
+    assert len(dirt) in (1, 2) and len(items(a)) == 1 + len(dirt)
     walk(b, jb, 8.5, 2.5, 10)       # six blocks from the dirt, six from the stone
     settle(b, a)
-    # Items lying together become one: after 40 ticks of its life an item looks around, the
-    # smaller stack goes into the larger, and the emptied entity is removed.
+    # Items lying together become one: every other tick while it passes from block to block,
+    # and every 40 ticks of its life where it lies, an item looks around; the smaller stack
+    # goes into the larger, and the emptied entity is removed.
     b.ticks(45)
     settle(b, a)
     left = items(a)
@@ -1375,6 +1401,7 @@ def named_items(srv: Server):
     for cl in (a, b):
         cl.send("player_loaded")
     walk(a, ja, 12.5, 12.5, 10)
+    look(b, 0.0, DOWN)
     settle(b, a)
     item_type = mc.ENTITY_TYPE["kItem"]
     sent = {"kCustomName": mc.nbt({"text": "Sting", "italic": False, "color": "aqua"}),
@@ -1606,6 +1633,7 @@ def menu_clicks(srv: Server):
     c = srv.client()
     join(c, "Alice")
     c.send("player_loaded")
+    look(c, 0.0, DOWN)      # what she throws out of the menu lands at her feet
     for slot, (item, count) in {9: ("kStone", 10), 10: ("kDirt", 5), 11: ("kStone", 64), 13: ("kIronChestplate", 1)}.items():
         give(c, slot, I[item], count)
         c.slots[slot] = plain(item, count)   # a client knows what it put there
@@ -1692,7 +1720,7 @@ def menu_clicks(srv: Server):
     settle(c)
     # The stone joins the stack in the off hand, the dirt takes the first free slot: the hand's.
     assert sorted(c.menu_log[mark:]) == sorted([("container_set_slot", 45, plain("kStone", 11)), ("container_set_slot", 36, plain("kDirt", 5))])
-    taken = [(n, w) for n, e, w in c.entity_log[emark:] if e in lying]
+    taken = [(n, w) for n, e, w in c.entity_log[emark:] if e in lying and n in ("take_item_entity", "remove_entities")]
     assert sorted(taken) == sorted([("take_item_entity", (c.entity_id, lying[i][1])) for i in lying] + [("remove_entities", None)] * 2), taken
     assert not [e for e in c.entities.values() if e.type == item_type]
 
@@ -2460,7 +2488,8 @@ def command_teleport_give_summon(srv: Server):
     assert run_command(a, line)["said"] == [failure("Item components in commands are not supported by this server yet"), here(line, 15)]
     assert run_command(a, "give Nobody stone")["said"] == [failure(tr("argument.entity.notfound.player"))]
 
-    # /summon: an entity like any other - shown, selected, killed. It only stands there.
+    # /summon: an entity like any other - shown, selected, killed. It has no mind of its own:
+    # it stands where it is put, and falls when that is in the air.
     before = set(a.entities)
     got = run_command(a, "summon armor_stand ~2 ~ ~")
     (eid,) = set(a.entities) - before
@@ -2477,12 +2506,20 @@ def command_teleport_give_summon(srv: Server):
     run_command(a, "summon cow")
     assert len(of_type(a, "kArmorStand")) == 2 and len(of_type(a, "kCow")) == 1
     # Selectors: the nearest stand; then by a box, by distance, by what they are not.
+    mark = len(b.entity_log)
     got = run_command(a, "tp @e[type=armor_stand,sort=nearest,limit=1] ~ ~3 ~")
     assert got["said"] == [tr("commands.teleport.success.location.single", shown, "8.500000", "-57.000000", "8.500000")], got
-    settle(a, b)
-    assert a.entities[eid].pos == (8.5, -57.0, 8.5) and b.entities[eid].pos == (8.5, -57.0, 8.5)
-    assert run_command(a, "kill @e[type=!player,type=!cow,distance=..2]")["said"] == [failure(tr("argument.entity.notfound.entity"))]
-    got = run_command(a, "kill @e[type=armor_stand,y=-58,dy=3]")
+    # Three blocks up it does not stay: it falls as a living thing does, and ten ticks later it
+    # stands on the ground again - under where it was put, and the players it lands among do
+    # not push it (ArmorStand.isPushable).
+    settle(a, b, ticks=16)
+    heard = [what[1] for name, what in log_of(b, eid, mark) if name in ("move_entity_pos", "entity_position_sync")]
+    # (Nobody is told of the teleport itself: a stand's viewers hear where it is every third tick.)
+    assert heard[0][0] == 8.5 and heard[0][2] == 8.5 and -57.5 < heard[0][1] <= -57.0, heard
+    for cl in (a, b):
+        assert cl.entities[eid].pos == (8.5, -60.0, 8.5) and cl.entities[eid].on_ground, cl.entities[eid].pos
+    assert run_command(a, "kill @e[type=!player,type=!cow,type=!armor_stand,distance=..2]")["said"] == [failure(tr("argument.entity.notfound.entity"))]
+    got = run_command(a, "kill @e[type=armor_stand,x=8,dx=0,y=-60,dy=1]")
     assert got["said"] == [tr("commands.kill.success.single", shown)] and eid not in a.entities
     got = run_command(a, "kill @e[type=!player]")
     assert got["said"] == [tr("commands.kill.success.multiple", 2)] and not of_type(a, "kArmorStand") and not of_type(a, "kCow")
@@ -2496,9 +2533,141 @@ def command_teleport_give_summon(srv: Server):
     # A summoned TNT is a primed one: it falls, and its fuse burns down from 80.
     run_command(a, "summon tnt ~ ~4 ~3")
     settle(a, ticks=12)
-    (tnt,) = of_type(a, "kTnt").values()
+    ((tid, tnt),) = of_type(a, "kTnt").items()
     assert tnt.pos[1] < -56.0 and 60 <= tnt.data[mc.TNT_DATA["kFuse"]][1] < 80, (tnt.pos, tnt.data)
+    # A client lets a primed TNT fall by itself between the server's updates, so when a command
+    # moves one, whoever sees it is told at once (teleport_entity; a stand's viewers were not):
+    # where it is now, and that a place given outright leaves it no velocity.
+    mark = len(b.entity_log)
+    run_command(a, "tp @e[type=tnt] 8.5 -40 14.5")
+    settle(b, ticks=1)
+    moved = [what for name, what in log_of(b, tid, mark) if name == "teleport_entity"]
+    assert len(moved) == 1 and moved[0][0] == (8.5, -40.0, 14.5) and moved[0][1] == (0.0, 0.0, 0.0), log_of(b, tid, mark)
     run_command(a, "kill @e[type=tnt]")
+
+
+def tick_stats(srv: Server) -> list:
+    """The server's own account of its ticks (--debug, one line every 100 ticks): per line
+    (ms avg, ms worst, ms entity tracker, ms entities' ticks, ms flush, KiB/tick, players, entities, at rest)."""
+    return re.findall(r"tick: ([\d.]+) ms avg, ([\d.]+) ms worst, ([\d.]+) ms of it the entity tracker, ([\d.]+) ms the entities' own "
+                      r"ticks, ([\d.]+) ms flush; ([\d.]+) KiB/tick sent; (\d+) players, (\d+) entities \((\d+) at rest\)", srv.read_log())
+
+
+F32_098 = struct.unpack(">f", struct.pack(">f", 0.98))[0]      # (double) 0.98f
+
+
+def living_fall(y: float, ground: float, ticks: int) -> list:
+    """Where a living entity that nobody steers is after each tick of a fall onto flat ground:
+    LivingEntity.aiStep and travelInAir, written out for one axis. [0] is where it starts.
+
+    A tick: a velocity under 0.003 is dropped; the entity moves by its velocity, as far as the
+    ground lets it (Entity.move keeps the position when it was stopped within 1e-7 of nothing);
+    stopped, the velocity is gone; then gravity, 0.08, and the drag on what is left, 0.98f."""
+    vy, out = 0.0, [y]
+    for _ in range(ticks):
+        if abs(vy) < 0.003:
+            vy = 0.0
+        moved = max(vy, ground - y) if vy < 0 else vy
+        if moved * moved > 1.0e-7 or vy * vy - moved * moved < 1.0e-7:
+            y = y + moved
+        if moved != vy:
+            vy = 0.0
+        vy = (vy - 0.08) * F32_098
+        out.append(y)
+    return out
+
+
+@test()
+def things_fall(srv: Server):
+    """What is in the air falls, what is thrown flies, what is walked into gives way - tick for
+    tick as on a vanilla server (the arithmetic is tested against one in tests/unit/physics_test.cpp;
+    this is that it runs, and that clients hear of it)."""
+    a, b = srv.client(), srv.client()
+    ja = join(a, "Alice")
+    jb = join(b, "Bob")
+    a.expect("player_info_update")
+    for cl in (a, b):
+        cl.send("player_loaded")
+    settle(a, b)
+    make_op(srv, a, "Alice")
+
+    # ---- an armor stand put ten blocks up. Bob is told where it is every third tick, each time
+    # with the ticks that passed (a living entity's path), in steps of 1/4096 of a block - and
+    # exactly when it lands. Every one of those positions is on the path the model above takes.
+    before = set(b.entities)
+    run_command(a, "summon armor_stand 8.5 -50 12.5")
+    settle(a, b, ticks=40)
+    (eid,) = set(b.entities) - before
+    stand = b.entities[eid]
+    assert stand.spawned[0] == (8.5, -50.0, 12.5) and stand.pos == (8.5, -60.0, 12.5) and stand.on_ground, (stand.spawned, stand.pos)
+    steps = list(stand.steps)
+    told = [(name, what[1], steps.pop(0) if what[0] else 0)           # ...a step of so many ticks, or just a place
+            for name, what in log_of(b, eid) if name in ("move_entity_pos", "move_entity_pos_rot", "entity_position_sync")]
+    assert not steps and len(told) >= 6, (told, stand.steps)
+    path = living_fall(-50.0, -60.0, 60)
+
+    def on_path(first: int) -> bool:
+        tick = first
+        for name, pos, step in told:
+            tick += step
+            if not 0 <= tick < len(path) or (pos[0], pos[2]) != (8.5, 12.5):
+                return False
+            if abs(pos[1] - path[tick]) > (0.0 if name == "entity_position_sync" else 1 / 8192 + 1e-12):
+                return False
+        return True
+
+    assert [first for first in range(-3, 4) if on_path(first)], (told, path[:30])
+    assert told[-1][:2] == ("entity_position_sync", (8.5, -60.0, 12.5))   # the landing: on the ground, to the last bit
+
+    # ---- a stone thrown straight ahead: three tenths of a block a tick the way Bob looks (+z),
+    # a tenth up give or take a tenth, a fiftieth of anything; it lands three to five blocks off,
+    # slides a little and lies there, on the ground to the last bit.
+    look(b, 0.0, 0.0)
+    give(b, 36, I["kStone"], 1)
+    action(b, DROP_ONE)
+    settle(a, b, ticks=60)
+    (item,) = of_type(a, "kItem").values()
+    where, (vx, vy, vz) = item.spawned
+    assert where == (SPAWN[0], DROP_Y, SPAWN[2]), where
+    assert abs(vx) < 0.0201 and -0.0001 < vy < 0.2001 and 0.2799 < vz < 0.3201, item.spawned
+    x, y, z = item.pos
+    assert y == SPAWN[1] and item.on_ground and abs(x - SPAWN[0]) < 0.6 and 2.5 < z - SPAWN[2] < 5.5, item.pos
+    assert of_type(b, "kItem")[item.id].pos == item.pos
+
+    # ---- a cow put where the two of them stand, a little to the side: each of them pushes it
+    # (and it pushes itself off them) until nothing touches - a cow is 0.9 wide, a player 0.6.
+    before = set(a.entities)
+    run_command(a, "summon cow 8.9 -60 8.5")
+    settle(a, b, ticks=40)
+    (eid,) = set(a.entities) - before
+    x, y, z = a.entities[eid].pos
+    assert 9.2499 <= x < 10.5 and y == -60.0 and abs(z - 8.5) < 1e-9, (x, y, z)
+    assert b.entities[eid].pos == (x, y, z)
+
+    # ---- at rest. Seven seconds on, the three of them lie and stand still, and the server has
+    # stopped ticking them in full (its own account of it, every five seconds, says so) - which
+    # nobody can tell from outside: the item's viewers hear of it as often as ever.
+    mark = len(a.entity_log)
+    settle(a, b, ticks=140)
+    assert int(tick_stats(srv)[-1][8]) == 3, tick_stats(srv)[-1]
+    # (An item at rest falls for three ticks and is stopped by the ground in the fourth, and its
+    # velocity is sent whenever it is found changed: at its update every 20 ticks - 0.04, 0.08 or
+    # 0.12 down, by where in that round the update falls - and when the ground has stopped it
+    # again. Unless its update falls on that very tick: then there is never anything to say.)
+    heard = [what for name, what in log_of(a, item.id, mark) if name == "set_entity_motion"]
+    assert not heard or (len(heard) >= 12 and {round(v[1] / -0.04) for v in heard} in ({0, 1}, {0, 2}, {0, 3})), heard
+    # What wakes them: the ground going from under them...
+    ix, iz = math.floor(item.pos[0]), math.floor(item.pos[2])
+    run_command(a, f"fill {ix - 1} -61 {iz - 1} {ix + 1} -61 {iz + 1} air")
+    run_command(a, "fill 8 -61 12 8 -61 12 air")
+    collect(a, ticks=12)        # (the holes and their light, to both)
+    collect(b, ticks=12)
+    assert a.entities[item.id].pos[1] == -61.0 and a.entities[item.id].on_ground, a.entities[item.id].pos
+    assert a.entities[stand.id].pos == (8.5, -61.0, 12.5) and b.entities[stand.id].pos == (8.5, -61.0, 12.5)
+    # ...and somebody walking into them: Bob steps into the cow, and it gives way again.
+    walk(b, jb, x - 0.3, 8.5, 10)
+    settle(a, b, ticks=30)
+    assert a.entities[eid].pos[0] > x + 0.3 and a.entities[eid].pos[1] == -60.0, (a.entities[eid].pos, x)
 
 
 @test()
@@ -2654,7 +2823,6 @@ def crowd(srv: Server):
 def crowd_load(srv: Server, n: int, seconds: int, online: bool) -> None:
     """n players within sight of each other, all walking and turning 20 times a second. Reports
     what a tick costs; three of them check that what they decode is where everyone is."""
-    import re
     import select
     watchers = 3
     t0 = time.time()
@@ -2682,7 +2850,6 @@ def crowd_load(srv: Server, n: int, seconds: int, online: bool) -> None:
 
     # Everyone walks a circle of its own inside a 16 x 16 block square: always within 32 blocks of
     # everyone else. Coordinates are multiples of 1/64, so what a watcher decodes must be exact.
-    import math
     where = {}
     cpu0, t1 = srv.cpu_seconds(), time.time()
     ticks = seconds * 20
@@ -2705,12 +2872,10 @@ def crowd_load(srv: Server, n: int, seconds: int, online: bool) -> None:
         for eid, e in c.entities.items():
             assert e.pos == where[eid], f"entity {eid} is seen at {e.pos}, it is at {where[eid]}"
     stop.set()
-    stats = re.findall(r"tick: ([\d.]+) ms avg, ([\d.]+) ms worst, ([\d.]+) ms of it entities, ([\d.]+) ms flush; "
-                       r"([\d.]+) KiB/tick sent; (\d+) players", srv.read_log())
-    full = [s for s in stats if int(s[5]) == n]
+    full = [s for s in tick_stats(srv) if int(s[6]) == n]
     print(f"    {n} players x 20 moves/s for {wall:.1f}s, each seeing {n - 1}, {'encrypted' if online else 'plain'}: "
           f"server used {100 * cpu / wall:.0f}% of one core (all threads)")
-    for avg, worst, ent, flush, kib, _ in full[-2:]:
+    for avg, worst, ent, _, flush, kib, *_ in full[-2:]:
         print(f"    tick thread: {avg} ms avg, {worst} ms worst per tick - {ent} ms the entity tracker, {flush} ms the flush "
               f"(encryption + hand-over); {kib} KiB sent per tick")
     assert full, "no tick statistics in the server log"
@@ -2721,6 +2886,88 @@ def crowd_load(srv: Server, n: int, seconds: int, online: bool) -> None:
     assert online or all(float(s[1]) < 50.0 for s in full[-2:]), "a tick took longer than a tick"
     for c in clients:
         c.close()
+
+
+@test(slow=True, max_players=200, view_distance=2, debug="true")
+def ten_thousand_at_rest(srv: Server):
+    """What a tick costs with ten thousand things lying about and nobody there: 150 bots each
+    walk a row and drop a stone every block and a half - 68 of them, nothing near enough to
+    anything to merge with it - and leave; then as many armor stands are summoned from the
+    console. The layout is the one tools/vanilla/physics_probe.py perf gives a vanilla server;
+    this prints the server's own account of its ticks, for docs/architecture.md to set the two
+    side by side."""
+    bots, each = 150, 68
+    errors = []
+
+    def listen(c: Client, seconds: float) -> bool:
+        """Read and drop what arrives for a while, answering what a client must: a keep-alive,
+        and a teleport - true if there was one."""
+        asked, until = False, time.time() + seconds
+        while True:
+            if time.time() >= until:        # (not "until nothing comes": with thousands of items in sight something always does)
+                c.sock.settimeout(60)
+                return asked
+            c.sock.settimeout(max(until - time.time(), 0.001))
+            try:
+                name, r = c.recv_any()
+            except (socket.timeout, BlockingIOError, TimeoutError):
+                c.sock.settimeout(60)
+                return asked
+            if name == "player_position":
+                tid, where = r.varint(), (r.f64(), r.f64(), r.f64())
+                r.take(24)
+                c.send("accept_teleportation", varint(tid) + struct.pack(">dddff", *where, r.f32(), r.f32()))
+                asked = True
+            elif name == "keep_alive":
+                c.send("keep_alive", r.take(8))
+
+    def one(i):
+        try:
+            c = srv.client(timeout=60)
+            join(c, f"Bot{i:03d}", view=2)
+            c.send("player_loaded")
+            # To the start of a row of its own, well away from where the later bots join (they
+            # would pick the items up). A server that still waits for a teleport to be confirmed
+            # ignores moves: answer, should it ask again, and go again.
+            z = 8.5 + 1.5 * i
+            for _ in range(40):
+                c.send("move_player_pos_rot", struct.pack(">dddffB", 40.5, SPAWN[1], z, 0.0, DOWN, 1))
+                if not listen(c, 0.4):
+                    break
+            for k in range(each):                # along the row: a step, a stone at its feet
+                c.send("move_player_pos", struct.pack(">dddB", 40.5 + 1.5 * k, SPAWN[1], z, 1))
+                c.send("set_creative_mode_slot", struct.pack(">h", -1) + mc.item_stack(I["kStone"], 1))
+            # ...and away again at once: two seconds on, an item can be picked up, and a slow bot is still there.
+            c.send("move_player_pos", struct.pack(">dddB", SPAWN[0], SPAWN[1], SPAWN[2], 1))
+            listen(c, 0.3)
+            c.close()
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"Bot{i:03d}: {e!r}")
+
+    for first in range(0, bots, 30):         # thirty at a time: more and the bots starve each other
+        threads = [threading.Thread(target=one, args=(i,)) for i in range(first, min(first + 30, bots))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    assert not errors, errors[:5]
+
+    def account(what: str, entities: int) -> None:
+        time.sleep(16)      # they fall, slide, lie - and three of the server's accounts go by
+        # (Give or take a few: two stones that landed within reach of each other are one stack now.)
+        quiet = [st for st in tick_stats(srv) if int(st[6]) == 0 and abs(int(st[7]) - entities) <= entities // 100]
+        assert quiet, tick_stats(srv)[-3:]
+        avg, worst, tracker, ticks, flush, _, _, count, rest = quiet[-1]
+        print(f"    {what}: {count} entities, {rest} of them at rest - a tick takes {avg} ms: {tracker} ms the entity tracker, "
+              f"{ticks} ms the entities' own ticks ({float(ticks) * 1e6 / int(count):.1f} ns each)")
+        assert int(rest) >= int(count) * 0.98 and float(avg) < 5.0, quiet[-1]
+
+    account("items", bots * each)
+    for i in range(100):                     # (a hundred lines at a time: the console's ring is not endless)
+        for k in range(100):
+            srv.console(f"summon armor_stand {40.5 + i * 0.9} -60 {12.5 + k * 0.9}")
+        time.sleep(0.06)
+    account("items and armor stands", bots * each + 10000)
 
 
 @test(slow=True, max_players=500, view_distance=2, debug="true")

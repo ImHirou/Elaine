@@ -14,20 +14,26 @@ Talk to the user in Russian (their language). Code, comments, commit messages an
 | Network | Done: io_uring reactor, framing, zlib compression, AES-CFB8, online + offline login, configuration phase, keep-alive. Known limit: encryption runs on the tick thread - 500 players in one place cost it 8-25 ms a tick in online mode |
 | World | Flat generator (vanilla default layers), palette sections, chunk wire codec, sky + block light (port of vanilla's engine), chunk frames cached and invalidated on change, chunk view follows the player. Block entities are kept per chunk and listed in its packet. One dimension, chunks never unloaded |
 | Blocks | Creative only: break, place, block-change broadcast with sequence acks. Placeable: blocks whose vanilla hooks are all implemented (default state, pillar axis, snowy) and the block classes that are ported in full (below) - 325 of 1286; the rest stay `kPlaceNone`. **docs/blocks-roadmap.md** is the checklist of all of them, generated (`tools/mcgen/roadmap.py`) |
-| Block entities, menus | **Chest** (single and double, the lid, two players in one chest, spills when broken), **furnace** (smelting, fuel, the `lit` state, its menu's four numbers), **crafting table** and the inventory's own grid (shaped, shapeless and transmute recipes: 1235 of 1266), **TNT** (flint and steel, a block of redstone; the primed entity falls and bounces as vanilla's; explosions take blocks, drop what their loot tables give, set off other TNT, push players). `server::Menu` is `AbstractContainerMenu` for all of them. Compared with a vanilla 26.3 server (`tools/vanilla/container_probe.py`): menus byte for byte; the differences left are in docs/architecture.md. Not there: experience (no orbs), the recipe book, the 31 recipes that compute their result from components, comparators, names and locks |
-| Entities | One SoA table for everything (`entity::Store`: players are the first rows, slot + generation handles, network id = slot + 1). Tracker (`entity::Tracker`) is a port of vanilla's `ChunkMap.TrackedEntity` + `ServerEntity`: who sees whom, add/remove bundles, movement deltas, rotation, head, velocity, entity data - encoded once per entity, copied per viewer. Its packets were compared with a vanilla 26.3 server's, byte for byte (`tools/vanilla/entity_probe.py`); what still differs is listed in docs/architecture.md. Primed TNT is the one entity that moves by itself (`world::collide`: `Entity.move` without a step height) |
+| Block entities, menus | **Chest** (single and double, the lid, two players in one chest, spills when broken), **furnace** (smelting, fuel, the `lit` state, its menu's four numbers), **crafting table** and the inventory's own grid (shaped, shapeless and transmute recipes: 1235 of 1266), **TNT** (flint and steel, a block of redstone; explosions take blocks, drop what their loot tables give, set off other TNT, push players, throw items and mobs about, break armor stands). `server::Menu` is `AbstractContainerMenu` for all of them. Compared with a vanilla 26.3 server (`tools/vanilla/container_probe.py`): menus byte for byte; the differences left are in docs/architecture.md. Not there: experience (no orbs), the recipe book, the 31 recipes that compute their result from components, comparators, names and locks |
+| Entities | One SoA table for everything (`entity::Store`: players are the first rows, slot + generation handles, network id = slot + 1). Tracker (`entity::Tracker`) is a port of vanilla's `ChunkMap.TrackedEntity` + `ServerEntity`: who sees whom, add/remove bundles, movement deltas, rotation, head, velocity, entity data - encoded once per entity, copied per viewer. Its packets were compared with a vanilla 26.3 server's, byte for byte (`tools/vanilla/entity_probe.py`); what still differs is listed in docs/architecture.md |
+| Physics | `src/phys`: a port of `Entity.move` and what is around it (collision with every block shape, stepping up, the block stood on, bounces, cobwebs, honey, slime), of `ItemEntity.tick`, `PrimedTnt.tick` and of `LivingEntity.travel` with nobody steering. Items, primed TNT, the armor stand and 61 kinds of mob move by it; living things push each other and are pushed by players. **Bit for bit** what a vanilla 26.3 server computes: `tools/vanilla/physics_probe.py` steps one tick by tick through 341 scenarios and records every position and velocity as exact doubles, `tests/unit/physics_test.cpp` replays them. What lies still is not ticked in full (`phys::item_rests`, `Game::sleep` / `wake`): the same bits, 4 ns a tick for an item instead of 135, nothing for a mob. A tick of something that moves: 60 - 430 ns on plain ground (`bench physics`); vanilla, measured the same way, takes 6 - 14 us per entity (docs/architecture.md, "Physics"). Not there: fluids, a brain (a mob falls, slides and is pushed, no more; what flies, swims or climbs stays where it is put), damage, what a player does to its own velocity, entities that collide (boats, shulkers), pistons |
 | Players | Join/leave, tab list. Players see each other: position, rotation, sneaking/sprinting flags, pose, skin layers, main hand, what they hold and wear (`set_equipment`, hand swaps), the arm swinging (`punch`, a placed block, a drop - compared with vanilla by `tools/vanilla/swing_probe.py`). Not yet shown: attributes (`update_attributes`), the jump velocity, footsteps, the locator bar (`waypoint`), what a hit does besides the swing (`attack` is ignored), the stab of a spear, the sounds and particles of placed and broken blocks |
-| Items | `item::ItemStack` is 8 bytes: item, count, id of an interned component patch. A patch from a client is read component by component and stored re-encoded; a stack with a component that has no decoder yet is refused (list in `src/item/components.cpp`, reasons in docs/architecture.md). Inventory and the player's own menu: creative slots, every kind of `container_click`, closing, Q / ctrl+Q / throwing out of the window, F, pick block, what the client is known to hold (state ids). Item entities: dropped, merged, picked up, expired - **at rest**: nothing moves entities yet, so a dropped item hangs where it appears (and says `NO_GRAVITY`). Compared with a vanilla 26.3 server (`tools/vanilla/inventory_probe.py`); the differences left are in docs/architecture.md. Not there: component hashes of clicks, stacks inside stacks (containers, bundles), the behaviour components (food, tool, equippable...) |
-| Commands | The tree, its reading and its errors are Brigadier's (`cmd::Registry`); a command is one syntax line and a plain function (`server/command.hpp`). There: `stop`, `setblock`, `fill`, `teleport` / `tp`, `give`, `playsound`, `stopsound`, `summon`, `kill`, `list`, `kick`, `op`, `deop`, `help`. Operators are vanilla's `ops.json`; the console is stdin. Arguments: coordinates (`~`, `^`), entity selectors (`@e[type=...,distance=..5,limit=1]`), block states and `#tags`, items, sounds. What a command answers was compared with a vanilla 26.3 server, text components byte for byte (`tools/vanilla/command_probe.py`); the differences left are in docs/architecture.md. Not there: NBT anywhere (`{...}` on blocks, item components, `summon`'s tag, `nbt=`), `tp ... facing`, the selector options `scores` / `advancements` / `predicate`, killing a player, and every command whose subject does not exist yet (chat, time, weather, game modes, effects, scoreboards, `execute`, `data`...) |
+| Items | `item::ItemStack` is 8 bytes: item, count, id of an interned component patch. A patch from a client is read component by component and stored re-encoded; a stack with a component that has no decoder yet is refused (list in `src/item/components.cpp`, reasons in docs/architecture.md). Inventory and the player's own menu: creative slots, every kind of `container_click`, closing, Q / ctrl+Q / throwing out of the window, F, pick block, what the client is known to hold (state ids). Item entities: thrown the way the player looks, falling, sliding, merged, picked up, expired. Compared with a vanilla 26.3 server (`tools/vanilla/inventory_probe.py`); the differences left are in docs/architecture.md. Not there: component hashes of clicks, stacks inside stacks (containers, bundles), the behaviour components (food, tool, equippable...) |
+| Commands | The tree, its reading and its errors are Brigadier's (`cmd::Registry`); a command is one syntax line and a plain function (`server/command.hpp`). There: `stop`, `setblock`, `fill`, `teleport` / `tp` (of what clients move by themselves - an item, a primed TNT - with `teleport_entity` at once), `give`, `playsound`, `stopsound`, `summon`, `kill`, `list`, `kick`, `op`, `deop`, `help`. Operators are vanilla's `ops.json`; the console is stdin. Arguments: coordinates (`~`, `^`), entity selectors (`@e[type=...,distance=..5,limit=1]`), block states and `#tags`, items, sounds. What a command answers was compared with a vanilla 26.3 server, text components byte for byte (`tools/vanilla/command_probe.py`); the differences left are in docs/architecture.md. Not there: NBT anywhere (`{...}` on blocks, item components, `summon`'s tag, `nbt=`), `tp ... facing`, the selector options `scores` / `advancements` / `predicate`, killing a player, and every command whose subject does not exist yet (chat, time, weather, game modes, effects, scoreboards, `execute`, `data`...) |
 | NBT and text | `nbt::Doc` reads a tag as vanilla's loader does (depth, quota, modified UTF-8, wrapped list elements) into a tape over the bytes - no tree; `nbt::Writer` builds one; `Doc::write` puts a loaded tag back in one canonical form. `text::transcode` is `ComponentSerialization.CODEC` both ways: any spelling of a text component in, the bytes vanilla writes for it out (entry order of its HashMap included) - compared with a vanilla 26.3 server over some 220 spellings (`tools/vanilla/component_probe.py`). On items: custom name, item name, lore, books, sign text; custom data and (block) entity data. Not read (the stack is refused): score / selector / nbt / object contents, a `show_item` whose stack has components, `show_dialog` / `custom`; a patch is still capped at 1 KiB, so a real book does not fit. The server's own texts are built with `text::Text` (what commands answer, a kick's reason) and leave through the same codec; the console prints them in English (`text::lang`: en_us from the jar). No chat, no renaming |
-| Not started | Mobs (the table and tracker take them; `/summon` puts them there, nothing moves them), physics of anything but primed TNT (items hang where they appear), movement checks, block updates in general (scheduled and random ticks, neighbour shapes beyond a chest's, fluids, redstone beyond the block of redstone), the other block entities, survival (everyone is creative), experience, chat, persistence (but for `ops.json`), chunk unloading, workers, Lua plugins |
+| Not started | A mob's brain (AI, pathfinding; `/summon` puts mobs there, and they fall and are pushed), fluids, movement checks, block updates in general (scheduled and random ticks, neighbour shapes beyond a chest's, fluids, redstone beyond the block of redstone), the other block entities, survival (everyone is creative), experience, chat, persistence (but for `ops.json`), chunk unloading, workers, Lua plugins |
 
 ## Commands
 
 ```sh
 cmake --preset release && cmake --build --preset release   # -O3, x86-64-v3, LTO  -> build/release/craftc
-ctest --preset release                                     # unit tests + integration tests (~2 min)
-cmake --preset dev && cmake --build --preset dev           # Debug + ASan/UBSan + DCHECKs
+cmake --build --preset release --target server_exe         # while iterating: only what is about to be run - server_exe
+                                                           # (craftc), unit_tests or bench, several may be named. Each is
+                                                           # an LTO link of the whole program: 10 s alone, 40 s when all
+                                                           # three run at once, which is what a build without --target does
+ctest --preset release                                     # unit tests + integration tests (~2 min); wants server_exe and unit_tests
+cmake --preset dev && cmake --build --preset dev           # Debug + ASan/UBSan + DCHECKs; --target server_exe is all the
+                                                           # line below needs: no tests, no benchmarks, a third fewer files
 ASAN_OPTIONS=detect_leaks=1 python3 tests/integration/run.py build/dev/craftc   # must be clean before "done"
 
 build/release/unit_tests --gtest_filter='Cfb8*'            # one unit suite
@@ -36,6 +42,7 @@ python3 tests/integration/run.py build/release/craftc -k crowd_500 --slow   # 50
 build/release/bench [filter]                               # micro-benchmarks (release/native builds only); `bench tracker` = entities,
                                                            # `bench item` / `bench menu` / `bench pickup` = items, `bench nbt` / `bench text`,
                                                            # `bench craft` / `bench furnace` / `bench collide` / `bench clip` / `bench blast` = blocks,
+                                                           # `bench physics` = an entity's tick, by what it is doing (ns per entity),
                                                            # `bench command` = reading a command line, encoding its answer
 build/release/craftc --online-mode=false --server-port=25565   # run; any server.properties key works as --key=value
                                                            # its stdin is the console: `op <name>` there makes the first operator
@@ -63,6 +70,8 @@ src/text/     component.* (text components: ComponentSerialization.CODEC both wa
               text.* (Text: a component the server builds; its English for the console)
 src/item/     stack.* (ItemStack: 8 bytes, vanilla's methods), components.* (the patch store, and the decoder of
               every component a client may send), recipes.* (crafting, smelting, fuel: the jar's recipes as tables)
+src/phys/     physics.* (entity physics: Entity.move and the ticks of an item, a primed TNT, a living entity - pure
+              functions over a position, a velocity and a Body; what is at rest), mth.hpp (Mth.sin's table)
 src/entity/   store.* (the entity table: SoA columns, slots, handles), tracker.* (who sees whom + the per-tick
               encode-once fan-out, equipment), visibility.hpp (its SIMD kernel), grid.hpp (entities by cell: 64 blocks for
               the tracker, 2 for the game's items)
@@ -71,17 +80,20 @@ src/server/   prelogin.* (handshake/status/login/config), session_auth.* (Mojang
               inventory.* (Inventory + Menu: slots and clicks of every menu, no game state), inventory_actions.cpp
               (its packets, drops, equipment), item_entities.cpp (items on the ground), block_entity.* (what a chest
               and a furnace hold; the furnace's tick), block_entities.cpp (Game::set_block, clicking a block, opening
-              and closing menus, a chest's lid), explosion.cpp (TNT: the entity, its physics, the explosion),
+              and closing menus, a chest's lid), explosion.cpp (TNT: the entity's fuse, the explosion),
+              physics.cpp (the entities' own tick in vanilla's order, what is at rest and what wakes it, who pushes whom),
               command.* (the command tree: syntax lines, Brigadier's parse, the `commands` packet), command_args.cpp
               (coordinates, selectors, block states, items), commands.cpp (who may run what, what a selector
               names, the commands themselves), console.* (stdin), viewers.hpp, settings.*
 src/world/    section.* (palette container), chunk*, chunk_codec.* (wire), light.* (light engine),
               dimension.* (chunks + light + frame cache + where block entities are), generator.*, block.* (state/item
-              tables), collide.* (a box against the blocks: sweep, support, line of sight; an explosion's rays), pool.hpp, bits.hpp
+              tables), collide.* (a box against the blocks: Entity.collide with every shape and the step up, the block
+              stood on, line of sight; an explosion's rays), pool.hpp, bits.hpp
 tests/unit/   GoogleTest;  tests/integration/  independent Python client (mcproto.py) + scenarios (run.py)
 bench/        micro-benchmarks;  tools/mcgen/  protocol data pipeline (gen.py: wire and state tables; gen_game.py: recipes,
-              loot, fuel, the ported block classes; gen_commands.py: names, block properties, en_us; roadmap.py);  tools/vanilla/  probes that record what a server sends
-              (ours or vanilla) and diff two recordings;  docs/architecture.md  the design in depth;
+              loot, fuel, the ported block classes; gen_physics.py: collision shapes as grids, what a block does to an entity, how each entity type moves;
+              gen_commands.py: names, block properties, en_us; roadmap.py);  tools/vanilla/  probes that record what a server sends
+              (ours or vanilla) and diff two recordings, and physics_probe.py, which records what vanilla computes;  docs/architecture.md  the design in depth;
               docs/blocks-roadmap.md  every block, done or to do (generated)
 .claude/skills/  task playbooks (below)
 ```
@@ -202,7 +214,8 @@ upgrade old worlds before importing them. Rules:
   `cd .cache/vanilla-server && /usr/lib/jvm/java-25-openjdk/bin/java -jar ../mc/<version>/server.jar --nogui`.
   The probes in `tools/vanilla/` (`entity_probe.py`, `inventory_probe.py`, `swing_probe.py`,
   `component_probe.py`, `container_probe.py`, `command_probe.py`) record one scripted session on any server; record vanilla and
-  ours, then `diff`. Use player names vanilla has not seen: it saves players, what they dropped and what
+  ours, then `diff`. `physics_probe.py` starts the vanilla server itself: `record` steps it tick by tick and writes down
+  what every entity of its scenarios is (the unit test's vectors), `perf` times its ticks with and without entities. Use player names vanilla has not seen: it saves players, what they dropped and what
   they blew up. Start ours on a port nothing else listens on, and stop it by pid: reactors bind with
   `SO_REUSEPORT`, so a second server on the same port quietly takes half the connections.
 - **Never create, edit or delete `eula.txt`.** If it is missing or not `eula=true`, stop and ask the user.
@@ -259,7 +272,7 @@ Java plugin (Bukkit/Paper) compatibility is explicitly out of scope for now.
 ## Conventions
 
 - **Naming**: the code name appears only in `CMakeLists.txt` (`project`, `MC_EXE`) and docs. Namespaces are
-  layers (`base`, `proto`, `nbt`, `text`, `crypto`, `net`, `item`, `entity`, `world`, `server`), macros are unprefixed or `MC_`/`PROTO_`. Do not
+  layers (`base`, `proto`, `nbt`, `text`, `crypto`, `net`, `item`, `phys`, `entity`, `world`, `server`), macros are unprefixed or `MC_`/`PROTO_`. Do not
   introduce the code name into identifiers.
 - Types `snake_case` for functions/variables, `PascalCase` for types, `kConstant`, members end in `_`.
   Fixed-width ints are `u8…u64`, `i8…i64`, `usize`.
@@ -272,6 +285,13 @@ Java plugin (Bukkit/Paper) compatibility is explicitly out of scope for now.
   a parser in `command_args.cpp` written from its class, error keys and cursors included. What a command
   cannot do yet is refused in words of our own, never half done. Extend `tools/vanilla/command_probe.py`
   with the new command's cases and compare with the vanilla server before it is called done.
+- **Physics**: `src/phys` is a port, and it is right when it gives vanilla's bits - not when it looks right. Keep
+  vanilla's expressions as they are written (`v + 0.0`, two multiplications where one would do, float where vanilla
+  has float); a shortcut must give the same answer as the long way and is tested against it (`world::slow::`, the
+  lockstep test of what is at rest). New behaviour - a block that acts on entities, a fluid, another kind of mover -
+  gets scenarios in `physics_probe.py`, a new recording (`record`, then `emit` into `tests/unit/data/`), and passes
+  `Physics.ReplaysWhatAVanillaServerRecorded` before it is called done. Whatever changes what an entity at rest would
+  read wakes it (`Game::wake`, `wake_near`, `wake_touching`): a tick that is skipped must be one that changes nothing.
 - **Menus**: `server::Menu` is every menu. A new one is a slot table (`at`, `kind_of`), its `quickMoveStack`,
   and - if its container does more than store - a case in `Menu::set` / `remove` / `on_take`; the stacks
   behind it are handed in per operation (`Containers`), never kept. What it shows is compared with vanilla

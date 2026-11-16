@@ -20,6 +20,7 @@
 #include "entity/store.hpp"
 #include "entity/tracker.hpp"
 #include "net/reactor.hpp"
+#include "phys/physics.hpp"
 #include "proto/frame.hpp"
 #include "proto/packets.hpp"
 #include "server/command.hpp"
@@ -151,6 +152,7 @@ class Game {
     void show_equipment(u32 pi);
     void apply_effects(u32 pi);
     void drop(u32 pi, ItemStack stack, bool thrown, bool predicted);
+    void throw_velocity(u32 pi, double v[3]);
     void fake_item(u32 pi, ItemStack stack);
     void on_punch(u32 pi);
     bool swing(u32 pi, u32 hand, proto::Swing how, bool to_self);
@@ -168,10 +170,63 @@ class Game {
 
     // ---- item entities (server/item_entities.cpp)
     void spawn_item(ItemStack stack, double x, double y, double z, u64 pickup_delay = 40, u64 age = 0);
+    void spawn_item(ItemStack stack, double x, double y, double z, double vx, double vy, double vz, u64 pickup_delay,
+                    u64 age = 0);
     void remove_item(u32 slot);
-    void tick_items();
+    void tick_item(u32 slot, u32 row);
+    void rest_item(u32 slot);
+    void freeze_item(u32 slot);
     void merge_item(u32 k);
     void pick_up_items(u32 pi);
+    void move_item_cell(u32 slot, double old_x, double old_z);
+
+    // ---- what moves by itself (server/physics.cpp)
+    // An entity's place among those that tick, and what Entity keeps about how it moves
+    // (phys::Body). By entity slot; players have one too, for the grid of what can be pushed.
+    struct Mover {
+        u32 order = kNone;  // its place in tick_order_
+        u8 kind = 0;        // gen::physics::kMover*: whose tick moves it, 0 = nobody's
+        bool in_grid = false;
+        bool asleep = false;  // at rest: see tick_entities()
+        u8 patience = 0;      // an item that was asked whether it rests and did not: how long until it is asked again
+        u32 cell = 0;         // its place in its cell of push_grid_, which is cell (gx, gz)
+        i32 gx = 0, gz = 0;
+        u64 retry = 0;  // ...not before this tick
+        phys::Body body;
+    };
+    // What the tick of an item at rest reads, and all it reads: by entity slot like movers_, but
+    // 32 bytes to the item where a Mover is 200. With ten thousand items lying about the pass
+    // over them is a walk down this array; through movers_ it was a cache miss an item - one
+    // load, and 66 % of the pass (perf on a running server; the pass took 1.1 times what the
+    // entity tracker took for the same items, now 0.3 times).
+    struct ItemSleep {
+        phys::ItemRest rest;
+        u32 merge_at = 0;  // the tick of its next look around (every 40th of its life), as far as 32 bits say...
+        u32 expires = 0;   // ...and of its last
+        u8 phase = 0;      // (tickCount + id) & 3 is (tick_ + phase) & 3
+    };
+    // tick_order_ holds entity slots; the top bits say what is at rest, so that a pass over the
+    // list does not have to look anything up to skip it. (kNone, a hole, has them all.)
+    static constexpr u32 kAsleep = 1u << 31, kAsleepItem = 1u << 30, kSlotMask = kAsleepItem - 1;
+    // An item entity without a stack (/summon item): its first tick discards it.
+    static constexpr u8 kMoverEmptyItem = 0xFF;
+    void start_ticking(u32 slot, u8 mover);
+    void stop_ticking(u32 slot);
+    void tick_entities();
+    void tick_living(u32 slot, u32 row);
+    bool push_entities(u32 row, float width, float height);
+    void sleep(u32 slot);
+    void wake(u32 slot);
+    void wake_near(proto::BlockPos pos);
+    void wake_touching(const world::Aabb& box, u32 but);
+    void wake_at_players();
+    void push(u32 row, double x, double y, double z);
+    phys::Motion motion_of(u32 row) const;
+    void store_motion(u32 row, const phys::Motion& m, phys::Body& b);
+    void enter_push_grid(u32 slot, double x, double z, float width);
+    void leave_push_grid(u32 slot);
+    void move_in_push_grid(u32 slot, double x, double z);
+    static float random_float_of(void* game) { return static_cast<Game*>(game)->random_float(); }
 
     // ---- commands (server/commands.cpp)
     struct Op {  // an entry of ops.json (ServerOpListEntry)
@@ -231,8 +286,7 @@ class Game {
     // ---- TNT and explosions (server/explosion.cpp)
     bool has_neighbour_signal(proto::BlockPos pos) const;
     void prime_tnt(proto::BlockPos pos, i32 fuse, bool sound);
-    void tick_tnt();
-    bool move_tnt(u32 row);
+    void tick_tnt(u32 slot, u32 row);
     void explode(double x, double y, double z, float radius);
     float seen_percent(double cx, double cy, double cz, const world::Aabb& box) const;
 
@@ -334,9 +388,26 @@ class Game {
     std::vector<u8> title_chest_, title_double_chest_, title_furnace_, title_crafting_;
     base::ByteBuf recipes_frame_;
 
-    // Primed TNT: the entities (by slot) that tick_tnt() moves and counts down.
+    // Primed TNT, by slot: what an explosion looks through for others to push.
     std::vector<u32> tnt_;
-    std::vector<world::Aabb> collide_scratch_;
+
+    // Everything that ticks, in the order it was created (EntityTickList): entity slots, kNone
+    // where one was removed. movers_ is by entity slot.
+    std::vector<u32> tick_order_;
+    u32 tick_holes_ = 0;
+    bool entities_ticked_ = false;  // this tick's pass over them has begun: what is created now has its first tick in the next
+    u32 asleep_ = 0, asleep_living_ = 0;  // how many of them are at rest; how many of those are alive
+    std::vector<Mover> movers_;
+    std::vector<ItemSleep> item_sleep_;
+    phys::Scratch phys_scratch_;
+    // Where the living and the players are, by 4 x 4 block cell and entity slot: who may be
+    // touching whom (LivingEntity.pushEntities, an explosion). A query reaches as far as the
+    // widest of them is wide.
+    using PushGrid = entity::BasicGrid<2>;
+    static i32 push_cell_of(double v) { return PushGrid::cell_of(proto::floor_int(v)); }
+    PushGrid push_grid_;
+    float push_half_width_ = 0.3f;
+    std::vector<u32> push_scratch_;
     std::vector<world::BlockAt> blown_;  // explode(): the blocks one explosion reaches
     world::BlastScratch blast_scratch_;
     struct Collected {  // ServerExplosion.StackCollector

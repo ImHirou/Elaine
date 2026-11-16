@@ -1,23 +1,24 @@
 // Item entities: stacks lying in the world.
 //
 // The rules are vanilla's, read from the 26.3 jar; each function names the method it follows:
-//   ItemEntity (constructor, tick, mergeWithNeighbours, tryToMerge, merge, playerTouch),
+//   ItemEntity (constructors, tick, mergeWithNeighbours, tryToMerge, merge, playerTouch),
 //   Player.aiStep (the pickup area), LivingEntity.take, Inventory.add
 //
-// What is NOT here, and why an item hangs where it was dropped: physics. Vanilla throws a
-// dropped item (LivingEntity.createItemStackToDrop gives it a velocity), then ItemEntity.tick
-// applies gravity, moves it against the blocks, and lets water carry it. None of that exists
-// yet, so an item is created at rest and stays. A client simulates items too
-// (ItemEntity.getMoveSimulationType is SERVER_AND_CLIENT): told nothing, it would let the item
-// fall and be pulled back up by the server's next position update, every three seconds. So the
-// item says what is true of it here - Entity.DATA_NO_GRAVITY - and the client leaves it be.
-// Both go away when entities get physics.
+// An item moves as vanilla's does: thrown, falling, sliding, coming to rest (phys::item_tick is
+// the part of ItemEntity.tick that decides where it is; this file is the rest of it - the
+// stack, its age, when it merges). A client simulates items as well
+// (ItemEntity.getMoveSimulationType is SERVER_AND_CLIENT), so the two have to agree tick by
+// tick, and what they disagree on shows as a twitch at the next position update.
 //
 // An item entity is a row of the entity table (its stack is the `item` column, which the
 // tracker shows as synchronized data) plus the timers below, kept beside the table by slot, and
 // an entry in a grid of 2-block cells for the two questions asked every tick: which items can
 // this player reach, which items lie next to this one.
+//
+// What is NOT here: water and lava (an item floats in one and burns in the other), hoppers.
 #include "server/game.hpp"
+
+#include PROTO_GEN_PHYSICS_HPP
 
 namespace server {
 
@@ -25,10 +26,11 @@ using namespace proto;
 
 namespace {
 
-constexpr u64 kLifetime = 6000;   // ItemEntity.LIFETIME: age at which it is discarded
-constexpr i8 kHealth = 5;         // ItemEntity.health: what an explosion has to take before it is gone
-constexpr u64 kMergePeriod = 40;  // ItemEntity.tick: an item that did not change block looks for neighbours this often
-constexpr i32 kMergeLimit = 64;   // ItemEntity.merge(to, from): never beyond 64, whatever the stack allows
+constexpr u64 kLifetime = 6000;        // ItemEntity.LIFETIME: age at which it is discarded
+constexpr i8 kHealth = 5;              // ItemEntity.health: what an explosion has to take before it is gone
+constexpr u32 kMergePeriod = 40;       // ItemEntity.tick: an item that did not change block looks for neighbours this often,
+constexpr u32 kMovingMergePeriod = 2;  // ...and one that did, this often
+constexpr i32 kMergeLimit = 64;        // ItemEntity.merge(to, from): never beyond 64, whatever the stack allows
 // EntityTypes.ITEM: 0.25 x 0.25. (Exact in float and double alike.)
 constexpr double kItemHalfWidth = 0.125, kItemHeight = 0.25;
 // Avatar.POSES: 0.6 wide; the heights a player on foot has.
@@ -50,11 +52,17 @@ Box item_box(const entity::Store& e, u32 row) {  // EntityDimensions.makeBoundin
 
 }  // namespace
 
-// new ItemEntity(level, x, y, z, stack) + Level.addFreshEntity: a random yaw, and
+// new ItemEntity(level, x, y, z, stack): it hops up, and up to a tenth of a block a tick sideways.
+void Game::spawn_item(ItemStack stack, double x, double y, double z, u64 pickup_delay, u64 age) {
+    const double vx = random_double() * 0.2 - 0.1, vz = random_double() * 0.2 - 0.1;
+    spawn_item(std::move(stack), x, y, z, vx, 0.2, vz, pickup_delay, age);
+}
+
+// new ItemEntity(level, x, y, z, stack, vx, vy, vz) + Level.addFreshEntity: a random yaw, and
 // `pickup_delay` ticks before it can be picked up - 40 for what a player drops
 // (createItemStackToDrop), 10 for what a block drops (setDefaultPickUpDelay), none for what
-// falls out of a chest. At rest and without gravity (see top).
-void Game::spawn_item(ItemStack stack, double x, double y, double z, u64 pickup_delay, u64 age) {
+// falls out of a chest.
+void Game::spawn_item(ItemStack stack, double x, double y, double z, double vx, double vy, double vz, u64 pickup_delay, u64 age) {
     if (stack.empty() || ents_.size() >= entity::kMaxEntities) return;
     // Mth.createInsecureUUID, and the yaw the ItemEntity constructor draws: random.nextFloat() * 360.
     const Uuid uuid{(random() & ~0xF000ull) | 0x4000ull, (random() & 0x3FFFFFFFFFFFFFFFull) | 0x8000000000000000ull};
@@ -62,20 +70,24 @@ void Game::spawn_item(ItemStack stack, double x, double y, double z, u64 pickup_
     entity::Store::Moves moved;
     const u32 row = tracker_.spawn(entity_type::kItem, false, uuid, x, y, z, yaw, 0, moved);
     ents_.set_item(row, std::move(stack));
-    ents_.set_no_gravity(row, true);
+    ents_.vx[row] = vx, ents_.vy[row] = vy, ents_.vz[row] = vz;
+    tracker_.created_with_velocity(row);
 
     const u32 slot = ents_.slot[row];
     if (slot >= item_of_slot_.size()) item_of_slot_.resize(ents_.slot_count(), kNone);
     item_of_slot_[slot] = static_cast<u32>(item_slot_.size());
     item_slot_.push_back(slot);
-    item_cell_.push_back(item_grid_.add(item_cell_of(x), item_cell_of(z), slot));  // nothing moves it: it stays in this cell
-    item_born_.push_back(tick_);
-    item_age_from_.push_back(tick_ - age);  // (modulo 2^64, as every difference taken from it is)
-    // The delay counts down in the item's own tick, which runs before the players': 40 ticks
-    // from one set while packets are handled, the 40th item tick has brought it to zero.
-    // kNever: ItemEntity.setNeverPickUp.
-    item_pickup_.push_back(pickup_delay == kNever ? kNever : pickup_delay ? tick_ + pickup_delay - 1 : tick_);
+    item_cell_.push_back(item_grid_.add(item_cell_of(x), item_cell_of(z), slot));
+    // Its first tick: this tick's, unless the entities have had theirs already (what an
+    // explosion or a broken chest leaves while they tick is ticked from the next one on).
+    const u64 first = tick_ + (entities_ticked_ ? 1 : 0);
+    item_born_.push_back(first);
+    item_age_from_.push_back(first - age);  // (modulo 2^64, as every difference taken from it is)
+    // The delay counts down in the item's own tick, which runs before the players': after its
+    // 40th tick an item with a delay of 40 can be taken. kNever: ItemEntity.setNeverPickUp.
+    item_pickup_.push_back(pickup_delay == kNever ? kNever : pickup_delay ? first + pickup_delay - 1 : tick_);
     item_health_.push_back(kHealth);
+    start_ticking(slot, proto::gen::physics::kMoverItem);
 }
 
 // Entity.discard: whoever sees it is told at once, then the entity is gone.
@@ -86,6 +98,7 @@ void Game::remove_item(u32 slot) {
     // Out of its cell; the cell's last item takes its place there.
     const u32 filler = item_grid_.remove(item_cell_of(ents_.x[row]), item_cell_of(ents_.z[row]), item_cell_[k]);
     if (filler != ~0u) item_cell_[item_of_slot_[filler]] = item_cell_[k];
+    stop_ticking(slot);
     entity::Store::Moves moved;
     tracker_.despawn(row, out_.data(), moved);  // rows after the players move; nothing here goes by row
     if (k != last) {
@@ -106,25 +119,94 @@ void Game::remove_item(u32 slot) {
     item_of_slot_[slot] = kNone;
 }
 
-// ItemEntity.tick, for every item: merge with neighbours, age, expire. Runs where vanilla ticks
-// entities - after the tracker, before the players' own tick.
-void Game::tick_items() {
-    const u32 n = static_cast<u32>(item_slot_.size());
-    if (LIKELY(n == 0)) return;
-    item_dead_.clear();
-    for (u32 k = 0; k < n; ++k) {
-        const u32 row = ents_.by_slot(item_slot_[k]);
-        if (ents_.item[row].empty()) continue;  // merged away earlier in this pass
-        if ((tick_ - item_born_[k] + 1) % kMergePeriod == 0) merge_item(k);
-        // age++, then "age >= 6000 -> discard": the item has had `age` ticks, this one included.
-        if (tick_ - item_age_from_[k] + 1 >= kLifetime && !ents_.item[row].empty()) {
-            ents_.item[row].set_count(0);
-            item_dead_.push_back(item_slot_[k]);
+// An item was moved: the grid keeps it in the cell it stands in.
+void Game::move_item_cell(u32 slot, double old_x, double old_z) {
+    const u32 row = ents_.by_slot(slot), k = item_of_slot_[slot];
+    const i32 ox = item_cell_of(old_x), oz = item_cell_of(old_z), nx = item_cell_of(ents_.x[row]),
+              nz = item_cell_of(ents_.z[row]);
+    if (LIKELY(ox == nx && oz == nz)) return;
+    const u32 filler = item_grid_.remove(ox, oz, item_cell_[k]);
+    if (filler != ~0u) item_cell_[item_of_slot_[filler]] = item_cell_[k];
+    item_cell_[k] = item_grid_.add(nx, nz, slot);
+}
+
+// ItemEntity.tick: it moves (phys::item_tick), merges with what lies next to it, ages, expires.
+void Game::tick_item(u32 slot, u32 row) {
+    u32 k = item_of_slot_[slot];
+    if (UNLIKELY(ents_.item[row].empty())) return remove_item(slot);  // "if (getItem().isEmpty()) discard()"
+    const double ox = ents_.x[row], oy = ents_.y[row], oz = ents_.z[row];
+    phys::Motion m = motion_of(row);
+    phys::World w{world_, phys_scratch_};
+    const u32 tick_count = static_cast<u32>(tick_ - item_born_[k] + 1);  // Entity.tickCount
+    const i32 id = ents_.net_id(row);
+    if (UNLIKELY(phys::item_tick(w, m, movers_[slot].body, tick_count, id, &random_float_of, this) == phys::Fate::kGone))
+        return remove_item(slot);  // it fell out of the world
+    store_motion(row, m, movers_[slot].body);
+    move_item_cell(slot, ox, oz);
+
+    // mergeWithNeighbours: every other tick while it goes from block to block, every 40 where it lies.
+    const bool moved =
+        floor_int(ox) != floor_int(m.pos[0]) || floor_int(oy) != floor_int(m.pos[1]) || floor_int(oz) != floor_int(m.pos[2]);
+    if (UNLIKELY(tick_count % (moved ? kMovingMergePeriod : kMergePeriod) == 0)) {
+        merge_item(k);
+        if (!item_dead_.empty()) {
+            // What a merge emptied is discarded at once - this item itself, when it went into another.
+            for (usize i = 0; i < item_dead_.size(); ++i) remove_item(item_dead_[i]);
+            item_dead_.clear();
+            k = item_of_slot_[slot];
+            if (k == kNone) return;
         }
     }
-    // Removal reorders the arrays, so it waits for the pass to end. Only other items could
-    // tell the difference, and they skip an empty stack as they would a removed entity.
-    for (const u32 slot : item_dead_) remove_item(slot);
+    // age++, then "age >= 6000 -> discard": the item has had `age` ticks, this one included.
+    if (UNLIKELY(tick_ - item_age_from_[k] + 1 >= kLifetime)) return remove_item(slot);
+
+    // At rest? Asked when a tick in which it tried the ground left it where it was, and - of an
+    // item that then was not (one on a slime block never is) - less and less often.
+    // (`row` is not to be used down here: a merge may have removed another item, and rows move.)
+    Mover& mv = movers_[slot];
+    const bool tried = (static_cast<u32>(static_cast<i32>(tick_count) + id) & 3) == 0;
+    if (tried && mv.body.on_ground && tick_ >= mv.retry && ox == m.pos[0] && oy == m.pos[1] && oz == m.pos[2]) {
+        ItemSleep& rest = item_sleep_[slot];
+        if (phys::item_rests(w, m, mv.body, tick_count, id, rest.rest)) {
+            rest.phase = static_cast<u8>((1 - item_born_[k] + static_cast<u64>(id)) & 3);
+            rest.merge_at = static_cast<u32>(tick_ + (kMergePeriod - tick_count % kMergePeriod));
+            rest.expires = static_cast<u32>(item_age_from_[k] + kLifetime - 1);
+            sleep(slot);
+        } else {
+            mv.patience = static_cast<u8>(std::min<u32>(mv.patience + 1u, 6u));
+            mv.retry = tick_ + (4ull << mv.patience);
+        }
+    }
+}
+
+// ItemEntity.tick for an item at rest (see server/physics.cpp): its velocity, and the two
+// things its age brings - a look around for others to merge with, and its end.
+void Game::rest_item(u32 slot) {
+    ItemSleep& rest = item_sleep_[slot];
+    const u32 row = ents_.by_slot(slot);
+    const u32 now = static_cast<u32>(tick_);
+    if (phys::item_rest_tick(ents_.vx[row], ents_.vy[row], ents_.vz[row], (now + rest.phase) & 3, rest.rest))
+        ents_.flags[row] |= entity::flag::kNeedsSync;
+    if (UNLIKELY(now == rest.merge_at)) {
+        rest.merge_at += kMergePeriod;
+        merge_item(item_of_slot_[slot]);
+        if (!item_dead_.empty()) {
+            for (usize i = 0; i < item_dead_.size(); ++i) remove_item(item_dead_[i]);
+            item_dead_.clear();
+            if (item_of_slot_[slot] == kNone) return;
+        }
+    }
+    if (UNLIKELY(static_cast<i32>(now - rest.expires) >= 0))
+        remove_item(slot);  // (32 bits of the clock: good for years of difference)
+}
+
+// An item in a chunk that does not tick is not ticked: its age, and what is left of the delay
+// before it can be picked up, stand still with it.
+void Game::freeze_item(u32 slot) {
+    const u32 k = item_of_slot_[slot];
+    ++item_born_[k];
+    ++item_age_from_[k];
+    if (item_pickup_[k] != kNever) ++item_pickup_[k];
 }
 
 // ItemEntity.mergeWithNeighbours: other mergable items within half a block sideways.
@@ -166,6 +248,8 @@ void Game::merge_item(u32 k) {
             static_cast<u32>(from_count - delta));  // changed in place: viewers are not told, as in vanilla
         item_pickup_[to_k] = std::max(item_pickup_[to_k], item_pickup_[from_k]);
         item_age_from_[to_k] = std::max(item_age_from_[to_k], item_age_from_[from_k]);
+        item_sleep_[ents_.slot[to]].expires =
+            static_cast<u32>(item_age_from_[to_k] + kLifetime - 1);  // (if it is at rest: when it ends)
         if (ents_.item[from].empty()) item_dead_.push_back(ents_.slot[from]);
         if (ents_.item[row].empty()) return;  // this item is the one that went
     }

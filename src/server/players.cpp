@@ -58,6 +58,7 @@ void Game::on_move(u32 pi, const sb::MovePlayer& m, bool has_pos, bool has_rot) 
     ents_.x[pi] = x;
     ents_.y[pi] = std::clamp(m.y, -kMaxVertical, kMaxVertical);
     ents_.z[pi] = z;
+    move_in_push_grid(ents_.slot[pi], x, z);
     const i32 cx = chunk_of(x), cz = chunk_of(z);
     if (UNLIKELY(cx != pcx_[pi] || cz != pcz_[pi])) {
         const i32 ocx = pcx_[pi], ocz = pcz_[pi];
@@ -106,6 +107,17 @@ void Game::tick_players() {
     // ...then it touches what is around it (items), and Player.tick ends with the pose.
     if (UNLIKELY(!item_slot_.empty()))
         for (u32 pi = 0; pi < n; ++pi) pick_up_items(pi);
+    // LivingEntity.aiStep ends with pushEntities: what a player stands in is pushed away from
+    // it. (Only asked while there is anything but players to push.)
+    if (UNLIKELY(push_grid_.size() > n)) {
+        for (u32 pi = 0; pi < n; ++pi) {
+            const u8 pose_now = ents_.pose[pi];
+            push_entities(pi, kWidth,
+                          pose_now == pose::kStanding    ? kStandingHeight
+                          : pose_now == pose::kCrouching ? kCrouchingHeight
+                                                         : kSwimmingHeight);
+        }
+    }
     for (u32 pi = 0; pi < n; ++pi) update_pose(pi);
 }
 

@@ -52,6 +52,33 @@ class Dimension {
     i32 max_y() const { return max_y_; }  // inclusive
     u32 sections() const { return sections_; }
     bool has_skylight() const { return has_sky_; }
+    // Whether a block whose collision shape reaches out of its own cell (a fence, a wall: 1.5
+    // blocks tall) may be anywhere in this dimension. Only then does a collision query have to
+    // read the cells beside its box; never cleared.
+    bool has_large_shapes() const { return large_shapes_; }
+    // ...and whether a block that does something to an entity inside it or on it (a cobweb,
+    // honey, slime) may be anywhere: only then are the blocks an entity passes through looked at.
+    bool has_entity_blocks() const { return entity_blocks_; }
+    // The same, asked of the sections that the cells [x0, x1] x [y0, y1] x [z0, z1] lie in: do
+    // they hold anything but air (kBlocks), a shape that reaches out of its cell (kLarge), a
+    // block that acts on an entity (kEntityBlocks), one that breaks a fall (kFallBlocks)? A
+    // query's cells lie in one section, rarely in eight; this is a mask per chunk.
+    static constexpr u32 kBlocks = 1, kLarge = 2, kEntityBlocks = 4, kFallBlocks = 8;
+    ALWAYS_INLINE u32 holds(i32 x0, i32 y0, i32 z0, i32 x1, i32 y1, i32 z1) const {
+        const i32 s0 = std::max((y0 - min_y_) >> 4, 0), s1 = std::min((y1 - min_y_) >> 4, static_cast<i32>(sections_) - 1);
+        if (s0 > s1) return 0;
+        const u32 mask = (2u << s1) - (1u << s0);
+        u32 out = 0;
+        for (i32 cz = z0 >> 4; cz <= z1 >> 4; ++cz) {
+            for (i32 cx = x0 >> 4; cx <= x1 >> 4; ++cx) {
+                const Chunk* c = map_.find(cx, cz);
+                if (UNLIKELY(!c)) continue;
+                out |= ((c->filled_sections & mask) ? kBlocks : 0) | ((c->large_sections & mask) ? kLarge : 0) |
+                       ((c->entity_sections & mask) ? kEntityBlocks : 0) | ((c->fall_sections & mask) ? kFallBlocks : 0);
+            }
+        }
+        return out;
+    }
     ChunkGenerator& generator() { return gen_; }
 
     // ---- chunks
@@ -114,6 +141,7 @@ class Dimension {
     i32 min_y_, max_y_;
     u32 sections_;
     bool has_sky_;
+    bool large_shapes_ = false, entity_blocks_ = false;
 
     ChunkMap map_;
     SectionAllocator alloc_;

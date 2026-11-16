@@ -86,7 +86,10 @@ menu is brought up to date (`ServerPlayer.tick`) before the player's connection 
 changed by a pickup is sent with the pickup and one changed by a key (F) a tick later; block
 entities tick after the entities, so what a furnace cooked in a tick reaches its menu in the next;
 an explosion happens in the tick of its TNT, and the blocks it took go out with the next tick's
-block changes - after the `explode` packet, as in vanilla.
+block changes - after the `explode` packet, as in vanilla. The entities themselves tick in the
+order they were made (`Game::tick_entities`, one list for items, TNT and the living, as
+`EntityTickList`): an explosion throws the item that ticks after it in the same tick and the
+one before it in the next. What is made while the list is walked ticks from the next tick on.
 
 A player is an entity: position, rotation and everything other players are shown live in the
 entity table (below), where players are the first rows - a player's index here is its entity
@@ -377,11 +380,12 @@ inventory screen keeps its own copy and reports slots (`set_creative_mode_slot`)
   rules. "Which items can this player reach" is asked by every player every tick, so items have
   a grid of their own with cells the size of the question (`BasicGrid<1>`: 2 blocks; the
   tracker's cells are 64). With no items in the world the pass is skipped.
-- **No physics yet**, which shows in exactly one place: vanilla throws a dropped item and lets it
-  fall. Here it is created at rest where vanilla creates it (0.3 below the eyes) and stays. A
-  client simulates items as well, and would let it fall and be yanked back by every position
-  update - so the item carries `NO_GRAVITY` in its entity data, which is the truth about it here.
-  Both go when entities get physics.
+- **A dropped item is thrown**, as `LivingEntity.createItemStackToDrop` throws it: from 0.3
+  below the eyes, three tenths of a block a tick the way the player looks (the sines are
+  `Mth.sin`'s table, the sum a float), a little up, a little of anything. What a chest spills
+  gets `Containers.dropItemStack`'s toss, what a block drops the hop of a new `ItemEntity`. From
+  there it is physics (see "Physics"): a client simulates items as well, so the two have to
+  agree tick by tick.
 
 ### What it costs
 
@@ -416,8 +420,9 @@ recording). What differs:
 
 - vanilla shows a new entity to its viewers the moment it is created, we at the end of the tick
   (the tracker's one deliberate difference): a swing and the item it threw swap places in the stream;
-- its items fall, so they merge after 2 ticks instead of 40, and land a little way off;
-- the `NO_GRAVITY` entry above.
+- which of two items that lie together goes into the other when both are as large, and which
+  neighbour an item with several takes first, follows the order of our grid's cells, not of
+  vanilla's entity sections.
 
 `tools/vanilla/swing_probe.py` does the same for a player's hands: punches in one tick and two,
 five and twelve ticks apart, a hit on the other bot, blocks placed with either hand and clicks
@@ -516,17 +521,13 @@ recipe every tick it burns. Fuel is an item component in 26.x (`cooking_fuel`, a
 asks whether the block cooks fast); `mcgen` evaluates it for the plain furnace into
 `ItemInfo::fuel_ticks`.
 
-### TNT: the first thing that moves by itself (`src/server/explosion.cpp`, `src/world/collide.*`)
+### TNT (`src/server/explosion.cpp`)
 
-A primed TNT is a row of the entity table that `Game::tick_tnt` moves the way `PrimedTnt.tick`
-does: gravity, `Entity.move`, drag, the fuse. The move is the port that entity physics will
-grow from: `world::collide` is `Entity.collide` for something that cannot step up - the box
-swept against the collision boxes of the blocks around it, axis by axis in vanilla's order with
-vanilla's margins - and around it what a collision does to the velocity
-(`restituteMovementAfterCollisions`: a slime block bounces), what the block underfoot does
-(`getBlockSpeedFactor`: soul sand, honey), and `requiresPrecisePosition`, which makes the
-tracker send exact positions for a TNT that touches a block. A client simulates primed TNT too,
-so the two have to agree tick by tick; the probe below compares the height of the hop.
+A primed TNT is a row of the entity table that `Game::tick_tnt` ticks the way `PrimedTnt.tick`
+does: gravity, the move, drag, the hop off the ground (`phys::tnt_tick`, see "Physics"), then
+the fuse, and `requiresPrecisePosition`, which makes the tracker send exact positions for a TNT
+that touches a block. A client simulates primed TNT too, so the two have to agree tick by tick;
+the probe below compares the height of the hop.
 
 The explosion is `ServerExplosion`: 1352 rays that the blocks wear down, the entities within
 twice the radius by how much of them the centre can see (`world::clip_hits`, the collision
@@ -534,7 +535,9 @@ shapes again), the blocks. What a block drops is its loot table - which is why `
 loot tables: for every block that can be in the world it reduces the table to what an explosion
 without a tool leaves (stone: cobblestone; glass: nothing; glowstone: 2 to 4 dust), and stops
 on a table it cannot reduce. TNT in the blast goes off on a short fuse instead of dropping;
-players get their push in the `explode` packet, which is where a client takes it from.
+players get their push in the `explode` packet, which is where a client takes it from; items,
+primed TNT and mobs get theirs as velocity (`Entity.push`), an item its damage first (five
+points of health), and an armor stand in reach breaks.
 
 ### What it costs
 
@@ -549,7 +552,6 @@ players get their push in the `explode` packet, which is where a client takes it
 | a furnace's recipe for an item | 2.6 ns |
 | 10 000 furnaces that neither burn nor could start | 13 us per tick |
 | 10 000 furnaces, all burning | 0.15 ms per tick |
-| move a primed TNT: in the air / lying on the ground | 0.10 / 0.21 us |
 | one line of sight of an explosion, 7 blocks long | 0.15 us |
 | the 1352 rays of one explosion | 0.18 ms |
 
@@ -603,12 +605,219 @@ differs:
   block being placed and the particles of one being broken (to others), a player's footsteps;
 - a furnace gives no experience when it is emptied, ores blown up by a player's TNT none
   either: there are no experience orbs;
-- items do not move, so what a chest spills or an explosion drops hangs where it appears, and
-  an explosion destroys items or leaves them but does not throw them;
-- a cobweb does not slow a falling TNT and honey does not let it slide (`entityInside`), water
-  does not carry it; a bounce off a slime block is computed but sent as a plain position;
+- an explosion hurts nothing but items (nothing else has health): a mob is thrown and lives,
+  an armor stand breaks with its sound but without its particles;
 - a player's inventory is not kept when it leaves, so what it had on a menu's cursor or in a
   crafting grid is not dropped at its feet.
+
+## Physics (src/phys/, src/world/collide.*, src/server/physics.cpp)
+
+What moves by itself - an item, a primed TNT, a living thing nobody steers - moves as on a
+vanilla server, and "as" is meant to the last bit of every coordinate. Not for its own sake: a
+client simulates items and TNT too and is corrected by what the server says, a farm is built
+around where things land, and a position that is one bit off is a different block two hundred
+ticks later.
+
+### A port, and a recording to hold it to
+
+`src/phys` and `src/world/collide.*` are vanilla's code read from the jar and written down
+again, method for method:
+
+- `Entity.move`: the cobweb's multiplier, `Entity.collide`, the rule for when the position is
+  taken (`movementLength > 1e-7 || delta^2 - movement^2 < 1e-7` - a move that is stopped within a
+  hair of nothing is dropped whole), which sides it hit (`Mth.equal`: 1e-5), the ground and the
+  block stood on (`checkSupportingBlock`, with its look back at where the entity came from),
+  the fall, `restituteMovementAfterCollisions` (a slime block, `#suppresses_bounce`, four fifths
+  for what is not alive), `getBlockSpeedFactor`;
+- `Entity.collide` with the step up (`collectCandidateStepUpHeights`), over `BlockCollisions` in
+  its cursor's order - the box grown by 1e-7 and one more cell, the cells on its faces only for
+  shapes that reach out of their block, a whole block met by `AABB.intersects` and any other
+  shape by `Shapes.joinIsNotEmpty` with its index mergers - and `Shapes.collide` /
+  `VoxelShape.collideX` over a shape's grid of cells; `Shapes.create`, which turns an entity's
+  box into a grid of eighths when its corners lie on them;
+- `ItemEntity.tick` (it moves only every fourth tick once it lies), `PrimedTnt.tick`,
+  `LivingEntity.aiStep` and `travelInAir` with no input, `Entity.push` and `pushEntities`;
+- `applyEffectsFromBlocks`: the blocks a box passes through
+  (`BlockGetter.forEachBlockIntersectedBetween`), and what three of them do - a cobweb, the side
+  of a honey block, the top of a slime block.
+
+Reading is not proof, so there is a recording. `tools/vanilla/physics_probe.py record` starts
+the vanilla server, freezes it (`/tick freeze`), builds a small fixture per scenario, summons
+entities with exact positions and velocities, steps the game a tick at a time and reads every
+entity back with `/data get`: positions, velocities, the fall distance, on-ground, printed as
+the shortest decimals that name those doubles. 341 scenarios, 18 741 states: drops and throws
+onto every kind of ground, walls, seams between blocks, ties between two blocks as near, tiny
+velocities around each threshold, some 36 collision shapes stood on and run into, slime, honey,
+cobwebs, soul sand, ice, steps up, blocks that change under an entity, pigs pushing each
+other, the void - and "courses" of random obstacles. `tests/unit/physics_test.cpp` builds the
+same blocks at the same coordinates, runs the same ticks and compares bits. All of them match.
+(What a recording cannot show is the sign of a zero - NBT stores `-0.0` as `0.0` - and what
+happens inside a tick.)
+
+The tables it needs come from the jar too (`tools/mcgen/gen_physics.py`): a byte per block
+state (what kind of collision shape, whether it reaches out of its block, which of 12
+"materials" - friction, speed and jump factor, bounce, what it does to an entity), and 210
+collision shapes as grids of cells (183 of them made of several boxes). The generator stops rather than guess: at a placeable
+block whose shape depends on who asks, at a block hook that acts on entities and is not
+ported, at a living entity class that declares a movement method the port was not written
+against, at a new answer to `getMoveSimulationType`.
+
+### Shortcuts are tested against the long way
+
+Vanilla's way is general: every query walks every cell of a grown box and builds a shape for
+each. `world::collide` keeps a literal port of that (`world::slow`) and a fast one beside it,
+and a test throws 300 000 random boxes at a cluttered patch of world through both. The fast one
+
+- asks the sections first (`Dimension::holds`: a mask per chunk of which sections hold
+  anything, hold a shape that reaches out of its cell, a block that acts on entities, one that
+  breaks a fall). Nothing but air around: nothing is read. No tall shape around: the cells
+  beside the box are not read - at most 8 cells instead of 56 for an item. An entity's tick asks once,
+  for all of its queries;
+- compares a shape of one box with the entity's box in closed form (`cells_meet`: the index
+  mergers of `joinIsNotEmpty` for two lists of two, written out) and sweeps against it without
+  the grid (`collide_cell`).
+
+### At rest
+
+Nearly everything in a world lies still. In vanilla that is not free: an item at rest checks
+every tick whether it is inside a block and tries the ground every fourth, a mob that stands
+runs `travel` every tick. But what lies still does the same thing every tick, exactly:
+
+- a living entity at rest is a fixed point - a tick leaves every bit of it as it was;
+- an item at rest goes round in four ticks: its fall grows by 0.04 three times, the fourth tick
+  the ground stops it, and what is left of its sideways velocity (under 1e-7, which moves
+  nothing) shrinks by the ground's friction.
+
+So an entity found at rest is not ticked in full (`Game::sleep`): a living one is passed by -
+the tick list carries a bit for it, nothing is looked up - and an item gets
+`phys::item_rest_tick`, which is its velocity and nothing else. Whether an item is at rest is
+not reasoned out from blocks: `phys::item_rests` takes its next four ticks on a copy and
+compares each with what `item_rest_tick` would have done. For a living entity it is a
+comparison of before and after.
+
+Whatever a tick at rest would have read wakes the entity when it changes: a block set within
+reach (`Game::set_block` -> `wake_near`; `phys::block_in_reach` is the cells such a tick reads,
+and their neighbours), a push, a teleport, a living thing put where it stands, a player in its
+box. Then it is ticked in full again from the state it has - which is the state the full ticks
+would have left, so nothing can be seen of the difference. Two tests hold that: the vanilla
+recording replayed with rest, and 260 things thrown into a patch of world that changes every
+third tick, each ticked both ways in lockstep for 900 ticks and compared to the bit.
+
+One thing of vanilla's shows here: an item at rest loses 0.12 of velocity in the tick the
+ground stops it, which is "more than a tenth" to `ItemEntity.tick`, so it sets `needsSync`
+every fourth tick for as long as it lies - and three in four lying items (by where in that
+round their 20-tick update falls) are sent as a velocity twice a second. That is kept; a
+client would not notice it missing, but it is what a vanilla server sends
+(`physics_probe.py wire`: of four items put down a tick apart, one is told a fall of 0.04 and
+then none, over and over, the next two 0.08 and 0.12, the fourth nothing at all - and the
+same four patterns come out of this server).
+
+### What clients are told
+
+The entity tracker was already `ServerEntity`; physics gives it what it reads: `needsSync`
+(a push, an item's change of velocity), `syncPosition` (a bounce brings the next update
+forward), exact positions for a primed TNT that touches a block and for an item that lies
+against one (`isFullPrecisionEncodingRequired`). A teleport of something a client moves by
+itself goes out at once (`teleport_entity`, `Entity.sendTeleportTransitionToPlayers`).
+
+### What it costs
+
+`bench physics` (i5-9300H, `release`): 10 000 entities on a 128 x 128 block patch, nanoseconds
+per entity per tick, by what the entity is doing. "Clutter" is a slab, a stair, a carpet, a
+chest or a block on every fourth column; "fences" adds fences and walls to that, so that every
+query has to look at the cells beside its box.
+
+| | flat ground | clutter | clutter + fences |
+|---|---|---|---|
+| an item falling through open air | 61 | 62 | 67 |
+| an item thrown: through the air, onto the ground, to a stop | 204 | 289 | 827 |
+| an item lying still, ticked in full | 135 | 185 | 574 |
+| ...at rest, as the server ticks it | 4.3 | 4.5 | 4.3 |
+| a primed TNT on the ground | 321 | 461 | 1209 |
+| a mob (a cow's size) falling | 78 | 83 | 72 |
+| ...walking into whatever is there, stepping up | 433 | 969 | 2123 |
+| ...standing, ticked in full | 375 | 505 | 1215 |
+| ...at rest, as the server ticks it | 0 | 0 | 0 |
+
+What the numbers say: the blocks decide. Open air costs a mask per chunk and no block read;
+on the ground a tick reads a dozen cells and builds a box for each that is not air; a fence
+within a section makes every query of that section read some fifty cells instead of eight,
+and that is three to four times the tick. What lies still costs nothing to speak of, which is
+what a world mostly holds.
+
+**Against vanilla.** `tools/vanilla/physics_probe.py perf` puts 10 000 entities into a vanilla
+26.3 server - far from its one player, in force-loaded chunks, 1.5 blocks apart - runs the
+game flat out (`/tick sprint`) and takes the time of a tick without them (1.3 ms) off the
+time with them. Same machine, nothing else running but for the last row (see the note):
+
+| 10 000 of them | a vanilla tick | per entity | here, per entity | vanilla / here |
+|---|---|---|---|---|
+| items lying still | 60 ms | 5.9 us | 4.3 ns at rest (135 ns ticked in full) | 1361x |
+| items falling through open air | 120 ms | 11.9 us | 61 ns | 196x |
+| armor stands standing | 142 ms | 14.1 us | 0 at rest (319 ns ticked in full) | 44x even ticked in full |
+| armor stands falling | 137 ms | 13.5 us | 77 ns | 176x |
+| primed TNT on the ground | 117 ms | 11.6 us | 321 ns | 36x |
+
+(A vanilla server cannot hold 20 ticks a second with ten thousand items lying about on this
+machine: 60 ms a tick. During the TNT row a game client was started on the machine; its other
+runs were 103 and 125 ms.)
+
+The two columns do not measure the same thing, and both ways of reading them are worth
+saying. Vanilla's is everything those entities add to its tick: the entity's own tick - which
+is the physics, but also its checks for fluids, fire and portals and, for an item, a look for
+neighbours to merge with - the tracker's `sendChanges`, and the bookkeeping of entity sections.
+And a good part of it, going by where thread dumps found the server (two of four taken during
+the TNT row), is one thing that this server does not do at all yet: every `move` of every
+entity asks for the entities it could collide with (boats, shulkers), which walks every entity
+of the sections around - 114 of them a section in this layout. Where entities are fewer to
+the block, vanilla is that much faster; here there is nothing to ask until such entities
+exist, and then the ones to ask about are those few, in a grid of their own.
+
+Ours is the physics alone. For the whole tick, `tests/integration/run.py -k ten_thousand
+--slow` does on a running server what the probe does on vanilla - the same layout: 150 bots
+each walk a row and drop a stone every block and a half, and leave; then 10 000 armor stands
+are summoned among them:
+
+| nobody online | a tick | of it: the entities' ticks | the entity tracker |
+|---|---|---|---|
+| 10 200 items lying still | 1.3 ms | 0.39 ms | 0.93 ms |
+| ...and 10 000 armor stands | 2.2 ms | 0.46 ms | 1.76 ms |
+
+That is where vanilla takes 60 ms, and it is the slow end of what this machine gives: a server
+that sleeps 49 ms out of every 50 starts each tick on a core that has cooled down and clocked
+down, and the same passes in a loop are several times faster (the first table's 4 ns an item
+against 38 here; two earlier runs of the scenario, with the bots' Python still warm on the
+other cores, took 0.7 and 0.8 ms a tick). Two things to know about what is left:
+
+- With nobody watching, most of it is the entity tracker, which asks every entity every tick
+  whether it has something to say (`ServerEntity.sendChanges` does, and an item at rest has,
+  twice a second). That is the next thing to look at, and it is not physics.
+- Items in a pile cost more than items apart: every 40th tick of its life an item looks for
+  others to merge with, and the look is as long as the pile. With each bot dropping 68
+  different items on one spot instead, the entities' ticks were 57 ns an item. Vanilla's look
+  is as long.
+
+The state a tick at rest reads is 32 bytes an item in an array of its own (`Game::ItemSleep`),
+not the 200 of everything an entity keeps about how it moves: the first version read the
+latter, and one cache miss an item was two thirds of the pass.
+
+
+### Compared with vanilla, and what is not there
+
+- Fluids: nothing floats, nothing is carried. No block holds one yet.
+- A brain. `living_tick` is `LivingEntity.travel` with no input: a mob falls, slides, steps
+  where it is pushed, and stands. The classes that move in a way of their own - what flies,
+  swims, hangs, climbs or flops (`gen_physics.OWN_MOVEMENT`) - are not moved at all.
+- Damage: no fall damage, no suffocation; what falls out of the world is removed at once.
+- A player is moved by its client. It pushes the mobs it walks into, and is not pushed back
+  here (vanilla gives it a velocity that its viewers are told).
+- With several neighbours at once, `pushEntities` adds their pushes in the order of our grid's
+  cells, vanilla in the order of its entity sections: the sum may differ in its last bit.
+- A living entity that bounces is sent as one step of its path, not two.
+- Shapes of several boxes are grids cut by their boxes' faces. Vanilla's own grid for such a
+  shape can have more cuts; that shows only for an entity that is already inside the shape.
+- Entities that collide with each other (boats, shulkers), the world border, pistons, powder
+  snow, climbing.
 
 ## NBT and text components (src/nbt/, src/text/)
 
@@ -869,9 +1078,11 @@ None of it is touched unless a command runs.
 - NBT in any argument: a block's `{...}`, an item's `[components]`, `/summon`'s tag, a
   selector's `nbt=`. It needs an SNBT reader and, per component, its `Codec`.
 - `/tp ... facing`, `/rotate`: the `player_look_at` packet and `Entity.lookAt`.
-- What is summoned is not ticked. A mob stands where it was put; anything a client would let
-  fall by itself is flagged `NO_GRAVITY`, as items on the ground are. `/summon item` (an item
-  entity without a stack, which vanilla discards in its first tick) summons nothing.
+- What is summoned has no brain: a mob falls to the ground, is pushed, and stands (see
+  "Physics" for which kinds; what flies, swims or climbs is not moved at all). What no tick
+  here moves and a client would let fall by itself - a falling block, an arrow - is flagged
+  `NO_GRAVITY`. `/summon item` makes an item without a stack, which its first tick discards,
+  as in vanilla.
 - `/kill`: the entity is gone at once - no death animation, no drops - and a player cannot be
   killed: there is no health and no respawn.
 - `/kick <reason>`, like every `message` argument: plain text; selectors inside it are not
@@ -944,8 +1155,8 @@ Roughly in dependency order:
 1. **Mojang reports** (`mcgen.py reports`) → real tags and block ids. Until then vanilla clients cannot join.
 2. **World**: chunk storage (paletted sections, bit-packed, SoA across sections), a framed-chunk cache
    keyed by chunk with invalidation on change, light, region file I/O on workers.
-3. **Entities**: the table and the tracker exist (see "Entities"). Next: attributes, the
-   inferred jump, then mobs - spawning, physics, AI. Known headroom in the tracker at 20 000 mobs: a
+3. **Entities**: the table, the tracker and physics exist (see "Entities", "Physics"). Next:
+   attributes, the inferred jump, then mobs - spawning, AI; fluids. Known headroom in the tracker at 20 000 mobs: a
    summary bitmap over each row (the fan-out and the "what do I see" walk scan 320 mostly-zero words
    per player: 17 % and part of 53 % of that tick).
 4. **Chunk pacing**: honour `chunk_batch_received` instead of sending the whole view at once.
@@ -962,7 +1173,7 @@ Roughly in dependency order:
    built with `text::Text`.)
 8. **Blocks**: `docs/blocks-roadmap.md` - shapes that follow their neighbours, scheduled and
    random ticks, fluids, redstone, the other block entities. And what the first four still
-   lack: experience orbs, item physics (`world::collide` is there for it), `entityInside`.
+   lack: experience orbs.
 9. **Commands**: an SNBT reader (block entity data, item components, `/summon`'s tag, `nbt=`),
    `facing`, then the commands that wait for their subject - chat first.
 10. Lua plugin host.

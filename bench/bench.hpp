@@ -59,5 +59,6 @@ void item_benchmarks();     // bench/item_bench.cpp
 void nbt_benchmarks();      // bench/nbt_bench.cpp
 void game_benchmarks();     // bench/game_bench.cpp
 void command_benchmarks();  // bench/command_bench.cpp
+void physics_benchmarks();  // bench/physics_bench.cpp
 
 }  // namespace benchmark

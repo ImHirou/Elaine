@@ -553,6 +553,34 @@ struct EntityPositionSync {
     }
 };
 
+// An entity put somewhere at once, outside the tracker's own updates: what a teleport command
+// does to an entity that clients move by themselves (Entity.sendTeleportTransitionToPlayers).
+// A PositionMoveRotation - position, velocity, angles in degrees - then which of those are
+// offsets (a set of net.minecraft.world.entity.Relative as an int: none, here) and on-ground.
+struct TeleportEntity {
+    static constexpr u32 kId = ids::play::cb::kTeleportEntity;
+    i32 id;
+    double x, y, z;
+    double dx, dy, dz;
+    float y_rot, x_rot;
+    u32 relative_mask;
+    bool on_ground;
+    usize bound() const { return 5 + 48 + 8 + 4 + 1; }
+    u8* encode(u8* p) const {
+        p = put_varint(p, static_cast<u32>(id));
+        p = put_f64(p, x);
+        p = put_f64(p, y);
+        p = put_f64(p, z);
+        p = put_f64(p, dx);
+        p = put_f64(p, dy);
+        p = put_f64(p, dz);
+        p = put_f32(p, y_rot);
+        p = put_f32(p, x_rot);
+        p = put_be32(p, relative_mask);
+        return put_bool(p, on_ground);
+    }
+};
+
 struct RotateHead {
     static constexpr u32 kId = ids::play::cb::kRotateHead;
     i32 id;
@@ -677,8 +705,8 @@ struct EntityEvent {
 // inline sound event).
 struct Sound {
     static constexpr u32 kId = ids::play::cb::kSound;
-    static constexpr u32 kSourceBlocks = 4, kSourcePlayers = 7;  // SoundSource ordinals
-    u32 sound;                                                   // sound_event registry id
+    static constexpr u32 kSourceBlocks = 4, kSourceNeutral = 6, kSourcePlayers = 7;  // SoundSource ordinals
+    u32 sound;                                                                       // sound_event registry id
     u32 source;
     double x, y, z;  // sent as (int)(v * 8.0)
     float volume, pitch;

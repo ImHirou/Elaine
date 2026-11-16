@@ -20,6 +20,7 @@
 #define PROTO_GEN_STATIC_IDS_HPP "proto/gen/v777/static_ids.hpp"            // menus, block entity types, sounds, particles
 #define PROTO_GEN_COMMAND_DATA_HPP "proto/gen/v777/command_data.hpp"        // names for commands: properties, items (world/block.cpp only)
 #define PROTO_GEN_LANG_HPP "proto/gen/v777/lang.hpp"                        // en_us messages for the console (text/lang.cpp only)
+#define PROTO_GEN_PHYSICS_HPP "proto/gen/v777/physics.hpp"                  // what entity physics reads off a block state and an entity type
 
 namespace proto {
 namespace ids = gen::ids;

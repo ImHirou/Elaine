@@ -550,6 +550,11 @@ class Client:
 
     def expect(self, name: str) -> Reader:
         got, r = self.recv()
+        # A scenario that runs for more than 15 seconds meets a keep-alive on the way: answered,
+        # as a client does, unless it is the keep-alive that the scenario is about.
+        while got == "keep_alive" and name != "keep_alive" and self.state == "play":
+            self.send("keep_alive", r.take(8))
+            got, r = self.recv()
         assert got == name, f"expected {self.state}/{name}, got {got}"
         return r
 
@@ -663,7 +668,7 @@ class Client:
 
 ENTITY_PACKETS = {"bundle_delimiter", "add_entity", "remove_entities", "set_entity_data", "move_entity_pos",
                   "move_entity_pos_rot", "move_entity_rot", "entity_position_sync", "rotate_head", "set_entity_motion",
-                  "set_equipment", "take_item_entity", "swing_animation", "entity_event"}
+                  "set_equipment", "take_item_entity", "swing_animation", "entity_event", "teleport_entity"}
 MENU_PACKETS = {"container_set_content", "container_set_slot", "set_cursor_item", "set_player_inventory", "set_held_slot",
                 "sound", "open_screen", "container_set_data", "container_close", "update_recipes", "block_event", "explode",
                 "commands", "stop_sound"}
@@ -955,6 +960,7 @@ class Entity:
         self.base = pos          # VecDeltaCodec base: what deltas are relative to
         self.pos = pos
         self.velocity = velocity
+        self.spawned = (pos, velocity)   # as add_entity gave them
         self.yaw, self.pitch = yaw * 360 / 256, pitch * 360 / 256   # degrees, as unpacked or as sent in full
         self.head = head         # packed
         self.on_ground = False
@@ -1092,6 +1098,16 @@ def _apply_entity_packet(self: "Client", name: str, r: Reader) -> None:
     elif name == "set_entity_motion":
         e.velocity = read_lp_vec3(r)
         log.append((name, eid, e.velocity))
+    elif name == "teleport_entity":
+        # ClientPacketListener.setValuesFromPositionPacket: a PositionMoveRotation (position,
+        # velocity, angles) and which of its parts are offsets from what the entity has - a set
+        # of Relative as an int. The base that deltas count from is not touched.
+        pos, delta = (r.f64(), r.f64(), r.f64()), (r.f64(), r.f64(), r.f64())
+        yaw, pitch, relative = r.f32(), r.f32(), r.i32()
+        assert relative == 0, f"teleport_entity with relative parts {relative:#x}: not modelled"
+        e.pos, e.velocity, e.yaw, e.pitch = pos, delta, yaw, pitch
+        e.on_ground = r.bool()
+        log.append((name, eid, (pos, delta)))
     r.done()
 
 

@@ -8,10 +8,13 @@ set(MC_EXE "craftc" CACHE STRING "Name of the server binary")
 set(MC_ARCH "x86-64-v3" CACHE STRING
     "-march baseline. x86-64-v3 = AVX2+BMI2+FMA (Haswell/Zen1 and newer). 'native' = this machine only")
 option(MC_LTO "Link-time optimization in optimized builds" ON)
+option(MC_LTO_CACHE "Keep what LTO compiled between links (GCC 15+): a link redoes only what an edit reached" ON)
 option(MC_TESTS "Build unit tests" ON)
 option(MC_BENCH "Build micro-benchmarks" ON)
 option(MC_FRAME_POINTERS "Keep frame pointers (cheap, makes perf call graphs reliable)" OFF)
 set(MC_SANITIZE "" CACHE STRING "Sanitizers for dev builds, e.g. address,undefined")
+set(MC_DEBUG_LEVEL "1" CACHE STRING
+    "-g level of sanitizer builds: 1 = functions and lines, all a sanitizer report reads; 2 = locals and types too, for gdb")
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release)
@@ -45,7 +48,11 @@ endif()
 if(MC_SANITIZE)
   # No vptr check: it needs RTTI, which the server is built without; the tests (built with RTTI)
   # would then ask for typeinfo of server classes that has never been emitted.
-  target_compile_options(mc_flags INTERFACE -fsanitize=${MC_SANITIZE} -fno-sanitize=vptr -fno-omit-frame-pointer -g)
+  # -g1 unless asked otherwise: a report's frames need functions and line tables, and the rest of -g is
+  # 7-20% of a compile (game.cpp 6.8 -> 6.3 s, entity_test.cpp 10.0 -> 8.0 s). It stands after the -g of
+  # CMAKE_CXX_FLAGS_DEBUG on the command line, and of several -g options the last is the one that counts.
+  target_compile_options(mc_flags INTERFACE
+    -fsanitize=${MC_SANITIZE} -fno-sanitize=vptr -fno-omit-frame-pointer -g${MC_DEBUG_LEVEL})
   target_link_options(mc_flags INTERFACE -fsanitize=${MC_SANITIZE})
 endif()
 target_include_directories(mc_flags INTERFACE ${CMAKE_SOURCE_DIR}/src)
@@ -64,6 +71,21 @@ if(MC_LTO AND NOT MC_SANITIZE AND CMAKE_BUILD_TYPE MATCHES "Release|RelWithDebIn
     message(WARNING "LTO not available: ${mc_ipo_msg}")
   endif()
 endif()
+
+# An LTO link compiles the whole program again. With a cache GCC keeps the code it made of each partition
+# and compiles only the partitions an edit reached - the server, linked alone on four cores, 10.3 s without:
+# 0.6 s when nothing changed, 5.6 s after an edit in item_entities.cpp, 9.6 s after one in game.cpp. The
+# binary is the one a link without the cache makes, byte for byte. One directory per binary (their
+# partitions have nothing in common), made before every link: lto-wrapper stops at a missing directory
+# instead of making it, and a cache is a thing people delete.
+function(mc_lto_cache target)
+  if(MC_LTO_CACHE AND CMAKE_INTERPROCEDURAL_OPTIMIZATION AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
+     AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 15)
+    set(dir ${CMAKE_BINARY_DIR}/lto-cache/${target})
+    add_custom_command(TARGET ${target} PRE_LINK COMMAND ${CMAKE_COMMAND} -E make_directory ${dir} VERBATIM)
+    target_link_options(${target} PRIVATE -flto-incremental=${dir})
+  endif()
+endfunction()
 
 # ---------------------------------------------------------------------------- dependencies
 find_package(PkgConfig REQUIRED)
@@ -95,6 +117,7 @@ add_library(core STATIC
   src/world/generator.cpp
   src/world/dimension.cpp
   src/world/collide.cpp
+  src/phys/physics.cpp
   src/item/components.cpp
   src/item/stack.cpp
   src/item/recipes.cpp
@@ -108,6 +131,7 @@ add_library(core STATIC
   src/server/block_actions.cpp
   src/server/block_entities.cpp
   src/server/explosion.cpp
+  src/server/physics.cpp
   src/server/players.cpp
   src/server/command.cpp
   src/server/command_args.cpp
@@ -122,6 +146,7 @@ target_link_libraries(core
 add_executable(server_exe src/main.cpp)
 set_target_properties(server_exe PROPERTIES OUTPUT_NAME ${MC_EXE})
 target_link_libraries(server_exe PRIVATE core mc_core_flags)
+mc_lto_cache(server_exe)
 
 if(MC_TESTS)
   find_package(GTest)
@@ -136,6 +161,7 @@ if(MC_TESTS)
       tests/unit/crypto_test.cpp
       tests/unit/spsc_test.cpp
       tests/unit/world_test.cpp
+      tests/unit/physics_test.cpp
       tests/unit/light_test.cpp
       tests/unit/entity_test.cpp
       tests/unit/item_test.cpp
@@ -144,6 +170,7 @@ if(MC_TESTS)
       tests/unit/command_test.cpp
     )
     target_link_libraries(unit_tests PRIVATE core GTest::gtest_main OpenSSL::Crypto)
+    mc_lto_cache(unit_tests)
     add_test(NAME unit COMMAND unit_tests)
     find_package(Python3 COMPONENTS Interpreter)
     if(Python3_FOUND)
@@ -158,6 +185,7 @@ endif()
 
 if(MC_BENCH)
   add_executable(bench bench/bench.cpp bench/world_bench.cpp bench/entity_bench.cpp bench/item_bench.cpp
-    bench/nbt_bench.cpp bench/game_bench.cpp bench/command_bench.cpp)
+    bench/nbt_bench.cpp bench/game_bench.cpp bench/command_bench.cpp bench/physics_bench.cpp)
   target_link_libraries(bench PRIVATE core mc_core_flags OpenSSL::Crypto)
+  mc_lto_cache(bench)
 endif()

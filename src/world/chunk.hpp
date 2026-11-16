@@ -120,6 +120,11 @@ struct Chunk {
     u16 block_entity_count = 0, block_entity_cap = 0;
     // Light sections whose data changed since the last broadcast (bit = light section index).
     u32 sky_changed = 0, block_changed = 0;
+    // What a section holds, a bit per section: anything but air; and - these three are set when
+    // such a block is put there and never cleared - a block whose collision shape reaches out of
+    // its cell, one that acts on an entity in it or on it, one that breaks a fall.
+    // (Dimension::holds: what collision queries and entity physics ask before reading blocks.)
+    u32 filled_sections = 0, large_sections = 0, entity_sections = 0, fall_sections = 0;
     // Vanilla SkyLightSectionStorage.topSections for this column: highest light-storing section
     // y + 1, or kNoSkyTop.
     i32 sky_top = kNoSkyTop;

@@ -12,7 +12,10 @@
 // keeps its own copy and reports slots with set_creative_mode_slot (container_click comes from
 // the other screens: a chest, a furnace, a crafting table), and what does not fit an inventory
 // vanishes.
+#include <cmath>
+
 #include "base/log.hpp"
+#include "phys/mth.hpp"
 #include "server/game.hpp"
 
 namespace server {
@@ -201,14 +204,31 @@ void Game::apply_effects(u32 pi) {
 // whatever is in the hand) and the stack becomes an item entity. `predicted`: the client swung
 // its own arm already and is not told to.
 //
-// Vanilla throws the item: createItemStackToDrop gives it a velocity along the player's look.
-// Nothing moves entities here yet, so it is created at rest - see spawn_item().
+// The item is thrown the way the player looks (createItemStackToDrop).
 void Game::drop(u32 pi, ItemStack stack, bool thrown, bool predicted) {
     if (stack.empty()) return;
     swing(pi, cb::SwingAnimation::kMainHand, {}, !predicted);
     const double y = ents_.y[pi] + static_cast<double>(eye_height(ents_.pose[pi])) - kDropBelowEyes;
-    spawn_item(std::move(stack), ents_.x[pi], y, ents_.z[pi]);
+    double v[3];
+    throw_velocity(pi, v);
+    spawn_item(std::move(stack), ents_.x[pi], y, ents_.z[pi], v[0], v[1], v[2], 40);
     (void)thrown;  // ItemEntity.thrower: only advancement triggers ask who threw it
+}
+
+// LivingEntity.createItemStackToDrop, the velocity of what is not dropped "randomly": three
+// tenths of a block a tick along the look, a little up, and a little of anything. Vanilla's
+// sines here are Mth's table, and the sum is a float.
+void Game::throw_velocity(u32 pi, double v[3]) {
+    const float sin_x = phys::mth_sin(static_cast<double>(ents_.pitch[pi] * 0.017453292f));
+    const float cos_x = phys::mth_cos(static_cast<double>(ents_.pitch[pi] * 0.017453292f));
+    const float sin_y = phys::mth_sin(static_cast<double>(ents_.yaw[pi] * 0.017453292f));
+    const float cos_y = phys::mth_cos(static_cast<double>(ents_.yaw[pi] * 0.017453292f));
+    const float dir = random_float() * 6.2831855f;
+    const float spread = 0.02f * random_float();
+    const float lift = random_float() - random_float();
+    v[0] = static_cast<double>(-sin_y * cos_x * 0.3f) + std::cos(static_cast<double>(dir)) * static_cast<double>(spread);
+    v[1] = static_cast<double>(-sin_x * 0.3f + 0.1f + lift * 0.1f);
+    v[2] = static_cast<double>(cos_y * cos_x * 0.3f) + std::sin(static_cast<double>(dir)) * static_cast<double>(spread);
 }
 
 // Player.createItemStackToDrop + ItemEntity.makeFakeItem: an item that is only there to be
@@ -216,7 +236,9 @@ void Game::drop(u32 pi, ItemStack stack, bool thrown, bool predicted) {
 // life already: its first tick, later in this one, discards it.
 void Game::fake_item(u32 pi, ItemStack stack) {
     const double y = ents_.y[pi] + static_cast<double>(eye_height(ents_.pose[pi])) - kDropBelowEyes;
-    spawn_item(std::move(stack), ents_.x[pi], y, ents_.z[pi], kNever, 5999);
+    double v[3];
+    throw_velocity(pi, v);
+    spawn_item(std::move(stack), ents_.x[pi], y, ents_.z[pi], v[0], v[1], v[2], kNever, 5999);
 }
 
 // handlePunch: the left mouse button, whatever it hit - the air, a block (the block itself is

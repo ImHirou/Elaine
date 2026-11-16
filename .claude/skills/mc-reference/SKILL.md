@@ -226,6 +226,16 @@ How to read it:
   other parser puts it back in front), the empty string `MutableComponent.append` drops, and the second, absolute
   `player_position` a server sends when a confirmed teleport does not match were found. The bot is opped from the
   console after it joined: asked to op a name it has not seen, vanilla looks it up at Mojang.
+- `tools/vanilla/physics_probe.py`: what vanilla *computes*, not what it sends - positions and velocities of
+  entities as exact doubles, tick by tick (`record`: `/tick freeze`, `/tick step 1`, `/data get entity`, whose
+  decimals are the shortest that name the double). It starts the server itself. What it taught: a step is only
+  armed by `/tick step` and runs later, so a recording counts ticks by an entity of its own (a TNT with a long
+  fuse) instead of trusting the order of commands; the console prints what a command answers as `System chat: ...`;
+  NBT cannot show the sign of a zero (`DoubleTag.valueOf` makes `-0.0` the shared zero); `/summon` hands entity
+  ids out in order, and an entity's id decides which tick an item at rest tries the ground; an entity that leaves
+  the chunks that tick simply stops, in the recording as anywhere; fixtures 8 blocks apart are near enough for a
+  thrown item to land on its neighbour's (replay the recording in one world, as it was made). `perf` times
+  vanilla's ticks with `/tick sprint` - a 1000-tick sprint with ten thousand entities is silent for two minutes.
 - **Commands** are Brigadier's (`com.mojang.brigadier`, not in the server jar: read it with `javap -p -c -cp
   .cache/mc/<version>/datagen/libraries/com/mojang/brigadier/*/brigadier-*.jar com.mojang.brigadier.CommandDispatcher`).
   A command's tree is the builder chain in its class (`mcgen.py pseudo net.minecraft.server.commands.FillCommand`

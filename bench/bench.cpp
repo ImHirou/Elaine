@@ -109,5 +109,6 @@ int main(int argc, char** argv) {
     nbt_benchmarks();
     game_benchmarks();
     command_benchmarks();
+    physics_benchmarks();
     return 0;
 }

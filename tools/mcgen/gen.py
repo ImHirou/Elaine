@@ -21,6 +21,9 @@ Emitted files (all deterministic, all committed):
   command_data.hpp    what commands look up by name: argument type ids, block properties, item
                       names, which entities can be summoned (gen_commands.py; one .cpp includes it)
   lang.hpp            en_us.json's messages, for the console (gen_commands.py; one .cpp includes it)
+  physics.hpp         what entity physics reads off a block state (collision shape kind, material)
+                      and an entity type; collision shapes as grids of cells (gen_physics.py)
+  state_physics.bin   its per-state byte
 
 Inputs beyond the jar itself: `mcgen.py reports` (ids, tags, item components), `mcgen.py blockdata`
 (per-state light, fluid and shape properties) and `mcgen.py gamedata` (block classes and their
@@ -42,6 +45,7 @@ from pathlib import Path
 
 import gen_commands
 import gen_game
+import gen_physics
 import mcgen
 from mcgen import ROOT, die, javap, jar_for, vdir, version_info
 
@@ -776,6 +780,7 @@ namespace proto::gen {
     bf = {name: value for name, value, _ in BLOCK_FLAGS}
     custom_clone = blocks_with_custom_clone(v["id"], {b["class"] for b in ext_blocks})
     kinds = [0] * 8
+    placeable_names: set[str] = set()
     loot = gen_game.Loot(vanilla, item_ids)
     be_ids = {n: e["protocol_id"] for n, e in static_regs["minecraft:block_entity_type"]["entries"].items()}
     signal_hooks = ("isSignalSource", "ownSignal", "getSignal", "getDirectSignal")
@@ -791,6 +796,8 @@ namespace proto::gen {
         ported = gen_game.ported_block(gb)
         kind = placement_kind(b, item if b["item"] != "minecraft:air" else None, ported)
         kinds[kind] += 1
+        if kind:
+            placeable_names.add(name)
         # What the entity and explosion code reads off a block that can be in the world. A hook
         # that would answer otherwise than the tables below has to be ported first.
         drops: list = []
@@ -938,7 +945,11 @@ namespace proto::gen {
     it.append("\n}  // namespace proto::gen::static_registry\n")
     files["items.hpp"] = "".join(it)
 
-    files["_stats"] = {"placeable": sum(kinds[1:]), "blocks": len(ext_blocks)}
+    entity_ids = {n.split(":", 1)[1]: e["protocol_id"] for n, e in static_regs["minecraft:entity_type"]["entries"].items()}
+    physics = gen_physics.emit(hdr, v["id"], ext_blocks, st, shapes, game, tagged, placeable_names, entity_ids, cfloat32)
+    physics_stats = physics.pop("_physics_stats")
+    files.update(physics)
+    files["_stats"] = {"placeable": sum(kinds[1:]), "blocks": len(ext_blocks), **physics_stats}
     return files
 
 
@@ -1170,6 +1181,19 @@ namespace serializer {
 
 # ----------------------------------------------------------------------------- driver
 
+def put(path: Path, content: str | bytes) -> bool:
+    """Write a generated file unless it already holds exactly this; tells whether it wrote.
+
+    A build goes by modification times, and what current.hpp includes reaches three objects in four: a file
+    rewritten with what it already had recompiles nearly everything, once per preset.
+    """
+    data = content.encode("utf-8") if isinstance(content, str) else content
+    if path.is_file() and path.read_bytes() == data:
+        return False
+    path.write_bytes(data)
+    return True
+
+
 def generate_into(version: str, out: Path, reports: Path | None = None) -> dict:
     """`reports` overrides where registries.json / blocks.json are read from (tests only)."""
     v = version_info(version)
@@ -1195,18 +1219,23 @@ def generate_into(version: str, out: Path, reports: Path | None = None) -> dict:
         print(f"mcgen: WARNING: synchronized registries with no vanilla entries: {', '.join(empty)}", file=sys.stderr)
 
     out.mkdir(parents=True, exist_ok=True)
-    (out / "meta.hpp").write_text(emit_meta(v))
-    (out / "packet_ids.hpp").write_text(emit_packet_ids(v, packets))
-    (out / "registries.hpp").write_text(emit_registries(v, regs))
-    (out / "registry_data.bin").write_bytes(registry_data_blob(packets, regs))
-    (out / "blobs.hpp").write_text(emit_blobs(v))
-    (out / "dimension_types.hpp").write_text(emit_dimension_types(v, regs, data))
+    saved: dict[str, bool] = {}  # file name -> did its content change
+
+    def save(name: str, content: str | bytes) -> None:
+        saved[name] = put(out / name, content)
+
+    save("meta.hpp", emit_meta(v))
+    save("packet_ids.hpp", emit_packet_ids(v, packets))
+    save("registries.hpp", emit_registries(v, regs))
+    save("registry_data.bin", registry_data_blob(packets, regs))
+    save("blobs.hpp", emit_blobs(v))
+    save("dimension_types.hpp", emit_dimension_types(v, regs, data))
 
     tag_tables: list[tuple[str, dict[str, list[int]]]] = []
     stats = {"registries": len(regs), "entries": sum(len(e) for _, e in regs), "tags": 0, "packets": packets_src}
     static_regs = json.loads(reg_report.read_text())
     entities, stats["entity_types"] = emit_entities(v, version, static_regs)
-    (out / "entities.hpp").write_text(entities)
+    save("entities.hpp", entities)
     synced = {p: {e: i for i, e in enumerate(entries)} for p, entries in regs}
     for path in data.tag_dirs():
         key = f"minecraft:{path}"
@@ -1221,10 +1250,10 @@ def generate_into(version: str, out: Path, reports: Path | None = None) -> dict:
             tag_tables.append((key, flat))
             stats["tags"] += len(flat)
     tag_tables.sort()
-    (out / "tags.bin").write_bytes(tags_blob(packets, tag_tables))
+    save("tags.bin", tags_blob(packets, tag_tables))
 
     blocks = json.loads(blk_report.read_text())
-    (out / "blocks.hpp").write_text(emit_blocks(v, blocks))
+    save("blocks.hpp", emit_blocks(v, blocks))
     game = gen_game.load_gamedata(d)
     tables = build_block_tables(v, blocks, json.loads(ext_report.read_text()), static_regs, data, comp_dir, game)
     stats.update(tables.pop("_stats"))
@@ -1238,10 +1267,9 @@ def generate_into(version: str, out: Path, reports: Path | None = None) -> dict:
     tables["command_data.hpp"] = gen_commands.emit_command_data(hdr, d, static_regs, blocks)
     tables["lang.hpp"] = gen_commands.emit_lang(hdr, version)
     for name, content in tables.items():
-        if isinstance(content, bytes):
-            (out / name).write_bytes(content)
-        else:
-            (out / name).write_text(content)
+        save(name, content)
+    stats["files"] = len(saved)
+    stats["changed"] = sorted(name for name, changed in saved.items() if changed)
     return stats
 
 
@@ -1252,10 +1280,13 @@ def out_dir(version: str) -> Path:
 def cmd_generate(args) -> None:
     out = out_dir(args.version)
     stats = generate_into(args.version, out)
-    print(f"mcgen: wrote {out.relative_to(ROOT)}: {stats['registries']} registries, {stats['entries']} entries, "
+    print(f"mcgen: generated {out.relative_to(ROOT)}: {stats['registries']} registries, {stats['entries']} entries, "
           f"{stats['tags']} tags, {stats['blocks']} blocks ({stats['placeable']} placeable), {stats['entity_types']} entity types, "
           f"{stats['crafting']} crafting and {stats['smelting']} smelting recipes ({stats['recipes_skipped']} of other kinds left out), "
-          f"packet ids from {stats['packets']}")
+          f"{stats['materials']} block materials, {stats['shapes_grid']} collision grids ({stats['shapes_inexact']} of several boxes), "
+          f"{stats['movers']} entity types that move, packet ids from {stats['packets']}")
+    changed = stats["changed"]  # the rest was left as it was, so nothing that includes it is rebuilt
+    print(f"mcgen: {len(changed)} of {stats['files']} files changed" + (f": {', '.join(changed)}" if changed else ""))
 
 
 def cmd_check(args) -> None:

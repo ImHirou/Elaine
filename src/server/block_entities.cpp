@@ -101,6 +101,7 @@ void Game::init_titles() {
 bool Game::set_block(BlockPos pos, BlockState state, u32 flags) {
     const BlockState old = world_.block(pos.x, pos.y, pos.z);
     if (!world_.set_block(pos.x, pos.y, pos.z, state)) return false;
+    wake_near(pos);  // what lay at rest on it, or beside it
     const world::BlockInfo& was = world::block_info_of(old);
     const world::BlockInfo& now = world::block_info_of(state);
     // A block entity that went with the old block: its entry stays (dead, and empty) until the
@@ -233,16 +234,22 @@ BlockState Game::update_from_neighbour_shapes(BlockState state, BlockPos pos) co
 }
 
 // Containers.dropContents: every stack falls out in pieces of 10 to 30, all pieces of a stack
-// from one random place inside the block. (Vanilla tosses them; nothing moves items yet.)
+// from one random place inside the block, each tossed its own way (RandomSource.triangle).
 void Game::drop_contents(BlockPos pos, ItemStack* items, u32 n) {
     constexpr double kItemWidth = 0.25, kRange = 1.0 - kItemWidth, kHalf = kItemWidth / 2.0;
+    constexpr double kSpread = 0.11485000171139836;
+    const auto triangle = [&](double mean) { return mean + kSpread * (random_double() - random_double()); };
     for (u32 i = 0; i < n; ++i) {
         ItemStack stack = items[i].take();
         if (stack.empty()) continue;
         const double x = pos.x + random_double() * kRange + kHalf;
         const double y = pos.y + random_double() * kRange;
         const double z = pos.z + random_double() * kRange + kHalf;
-        while (!stack.empty()) spawn_item(stack.split(random_int(21) + 10), x, y, z, 0);  // no pick-up delay
+        while (!stack.empty()) {
+            ItemStack piece = stack.split(random_int(21) + 10);
+            const double vx = triangle(0.0), vy = triangle(0.2), vz = triangle(0.0);
+            spawn_item(std::move(piece), x, y, z, vx, vy, vz, 0);  // no pick-up delay
+        }
     }
 }
 

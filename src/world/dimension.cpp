@@ -6,6 +6,7 @@
 #include "world/chunk_codec.hpp"
 
 #include PROTO_GEN_DIMENSION_TYPES_HPP
+#include PROTO_GEN_PHYSICS_HPP
 
 namespace world {
 
@@ -50,6 +51,30 @@ bool update_column(ColumnMap& map, const Chunk& c, i32 min_y, u32 lx, i32 y, u32
     return false;
 }
 
+namespace physics = proto::gen::physics;
+
+// What collision queries and entity physics want to know of a dimension before they look at
+// its blocks one by one: bit 0, a state whose collision shape reaches out of its block
+// (BlockState.hasLargeCollisionShape); bit 1, one that acts on an entity in it or on it.
+// ...bit 2, one that breaks a fall (#fall_damage_resetting).
+ALWAYS_INLINE u32 traits_of(BlockState s) {
+    const u32 p = physics::kState[s];
+    const physics::Material& m = physics::kMaterials[p >> physics::kMaterialShift];
+    return ((p & physics::kLarge) ? 1u : 0u) | ((m.inside != physics::kInsideNone || (m.flags & physics::kStepSlime)) ? 2u : 0u) |
+           ((m.flags & physics::kFallResetting) ? 4u : 0u);
+}
+u32 traits_of(const Section& s) {
+    if (s.bits == 0) return traits_of(s.single);
+    u32 t = 0;
+    if (s.bits == Section::kDirectBits) {
+        for (u32 i = 0; i < Section::kVolume; ++i) t |= traits_of(s.get(i));
+        return t;
+    }
+    for (u32 i = 0; i < s.palette_len; ++i)
+        if (s.palette[i] != Section::kNoState) t |= traits_of(s.palette[i]);
+    return t;
+}
+
 }  // namespace
 
 Dimension::Dimension(u32 type_id, std::string name, ChunkGenerator& gen, i32 compression_threshold)
@@ -80,6 +105,15 @@ Chunk& Dimension::load(i32 cx, i32 cz) {
     c->sections_count = static_cast<u8>(sections_);
     c->light_count = static_cast<u8>(sections_ + 2);
     gen_.generate(*c, alloc_);
+    for (u32 si = 0; si < sections_; ++si) {
+        const u32 traits = traits_of(c->sections[si]), bit = 1u << si;
+        if (!c->sections[si].only_air()) c->filled_sections |= bit;
+        if (traits & 1) c->large_sections |= bit;
+        if (traits & 2) c->entity_sections |= bit;
+        if (traits & 4) c->fall_sections |= bit;
+        large_shapes_ |= (traits & 1) != 0;
+        entity_blocks_ |= (traits & 2) != 0;
+    }
     prime_heightmaps(*c);
     if (has_sky_) light_.fill_sky_sources(*c);
     map_.insert(c);
@@ -186,9 +220,19 @@ bool Dimension::set_block_raw(Chunk& c, i32 x, i32 y, i32 z, BlockState s) {
     if (was_empty && is_air(s)) return false;
     const BlockState old = sec.set(alloc_, Section::index(lx, ly, lz), s);
     if (old == s) return false;
+    if (const u32 traits = traits_of(s); UNLIKELY(traits)) {
+        large_shapes_ |= (traits & 1) != 0;
+        entity_blocks_ |= (traits & 2) != 0;
+        if (traits & 1) c.large_sections |= 1u << si;
+        if (traits & 2) c.entity_sections |= 1u << si;
+        if (traits & 4) c.fall_sections |= 1u << si;
+    }
     update_heightmaps(c, lx, y, lz, s);
     const bool empty = sec.only_air();
-    if (was_empty != empty) light_.update_section_status(c, si, empty);
+    if (was_empty != empty) {
+        light_.update_section_status(c, si, empty);
+        c.filled_sections = empty ? c.filled_sections & ~(1u << si) : c.filled_sections | (1u << si);
+    }
     if (light_differs(old, s)) {
         if (has_sky_) light_.update_sky_sources(c, lx, y, lz);
         light_.check_block(x, y, z);

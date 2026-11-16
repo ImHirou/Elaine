@@ -42,17 +42,20 @@ using Handle = u64;
 inline constexpr u32 kSlotBits = 24;
 inline constexpr u32 kMaxEntities = (1u << kSlotBits) - 1;
 
-namespace flag {                              // Store::flags
-inline constexpr u16 kOnGround = 1 << 0;      // Entity.onGround
-inline constexpr u16 kNeedsSync = 1 << 1;     // Entity.needsSync: got an impulse, viewers hear its velocity at once
-inline constexpr u16 kSyncVelocity = 1 << 2;  // Entity.syncVelocity: the same, and its own client hears it too
-inline constexpr u16 kMoved = 1 << 3;         // who-sees-whom must be re-evaluated for it (set on creation and on
-                                              // every movement packet of a player; cleared by the tracker)
-inline constexpr u16 kLiving = 1 << 4;        // LivingEntity: movement is sent as stepped paths
-inline constexpr u16 kTrackDeltas = 1 << 5;   // EntityType.trackDeltas: velocity is sent with movement
-inline constexpr u16 kNoGravity = 1 << 6;     // Entity.DATA_NO_GRAVITY, synchronized: write it with set_no_gravity()
-inline constexpr u16 kPrecise = 1 << 7;       // Entity.requiresPrecisePosition: every update is an absolute position
-                                              // (a primed TNT that touches a block)
+namespace flag {                                     // Store::flags
+inline constexpr u16 kOnGround = 1 << 0;             // Entity.onGround
+inline constexpr u16 kNeedsSync = 1 << 1;            // Entity.needsSync: got an impulse, viewers hear its velocity at once
+inline constexpr u16 kSyncVelocity = 1 << 2;         // Entity.syncVelocity: the same, and its own client hears it too
+inline constexpr u16 kMoved = 1 << 3;                // who-sees-whom must be re-evaluated for it (set on creation and on
+                                                     // every movement packet of a player; cleared by the tracker)
+inline constexpr u16 kLiving = 1 << 4;               // LivingEntity: movement is sent as stepped paths
+inline constexpr u16 kTrackDeltas = 1 << 5;          // EntityType.trackDeltas: velocity is sent with movement
+inline constexpr u16 kNoGravity = 1 << 6;            // Entity.DATA_NO_GRAVITY, synchronized: write it with set_no_gravity()
+inline constexpr u16 kPrecise = 1 << 7;              // Entity.requiresPrecisePosition: every update is an absolute position
+                                                     // (a primed TNT that touches a block)
+inline constexpr u16 kHorizontalCollision = 1 << 8;  // Entity.horizontalCollision, verticalCollision: what its last move ran
+inline constexpr u16 kVerticalCollision = 1 << 9;    // into (an item against a block is not shown rounded into it)
+inline constexpr u16 kSyncPosition = 1 << 10;        // Entity.syncPosition: it bounced - its viewers hear where it is at once
 }  // namespace flag
 
 // Entity.DATA_SHARED_FLAGS_ID bits (Entity.FLAG_*).
