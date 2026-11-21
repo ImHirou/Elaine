@@ -51,6 +51,10 @@ Game::Game(const Settings& s, std::vector<std::unique_ptr<net::Reactor>>& reacto
       rng_(base::now_ns() | 1),
       console_(console) {
     random_value_ = static_cast<u32>(random());  // Level.randValue: RandomSource.create().nextInt()
+    time_ = static_cast<u64>(world.time.game_time);
+    for (u32 i = 0; i < kClocks; ++i) clocks_[i] = world.time.clocks[i];
+    sky_darken_ = sky_darken(clocks_[reg::world_clock::kOverworld].total_ticks);
+    world_.set_time(time_);
     world_.keep_adopted(true);
     // Where players appear: on top of what stands at the world's spawn (the chunk is read for
     // it, once, here), or where the world says when nothing stands there.
@@ -125,7 +129,9 @@ void Game::run(const std::atomic<bool>& stop) {
         pump_chunks(t0);  // the chunks the workers have ready enter the world
         for (u32 ri = 0; ri < reactors_.size(); ++ri) drain(ri);
         if (UNLIKELY(!joining_.empty())) admit_joining();
+        if (UNLIKELY(!suggestion_requests_.empty())) answer_suggestions();
         run_console();  // DedicatedServer.tickConnection: the console's lines after the players' packets
+        tick_clocks();  // MinecraftServer.tickChildren: the clocks, then (every 20th tick) the time to everyone
         // ServerLevel.tick: tickTime - what packets scheduled was scheduled by the tick before -
         // then the block ticks that are due, then (ServerChunkCache.tickChunks) the random ticks.
         world_.set_time(++time_);
@@ -152,6 +158,7 @@ void Game::run(const std::atomic<bool>& stop) {
         tick_furnaces();  // block entities tick after the entities
         tick_players();
         autosave_players();
+        if (UNLIKELY((tick_ + 1) % (20ull * s_.autosave_seconds) == 0)) save_time();  // (with the autosave: what time it is)
         // Not t0: a player who joined during drain() has keepalive_sent_ns > t0, and the unsigned
         // difference would wrap and send a keep-alive at once.
         if (++tick_ % 20 == 0) keepalives(base::now_ns());
@@ -445,6 +452,7 @@ void Game::finish_join(u32 ri, const InHeader& h, const net::JoinTransport& t, J
     const cb::PlayerInfoEntry self{p.profile_wire, kCreative, true, 0};
     broadcast(cb::PlayerInfoAdd{{&self, 1}});
 
+    send_clocks(pi);  // PlayerList.sendLevelInfo: every clock, then the spawn
     send(pi,
          cb::SetDefaultSpawnPosition{kOverworld, floor_int(spawn_[0]), static_cast<i32>(spawn_y), floor_int(spawn_[2]), 0, 0});
     send(pi, cb::GameEvent{cb::GameEvent::kLevelChunksLoadStart, 0});
@@ -699,6 +707,11 @@ HOT void Game::on_packet(u32 pi, const u8* body, u32 n) {
         case sbid::kChatAck: {
             const auto a = sb::ChatAck::decode(rd);
             if (rd.done()) on_chat_ack(pi, a.offset);  // (may kick)
+            break;
+        }
+        case sbid::kCommandSuggestion: {
+            const auto c = sb::CommandSuggestion::decode(rd);
+            if (rd.done()) on_command_suggestion(pi, c);
             break;
         }
         case sbid::kChatSessionUpdate:

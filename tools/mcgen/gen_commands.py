@@ -27,7 +27,7 @@ ARGUMENT_TYPES = ["brigadier:bool", "brigadier:float", "brigadier:double", "brig
                   "minecraft:entity", "minecraft:game_profile", "minecraft:block_pos", "minecraft:vec3",
                   "minecraft:block_state", "minecraft:block_predicate", "minecraft:item_stack",
                   "minecraft:item_predicate", "minecraft:message", "minecraft:rotation", "minecraft:resource_location",
-                  "minecraft:entity_anchor", "minecraft:resource"]
+                  "minecraft:entity_anchor", "minecraft:resource", "minecraft:time"]
 
 # Translation keys by their first part: what commands answer with, what a kick says, and the
 # names of the things those messages mention.

@@ -11,7 +11,7 @@
 //   and net.minecraft.server.commands: StopCommand, SetBlockCommand, FillCommand,
 //   TeleportCommand, GiveCommand, PlaySoundCommand, StopSoundCommand, SummonCommand, KillCommand,
 //   ListPlayersCommand, KickCommand, OpCommand, DeOpCommands, HelpCommand, and the ones that
-//   talk: EmoteCommands, MsgCommand, SayCommand, TeamMsgCommand (MessageArgument).
+//   talk: EmoteCommands, MsgCommand, SayCommand, TeamMsgCommand (MessageArgument); TimeCommand.
 // What each says, and to whom, was compared with a vanilla 26.3 server
 // (tools/vanilla/command_probe.py).
 //
@@ -1073,6 +1073,112 @@ struct Game::Commands {
         return in.fail(tr("commands.teammsg.failed.noteam"));
     }
 
+    // ---- /time (TimeCommand): about a world clock - the one of the source's dimension, or the
+    // one named after "of". Every change of a clock goes to everyone at once (modifyClock).
+    static bool clock_of(Invocation& in, u32& clock) {
+        if (const cmd::Value* named = in.value("clock")) {
+            clock = static_cast<u32>(named->integer);
+            return true;
+        }
+        clock = default_clock(reg::dimension_type::kOverworld);  // getDefaultClock: of the source's level - the one there is
+        if (clock != ~0u) return true;
+        in.fail(tr("commands.time.no_default_clock").arg("minecraft:overworld"));
+        return false;
+    }
+    static i32 wrap_time(i64 ticks) { return static_cast<i32>(ticks % 2147483647ll); }
+    static i32 time_set(Invocation& in) {
+        Game& g = in.game;
+        u32 clock;
+        if (!clock_of(in, clock)) return 0;
+        Clock& c = g.clocks_[clock];
+        const i32 ticks = in.integer("time");
+        if (c.total_ticks == ticks) return in.fail(tr("commands.time.set.already_at_time").arg(clock_name(clock)).arg(ticks));
+        c.total_ticks = ticks;
+        c.partial_tick = 0;
+        g.clock_changed(clock);
+        in.success(tr("commands.time.set.absolute").arg(clock_name(clock)).arg(ticks));
+        return ticks;
+    }
+    static i32 time_marker(Invocation& in) {
+        Game& g = in.game;
+        u32 clock;
+        if (!clock_of(in, clock)) return 0;
+        Clock& c = g.clocks_[clock];
+        const std::string_view marker = in.string("timemarker"), name = clock_name(clock);
+        const Move moved = move_to_marker(c, clock, marker);
+        g.clock_changed(clock);  // (moveToTimeMarker goes through modifyClock whatever comes of it)
+        // The two complaints name their two things in opposite orders: vanilla's own.
+        if (moved == Move::kNoMarker) return in.fail(tr("commands.time.no_time_marker_found").arg(marker).arg(name));
+        if (moved == Move::kNotMoved) return in.fail(tr("commands.time.set.already_at_time_marker").arg(name).arg(marker));
+        in.success(tr("commands.time.set.time_marker").arg(name).arg(marker));
+        return wrap_time(c.total_ticks);
+    }
+    static i32 time_add(Invocation& in) {
+        Game& g = in.game;
+        u32 clock;
+        if (!clock_of(in, clock)) return 0;
+        Clock& c = g.clocks_[clock];
+        c.total_ticks = std::max<i64>(c.total_ticks + in.integer("time"), 0);
+        g.clock_changed(clock);
+        in.success(tr("commands.time.set.absolute").arg(clock_name(clock)).arg_long(c.total_ticks));
+        return wrap_time(c.total_ticks);
+    }
+    static i32 time_pause(Invocation& in) {  // ...and resume
+        Game& g = in.game;
+        u32 clock;
+        if (!clock_of(in, clock)) return 0;
+        Clock& c = g.clocks_[clock];
+        const bool paused = in.has("pause");
+        if (c.paused == paused)
+            return in.fail(
+                tr(paused ? "commands.time.pause.already_paused" : "commands.time.pause.already_running").arg(clock_name(clock)));
+        c.paused = paused;
+        g.clock_changed(clock);
+        in.success(tr(paused ? "commands.time.pause" : "commands.time.resume").arg(clock_name(clock)));
+        return 1;
+    }
+    static i32 time_rate(Invocation& in) {
+        Game& g = in.game;
+        u32 clock;
+        if (!clock_of(in, clock)) return 0;
+        Clock& c = g.clocks_[clock];
+        const float rate = static_cast<float>(in.number("rate"));
+        if (c.rate == rate) return in.fail(tr("commands.time.rate.already_same").arg(clock_name(clock)).arg(rate));
+        c.rate = rate;
+        g.clock_changed(clock);
+        in.success(tr("commands.time.rate").arg(clock_name(clock)).arg(rate));
+        return 1;
+    }
+    static i32 time_query(Invocation& in) {
+        u32 clock;
+        if (!clock_of(in, clock)) return 0;
+        const i64 ticks = in.game.clocks_[clock].total_ticks;
+        in.success(tr("commands.time.query.absolute").arg(clock_name(clock)).arg_long(ticks), false);
+        return wrap_time(ticks);
+    }
+    // Where a timeline is in its period ("query day": the time of day), or how many periods have
+    // passed ("query day repetition": the day).
+    static i32 time_query_timeline(Invocation& in) {
+        u32 clock;
+        if (!clock_of(in, clock)) return 0;
+        const u32 timeline = static_cast<u32>(in.integer("timeline"));
+        if (timeline_clock(timeline) != clock)
+            return in.fail(tr("commands.time.wrong_timeline_for_clock").arg(timeline_name(timeline)).arg(clock_name(clock)));
+        const i64 total = in.game.clocks_[clock].total_ticks;
+        const bool repetitions = in.has("repetition");
+        const i64 answer = repetitions ? timeline_repetitions(timeline, total) : timeline_ticks(timeline, total);
+        in.success(tr(repetitions ? "commands.time.query.timeline.repetitions" : "commands.time.query.timeline")
+                       .arg(timeline_name(timeline))
+                       .arg_long(answer),
+                   false);
+        return wrap_time(answer);
+    }
+    static i32 time_query_gametime(Invocation& in) {
+        const i64 time = static_cast<i64>(in.game.time_);
+        in.success(tr("commands.time.query.gametime").arg_long(time), false);
+        return wrap_time(time);
+    }
+
     // ---- /kick <targets> [<reason>]
     static i32 kick(Invocation& in) {
         Game& g = in.game;
@@ -1206,6 +1312,19 @@ void Game::init_commands() {
     r.add("teleport <targets:entities> <location:vec3> [<rotation:rotation>]", cmd::kGamemasters, &C::teleport_cmd);
     r.add("teleport <targets:entities> <destination:entity>", cmd::kGamemasters, &C::teleport_cmd);
     r.alias("tp", "teleport", cmd::kGamemasters);
+    // TimeCommand: the same nodes under "time" and under "time of <clock>" (addClockNodes), in
+    // that order; "query gametime" is the level's and stands under the first alone.
+    for (const std::string& at : {std::string("time"), std::string("time of <clock:clock>")}) {
+        r.add(at + " set <time:time>", cmd::kGamemasters, &C::time_set);
+        r.add(at + " set <timemarker:time_marker>", cmd::kGamemasters, &C::time_marker);
+        r.add(at + " add <time:time(-2147483648)>", cmd::kGamemasters, &C::time_add);
+        r.add(at + " pause", cmd::kGamemasters, &C::time_pause);
+        r.add(at + " resume", cmd::kGamemasters, &C::time_pause);
+        r.add(at + " rate <rate:float(0.00001,1000)>", cmd::kGamemasters, &C::time_rate);
+        r.add(at + " query time", cmd::kGamemasters, &C::time_query);
+        r.add(at + " query <timeline:timeline> [repetition]", cmd::kGamemasters, &C::time_query_timeline);
+        if (at == "time") r.add("time query gametime", cmd::kGamemasters, &C::time_query_gametime);
+    }
     r.add("deop <targets:profile>", cmd::kAdmins, &C::deop);
     r.add("op <targets:profile>", cmd::kAdmins, &C::op);
     r.add("stop", cmd::kOwners, &C::stop);

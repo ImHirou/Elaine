@@ -878,11 +878,10 @@ tick queue under load and the random pass belong with the first claim that any o
   waterlogged block that would ask for one on an update does not. Ice does not melt - it
   would leave water - and lava sets nothing alight (a fluid's random tick). Concrete powder
   hardens beside water, which only an imported world has, and that water does not flow.
-- **The time of day and the weather.** `raw_brightness` reads the sky's light as at noon: grass
-  spreads by night as by day, where vanilla's would wait for a torch. Nothing rains or snows
-  on a block (`tickPrecipitation`), no lightning.
-- **Game rules.** `random-tick-speed` is a setting of the server; blocks and entities always
-  drop.
+- **The weather.** Nothing rains or snows on a block (`tickPrecipitation`), no lightning, and
+  rain takes nothing from the sky's light. (The time of day does: see "Time".)
+- **Game rules.** `random-tick-speed` and `advance-time` are settings of the server; blocks and
+  entities always drop.
 - **Comparators** (`updateNeighbourForOutputSignal`) and redstone wire's shape updates at a
   distance (`updateIndirectNeighbourShapes`): neither block exists. A signal is still "a block
   of redstone beside me".
@@ -1633,9 +1632,9 @@ None of it is touched unless a command runs.
   `/tellraw` waits for the SNBT reader.
 - `/op` of someone who is not online works by name only in offline mode (the name is its own
   profile); in online mode Mojang would have to be asked.
-- Suggestions the server would have to compute (`ask_server`): `/op` and `/deop` leave their
-  argument to the client's own completion of player names.
-- Every command about something that does not exist: time and weather, game modes, effects, experience, scoreboards and teams, `execute`, `data`,
+- Suggestions the server computes (`ask_server`) are answered for `/time` (see "Time"); `/op`
+  and `/deop` still leave their argument to the client's own completion of player names.
+- Every command about something that does not exist: weather, game modes, effects, experience, scoreboards and teams, `execute`, `data`,
   `clear` (the inventory can do it; its item predicates are the work), bans and the whitelist.
 
 ## Chat (src/server/chat.cpp)
@@ -1715,6 +1714,84 @@ the pseudo-code of the jar shows as a pre-increment); with that, nothing differs
 - Text filtering (`FilterMask`: everything passes), `/tellraw`, teams.
 - A packet that is no chat packet - a message of more than 256 characters - is skipped; vanilla
   disconnects its sender.
+
+## Time (src/server/clock.*, time.cpp)
+
+26.x has no "day time". A server has **world clocks** (`minecraft:world_clock`: the overworld's,
+the end's) - each a count of ticks, the part of a tick it is into, a rate and whether it stands
+still - and **timelines** (`minecraft:timeline`) that read a clock: `day` makes the overworld's
+clock a day of 24000 ticks and names moments of it (time markers: day, noon, night, midnight),
+`moon` a month of eight, and each carries tracks that turn the time into something - where the
+sun stands, how much light the sky gives. The clocks, the timelines, their markers and the one
+track the server computes with are generated from the jar's data (`timelines.hpp`); the
+generator stops if that track is no longer a linear one that multiplies.
+
+`server/clock.*` is the port - `ServerClockInstance.tick` (a rate is a float added every tick,
+its whole part the ticks that pass), `ClockTimeMarker` (a marker is moved *on* to: the next
+time it is that time of day, never back), `KeyframeTrackSampler` - as pure functions over a
+clock, in vanilla's own floats: a client runs every clock it knows by itself, and must agree.
+`Game` has the clocks (`clocks_`) and ticks them where `MinecraftServer.tickChildren` does,
+before the level's own count (`time_`, `Level.getGameTime`), unless `advance-time` (the game
+rule `advance_time`, a setting here) says no clock runs.
+
+**Who is told what** is little, because clients compute: on joining, every clock
+(`PlayerList.sendLevelInfo`); when a command changes a clock, that clock, to everyone, at once
+(`ServerClockManager.modifyClock`); and every twentieth tick the game time alone, by which a
+client's clocks catch up. One packet, `set_time`: the game time and a map of clock to (ticks, a
+VarLong; the part of a tick; the rate - 0 for a clock that stands still, whichever way).
+
+**What it changes.** `Level.skyDarken` - how many levels the time of day takes from the sky's
+light: none from 23970 to 12030 of the day, eleven from 13670 to 22330, a level every 164 ticks
+in between (`sky_darken`: the attribute `gameplay/sky_light_level`, 15 times the day's track,
+then `(int)(15.0f - level)`; no weather takes more). It is what a spreading block reads
+(`Game::raw_brightness`): grass and mycelium under an open sky stop spreading at tick 13015 of
+the day and start again at 22986 - unless something else lights them. Nothing else that is
+ported reads the time (checked class by class in the jar).
+
+**`/time`** is `TimeCommand`, node for node: `set <time>`, `set <timemarker>`, `add <time>`,
+`pause`, `resume`, `rate <rate>`, `query time`, `query <timeline> [repetition]`, `query
+gametime` - on the clock of the source's dimension, or on any after `of <clock>`. A time is
+`TimeArgument` (a float, a unit - `d`, `s`, `t` - and `Math.round`); `set -5` is no time and is
+read as a marker of that name, as Brigadier reads the second of two arguments. The answers are
+vanilla's to the argument: two of its complaints name clock and marker in opposite orders, a
+`set` answers with an Integer and an `add` with a Long, and a move to a marker tells everyone
+the clock even when nothing moved.
+
+**Suggestions.** A client completes most of a line by itself; for the arguments the tree marks
+`minecraft:ask_server` - the time markers, the timelines - it asks (`command_suggestion`) and is
+answered (`command_suggestions`) with what `CommandDispatcher.getCompletionSuggestions` gives for
+the end of the line: the node the last word would be a child of, what each of its children
+offers for that word - a literal itself, a time its units, an asked argument the identifiers
+that fit (`SharedSuggestionProvider.suggestResource`) - as one sorted list over the range they
+replace together. One answer a tick per player, to its latest question
+(`ServerCommandSuggestionsProvider`). `Registry::suggest` offers what the three kinds of node
+under `/time` offer; an argument type that suggests something else (coordinates, selectors)
+stands under no node a client asks about, and would have to be taught first.
+
+**Kept**: `world.json` has the game time and the clocks, written again with every autosave and
+when the server stops - by a worker (`server::Files`), as a player's file is. A world saved
+before there was time begins at 0. A vanilla world's time is imported: `Time` of `level.dat`,
+the clocks of `data/minecraft/world_clocks.dat`.
+
+### Compared with vanilla
+
+`tools/vanilla/command_probe.py` runs `/time` on both servers with the overworld's clock stopped
+(so that it is where each command puts it) - every branch, right and wrong - and asks for
+suggestions at the end of some twenty lines, as an operator and as somebody who is none; it compares every answer, every `set_time` that names a
+clock, and every list of suggestions. `tools/vanilla/block_probe.py` puts the clock to either
+side of the two ticks of the day at which grass begins and stops spreading, and compares what
+becomes of a hole in the grass. What differs is listed here:
+
+- the beat of every twentieth tick falls where each server's count of ticks has it; the game
+  time itself is each world's own;
+- `ticking_state` / `ticking_step` (`/tick`) are not sent on joining: there is no tick rate
+  manager, and a client assumes the rate it is.
+
+### Not there
+
+Weather (and what rain takes from the sky's light), game rules as such (`/gamerule`), beds and
+sleeping (the one thing in vanilla that moves a clock without a command), everything else the
+timelines carry for a server - when monsters burn, when villagers work - and `/tick`.
 
 ## Wire format handling
 
@@ -1798,4 +1875,5 @@ Roughly in dependency order:
    the other block entities. And what the first four still lack: experience orbs.
 8. **Commands**: an SNBT reader (block entity data, item components, `/summon`'s tag, `nbt=`),
    `facing`, then the commands that wait for their subject. **Chat**: signed (see "Chat").
+   **Time**: the weather, game rules.
 9. Lua plugin host.

@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <set>
@@ -618,6 +619,26 @@ bool import_world(const std::string& dir, base::Workers& workers, WorldInfo& inf
             u32 i = 0;
             for (const nbt::Tag v : pos.elements()) info.spawn[i++] = v.as_int();
             info.has_spawn = true;
+        }
+    }
+    // What time it is: the level's count of ticks (LevelData "Time"), and its clocks
+    // (data/minecraft/world_clocks.dat: ServerClockManager's saved data - PackedClockStates, a
+    // ClockState by clock; what a state leaves out is its default).
+    if (const nbt::Tag time = data.get("Time"); time.numeric()) info.time.game_time = std::max<i64>(0, time.as_long());
+    std::vector<u8> clock_bytes;
+    nbt::Doc clock_doc;
+    if (read_nbt_gz(dir + "/data/minecraft/world_clocks.dat", clock_bytes, clock_doc)) {
+        const nbt::Tag clocks = clock_doc.root().get("data");
+        for (u32 i = 0; i < kClocks; ++i) {
+            const nbt::Tag state = clocks.get(clock_name(i));
+            if (state.type != nbt::kCompound) continue;
+            Clock c;
+            if (const nbt::Tag v = state.get("total_ticks"); v.numeric()) c.total_ticks = v.as_long();
+            if (const nbt::Tag v = state.get("partial_tick"); v.numeric()) c.partial_tick = static_cast<float>(v.as_double());
+            if (const nbt::Tag v = state.get("rate"); v.numeric()) c.rate = static_cast<float>(v.as_double());
+            if (const nbt::Tag v = state.get("paused"); v.numeric()) c.paused = v.as_double() != 0;
+            if (c.total_ticks >= 0 && c.partial_tick >= 0.0f && c.partial_tick < 1.0f && c.rate > 0.0f && std::isfinite(c.rate))
+                info.time.clocks[i] = c;
         }
     }
     // The overworld's generator (data/minecraft/world_gen_settings.dat). A flat world is made as

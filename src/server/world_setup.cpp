@@ -3,7 +3,9 @@
 #include <unistd.h>
 #include <yyjson.h>
 
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 
 #include "base/log.hpp"
@@ -69,12 +71,43 @@ bool read_meta(const std::string& path, WorldInfo& out, std::string& err) {
             out.has_spawn = true;
         }
         out.imported = yyjson_get_bool(yyjson_obj_get(root, "imported"));
+        // The time: absent in a world saved before there was any, which then begins at 0. A
+        // clock is taken whole or left as new (ClockState.CODEC: a rate is positive).
+        yyjson_val* time = yyjson_obj_get(root, "time");
+        out.time.game_time = std::max<i64>(0, yyjson_get_sint(yyjson_obj_get(time, "game")));
+        yyjson_val* clocks = yyjson_obj_get(time, "clocks");
+        for (u32 i = 0; i < kClocks; ++i) {
+            yyjson_val* c = yyjson_obj_getn(clocks, clock_name(i).data(), clock_name(i).size());
+            if (!yyjson_is_obj(c)) continue;
+            Clock read;
+            read.total_ticks = yyjson_get_sint(yyjson_obj_get(c, "total_ticks"));
+            read.partial_tick = static_cast<float>(yyjson_get_num(yyjson_obj_get(c, "partial_tick")));
+            yyjson_val* rate = yyjson_obj_get(c, "rate");
+            read.rate = rate ? static_cast<float>(yyjson_get_num(rate)) : 1.0f;
+            read.paused = yyjson_get_bool(yyjson_obj_get(c, "paused"));
+            if (read.total_ticks >= 0 && read.partial_tick >= 0.0f && read.partial_tick < 1.0f && read.rate > 0.0f &&
+                std::isfinite(read.rate))
+                out.time.clocks[i] = read;
+        }
     }
     yyjson_doc_free(doc);
     return ok;
 }
 
 bool write_meta(const std::string& path, const WorldInfo& info, std::string& err) {
+    // Written beside it and moved into place: a world.json is whole or not there.
+    const std::string tmp = path + ".tmp", json = world_json(info, info.time);
+    FILE* f = std::fopen(tmp.c_str(), "wb");
+    bool ok = f && std::fwrite(json.data(), 1, json.size(), f) == json.size();
+    if (f) ok = std::fclose(f) == 0 && ok;
+    if (ok) ok = std::rename(tmp.c_str(), path.c_str()) == 0;
+    if (!ok) err = "cannot write " + path;
+    return ok;
+}
+
+}  // namespace
+
+std::string world_json(const WorldInfo& info, const WorldTime& now) {
     yyjson_mut_doc* doc = yyjson_mut_doc_new(nullptr);
     yyjson_mut_val* root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
@@ -98,20 +131,24 @@ bool write_meta(const std::string& path, const WorldInfo& info, std::string& err
         for (const i32 v : info.spawn) yyjson_mut_arr_add_int(doc, spawn, v);
     }
     yyjson_mut_obj_add_bool(doc, root, "imported", info.imported);
-    // Written beside it and moved into place: a world.json is whole or not there.
-    const std::string tmp = path + ".tmp";
-    yyjson_write_err werr;
-    bool ok = yyjson_mut_write_file(tmp.c_str(), doc, YYJSON_WRITE_PRETTY, nullptr, &werr);
-    if (!ok) err = "cannot write " + tmp + ": " + werr.msg;
-    yyjson_mut_doc_free(doc);
-    if (ok && std::rename(tmp.c_str(), path.c_str()) != 0) {
-        err = "cannot write " + path;
-        ok = false;
+    yyjson_mut_val* time = yyjson_mut_obj_add_obj(doc, root, "time");
+    yyjson_mut_obj_add_sint(doc, time, "game", now.game_time);
+    yyjson_mut_val* clocks = yyjson_mut_obj_add_obj(doc, time, "clocks");
+    for (u32 i = 0; i < kClocks; ++i) {
+        const Clock& c = now.clocks[i];
+        yyjson_mut_val* clock = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_sint(doc, clock, "total_ticks", c.total_ticks);
+        yyjson_mut_obj_add_real(doc, clock, "partial_tick", static_cast<double>(c.partial_tick));
+        yyjson_mut_obj_add_real(doc, clock, "rate", static_cast<double>(c.rate));
+        yyjson_mut_obj_add_bool(doc, clock, "paused", c.paused);
+        yyjson_mut_obj_add(clocks, yyjson_mut_strncpy(doc, clock_name(i).data(), clock_name(i).size()), clock);
     }
-    return ok;
+    char* text = yyjson_mut_write(doc, YYJSON_WRITE_PRETTY, nullptr);
+    std::string out = text ? text : "";
+    std::free(text);
+    yyjson_mut_doc_free(doc);
+    return out;
 }
-
-}  // namespace
 
 WorldInfo::~WorldInfo() {
     if (lock_fd >= 0) ::close(lock_fd);

@@ -346,7 +346,8 @@ void Game::tend_chunks() {
 
 // Everything that is loaded goes to disk, and the caller waits until it is there: the server stops.
 void Game::save_world() {
-    files_.finish();  // the players' files, which leaving has just written
+    save_time();
+    files_.finish();  // the players' files, which leaving has just written, and world.json
     if (!world_.persistent()) return;
     const u64 t0 = base::now_ns();
     saving_.clear();

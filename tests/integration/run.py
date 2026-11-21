@@ -2630,7 +2630,7 @@ def command_tree_and_operators(srv: Server):
     make_op(srv, a, "Alice")
     tree = a.commands["children"]
     assert sorted(tree) == ["deop", "fill", "give", "help", "kick", "kill", "list", "me", "msg", "op", "playsound", "say",
-                            "setblock", "stop", "stopsound", "summon", "teammsg", "teleport", "tell", "tm", "tp", "w"], sorted(tree)
+                            "setblock", "stop", "stopsound", "summon", "teammsg", "teleport", "tell", "time", "tm", "tp", "w"], sorted(tree)
     assert tree["setblock"]["restricted"] and not tree["setblock"]["executable"] and not tree["list"]["restricted"]
     pos = tree["setblock"]["children"]["pos"]
     assert pos["parser"] == "kBlockPos" and not pos["executable"]
@@ -3430,6 +3430,203 @@ def chat_commands(srv: Server):
     c.expect_closed()
 
 
+# ----------------------------------------------------------------------------- time
+
+CLOCK = {name.split(":")[1]: i for i, name in enumerate(mc.load_registry("world_clock"))}
+OVERWORLD, THE_END = CLOCK["overworld"], CLOCK["the_end"]
+
+
+def suggestions(c: Client, line: str, request: int = 1) -> tuple:
+    """command_suggestion for a line as typed (with its slash); the answer: (start, length, texts)."""
+    c.send("command_suggestion", varint(request) + mc.mc_str(line))
+    r = c.expect("command_suggestions")
+    assert r.varint() == request
+    start, length = r.varint(), r.varint()
+    texts = []
+    for _ in range(r.varint()):
+        texts.append(r.str())
+        assert not r.bool(), "a tooltip"
+    r.done()
+    return start, length, texts
+
+
+@test()
+def time_of_day(srv: Server):
+    """The world's clocks: everyone is told all of them on joining, the game time every twentieth
+    tick, and a clock at once when /time changes it - set, moved on to a time marker, added to,
+    paused, run faster. What the server suggests for the arguments it is asked about."""
+    a, b = srv.client(), srv.client()
+    join(a, "Alice")
+    join(b, "Bob")
+    a.expect("player_info_update")
+    for cl in (a, b):
+        cl.send("player_loaded")
+    settle(a, b)
+    # Joining: one packet with both clocks. In a new world they have run as long as the world has.
+    first, clocks = a.time_log[0]
+    assert clocks == {OVERWORLD: (first, 0.0, 1.0), THE_END: (first, 0.0, 1.0)}, a.time_log[0]
+    assert b.time_log[0][1].keys() == {OVERWORLD, THE_END} and b.time_log[0][0] >= first
+    # Then, every twentieth tick, the game time and no clock.
+    a.ticks(45)
+    beats = a.time_log[1:]
+    assert len(beats) >= 2 and all(not named for _, named in beats), a.time_log
+    assert all(later[0] - earlier[0] == 20 for earlier, later in zip(beats, beats[1:])), beats
+    # /time is a gamemaster's.
+    line = "time set day"
+    assert run_command(b, line)["said"] == [failure(tr("command.unknown.command")), here(line, 0)]
+    make_op(srv, a, "Alice")
+    tree = a.commands["children"]["time"]["children"]
+    assert list(tree) == ["set", "add", "pause", "resume", "rate", "query", "of"], list(tree)
+    assert list(tree["set"]["children"]) == ["time", "timemarker"] and list(tree["query"]["children"]) == ["time", "timeline", "gametime"]
+    assert tree["set"]["children"]["time"]["properties"] == {"min": 0}
+    assert tree["add"]["children"]["time"]["properties"] == {"min": -2147483648}
+    assert tree["set"]["children"]["timemarker"]["suggestions"] == "minecraft:ask_server"
+    assert tree["query"]["children"]["timeline"]["suggestions"] == "minecraft:ask_server"
+    clock = tree["of"]["children"]["clock"]
+    assert clock["properties"] == {"registry": "minecraft:world_clock"} and "suggestions" not in clock
+    assert list(clock["children"]) == ["set", "add", "pause", "resume", "rate", "query"] and \
+        list(clock["children"]["query"]["children"]) == ["time", "timeline"]
+
+    def time(line: str) -> tuple:
+        """Run a /time line as Alice: what she is told, and the clocks everyone was told of."""
+        marks = len(a.time_log), len(b.time_log)
+        said = run_command(a, "time " + line)["said"]
+        settle(b)
+        told = [named for _, named in a.time_log[marks[0]:] if named]
+        assert told == [named for _, named in b.time_log[marks[1]:] if named], "Bob was told otherwise"
+        return said, told
+
+    ow, end = "minecraft:overworld", "minecraft:the_end"
+    # A clock that stands still, so that it is where it was put: to a client, one with rate 0.
+    said, told = time("pause")
+    assert said == [tr("commands.time.pause", ow)] and len(told) == 1 and told[0][OVERWORLD][2] == 0.0, (said, told)
+    assert time("pause") == ([failure(tr("commands.time.pause.already_paused", ow))], [])
+    # set <ticks>: there, whichever way that is.
+    assert time("set 1000") == ([tr("commands.time.set.absolute", ow, 1000)], [{OVERWORLD: (1000, 0.0, 0.0)}])
+    assert time("set 1000") == ([failure(tr("commands.time.set.already_at_time", ow, 1000))], [])
+    assert time("set 50s") == ([failure(tr("commands.time.set.already_at_time", ow, 1000))], [])
+    # set <marker>: on to the next time it is that time of day. (The clock is sent whatever comes of it.)
+    at = [{OVERWORLD: (1000, 0.0, 0.0)}]
+    assert time("set day") == ([failure(tr("commands.time.set.already_at_time_marker", ow, "minecraft:day"))], at)
+    assert time("set noon") == ([tr("commands.time.set.time_marker", ow, "minecraft:noon")], [{OVERWORLD: (6000, 0.0, 0.0)}])
+    assert time("set minecraft:night") == ([tr("commands.time.set.time_marker", ow, "minecraft:night")], [{OVERWORLD: (13000, 0.0, 0.0)}])
+    assert time("set day") == ([tr("commands.time.set.time_marker", ow, "minecraft:day")], [{OVERWORLD: (25000, 0.0, 0.0)}])
+    assert time("set teatime") == ([failure(tr("commands.time.no_time_marker_found", "minecraft:teatime", ow))], [{OVERWORLD: (25000, 0.0, 0.0)}])
+    # add: by so much, never to before the beginning.
+    assert time("add 2s") == ([tr("commands.time.set.absolute", ow, mc.Long(25040))], [{OVERWORLD: (25040, 0.0, 0.0)}])
+    assert time("add -1d") == ([tr("commands.time.set.absolute", ow, mc.Long(1040))], [{OVERWORLD: (1040, 0.0, 0.0)}])
+    assert time("add -100000") == ([tr("commands.time.set.absolute", ow, mc.Long(0))], [{OVERWORLD: (0, 0.0, 0.0)}])
+    assert time("set 3.5d") == ([tr("commands.time.set.absolute", ow, 84000)], [{OVERWORLD: (84000, 0.0, 0.0)}])
+    # query: the clock, a timeline of it (where in its period, how many periods), the level's ticks.
+    assert time("query time") == ([tr("commands.time.query.absolute", ow, mc.Long(84000))], [])
+    assert time("add 6000") == ([tr("commands.time.set.absolute", ow, mc.Long(90000))], [{OVERWORLD: (90000, 0.0, 0.0)}])
+    assert time("query day") == ([tr("commands.time.query.timeline", "minecraft:day", mc.Long(18000))], [])
+    assert time("query day repetition") == ([tr("commands.time.query.timeline.repetitions", "minecraft:day", mc.Long(3))], [])
+    assert time("query minecraft:moon") == ([tr("commands.time.query.timeline", "minecraft:moon", mc.Long(90000))], [])
+    assert time("query early_game repetition") == ([tr("commands.time.query.timeline.repetitions", "minecraft:early_game", mc.Long(0))], [])
+    said, told = time("query gametime")
+    assert told == [] and len(said) == 1 and said[0]["translate"] == "commands.time.query.gametime", said
+    assert isinstance(said[0]["with"][0], mc.Long) and a.game_time <= said[0]["with"][0] <= a.game_time + 40, (said, a.game_time)
+    line = "time query week"
+    assert time("query week")[0] == [failure(tr("argument.resource.not_found", "minecraft:week", "minecraft:timeline")), here(line, 15)]
+    # of <clock>: another clock. The end's has run all the while; the day is not its timeline.
+    said, told = time("of the_end query time")
+    assert said[0]["with"][1] > first and told == []
+    assert time("of the_end query day") == ([failure(tr("commands.time.wrong_timeline_for_clock", "minecraft:day", end))], [])
+    assert time("of minecraft:the_end set 5") == ([tr("commands.time.set.absolute", end, 5)], [{THE_END: (5, 0.0, 1.0)}])
+    assert time("of the_end set noon")[0] == [failure(tr("commands.time.no_time_marker_found", "minecraft:noon", end))]
+    assert time("of overworld query time") == ([tr("commands.time.query.absolute", ow, mc.Long(90000))], [])
+    # rate: how fast a clock runs - told at once, used once it runs again.
+    assert time("rate 2.5") == ([tr("commands.time.rate", ow, mc.Float(2.5))], [{OVERWORLD: (90000, 0.0, 0.0)}])
+    assert time("rate 2.5") == ([failure(tr("commands.time.rate.already_same", ow, mc.Float(2.5)))], [])
+    line = "time rate 1001"
+    assert time("rate 1001")[0] == [failure(tr("argument.float.big", mc.Float(1000.0), mc.Float(1001.0))), here(line, 10)]
+    said, told = time("resume")
+    assert said == [tr("commands.time.resume", ow)] and told[0][OVERWORLD][2] == 2.5, (said, told)
+    assert time("resume") == ([failure(tr("commands.time.pause.already_running", ow))], [])
+    a.ticks(21)
+    said, told = time("pause")
+    ticks, partial, rate = told[0][OVERWORLD]
+    assert 90000 + 50 <= ticks <= 90000 + 150 and partial in (0.0, 0.5) and rate == 0.0, told
+
+    # ---- suggestions, for the arguments the tree says to ask the server about.
+    assert suggestions(a, "/time set ") == (10, 0, ["minecraft:day", "minecraft:midnight", "minecraft:night", "minecraft:noon"])
+    assert suggestions(a, "/time set n") == (10, 1, ["minecraft:night", "minecraft:noon"])
+    assert suggestions(a, "/time set mid") == (10, 3, ["minecraft:midnight"])
+    assert suggestions(a, "/time set 5") == (11, 0, ["d", "s", "t"])
+    assert suggestions(a, "time query ") == (11, 0, ["gametime", "minecraft:day", "minecraft:early_game", "minecraft:moon",
+                                                    "minecraft:villager_schedule", "time"])
+    assert suggestions(a, "/time of the_end set ") == (0, 0, [])     # the end's clock has no markers
+    assert suggestions(a, "/time of the_end query ") == (23, 0, ["time"])
+    assert suggestions(a, "/time set x", request=77) == (0, 0, [])
+    assert suggestions(b, "/time set ") == (0, 0, [])           # not Bob's command: nothing
+    assert suggestions(b, "/t") == (1, 1, ["teammsg", "tell", "tm"])
+    # One answer a tick, to the latest question.
+    a.send_together(("command_suggestion", varint(1) + mc.mc_str("/time set d")), ("command_suggestion", varint(2) + mc.mc_str("/time set m")))
+    r = a.expect("command_suggestions")
+    assert r.varint() == 2
+    settle(a)
+
+    # ---- someone who joins now is told the clocks as they are.
+    c = srv.client()
+    join(c, "Carol")
+    assert c.time_log[0][1] == {OVERWORLD: (ticks, partial, 0.0), THE_END: (c.time_log[0][1][THE_END][0], 0.0, 1.0)}, c.time_log[0]
+
+
+@test(advance_time="false")
+def time_that_stands_still(srv: Server):
+    """advance-time=false (the game rule advance_time): no clock runs; the level's ticks do."""
+    a = srv.client()
+    join(a, "Alice")
+    a.send("player_loaded")
+    assert a.time_log[0][1] == {OVERWORLD: (0, 0.0, 0.0), THE_END: (0, 0.0, 0.0)}, a.time_log[0]
+    a.ticks(45)
+    assert a.game_time >= a.time_log[0][0] + 20 and all(not named for _, named in a.time_log[1:])   # the level's ticks go on
+    make_op(srv, a, "Alice")
+    assert run_command(a, "time query time")["said"] == [tr("commands.time.query.absolute", "minecraft:overworld", mc.Long(0))]
+    mark = len(a.time_log)
+    assert run_command(a, "time set 500")["said"] == [tr("commands.time.set.absolute", "minecraft:overworld", 500)]
+    assert [named for _, named in a.time_log[mark:] if named] == [{OVERWORLD: (500, 0.0, 0.0)}]
+    a.ticks(25)
+    assert run_command(a, "time query time")["said"] == [tr("commands.time.query.absolute", "minecraft:overworld", mc.Long(500))]
+
+
+@test(random_tick_speed=4096, simulation_distance=2)
+def grass_sleeps_at_night(srv: Server):
+    """Grass spreads where the light above it is 9 or more - the sky's light less what the time
+    of day takes from it: none at noon, eleven levels at midnight."""
+    a = srv.client()
+    join(a, "Alice", view=2)
+    a.send("player_loaded")
+    settle(a)
+    grass, dirt = mc.BLOCK["kGrassBlock"], mc.BLOCK["kDirt"]
+    srv.console("time pause")
+    srv.console("time set midnight")
+    srv.wait_log("to time marker minecraft:midnight")
+    settle(a, ticks=3)
+    assert a.clocks[OVERWORLD] == (18000, 0.0, 0.0), a.clocks
+    # A hole in the grass, at midnight: the dirt at its bottom stays dirt.
+    dig(a, (8, -61, 12), seq=1)
+    assert collect(a, ticks=40) == {(8, -61, 12): AIR}
+    # Dusk, as long as the sky still gives nine levels: at tick 13014 of the day it is 15 - 6.
+    srv.console("time set 13015")
+    srv.wait_log("to 13015 tick")
+    assert collect(a, ticks=40) == {}
+    srv.console("time set 37014")
+    srv.wait_log("to 37014 tick")
+    changes = until(a, lambda ch: ch.get((8, -62, 12)) == grass)
+    assert changes == {(8, -62, 12): grass}, changes
+    # ...and a torch does what the sun does not: light of its own is not the sky's to take.
+    srv.console("time set midnight")
+    srv.wait_log("to time marker minecraft:midnight")
+    dig(a, (11, -61, 12), seq=2)
+    assert collect(a, ticks=40) == {(11, -61, 12): AIR}
+    give(a, 36, I["kTorch"])
+    click(a, (12, -61, 12), 1, seq=3)
+    changes = until(a, lambda ch: ch.get((11, -62, 12)) == grass)
+    assert changes.get((11, -62, 12)) == grass and dirt not in changes.values(), changes
+
+
 def join_many(srv: Server, n: int, view: int, online: bool = False) -> list:
     """n bots joined at once, a thread each; returns their clients in order."""
     errors, clients = [], [None] * n
@@ -3915,6 +4112,14 @@ def the_world_is_kept():
         a.send("move_player_pos_rot", struct.pack(">dddffB", *stood, *looked, 1))
         hers = list(server_menu(a))
         assert any(hers), hers
+        # ...and what time it is: a clock that was set and stopped, the ticks of the world.
+        srv.console("time pause")
+        srv.console("time set 5000")
+        srv.wait_log("to 5000 tick")
+        settle(a, ticks=2)
+        ticks_before = a.game_time
+        assert a.clocks[OVERWORLD] == (5000, 0.0, 0.0) and ticks_before > 30, (a.clocks, ticks_before)
+        the_ends = a.time_log[0][1][THE_END][0] - a.time_log[0][0]
         assert srv.stop() == 0, srv.read_log()
         assert "world saved" in srv.read_log()
         os.unlink(srv.log.name)
@@ -3941,6 +4146,11 @@ def the_world_is_kept():
         ja = join(a, "Alice", view=3)
         assert ja["teleport"]["pos"] == stood and ja["teleport"]["rot"] == looked, ja["teleport"]
         assert a.slots == hers, (a.slots, hers)
+        # The time went on from where it was: the overworld's clock stands where it was stopped,
+        # the end's and the world's own ticks run on from what they had come to.
+        now, clocks = a.time_log[0]
+        assert clocks[OVERWORLD] == (5000, 0.0, 0.0) and clocks[THE_END] == (now + the_ends, 0.0, 1.0), (now, clocks)
+        assert ticks_before <= now <= ticks_before + 400, (ticks_before, now)
         assert sorted(os.listdir(os.path.join(world, "playerstate"))) == sorted(player_file(n) for n in ("Alice", "Bob"))
         # ...and a world is one server's: a second one on it does not start.
         try:
@@ -4094,8 +4304,13 @@ def anvil_world(path: str) -> dict:
     os.makedirs(os.path.join(path, "data", "minecraft"))
     with open(os.path.join(path, "level.dat"), "wb") as f:
         f.write(gzip.compress(anvil_named({"Data": {
-            "DataVersion": version, "LevelName": "by hand", "version": 19133,
+            "DataVersion": version, "LevelName": "by hand", "version": 19133, "Time": mc.Long(123456),
             "spawn": {"dimension": "minecraft:overworld", "pos": mc.IntArray([4, -60, 4]), "yaw": mc.Float(0), "pitch": mc.Float(0)}}})))
+    # ServerClockManager's saved data: a ClockState by clock; what a state leaves out is its default.
+    with open(os.path.join(path, "data", "minecraft", "world_clocks.dat"), "wb") as f:
+        f.write(gzip.compress(anvil_named({"DataVersion": version, "data": {
+            "minecraft:overworld": {"total_ticks": mc.Long(30000), "rate": mc.Float(2.0), "paused": mc.Byte(1)},
+            "minecraft:the_end": {"total_ticks": mc.Long(77)}}})))
     with open(os.path.join(path, "data", "minecraft", "world_gen_settings.dat"), "wb") as f:
         f.write(gzip.compress(anvil_named({"DataVersion": version, "data": {"seed": mc.Long(42), "dimensions": {
             "minecraft:overworld": {"type": "minecraft:overworld", "generator": {"type": "minecraft:flat", "settings": {
@@ -4163,6 +4378,11 @@ def a_vanilla_world_is_imported():
         # The world's own spawn and its own generator: flat, sandstone, desert.
         assert j["teleport"]["pos"] == (4.5, -60.0, 4.5), j["teleport"]["pos"]
         assert j["login"]["is_flat"] is True
+        # ...and its own time: the level's ticks go on from where they were, the end's clock with
+        # them, and the overworld's - which was stopped - stands.
+        now, clocks = c.time_log[0]
+        assert 123456 <= now <= 123456 + 400, now
+        assert clocks == {OVERWORLD: (30000, 0.0, 0.0), THE_END: (77 + now - 123456, 0.0, 1.0)}, (now, clocks)
         desert, jungle = (mc.load_registry("worldgen_biome").index(f"minecraft:{b}") for b in ("desert", "jungle"))
         sand = mc.BLOCK["kSandstone"]
         beyond = c.chunks[(-3, 1)]                       # never in the vanilla world: the generator's

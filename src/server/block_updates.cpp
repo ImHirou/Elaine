@@ -29,8 +29,8 @@
 //     containers), redstone wire's updateIndirectNeighbourShapes: there are none;
 //   * fluid ticks (a second LevelTicks, which runs after the blocks'): a waterlogged block
 //     does not ask for one;
-//   * the time of day: a spreading block reads the sky's light as at noon (Level.skyDarken);
-//   * tickPrecipitation and tickThunder (ice, snow layers, lightning): there is no weather;
+//   * tickPrecipitation and tickThunder (ice, snow layers, lightning): there is no weather - nor
+//     what rain takes from the sky's light (Level.skyDarken follows the time of day alone);
 //   * game rules: random-tick-speed is a setting, blocks and entities always drop.
 #include "base/log.hpp"
 #include "server/game.hpp"
@@ -473,12 +473,13 @@ void Game::random_tick(BlockState state, BlockPos pos) {
 }
 
 // LevelLightEngine.getRawBrightness(pos, Level.getSkyDarken()): the brighter of the block's
-// light and the sky's. It is always day (there is no time yet): the sky is not darkened.
+// light and the sky's - the sky's less what the time of day takes from it (sky_darken_: none by
+// day, eleven levels in the middle of the night; there is no weather to take more).
 u32 Game::raw_brightness(BlockPos pos) const {
     const world::LightEngine& light = world_.light();
-    const u32 block = light.light(world::LightEngine::kBlock, pos.x, pos.y, pos.z);
-    const u32 sky = world_.has_skylight() ? light.light(world::LightEngine::kSky, pos.x, pos.y, pos.z) : 0u;
-    return std::max(block, sky);
+    const i32 block = static_cast<i32>(light.light(world::LightEngine::kBlock, pos.x, pos.y, pos.z));
+    const i32 sky = world_.has_skylight() ? static_cast<i32>(light.light(world::LightEngine::kSky, pos.x, pos.y, pos.z)) : 0;
+    return static_cast<u32>(std::max(block, sky - sky_darken_));
 }
 
 // SpreadingSnowyBlock.randomTick (grass, mycelium): soil again under what smothers it; in the

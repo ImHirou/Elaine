@@ -5,7 +5,8 @@
 //     session.lock                     held (fcntl) while a server runs the world: vanilla's file, and
 //                                      vanilla's kind of lock - neither takes a world the other has
 //     world.json                       what this server knows of the world: the format and data
-//                                      version it was saved by, its generator, its spawn
+//                                      version it was saved by, its generator, its spawn - and
+//                                      what time it is: written again with every autosave
 //     chunks/minecraft/overworld/      region files of this server's own format (world/region.hpp)
 //     playerstate/<uuid>.bin           what is kept of a player (server/player_data.hpp)
 //
@@ -21,6 +22,7 @@
 #include <vector>
 
 #include "base/workers.hpp"
+#include "server/clock.hpp"
 #include "server/settings.hpp"
 #include "world/generator.hpp"
 
@@ -40,6 +42,8 @@ struct WorldInfo {
     bool has_spawn = false;
     i32 spawn[3] = {0, 0, 0};
     bool imported = false;  // made from a vanilla world
+    // What time it was when the world was last saved: its count of ticks and its clocks.
+    WorldTime time;
     int lock_fd = -1;
 
     WorldInfo() = default;
@@ -47,6 +51,9 @@ struct WorldInfo {
     WorldInfo& operator=(const WorldInfo&) = delete;
     ~WorldInfo();
 };
+
+// world.json as text: what `info` says of the world, at the time `now`.
+std::string world_json(const WorldInfo& info, const WorldTime& now);
 
 // Open the world `s.level_name` names: lock it, read what is known of it - or import the vanilla
 // world that is there, or begin a new one. False with `err` when the world cannot be used: it is

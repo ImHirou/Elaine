@@ -9,10 +9,13 @@
 #include <cstdlib>
 #include <deque>
 
+#include <cmath>
+
 #include "base/log.hpp"
 #include "proto/gen/current.hpp"
 #include "proto/identifier.hpp"
 #include "proto/wire.hpp"
+#include "server/clock.hpp"
 
 #include PROTO_GEN_COMMAND_DATA_HPP
 
@@ -189,9 +192,42 @@ constexpr TypeName kTypes[] = {
     {"summonable", Type::kSummonable},
     {"message", Type::kMessage},
     {"anchor", Type::kAnchor},
+    {"time", Type::kTime},
+    {"clock", Type::kClock},
+    {"timeline", Type::kTimeline},
+    {"time_marker", Type::kTimeMarker},
 };
 
-bool numeric(Type t) { return t == Type::kInt || t == Type::kFloat || t == Type::kDouble; }
+// The types that take bounds: the numbers, and a time its least.
+bool numeric(Type t) { return t == Type::kInt || t == Type::kFloat || t == Type::kDouble || t == Type::kTime; }
+
+// Math.round(float): the nearest int, a half upwards; what no int holds is the nearest that does.
+i32 java_round(float v) {
+    if (v != v) return 0;
+    const double r = std::floor(static_cast<double>(v) + 0.5);
+    return r <= -2147483648.0 ? INT32_MIN : r >= 2147483647.0 ? INT32_MAX : static_cast<i32>(r);
+}
+
+// TimeArgument.UNITS: how many ticks a unit is; 0 for what is none.
+i32 time_unit(std::string_view unit) { return unit == "d" ? 24000 : unit == "s" ? 20 : unit == "t" || unit.empty() ? 1 : 0; }
+
+// SharedSuggestionProvider.matchesSubStr: `input` begins with `pattern`, or a part of it after a
+// '.', '_' or '/' does.
+bool matches_sub_str(std::string_view pattern, std::string_view input) {
+    for (usize at = 0;;) {
+        if (input.substr(at).starts_with(pattern)) return true;
+        at = input.find_first_of("._/", at);
+        if (at == std::string_view::npos) return false;
+        ++at;
+    }
+}
+
+std::string lower(std::string_view s) {  // toLowerCase(Locale.ROOT), for what an identifier can be made of
+    std::string out(s);
+    for (char& c : out)
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + 32);
+    return out;
+}
 
 }  // namespace
 
@@ -498,6 +534,38 @@ bool Registry::parse_argument(const Node& n, std::string_view line, u32& cursor,
             out.integer = static_cast<i32>(type);
             break;
         }
+        case Type::kTime: {  // TimeArgument.parse: a float, a unit, and the ticks they come to
+            double value = 0;
+            if (!read_double(r, value, err, true)) return false;
+            const i32 factor = time_unit(read_unquoted(r));
+            if (factor == 0) {  // (createWithContext: the cursor stays behind the unit)
+                err = error_at(r, Text::translatable("argument.time.invalid_unit"));
+                return false;
+            }
+            const i32 ticks = java_round(static_cast<float>(value) * static_cast<float>(factor));
+            const i32 minimum = n.bounded_min ? static_cast<i32>(n.min) : 0;
+            if (ticks < minimum) {
+                err = error_at(r, Text::translatable("argument.time.tick_count_too_low").arg(minimum).arg(ticks));
+                return false;
+            }
+            out.integer = ticks;
+            break;
+        }
+        case Type::kClock:
+        case Type::kTimeline: {  // ResourceArgument.parse over minecraft:world_clock / minecraft:timeline
+            if (!read_identifier(r, out.text, err)) return false;
+            const bool clock = n.type == Type::kClock;
+            const u32 id = clock ? find_clock(out.text) : find_timeline(out.text);
+            if (id == kNone) {
+                err = error_at(r, Text::translatable("argument.resource.not_found")
+                                      .arg(out.text)
+                                      .arg(clock ? "minecraft:world_clock" : "minecraft:timeline"));
+                return false;
+            }
+            out.integer = static_cast<i32>(id);
+            break;
+        }
+        case Type::kTimeMarker: ok = read_identifier(r, out.text, err); break;
         case Type::kAnchor: {  // EntityAnchorArgument.parse
             const u32 start = r.at;
             const std::string_view name = read_unquoted(r);
@@ -554,7 +622,7 @@ void Registry::parse_nodes(u32 node, std::string_view line, u32 cursor, u8 level
         u32 at = cursor;
         Error err;
         bool ok = true;
-        Parsed::Step step{c, false, {}};
+        Parsed::Step step{c, false, {}, cursor, cursor};
         if (n.kind == Node::kLiteral) {
             at = word_end;  // LiteralCommandNode.parse: the word, then a space or the end
         } else {
@@ -569,6 +637,7 @@ void Registry::parse_nodes(u32 node, std::string_view line, u32 cursor, u8 level
             errors.push_back(std::move(err));
             continue;
         }
+        step.end = at;
         reading.steps.push_back(std::move(step));
         reading.run = n.run;  // withCommand: also when the node has none
         reading.user = n.user;
@@ -694,7 +763,9 @@ void Registry::encode_tree(u8 level, base::ByteBuf& out) const {
         const std::string_view suggestions = n.kind != Node::kArgument     ? std::string_view()
                                              : n.type == Type::kSound      ? "minecraft:available_sounds"
                                              : n.type == Type::kSummonable ? "minecraft:summonable_entities"
-                                                                           : std::string_view();
+                                             : n.type == Type::kTimeline || n.type == Type::kTimeMarker
+                                                 ? "minecraft:ask_server"  // (Registry::suggest answers)
+                                                 : std::string_view();
         if (!suggestions.empty()) flags |= 16;  // FLAG_CUSTOM_SUGGESTIONS
         if (n.level > kAll) flags |= 32;        // FLAG_RESTRICTED: not for a source without permissions
         u32 children = 0;
@@ -748,11 +819,103 @@ void Registry::encode_tree(u8 level, base::ByteBuf& out) const {
                 case Type::kSummonable: p = put_str(put_varint(p, argument::kResource), "minecraft:entity_type"); break;
                 case Type::kMessage: p = put_varint(p, argument::kMessage); break;
                 case Type::kAnchor: p = put_varint(p, argument::kEntityAnchor); break;
+                // TimeArgument.Info: the least number of ticks, always there
+                case Type::kTime:
+                    p = put_be32(put_varint(p, argument::kTime), static_cast<u32>(n.bounded_min ? static_cast<i32>(n.min) : 0));
+                    break;
+                case Type::kClock: p = put_str(put_varint(p, argument::kResource), "minecraft:world_clock"); break;
+                case Type::kTimeline: p = put_str(put_varint(p, argument::kResource), "minecraft:timeline"); break;
+                case Type::kTimeMarker: p = put_varint(p, argument::kResourceLocation); break;
             }
             return suggestions.empty() ? p : put_str(p, suggestions);
         });
     }
     put(5, [&](u8* p) { return put_varint(p, 0); });  // rootIndex
+}
+
+// ---------------------------------------------------------------------------- suggestions
+
+bool suggests_resource(std::string_view typed, std::string_view id) {
+    if (typed.find(':') != std::string_view::npos) return matches_sub_str(typed, id);
+    const usize colon = id.find(':');
+    return matches_sub_str(typed, id.substr(0, colon)) || matches_sub_str(typed, id.substr(colon + 1));
+}
+
+// CommandDispatcher.getCompletionSuggestions for the end of the line: the node the line's last
+// word would be a child of (CommandContextBuilder.findSuggestionContext), what each of its
+// children offers for that word, and all of it as one list (Suggestions.merge).
+void Registry::suggest(std::string_view line, u8 level, Ask ask, void* ctx, Suggestions& out) const {
+    Reading begin, got;
+    parse_nodes(0, line, 0, level, begin, got);
+    const std::vector<Parsed::Step>& steps = got.steps;
+    const u32 cursor = static_cast<u32>(line.size());
+    u32 parent = 0, start = 0;
+    usize before = 0;  // how many steps stand before the word
+    if (!steps.empty() && steps.back().end < cursor) {
+        parent = steps.back().node;
+        start = steps.back().end + 1;
+        before = steps.size();
+    } else {
+        for (usize i = 0; i < steps.size(); ++i) {
+            if (steps[i].start <= cursor && cursor <= steps[i].end) {
+                start = steps[i].start;
+                before = i;
+                break;
+            }
+            parent = steps[i].node;
+            before = i + 1;
+        }
+    }
+    start = std::min(start, cursor);
+    if (nodes_[parent].redirect != kNone) parent = nodes_[parent].redirect;
+    const std::vector<Parsed::Step> context(steps.begin(), steps.begin() + static_cast<std::ptrdiff_t>(before));
+    const std::string_view remaining = line.substr(start);
+    const std::string typed = lower(remaining);
+
+    // One suggestion: what would stand in line[from, cursor).
+    struct One {
+        u32 from;
+        std::string text;
+    };
+    std::vector<One> found;
+    const auto offer = [&](u32 from, std::string_view text) {  // SuggestionsBuilder.suggest: not what is there already
+        if (text != line.substr(from)) found.push_back({from, std::string(text)});
+    };
+    std::vector<std::string> asked;
+    for (const u32 c : nodes_[parent].children) {
+        const Node& n = nodes_[c];
+        if (n.level > level) continue;
+        if (n.kind == Node::kLiteral) {  // LiteralCommandNode.listSuggestions
+            if (lower(n.name).starts_with(typed)) offer(start, n.name);
+        } else if (n.type == Type::kTime) {  // TimeArgument.listSuggestions: the units, behind a number
+            Reader r{line, start};
+            double value;
+            Error ignored;
+            if (!read_double(r, value, ignored, true)) continue;
+            const std::string unit = lower(line.substr(r.at));
+            for (const std::string_view u : {"d", "s", "t", ""})
+                if (matches_sub_str(unit, u)) offer(r.at, u);
+        } else if (n.type == Type::kTimeline || n.type == Type::kTimeMarker) {  // SharedSuggestionProvider.suggestResource
+            asked.clear();
+            if (ask) ask(ctx, {n.type, context, typed}, asked);
+            for (const std::string& id : asked) offer(start, id);
+        }
+    }
+    out = {};
+    if (found.empty()) return;  // Suggestions.EMPTY
+    // Suggestions.create: every text stretched over the range they cover together, each once,
+    // in order (compareToIgnoreCase).
+    u32 from = cursor;
+    for (const One& s : found) from = std::min(from, s.from);
+    out.start = from;
+    out.length = cursor - from;
+    for (const One& s : found) out.texts.push_back(std::string(line.substr(from, s.from - from)) + s.text);
+    std::sort(out.texts.begin(), out.texts.end(), [](const std::string& a, const std::string& b) {
+        const std::string x = lower(a), y = lower(b);
+        return x != y ? x < y : a < b;
+    });
+    out.texts.erase(std::unique(out.texts.begin(), out.texts.end()), out.texts.end());
+    if (out.texts.size() > 1000) out.texts.resize(1000);  // ServerCommandSuggestionsProvider.MAX_COMMAND_SUGGESTIONS
 }
 
 // ---------------------------------------------------------------------------- usage

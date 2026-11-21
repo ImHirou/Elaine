@@ -145,6 +145,15 @@ class Reader:
                 return v
         raise AssertionError("varint too long")
 
+    def varlong(self) -> int:
+        v = 0
+        for shift in range(0, 70, 7):
+            b = self.take(1)[0]
+            v |= (b & 0x7F) << shift
+            if not b & 0x80:
+                return v - (1 << 64) if v >> 63 else v
+        raise AssertionError("varlong too long")
+
     def u8(self) -> int: return self.take(1)[0]
     def i8(self) -> int: return struct.unpack(">b", self.take(1))[0]
     def u32(self) -> int: return struct.unpack(">I", self.take(4))[0]
@@ -430,6 +439,13 @@ class Client:
         # ("player", {...}) and ("disguised", {...}) in arrival order. chat_index is the client's
         # own count of the player_chat packets it was sent (ClientPacketListener.nextChatIndex):
         # the index it expects the next one to carry.
+        # The time as the server has said it (set_time), kept by recv(): the level's count of
+        # ticks, and per world clock (its id in minecraft:world_clock) the ticks it stood at, the
+        # part of a tick it was into and its rate - as of the packet that last named it. A client
+        # runs its clocks on by itself between packets; this is only what it was told.
+        self.game_time = None
+        self.clocks: dict[int, tuple] = {}
+        self.time_log: list[tuple] = []        # (game time, {clock: (ticks, partial tick, rate)}) in arrival order
         self.chat: list[tuple] = []
         self.chat_index = 0
         self._chat_read = 0                    # recv_pending_chat(): how far self.chat has been handed out
@@ -483,8 +499,24 @@ class Client:
                 self.apply_chunk_packet(name, r)
             elif name in CHAT_PACKETS:
                 self.apply_chat_packet(name, r)
+            elif name == "set_time":
+                self.apply_time_packet(r)
             elif name not in self.ignore:
                 return name, r
+
+    def apply_time_packet(self, r: Reader) -> None:
+        """handleSetTime: the game time, and the clocks the packet has news of."""
+        game_time = r.i64()
+        clocks = {}
+        for _ in range(r.varint()):
+            clock = r.varint()
+            assert clock not in clocks, "a clock twice in one set_time"
+            clocks[clock] = (r.varlong(), r.f32(), r.f32())
+        r.done()
+        assert self.game_time is None or game_time >= self.game_time, "the game time went back"
+        self.game_time = game_time
+        self.clocks.update(clocks)
+        self.time_log.append((game_time, clocks))
 
     def apply_chat_packet(self, name: str, r: Reader) -> None:
         """handleSystemChat / handlePlayerChat / handleDisguisedChat, as far as a client checks
@@ -612,6 +644,8 @@ class Client:
                     self.apply_chunk_packet(name, r)
                 elif name in CHAT_PACKETS:
                     self.apply_chat_packet(name, r)
+                elif name == "set_time":
+                    self.apply_time_packet(r)
                 elif name == "keep_alive":
                     self.send("keep_alive", r.take(8))
         finally:
@@ -1350,6 +1384,8 @@ def parse_commands(r: Reader) -> dict:
                 props = {"amount": "single" if mask & 1 else "multiple", "type": "players" if mask & 2 else "entities"}
             elif parser == "kResource":
                 props["registry"] = r.str()
+            elif parser == "kTime":     # TimeArgument.Info: the least number of ticks
+                props["min"] = r.i32()
             node["properties"] = props
             if flags & 16:
                 node["suggestions"] = r.str()

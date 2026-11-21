@@ -16,7 +16,9 @@ from the console - destroying, sand into the air and forty blocks up, a torch in
 the block under it, a lamp beside a block of redstone; sand on a stone that goes, sand and
 concrete powder and gravel placed in the air, gravel onto a torch. Then the random ticks, at 4096 a
 section instead of 3: grass taking bare dirt and dying under a stone, copper weathering,
-amethyst budding, nylium dying. Last, TNT on five sides of a block of redstone.
+amethyst budding, nylium dying - and grass by the time of day: the clock is stopped and set from the
+console to either side of the two ticks of the day at which the sky gives grass light enough to
+spread. Last, TNT on five sides of a block of redstone.
 
 `vanilla` starts the reference server under the rules in AGENTS.md (from .cache/vanilla-server/,
 the cached jar, Java 25; gamemode=creative, level-type=flat, spawn-protection=0,
@@ -284,6 +286,24 @@ def record(port: int, out_path: str, name_a: str, name_b: str, random_ticks=None
         step("B places crimson nylium and a stone on it: netherrack", lambda: (b.select(4), b.use(at(1, 0, 3)), b.select(0), b.use(at(1, 1, 3))),
              ticks=400, until=lambda blocks: blocks.get(at(1, 1, 3)) == mc.BLOCK["kNetherrack"], about=[at(1, 1, 3), at(1, 2, 3)])
         step("and then it is quiet", ticks=30, about=untouched + buds + [at(5, 1, 0), at(1, 1, 3)])
+        if console:
+            # The time of day. Grass spreads where the light above it is nine or more - the sky's
+            # fifteen less what the hour takes: six levels at tick 13014 of the day, seven from
+            # 13015 on; seven until 22985 before dawn, six from 22986. The clock stands still
+            # for it and is put where each step wants it, a day further on each time.
+            console("time pause")
+            idle(2)
+            step("midnight: B digs a hole in the grass, and the dirt under it stays dirt",
+                 lambda: (console("time set midnight"), b.dig(at(2, 0, 4))), ticks=80, about=[at(2, 0, 4), at(2, -1, 4)])
+            step("dusk, tick 13015 of the day: still dirt", lambda: console("time set 37015"), ticks=80, about=[at(2, -1, 4)])
+            step("dusk, tick 13014 of the day: it is taken", lambda: console("time set 61014"), ticks=400,
+                 until=lambda blocks: blocks.get(at(2, -1, 4)) == grass, about=[at(2, -1, 4)])
+            step("dawn, tick 22985 of the day: B digs another hole, and the dirt stays dirt",
+                 lambda: (console("time set 94985"), b.dig(at(2, 0, 6))), ticks=80, about=[at(2, 0, 6), at(2, -1, 6)])
+            step("dawn, tick 22986 of the day: it is taken", lambda: console("time set 118986"), ticks=400,
+                 until=lambda blocks: blocks.get(at(2, -1, 6)) == grass, about=[at(2, -1, 6)])
+            console("time set 126000")     # (the morning after, for what follows)
+            console("time resume")
         random_ticks(False)
         idle(4)
 

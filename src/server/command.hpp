@@ -82,6 +82,10 @@ enum class Type : u8 {
     kSummonable,      // summonable: an entity type /summon takes
     kMessage,         // message: the rest of the line, as chat
     kAnchor,          // anchor: feet or eyes
+    kTime,            // time, time(min): a number of ticks - "10", "10t", "3s", "1.5d"
+    kClock,           // clock: a world clock (minecraft:world_clock)
+    kTimeline,        // timeline: a timeline (minecraft:timeline); the server suggests them
+    kTimeMarker,      // time_marker: an identifier; the server suggests a clock's time markers
 };
 
 // "~1": relative to where the source is; "^1": along where it looks (all three or none).
@@ -213,9 +217,11 @@ struct Invocation {
     bool has(std::string_view name) const { return find(name) != nullptr; }  // a literal or an argument is there
     // The first of "a|b|c" that the line holds, as its index; -1 for none.
     i32 which(std::string_view alternatives) const;
+    // The argument of that name (a literal may be called the same: "time query time").
     const Value* value(std::string_view name) const {
-        const Step* s = find(name);
-        return s ? s->value : nullptr;
+        for (const Step& s : steps)
+            if (s.value && s.name == name) return s.value;
+        return nullptr;
     }
     // By name; `or_else` for an optional argument that was left out.
     i32 integer(std::string_view name, i32 or_else = 0) const {
@@ -260,6 +266,7 @@ struct Parsed {
         u32 node;
         bool has_value;
         Value value;
+        u32 start = 0, end = 0;  // where the node stands in the line (StringRange)
     };
     std::vector<Step> steps;
     u32 last_node = 0;  // the node the reading ended at, the root if none was read
@@ -297,6 +304,24 @@ class Registry {
 
     std::string_view node_name(u32 node) const { return nodes_[node].name; }
 
+    // ---- suggestions (CommandDispatcher.getCompletionSuggestions). A client completes most of
+    // a line by itself; for the arguments the tree marks minecraft:ask_server it asks, and is
+    // answered with what every node that could stand at the end of the line offers.
+    // What such an argument is asked: its type, the steps of the line before it, and what is
+    // typed where it would stand (lower case).
+    struct Asked {
+        Type type;
+        const std::vector<Parsed::Step>& steps;
+        std::string_view typed;
+    };
+    // Appends the identifiers the argument offers ("minecraft:day").
+    using Ask = void (*)(void* ctx, const Asked& asked, std::vector<std::string>& out);
+    struct Suggestions {
+        u32 start = 0, length = 0;       // the part of the line every text would replace, in bytes
+        std::vector<std::string> texts;  // sorted, each one once
+    };
+    void suggest(std::string_view line, u8 level, Ask ask, void* ctx, Suggestions& out) const;
+
   private:
     struct Node {
         enum Kind : u8 { kRoot, kLiteral, kArgument } kind = kRoot;
@@ -333,6 +358,11 @@ bool parse_coordinates(std::string_view line, u32& cursor, Type type, Coordinate
 bool parse_selector(std::string_view line, u32& cursor, Type type, bool allow_selectors, Selector& out, Error& err);
 bool parse_block(std::string_view line, u32& cursor, bool predicate, BlockArg& out, Error& err);
 bool parse_item(std::string_view line, u32& cursor, bool predicate, ItemArg& out, Error& err);
+
+// SharedSuggestionProvider.filterResources: does what is typed (lower case) lead to this
+// identifier? With a ':' in it, it must begin the identifier or a part of it (after '.', '_' or
+// '/'); without one, the namespace or the path.
+bool suggests_resource(std::string_view typed, std::string_view id);
 
 // The members of a tag of the registry ("minecraft:block", "#minecraft:logs" without the '#'),
 // as the ids the client was sent (update_tags). False if there is no such tag.

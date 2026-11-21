@@ -173,6 +173,8 @@ add_library(core STATIC
   src/server/physics.cpp
   src/server/players.cpp
   src/server/chat.cpp
+  src/server/clock.cpp
+  src/server/time.cpp
   src/server/command.cpp
   src/server/command_args.cpp
   src/server/commands.cpp
@@ -214,6 +216,7 @@ if(MC_TESTS)
       tests/unit/container_test.cpp
       tests/unit/command_test.cpp
       tests/unit/chat_test.cpp
+      tests/unit/time_test.cpp
     )
     target_link_libraries(unit_tests PRIVATE core GTest::gtest_main OpenSSL::Crypto)
     mc_needs_generated(unit_tests)

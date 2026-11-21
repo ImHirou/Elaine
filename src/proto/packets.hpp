@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <span>
+#include <string>
 #include <string_view>
 
 #include "proto/entity_codec.hpp"
@@ -254,6 +255,56 @@ struct GameEvent {
     float param;
     usize bound() const { return 5; }
     u8* encode(u8* p) const { return put_f32(put_u8(p, event), param); }
+};
+
+// set_time. 26.x: no day time any more - the level's count of ticks, then the world clocks the
+// sender has news of: a map of clock (its id in minecraft:world_clock) to ClockNetworkState -
+// its ticks (a VarLong), the part of a tick it is into, and the rate it runs at, 0 for one that
+// stands still. A client advances every clock it knows by itself (by the game time that passed,
+// times the rate), so a packet without clocks keeps them all in step.
+struct SetTime {
+    static constexpr u32 kId = ids::play::cb::kSetTime;
+    struct Clock {
+        u32 id;
+        i64 total_ticks;
+        float partial_tick;
+        float rate;
+    };
+    i64 game_time;
+    std::span<const Clock> clocks;
+    usize bound() const { return 8 + kVarIntMaxBytes + clocks.size() * (kVarIntMaxBytes + kVarLongMaxBytes + 8); }
+    u8* encode(u8* p) const {
+        p = put_be64(p, static_cast<u64>(game_time));
+        p = put_varint(p, static_cast<u32>(clocks.size()));
+        for (const Clock& c : clocks) {
+            p = put_varint(p, c.id);
+            p = put_varlong(p, static_cast<u64>(c.total_ticks));
+            p = put_f32(p, c.partial_tick);
+            p = put_f32(p, c.rate);
+        }
+        return p;
+    }
+};
+
+// command_suggestions: the answer to command_suggestion `id` - what may stand in place of
+// `length` chars of the line from `start` on (chars as Java counts them; the line as the client
+// sent it, with its slash). An entry is a text and an optional tooltip, which nothing here has.
+struct CommandSuggestions {
+    static constexpr u32 kId = ids::play::cb::kCommandSuggestions;
+    u32 id;
+    u32 start, length;
+    std::span<const std::string> texts;
+    usize bound() const {
+        usize n = 4 * kVarIntMaxBytes;
+        for (const std::string& t : texts) n += str_bound(t) + 1;
+        return n;
+    }
+    u8* encode(u8* p) const {
+        p = put_varint(put_varint(put_varint(p, id), start), length);
+        p = put_varint(p, static_cast<u32>(texts.size()));
+        for (const std::string& t : texts) p = put_bool(put_str(p, t), false);
+        return p;
+    }
 };
 
 struct SetChunkCacheCenter {
@@ -1300,6 +1351,22 @@ struct ChatCommand {
             r.bytes(256);
         }
         c.last_seen = LastSeenUpdate::decode(r);
+        return c;
+    }
+};
+
+// command_suggestion: the client asks what could come next in a line it is typing - for the
+// arguments whose suggestions it was told to ask the server for (minecraft:ask_server). The id
+// comes back with the answer; the line is as typed, with its slash, at most 32500 chars.
+struct CommandSuggestion {
+    static constexpr u32 kMaxChars = 32500;
+    u32 id;
+    std::string_view command;
+    static CommandSuggestion decode(Reader& r) {
+        CommandSuggestion c;
+        c.id = r.varint();
+        c.command = r.str(kMaxChars * 3);
+        if (utf16_length(c.command) > kMaxChars) r.ok = false;
         return c;
     }
 };

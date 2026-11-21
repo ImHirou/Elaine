@@ -90,6 +90,8 @@ bool set_key(Settings& s, std::string_view k, std::string_view v, std::string& e
         ok = parse_num(v, s.max_chained_neighbor_updates, -(1 << 30), 1 << 30);
     else if (k == "random-tick-speed")
         ok = parse_num(v, s.random_tick_speed, 0, 4096);
+    else if (k == "advance-time")
+        ok = parse_bool(v, s.advance_time);
     else
         return true;  // unknown keys (vanilla has many we do not implement yet) are ignored
     if (!ok) err = "invalid value for " + std::string(k) + ": '" + std::string(v) + "'";

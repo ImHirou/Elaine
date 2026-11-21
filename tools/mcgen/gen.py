@@ -12,6 +12,7 @@ Emitted files (all deterministic; none is in git - their lock is, see "the lock"
   items.hpp           item id per item, by name; data component type ids
   dimension_types.hpp height / skylight per dimension type, in network id order
   chat_types.hpp      the translation and its arguments for each chat type, in network id order
+  timelines.hpp       world clocks, timelines and their time markers; the overworld's sky light by time
   entities.hpp        entity type ids + tracking parameters, entity-data serializer / accessor ids, poses
   block_data.hpp      HOT per-state tables (#embed of state_*.bin) + the light occlusion matrix
   state_*.bin         one table per file, indexed by block state id
@@ -1183,6 +1184,98 @@ struct Decoration {
     return "".join(out)
 
 
+def emit_timelines(v: dict, regs: list[tuple[str, list[str]]], vanilla: "VanillaData") -> str:
+    """World clocks and the timelines that run on them: what `/time` names, and how dark the
+    overworld's sky is at a clock's time (Level.updateSkyBrightness)."""
+    by_path = dict(regs)
+    clocks, timelines, dims = by_path["world_clock"], by_path["timeline"], by_path["dimension_type"]
+
+    def read(kind: str, name: str) -> dict:
+        return json.loads(vanilla.zip.read(f"data/minecraft/{kind}/{name.split(':', 1)[1]}.json"))
+
+    out = [HEADER.format(id=v["id"], proto=v["protocol_version"]), """
+#include <string_view>
+
+// World clocks (reg::world_clock) and timelines (reg::timeline), in network id order. From
+// data/minecraft/timeline/*.json and dimension_type/*.json in the vanilla datapack.
+namespace proto::gen::timeline {
+
+inline constexpr int kNoClock = -1;
+
+struct Timeline {
+    unsigned clock;  // the world clock it runs on
+    int period;      // period_ticks; 0: it does not repeat
+};
+
+// ClockTimeMarker: a named moment of a timeline - of its clock, that is.
+struct Marker {
+    std::string_view name;
+    unsigned clock;
+    int ticks;
+    int period;             // its timeline's; 0: none
+    bool show_in_commands;  // offered by `/time set`
+};
+
+struct Keyframe {
+    int ticks;
+    float value;
+};
+
+"""]
+    rows, markers, seen = [], [], set()
+    for name in timelines:
+        j = read("timeline", name)
+        if with_ns(j["clock"]) not in clocks:
+            die(f"{name}: clock {j['clock']} is no world clock")
+        clock, period = clocks.index(with_ns(j["clock"])), j.get("period_ticks", 0)
+        rows.append(f"    {{{clock}, {period}}},  // {name}\n")
+        for marker, info in j.get("time_markers", {}).items():
+            ticks, shown = (info, False) if isinstance(info, int) else (info["ticks"], info.get("show_in_commands", False))
+            if (clock, marker) in seen:      # Timeline.validateRegistry
+                die(f"{name}: time marker {marker} is defined twice for one clock")
+            seen.add((clock, marker))
+            markers.append(f'    {{"{with_ns(marker)}", {clock}, {ticks}, {period}, {str(shown).lower()}}},\n')
+    out.append(f"inline constexpr Timeline kTimelines[{len(rows)}] = {{\n" + "".join(rows) + "};\n\n")
+    out.append(f"inline constexpr Marker kMarkers[{len(markers)}] = {{\n" + "".join(markers) + "};\n\n")
+
+    # DimensionType.defaultClock: the clock `/time` means in a dimension.
+    out.append(f"// DimensionType.defaultClock, by reg::dimension_type.\ninline constexpr int kDefaultClock[{len(dims)}] = {{\n")
+    for name in dims:
+        clock = read("dimension_type", name).get("default_clock")
+        out.append(f"    {clocks.index(with_ns(clock)) if clock else 'kNoClock'},  // {name}\n")
+    out.append("};\n\n")
+
+    # gameplay/sky_light_level in the overworld: the attribute's own default, times what the
+    # timelines of the dimension make of it. The server computes Level.skyDarken from it, so
+    # everything about it that is data is checked to be what the C++ expects.
+    attribute = "minecraft:gameplay/sky_light_level"
+    overworld = read("dimension_type", "minecraft:overworld")
+    if attribute in overworld.get("attributes", {}):
+        die(f"the overworld sets {attribute} itself now: teach emit_timelines and server/clock.cpp")
+
+    def tagged(tag: str) -> list[str]:
+        values = json.loads(vanilla.zip.read(f"data/minecraft/tags/timeline/{tag.split(':', 1)[1]}.json"))["values"]
+        return [n for v_ in values for n in (tagged(with_ns(v_[1:])) if v_.startswith("#") else [with_ns(v_)])]
+
+    which = overworld["timelines"]
+    in_overworld = tagged(with_ns(which[1:])) if which.startswith("#") else [with_ns(which)]
+    having = [n for n in in_overworld if attribute in read("timeline", n).get("tracks", {})]
+    if len(having) != 1:
+        die(f"{attribute}: tracks in {having}, expected exactly one timeline of the overworld's")
+    track = read("timeline", having[0])["tracks"][attribute]
+    if track.get("modifier") != "multiply" or track.get("ease", "linear") != "linear" or len(track["keyframes"]) < 2:
+        die(f"{attribute} in {having[0]}: {track} - no longer a linear track that multiplies")
+    if not read("timeline", having[0]).get("period_ticks"):
+        die(f"{having[0]} has no period")
+    keys = track["keyframes"]
+    out.append(f"// {attribute} of {having[0]}: a factor (modifier \"multiply\"), linear between keyframes.\n"
+               f"inline constexpr unsigned kSkyLightTimeline = {timelines.index(having[0])};\n"
+               f"inline constexpr Keyframe kSkyLight[{len(keys)}] = {{\n")
+    out.extend(f"    {{{k['ticks']}, {k['value']!r}f}},\n" for k in keys)
+    out.append("};\n\n}  // namespace proto::gen::timeline\n")
+    return "".join(out)
+
+
 # ----------------------------------------------------------------------------- entities
 
 def pseudo_of(version: str, classes: list[str], method_rx: str | None) -> str:
@@ -1437,6 +1530,7 @@ def generate_into(version: str, out: Path, reports: Path | None = None) -> dict:
     save("blobs.hpp", emit_blobs(v))
     save("dimension_types.hpp", emit_dimension_types(v, regs, data))
     save("chat_types.hpp", emit_chat_types(v, regs, data))
+    save("timelines.hpp", emit_timelines(v, regs, data))
 
     tag_tables: list[tuple[str, dict[str, list[int]]]] = []
     stats = {"registries": len(regs), "entries": sum(len(e) for _, e in regs), "tags": 0, "packets": packets_src}

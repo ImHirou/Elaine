@@ -43,6 +43,7 @@ struct Settings {
     // before the rest are skipped (CollectingNeighborUpdater); negative: any number.
     i32 max_chained_neighbor_updates = 1000000;
     u32 random_tick_speed = 3;  // random-tick-speed: the game rule randomTickSpeed, until there are game rules
+    bool advance_time = true;   // advance-time: the game rule advance_time - do the world's clocks run?
 };
 
 // Missing file is not an error (defaults apply). Returns false + err on a malformed value.

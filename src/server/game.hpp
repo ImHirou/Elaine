@@ -339,6 +339,16 @@ class Game {
     void move_in_push_grid(u32 slot, double x, double z);
     static float random_float_of(void* game) { return static_cast<Game*>(game)->random_float(); }
 
+    // ---- the world's clocks (server/time.cpp)
+    void tick_clocks();
+    void send_clocks(u32 pi);
+    void clock_changed(u32 clock);
+    proto::cb::SetTime::Clock clock_state(u32 clock) const;
+    void save_time();
+    void on_command_suggestion(u32 pi, const proto::sb::CommandSuggestion& c);
+    void answer_suggestions();
+    static void ask_server(void* game, const cmd::Registry::Asked& asked, std::vector<std::string>& out);
+
     // ---- chat (server/chat.cpp)
     void on_chat(u32 pi, const proto::sb::Chat& c);
     void on_chat_ack(u32 pi, u32 offset);
@@ -591,7 +601,19 @@ class Game {
     // made, how many there have been since the first of this chain, and how many there may be.
     std::vector<NeighborUpdate> update_stack_, update_added_;
     u32 update_count_ = 0;
-    u64 time_ = 0;          // Level.getGameTime: what scheduled ticks are due by
+    u64 time_ = 0;  // Level.getGameTime: what scheduled ticks are due by
+    // ServerClockManager: the world's clocks, and what the overworld's makes of the sky's light
+    // (Level.skyDarken, brought up to date once a tick).
+    Clock clocks_[kClocks];
+    i32 sky_darken_ = 0;
+    // ServerCommandSuggestionsProvider: the line each of these players last asked about - one
+    // answer a tick, to the latest question.
+    struct SuggestionRequest {
+        u64 player;  // entity::Handle
+        u32 id;
+        std::string line;
+    };
+    std::vector<SuggestionRequest> suggestion_requests_;
     u32 random_value_ = 0;  // Level.randValue: where the random ticks fall
     // A random tick that is run only to be seen doing nothing (world::kCheckDormantSections).
     bool expect_no_change_ = false;

@@ -16,7 +16,9 @@ messages (their text components, byte for byte), block changes, teleports, sound
 that appear, the command tree - and chat: what the two type and what the commands that talk say
 (player_chat and disguised_chat, field by field; a message's time is its server's own and is
 compared as "now"), with the chat shown, cut down to system messages and hidden, and a third
-bot that joins, says a word and leaves. `diff` lines two recordings up step by step.
+bot that joins, says a word and leaves - and the time: `/time` on a clock that is stopped for it
+(so that it is where each command puts it), every set_time that names a clock, and what the
+server suggests for the lines a client asks it about. `diff` lines two recordings up step by step.
 
 The reference is the vanilla server, run under the rules in AGENTS.md (gamemode=creative,
 level-type=flat, spawn-protection=0):
@@ -61,7 +63,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mcproto as mc  # noqa: E402
 from inventory_probe import Actor  # noqa: E402
 
-LOGGED = {"system_chat", "player_chat", "disguised_chat", "block_update", "section_blocks_update", "player_position", "sound", "stop_sound", "add_entity",
+LOGGED = {"system_chat", "player_chat", "disguised_chat", "set_time", "command_suggestions", "block_update", "section_blocks_update", "player_position", "sound", "stop_sound", "add_entity",
           "remove_entities", "entity_event", "commands", "disconnect", "set_entity_data", "container_set_slot",
           "set_player_inventory", "take_item_entity"}
 UUID_RX = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -82,6 +84,11 @@ class Prober(Actor):
         signatures, as from a client that has no key (offline mode)."""
         self.c.send("chat_command_signed", mc.mc_str(command) + struct.pack(">qq", int(time.time() * 1000), 0) +
                     mc.varint(0) + NOTHING_SEEN)
+
+    def suggest(self, line: str) -> None:
+        """command_suggestion: what could come next in this line (as typed, with its slash)?"""
+        self.asked = getattr(self, "asked", 0) + 1
+        self.c.send("command_suggestion", mc.varint(self.asked) + mc.mc_str(line))
 
     def chat(self, message: str) -> None:
         self.c.send("chat", mc.mc_str(message) + struct.pack(">qq", int(time.time() * 1000), 0) + b"\x00" + NOTHING_SEEN)
@@ -313,6 +320,59 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str | No
             pump(bot, 0.25)
     steps.append({"step": "C joins, says something and leaves", "A": a.log[mark_a:], "B": b.log[mark_b:], "C": c.log})
 
+    # ---- the time: the world's clocks. The overworld's is stopped first, so that it is where
+    # each command puts it; the end's runs on.
+    run("time pause")
+    run("time pause")
+    run("time set 1000")
+    run("time set 1000")
+    run("time set 50s")
+    run("time set day")                               # it is that time already
+    run("time set noon")
+    run("time set minecraft:night")
+    run("time set day")                               # tomorrow's
+    run("time set teatime")
+    run("time set -5")                                # no time: a time marker of that name
+    run("time set 12:30")
+    run("time set 1x")
+    run("time set -5D")
+    run("time set")
+    run("time")
+    run("time add 2s")
+    run("time add -1d")
+    run("time add -100000")
+    run("time add 0.5")
+    run("time set 3.5d")
+    run("time add 6000")
+    run("time query time")
+    run("time query day")
+    run("time query day repetition")
+    run("time query minecraft:moon")
+    run("time query early_game repetition")
+    run("time query villager_schedule")
+    run("time query week")
+    run("time query gametime")
+    run("time of the_end query day")
+    run("time of the_end set noon")
+    run("time of minecraft:overworld query time")
+    run("time of nowhere pause")
+    run("time of the_end query gametime")
+    run("time rate 2.5")
+    run("time rate 2.5")
+    run("time rate 1001")
+    run("time rate 0")
+    run("time rate 1")
+    run("time set day", b)                            # not a command to B
+    for line in ("/time set ", "/time set n", "/time set mid", "/time set MID", "/time set minecraft:", "/time set minecraft:noon",
+                 "/time set 5", "/time set 0", "/time set 1.5d", "/time set x", "/time add 7", "/time query ", "/time query d",
+                 "/time query t", "/time of the_end set ", "/time of the_end query ", "/time of overworld set n", "/time ",
+                 "/time q", "/time set", "time set n"):
+        step("A asks what could follow: " + line, lambda line=line: a.suggest(line), ticks=3)
+    step("B asks what could follow: /time set ", lambda: b.suggest("/time set "), ticks=3)
+    step("A asks twice in one tick", lambda: (a.suggest("/time set d"), a.suggest("/time set m")), ticks=3)
+    run("time resume")                                # as it was: running, at its own rate
+    run("time resume")
+
     # ---- what is not a command, and who may run what
     run("nonsense")
     run("")
@@ -490,6 +550,33 @@ def _normalise(rec: dict, who: str, commands: set | None) -> tuple[dict[str, lis
             elif name == "disguised_chat":
                 rows.append((name, f"{mc.snbt(_text(r.nbt(), bots))} {_chat_type(r, bots)}"))
                 r.done()
+            elif name == "set_time":
+                # The game time is each server's own. The beat of every twentieth tick names no
+                # clock and falls where it falls; a clock that is named is compared in full, in
+                # the order of its id (the map is a hash map's).
+                r.i64()
+                clocks = {}
+                for _ in range(r.varint()):
+                    clock = r.varint()
+                    clocks[clock] = (r.varlong(), r.f32(), r.f32())
+                r.done()
+                if clocks:
+                    # Where a clock that runs has come to is its world's own: the end's, always;
+                    # the overworld's until it is stopped, and for whoever joins before that.
+                    names = mc.load_registry("world_clock")
+                    running = st["step"] in ("/time pause", "C joins, says something and leaves")
+                    rows.append((name, " ".join(
+                        f"{names[c]}: {'its own' if running or names[c] != 'minecraft:overworld' else t} ticks + {p} at rate {rate}"
+                        for c, (t, p, rate) in sorted(clocks.items()))))
+                else:
+                    rows.append(("  (not compared)", "the game time"))
+            elif name == "command_suggestions":
+                asked, start, length = r.varint(), r.varint(), r.varint()
+                texts = []
+                for _ in range(r.varint()):
+                    texts.append(r.str() + (" (" + mc.snbt(r.nbt()) + ")" if r.bool() else ""))
+                r.done()
+                rows.append((name, f"#{asked} {start}+{length}: {texts}"))
             elif name == "system_chat":
                 value = _text(r.nbt(), bots)
                 overlay = r.bool()
@@ -501,6 +588,9 @@ def _normalise(rec: dict, who: str, commands: set | None) -> tuple[dict[str, lis
                 if st["step"].endswith("/help") or st["step"].endswith("B: /help"):   # one line per command: only those both have
                     if commands is not None and line.split(" ")[0].lstrip("/") not in commands:
                         continue
+                if key == "commands.time.query.gametime" or (key == "commands.time.query.absolute" and "the_end" in line):
+                    rows.append((name, key + " (a count of ticks: each server's own)"))
+                    continue
                 rows.append((name, mc.snbt(value) + (" (overlay)" if overlay else "")))
             elif name == "disconnect":
                 rows.append((name, mc.snbt(_text(r.nbt(), bots))))
@@ -508,8 +598,8 @@ def _normalise(rec: dict, who: str, commands: set | None) -> tuple[dict[str, lis
                 changed = dict([mc.parse_block_update(r)]) if name == "block_update" else mc.parse_section_blocks_update(r)
                 for pos, state in changed.items():
                     rel = tuple(p - o for p, o in zip(pos, origin))
-                    if rel[1] == -1 and state == mc.BLOCK["kDirt"]:   # the ground under a block: a random tick's doing
-                        rows.append(("  (not compared)", f"grass turned to dirt at {rel}"))
+                    if rel[1] == -1 and state in (mc.BLOCK["kDirt"], mc.BLOCK["kGrassBlock"]):   # the ground: a random tick's doing
+                        rows.append(("  (not compared)", f"grass and dirt at {rel}"))
                     else:
                         blocks[rel] = state
             elif name == "player_position":

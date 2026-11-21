@@ -16,7 +16,8 @@ players in one place are an ordinary evening.
 **Early.** Elaine speaks Minecraft **26.3** and is being built system by system; each one is
 finished - compared with a real vanilla server, byte for byte where that is possible - before the
 next begins. Today a vanilla client can join, build in creative mode in a world that is kept on disk
-or imported from vanilla, open chests, smelt, craft, light TNT and watch sand fall. There is no
+or imported from vanilla, open chests, smelt, craft, light TNT, watch sand fall and the sun set, talk
+to whoever else is there - and find itself where it was, with what it had, when it comes back. There is no
 survival mode, no mob AI and no terrain generator yet: **it is not ready to host players.**
 
 What exists is listed under [Goals](#goals); how it works and why, in
@@ -72,7 +73,7 @@ defaults to what suits a big server.*
 - [x] `server.properties` is read; every key also works on the command line as `--key=value`
 - [x] Elaine's own keys for what vanilla does not have: reactor and worker threads, when chunks are unloaded and saved
 - [ ] Every vanilla key either honoured or reported at startup (today an unknown key is skipped silently)
-- [ ] Game rules and `/gamerule` (`random-tick-speed` is a setting until then)
+- [ ] Game rules and `/gamerule` (`random-tick-speed` and `advance-time` are settings until then)
 - [ ] A reference of every key
 
 ### World
@@ -86,7 +87,8 @@ defaults to what suits a big server.*
 - [x] The flat generator
 - [ ] Terrain generation: vanilla's, the same world from the same seed
 - [ ] The Nether and the End (one dimension today)
-- [ ] The time of day and weather
+- [x] The time of day: 26.x's world clocks, told to clients, kept, imported; the sky darkens for what grows
+- [ ] Weather
 - [ ] Export back to Anvil; worlds of older versions
 
 ### Blocks
@@ -158,10 +160,11 @@ cost per entity.*
 *Every vanilla command, read by Brigadier's rules and answered in vanilla's words.*
 
 - [x] Brigadier's tree, its parsing and its errors; answers in vanilla's text components
-- [x] `stop`, `setblock`, `fill`, `teleport`, `give`, `playsound`, `stopsound`, `summon`, `kill`, `list`, `kick`, `op`, `deop`, `help`, `say`, `me`, `msg`, `teammsg`
+- [x] `stop`, `setblock`, `fill`, `teleport`, `give`, `playsound`, `stopsound`, `summon`, `kill`, `list`, `kick`, `op`, `deop`, `help`, `say`, `me`, `msg`, `teammsg`, `time`
 - [x] Coordinates, entity selectors, block states and tags, items
 - [ ] NBT in commands (SNBT)
-- [ ] `execute`, `gamemode`, `time`, `weather`, `gamerule`, `effect`, `scoreboard`, `data` and the rest
+- [x] Suggestions a client asks the server for (time markers, timelines)
+- [ ] `execute`, `gamemode`, `weather`, `gamerule`, `effect`, `scoreboard`, `data` and the rest
 
 ### Plugins
 
