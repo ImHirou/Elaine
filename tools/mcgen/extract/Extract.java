@@ -10,6 +10,7 @@
 // Run through `tools/mcgen/mcgen.py blockdata` (which supplies the class path and Java version).
 
 import com.google.gson.stream.JsonWriter;
+import it.unimi.dsi.fastutil.doubles.DoubleList;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -46,8 +47,13 @@ public final class Extract {
         final Map<String, Integer> ids = new LinkedHashMap<>();
         final List<VoxelShape> shapes = new ArrayList<>();
         final List<List<AABB>> boxes = new ArrayList<>();
+        // Collision shapes are told apart by their grid as well as by the space they fill: an entity is
+        // stopped cell by cell (VoxelShape.collideX) and may step up to every height the grid has
+        // (Entity.collectCandidateStepUpHeights), so the same boxes cut differently are another shape.
+        final boolean byGrid;
 
-        ShapeTable() {
+        ShapeTable(boolean byGrid) {
+            this.byGrid = byGrid;
             ids.put("", 0);
             shapes.add(Shapes.empty());
             boxes.add(List.of());
@@ -63,6 +69,11 @@ public final class Extract {
             for (AABB a : b) parts.add(a.minX + "," + a.minY + "," + a.minZ + "," + a.maxX + "," + a.maxY + "," + a.maxZ);
             Collections.sort(parts);
             String key = String.join(";", parts);
+            if (byGrid) {
+                StringBuilder g = new StringBuilder(key);
+                for (Direction.Axis axis : Direction.Axis.values()) g.append('|').append(s.getCoords(axis));
+                key = g.append('|').append(cells(s)).toString();
+            }
             Integer have = ids.get(key);
             if (have != null) return have;
             int id = shapes.size();
@@ -75,6 +86,28 @@ public final class Extract {
             boxes.add(b);
             return id;
         }
+    }
+
+    /**
+     * The cells of a shape's grid, '1' for a full one, in BitSetDiscreteVoxelShape's order
+     * ((x * ySize + y) * zSize + z). VoxelShape keeps its DiscreteVoxelShape to itself; toAabbs()
+     * hands out the full cells joined into boxes along the same coordinates, so a cell is full
+     * exactly when its middle lies in one of them.
+     */
+    static String cells(VoxelShape s) {
+        DoubleList xs = s.getCoords(Direction.Axis.X), ys = s.getCoords(Direction.Axis.Y), zs = s.getCoords(Direction.Axis.Z);
+        List<AABB> full = s.toAabbs();
+        StringBuilder out = new StringBuilder();
+        for (int x = 0; x + 1 < xs.size(); ++x)
+            for (int y = 0; y + 1 < ys.size(); ++y)
+                for (int z = 0; z + 1 < zs.size(); ++z) {
+                    double cx = (xs.getDouble(x) + xs.getDouble(x + 1)) / 2, cy = (ys.getDouble(y) + ys.getDouble(y + 1)) / 2,
+                           cz = (zs.getDouble(z) + zs.getDouble(z + 1)) / 2;
+                    boolean in = false;
+                    for (AABB a : full) in |= a.contains(cx, cy, cz);
+                    out.append(in ? '1' : '0');
+                }
+        return out.toString();
     }
 
     /** Simple name of the class that declares `name` with these parameters, searching up from `c`. */
@@ -104,8 +137,8 @@ public final class Extract {
 
         final Direction[] dirs = Direction.values();  // DOWN, UP, NORTH, SOUTH, WEST, EAST = light propagation order
         final int n = Block.BLOCK_STATE_REGISTRY.size();
-        ShapeTable faces = new ShapeTable();
-        ShapeTable collision = new ShapeTable();
+        ShapeTable faces = new ShapeTable(false);
+        ShapeTable collision = new ShapeTable(true);
         Map<String, Integer> tupleIds = new LinkedHashMap<>();
         List<int[]> tuples = new ArrayList<>();
         tupleIds.put("0,0,0,0,0,0", 0);
@@ -177,6 +210,19 @@ public final class Extract {
             j.endArray();
             j.name("collision_shapes").beginArray();
             for (List<AABB> b : collision.boxes) boxes(j, b);
+            j.endArray();
+            // The same shapes as vanilla holds them: the coordinates of each axis and the cells they cut.
+            j.name("collision_grids").beginArray();
+            for (VoxelShape s : collision.shapes) {
+                j.beginObject();
+                for (Direction.Axis axis : Direction.Axis.values()) {
+                    j.name(axis.getName()).beginArray();
+                    if (!s.isEmpty()) for (double c : s.getCoords(axis)) j.value(c);
+                    j.endArray();
+                }
+                j.name("cells").value(s.isEmpty() ? "" : cells(s));
+                j.endObject();
+            }
             j.endArray();
 
             j.name("states").beginObject();

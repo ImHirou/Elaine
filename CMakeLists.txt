@@ -168,6 +168,7 @@ add_library(core STATIC
   src/server/block_actions.cpp
   src/server/block_entities.cpp
   src/server/block_updates.cpp
+  src/server/block_shapes.cpp
   src/server/falling.cpp
   src/server/explosion.cpp
   src/server/physics.cpp

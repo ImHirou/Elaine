@@ -18,6 +18,9 @@
 #include "world/dimension.hpp"
 #include "world/section.hpp"
 
+#include PROTO_GEN_ITEMS_HPP
+#include PROTO_GEN_PHYSICS_HPP
+
 using namespace world;
 namespace blk = proto::gen::block;
 
@@ -717,8 +720,20 @@ TEST(Blocks, WhatAChangeAndATickAskOfAState) {
     EXPECT_EQ(block_info_of(blk::kOxidizedCopper).weather, 4);
     EXPECT_EQ(block_info_of(blk::kWeatheredCutCopperStairs).weather, 3);
     EXPECT_EQ(block_info_of(blk::kWaxedCopperBlock).weather, 0);
-    EXPECT_EQ(block_info_of(blk::kCopperBlock).alt[0], blk::kExposedCopper);
-    EXPECT_EQ(block_info_of(blk::kOxidizedCopper).alt[0], 0);
+    EXPECT_EQ(block_info_of(blk::kCopperBlock).next_stage, blk::kExposedCopper);
+    EXPECT_EQ(block_info_of(blk::kOxidizedCopper).next_stage, 0);
+    // ...and what weathers with a shape keeps it: the next block's states lie as its own do.
+    EXPECT_EQ(block_info_of(blk::kCutCopperStairs).next_stage, block_info_of(blk::kExposedCutCopperStairs).first_state);
+    EXPECT_EQ(block_info_of(blk::kWaxedCutCopperStairs).next_stage, 0);
+    EXPECT_EQ(st::kRandom[blk::kCutCopperStairs] & (st::kRandomTick | st::kRandomAlways), st::kRandomTick | st::kRandomAlways);
+    EXPECT_EQ(st::kRandom[blk::kOxidizedCutCopperStairs] & st::kRandomTick, 0);
+    // A block whose updateShape only asks for the tick of the water in it has no shape hook; one
+    // whose shape is its neighbours' doing has.
+    EXPECT_EQ(st::kHooks[blk::kOakSlab] & st::kHookShape, 0);
+    EXPECT_EQ(st::kHooks[blk::kIronChain] & st::kHookShape, 0);
+    for (const u32 s :
+         {blk::kOakStairs, blk::kOakFence, blk::kGlassPane, blk::kCobblestoneWall, blk::kLantern, blk::kRedMushroomBlock})
+        EXPECT_TRUE(st::kHooks[s] & st::kHookShape) << s;
     EXPECT_TRUE(holds_water(blk::kWater));
     EXPECT_TRUE(holds_water_source(blk::kWater));
     EXPECT_TRUE(holds_water(blk::kWater + 3));
@@ -766,7 +781,16 @@ TEST(Blocks, GeneratedTablesAgreeWithEachOther) {
             ASSERT_EQ(item_info(info.item).block, b) << block_name(b);
             ASSERT_TRUE(item_info(info.item).flags & item_flag::kPlainBlockItem) << block_name(b);
         }
-        ASSERT_FALSE(info.flags & (block_flag::kGameMaster | block_flag::kCustomReplace)) << block_name(b);
+        ASSERT_FALSE(info.flags & block_flag::kGameMaster) << block_name(b);
+        // canBeReplaced(state, context) is its class's own: a slab's, which is ported (Game::slab_can_be_replaced).
+        ASSERT_EQ((info.flags & block_flag::kCustomReplace) != 0, info.kind == proto::gen::block_kind::kSlab) << block_name(b);
+        if (info.next_stage) {
+            const BlockInfo& next = block_info_of(info.next_stage);
+            ASSERT_EQ(next.first_state, info.next_stage) << block_name(b);
+            ASSERT_EQ(next.state_count, info.state_count) << block_name(b);
+            ASSERT_EQ(next.weather, info.weather + 1) << block_name(b);
+            ASSERT_NE(next.flags & block_flag::kPlaceMask, block_flag::kPlaceNone) << block_name(b);
+        }
         // A block that answers a click, or keeps a block entity, is placeable only as a ported class.
         if ((info.flags & block_flag::kInteractive) || info.block_entity != proto::gen::kNoBlockEntity) {
             ASSERT_NE(info.kind, proto::gen::block_kind::kPlain) << block_name(b);
@@ -789,6 +813,74 @@ TEST(Blocks, GeneratedTablesAgreeWithEachOther) {
     EXPECT_TRUE(collision_boxes(kAir, dynamic).empty());
     ASSERT_EQ(collision_boxes(blk::kOakSlab, dynamic).size(), 1u);
     EXPECT_EQ(collision_boxes(blk::kOakSlab, dynamic)[0].max[1], 0.5);
+}
+
+// What a fence, a pane and a wall read off the states around them (state::kConnect, kWallAbove).
+TEST(Blocks, WhatAStateIsToWhatReachesForIt) {
+    namespace st = state;
+    const auto state_of = [](std::string_view name, u32 offset = 0) {
+        return static_cast<BlockState>(block_info(find_block(name)).first_state + offset);
+    };
+    EXPECT_EQ(st::kConnect[blk::kStone], 0);
+    EXPECT_EQ(st::kConnect[blk::kOakFence], st::kConnectFence | st::kConnectWoodenFence);
+    EXPECT_EQ(st::kConnect[blk::kNetherBrickFence], st::kConnectFence);
+    EXPECT_EQ(st::kConnect[blk::kCobblestoneWall], st::kConnectWall);
+    EXPECT_EQ(st::kConnect[blk::kGlassPane], st::kConnectBars);
+    EXPECT_EQ(st::kConnect[blk::kIronBars], st::kConnectBars);
+    EXPECT_EQ(st::kConnect[blk::kWhiteStainedGlassPane], st::kConnectBars);
+    // Block.isExceptionForConnection: whole faces nothing reaches for.
+    for (const u32 s : {blk::kOakLeaves, blk::kBarrier, blk::kMelon, blk::kPumpkin, blk::kCarvedPumpkin, blk::kShulkerBox})
+        EXPECT_EQ(st::kConnect[s], st::kConnectException) << s;
+    // A gate joins what stands in line with it: facing north (its first states), what is west and east.
+    // FenceGateBlock.connectsToDirection, and #unstable_bottom_center: nothing hangs under a gate.
+    EXPECT_EQ(st::kConnect[state_of("minecraft:oak_fence_gate")], st::kConnectGateWE | st::kUnstableBottomCenter);
+    EXPECT_EQ(st::kConnect[blk::kOakFenceGate], st::kConnectGateWE | st::kUnstableBottomCenter);
+    const BlockInfo& gate = block_info(find_block("minecraft:oak_fence_gate"));
+    EXPECT_EQ(st::kConnect[gate.first_state + gate.state_count - 1],
+              st::kConnectGateNS | st::kUnstableBottomCenter);  // facing east
+
+    // The block on a wall: which of the wall's parts its underside covers.
+    const u32 all = st::kCoversNorth | st::kCoversSouth | st::kCoversWest | st::kCoversEast | st::kCoversPost;
+    EXPECT_EQ(st::kWallAbove[kAir], 0);
+    EXPECT_EQ(st::kWallAbove[blk::kStone], all);
+    EXPECT_EQ(st::kWallAbove[blk::kGlass], all);
+    EXPECT_EQ(st::kWallAbove[blk::kOakSlab], all);                    // a bottom slab lies on it
+    EXPECT_EQ(st::kWallAbove[state_of("minecraft:oak_slab", 1)], 0);  // a top slab does not reach down to it
+    EXPECT_EQ(st::kWallAbove[blk::kTorch], st::kPostOverride);        // #wall_post_override: no shape, and a post all the same
+    EXPECT_EQ(st::kWallAbove[blk::kOakFence], st::kCoversPost);       // a fence post is wider than the test's column
+    EXPECT_EQ(st::kWallAbove[blk::kLantern], st::kCoversPost);
+    EXPECT_EQ(st::kWallAbove[blk::kWater], 0);
+    // A wall with a post (the default state) covers the post under it and says it has one; a pane
+    // that runs north-south covers those two arms.
+    EXPECT_EQ(st::kWallAbove[blk::kCobblestoneWall], st::kCoversPost | st::kWallPost);
+    const BlockInfo& pane = block_info(find_block("minecraft:glass_pane"));
+    // (east, north, south, waterlogged, west: true before false)
+    const BlockState north_south = static_cast<BlockState>(pane.first_state + 16 + 2 + 1);
+    EXPECT_EQ(st::kWallAbove[north_south], st::kCoversNorth | st::kCoversSouth | st::kCoversPost);
+
+    // What breaks leaves what its loot table gives an empty hand: of a mushroom block -6 .. 2
+    // mushrooms, which is none most times (limit_count floors it); of a slab one - its
+    // double is the server's to count (Game::block_drop).
+    const BlockInfo& cap = block_info_of(blk::kBrownMushroomBlock);
+    EXPECT_EQ(cap.drop[0].item, proto::gen::item::kBrownMushroom);
+    EXPECT_EQ(cap.drop[0].min, -6);
+    EXPECT_EQ(cap.drop[0].max, 2);
+    const BlockInfo& oak_slab = block_info_of(blk::kOakSlab);
+    EXPECT_EQ(oak_slab.kind, proto::gen::block_kind::kSlab);
+    EXPECT_EQ(oak_slab.drop[0].min, 1);
+    EXPECT_EQ(oak_slab.drop[0].max, 1);
+    EXPECT_EQ(block_info_of(blk::kGlassPane).drop[0].item, 0u);  // glass breaks to nothing without silk touch
+
+    // Collision shapes are vanilla's grids, not the boxes cut again: stairs are two layers of
+    // two rows, an outer corner two of four cells.
+    namespace physics = proto::gen::physics;
+    const physics::Shape& straight = physics::kShapes[st::collision_of(blk::kOakStairs)];
+    EXPECT_EQ(straight.nx * 100 + straight.ny * 10 + straight.nz, 122);
+    EXPECT_EQ(physics::kShapeCells[straight.cells],
+              0b0111ull);  // (x * ny + y) * nz + z: the lower layer, and the upper's north row
+    const physics::Shape& fence = physics::kShapes[st::collision_of(blk::kOakFence)];
+    EXPECT_EQ(fence.nx * 100 + fence.ny * 10 + fence.nz, 111);
+    EXPECT_EQ(physics::kShapeCoords[fence.coords + 3], 1.5);  // y: 0, 1.5 - a fence is a block and a half to what walks into it
 }
 
 // ---------------------------------------------------------------------------- boxes against blocks

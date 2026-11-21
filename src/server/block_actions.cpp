@@ -250,17 +250,20 @@ bool Game::place_block(u32 pi, const sb::UseItemOn& u, const ItemStack& held) {
                   static_cast<int>(world::block_name(item.block).size()), world::block_name(item.block).data());
         return false;
     }
-    // BlockBehaviour.canBeReplaced(state, context): replaceable, and not by its own item.
-    const auto replaceable = [&](BlockState s) {
+    // BlockBehaviour.canBeReplaced(state, context): replaceable, and not by its own item - or a
+    // slab that has room for its other half (SlabBlock's).
+    const auto replaceable = [&](BlockState s, bool clicked) {
         const world::BlockInfo& b = world::block_info_of(s);
+        if (b.kind == gen::block_kind::kSlab) return slab_can_be_replaced(s, held, u, clicked);
         return world::is_replaceable(s) && !(b.flags & block_flag::kCustomReplace) && b.item != held.item();
     };
-    // BlockPlaceContext: into the clicked block if that can be replaced, otherwise against its face.
+    // BlockPlaceContext: into the clicked block if that can be replaced, otherwise against its
+    // face (canPlace: into what is there, if that can be replaced).
     BlockPos at = u.pos;
-    const bool replacing = replaceable(world_.block(at.x, at.y, at.z));
+    const bool replacing = replaceable(world_.block(at.x, at.y, at.z), true);
     if (!replacing) {
         at = {at.x + world::kStepX[u.direction], at.y + world::kStepY[u.direction], at.z + world::kStepZ[u.direction]};
-        if (!replaceable(state_for_client(at))) return false;
+        if (!replaceable(state_for_client(at), false)) return false;
     }
     const BlockState state = state_for_placement(pi, u, block, kind, at, replacing);
     if (state == world::Section::kNoState) return false;  // getPlacementState: null
@@ -298,10 +301,24 @@ void Game::nearest_looking_directions(u32 pi, u32 out[6]) const {
     }
 }
 
+// BlockPlaceContext.getNearestLookingDirections: the directions the player looks along, nearest
+// first - but against a face, into that face comes first.
+void Game::placement_directions(u32 pi, u32 face, bool replacing_clicked, u32 out[6]) const {
+    nearest_looking_directions(pi, out);
+    if (replacing_clicked) return;
+    const u32 into = world::opposite(face);
+    u32 index = 0;
+    while (index < 6 && out[index] != into) ++index;
+    if (index > 0 && index < 6) {
+        for (u32 i = index; i > 0; --i) out[i] = out[i - 1];
+        out[0] = into;
+    }
+}
+
 // Block.getStateForPlacement (and, for a torch, StandingAndWallBlockItem.getPlacementState): the
 // state a block of this placement kind is placed as at `at`; Section::kNoState: it cannot be.
 BlockState Game::state_for_placement(u32 pi, const sb::UseItemOn& u, const world::BlockInfo& block, u32 kind, BlockPos at,
-                                     bool replacing_clicked) {
+                                     bool replacing_clicked) const {
     switch (kind) {
         case block_flag::kPlaceAxis: return block.alt[kAxisOf[u.direction]];  // RotatedPillarBlock
         case block_flag::kPlaceSnowy: {                                       // SnowyBlock
@@ -315,18 +332,8 @@ BlockState Game::state_for_placement(u32 pi, const sb::UseItemOn& u, const world
         }
         case block_flag::kPlaceChest: return chest_for_placement(pi, at, u.direction);
         case block_flag::kPlaceTorch: {
-            // BlockPlaceContext.getNearestLookingDirections: against a face, that face's direction comes first.
             u32 dirs[6];
-            nearest_looking_directions(pi, dirs);
-            if (!replacing_clicked) {
-                const u32 into = world::opposite(u.direction);
-                u32 index = 0;
-                while (index < 6 && dirs[index] != into) ++index;
-                if (index > 0 && index < 6) {
-                    for (u32 i = index; i > 0; --i) dirs[i] = dirs[i - 1];
-                    dirs[0] = into;
-                }
-            }
+            placement_directions(pi, u.direction, replacing_clicked, dirs);
             // WallTorchBlock.getStateForPlacement: on the first wall it looks at that holds it.
             BlockState wall = world::Section::kNoState;
             for (const u32 dir : dirs) {
@@ -356,7 +363,8 @@ BlockState Game::state_for_placement(u32 pi, const sb::UseItemOn& u, const world
             return static_cast<BlockState>(gen::props::redstone_lamp::kFirst + (has_neighbour_signal(at) ? 0 : 1));
         case block_flag::kPlaceConcretePowder:  // ConcretePowderBlock.shouldSolidify: concrete in water, or beside it
             return world::holds_water(state_for_client(at)) || touches_water(at) ? block.alt[0] : block.default_state;
-        default: return block.default_state;  // Block.getStateForPlacement
+        case block_flag::kPlaceDefault: return block.default_state;                       // Block.getStateForPlacement
+        default: return shaped_for_placement(pi, u, block, kind, at, replacing_clicked);  // server/block_shapes.cpp
     }
 }
 

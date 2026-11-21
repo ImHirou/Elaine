@@ -2,7 +2,7 @@
 
 Minecraft 26.3 has 1286 blocks in 268 block classes. The server holds a block only if it
 simulates everything vanilla would do with it - so the list of what can be **placed** is the list
-of what is **done**: 355 blocks today. This file is that list, block class by block class,
+of what is **done**: 675 blocks today. This file is that list, block class by block class,
 in the order the missing systems are meant to be built.
 
 **Generated** by `tools/mcgen/roadmap.py` from the jar's block classes (`mcgen.py gamedata`) and the
@@ -19,7 +19,8 @@ A box is ticked when every block of the class can be placed; `(n of m)` says how
 Some blocks that are ticked still do less than in vanilla, because a system around them is
 missing; those gaps are listed under "Systems" below and in docs/architecture.md, never
 silently: ice does not melt (it would leave water), concrete powder meets no water that
-flows, ores give no experience, an amethyst block does not chime.
+flows, the water in a waterlogged slab or fence stays where it is, a fence takes no lead, ores
+give no experience, an amethyst block does not chime.
 
 ## Systems
 
@@ -117,47 +118,47 @@ Needs: Menus over containers, recipes, a furnace's tick, primed TNT and explosio
 - [x] **TntBlock** (1) - `dropFromExplosion`, `neighborChanged`, `onPlace`, `onProjectileHit`, `playerWillDestroy`, `useItemOn`, `wasExploded`  
   tnt
 
-## 2. Shapes: a state from how the block is placed and what stands beside it (1 of 307 blocks)
+## 2. Shapes: a state from how the block is placed and what stands beside it (297 of 307 blocks)
 
-Needs: BlockPlaceContext in full (the clicked face and where on it, the player's look, replacing a block with more of itself). `updateShape` for every neighbour change is there (`Game::update_shape`; podzol under snow is the first). No ticking.
+Needs: BlockPlaceContext - the clicked face and where on it, the player's look, a block replaced by more of itself - and `updateShape` for every neighbour change are there (`server/block_shapes.cpp`: slabs, stairs, fences, panes, walls, lanterns, chains). What is left has a rule of its own: a path that turns to dirt, a pumpkin that makes a golem, what grows on the faces of other blocks.
 
-- [ ] **SlabBlock** (97) - `canBeReplaced(BlockState,BlockPlaceContext)`, `getFluidState`, `getStateForPlacement`, `updateShape`  
+- [x] **SlabBlock** (97) - `canBeReplaced(BlockState,BlockPlaceContext)`, `getFluidState`, `getStateForPlacement`, `updateShape`  
   white_wool_slab, orange_wool_slab, magenta_wool_slab, light_blue_wool_slab, yellow_wool_slab, lime_wool_slab, pink_wool_slab, gray_wool_slab, light_gray_wool_slab, cyan_wool_slab, purple_wool_slab, blue_wool_slab, brown_wool_slab, green_wool_slab, red_wool_slab, black_wool_slab, resin_brick_slab, prismarine_slab, prismarine_brick_slab, dark_prismarine_slab, oak_slab, spruce_slab, birch_slab, jungle_slab, acacia_slab, cherry_slab, dark_oak_slab, pale_oak_slab, mangrove_slab, poplar_slab, bamboo_slab, bamboo_mosaic_slab, stone_slab, sandstone_slab, cut_sandstone_slab, petrified_oak_slab, cobblestone_slab, brick_slab, stone_brick_slab, mud_brick_slab, nether_brick_slab, quartz_slab, red_sandstone_slab, cut_red_sandstone_slab, smooth_stone_slab, purpur_slab, white_concrete_slab, orange_concrete_slab, magenta_concrete_slab, light_blue_concrete_slab, yellow_concrete_slab, lime_concrete_slab, pink_concrete_slab, gray_concrete_slab, light_gray_concrete_slab, cyan_concrete_slab, purple_concrete_slab, blue_concrete_slab, brown_concrete_slab, green_concrete_slab, red_concrete_slab, black_concrete_slab, polished_granite_slab, smooth_red_sandstone_slab, mossy_stone_brick_slab, polished_diorite_slab, mossy_cobblestone_slab, end_stone_brick_slab, smooth_sandstone_slab, smooth_quartz_slab, granite_slab, andesite_slab, red_nether_brick_slab, polished_andesite_slab, diorite_slab, crimson_slab, warped_slab, blackstone_slab, polished_blackstone_brick_slab, polished_blackstone_slab, tuff_slab, polished_tuff_slab, tuff_brick_slab, sulfur_slab, polished_sulfur_slab, sulfur_brick_slab, cinnabar_slab, polished_cinnabar_slab, cinnabar_brick_slab, waxed_cut_copper_slab, waxed_exposed_cut_copper_slab, waxed_weathered_cut_copper_slab, waxed_oxidized_cut_copper_slab, cobbled_deepslate_slab, polished_deepslate_slab, deepslate_tile_slab, deepslate_brick_slab
-- [ ] **StairBlock** (93) - `getExplosionResistance`, `getFluidState`, `getStateForPlacement`, `updateShape`  
+- [x] **StairBlock** (93) - `getExplosionResistance`, `getFluidState`, `getStateForPlacement`, `updateShape`  
   white_wool_stairs, orange_wool_stairs, magenta_wool_stairs, light_blue_wool_stairs, yellow_wool_stairs, lime_wool_stairs, pink_wool_stairs, gray_wool_stairs, light_gray_wool_stairs, cyan_wool_stairs, purple_wool_stairs, blue_wool_stairs, brown_wool_stairs, green_wool_stairs, red_wool_stairs, black_wool_stairs, oak_stairs, cobblestone_stairs, brick_stairs, stone_brick_stairs, mud_brick_stairs, resin_brick_stairs, nether_brick_stairs, sandstone_stairs, spruce_stairs, birch_stairs, jungle_stairs, quartz_stairs, acacia_stairs, cherry_stairs, dark_oak_stairs, pale_oak_stairs, mangrove_stairs, poplar_stairs, bamboo_stairs, bamboo_mosaic_stairs, prismarine_stairs, prismarine_brick_stairs, dark_prismarine_stairs, red_sandstone_stairs, purpur_stairs, white_concrete_stairs, orange_concrete_stairs, magenta_concrete_stairs, light_blue_concrete_stairs, yellow_concrete_stairs, lime_concrete_stairs, pink_concrete_stairs, gray_concrete_stairs, light_gray_concrete_stairs, cyan_concrete_stairs, purple_concrete_stairs, blue_concrete_stairs, brown_concrete_stairs, green_concrete_stairs, red_concrete_stairs, black_concrete_stairs, polished_granite_stairs, smooth_red_sandstone_stairs, mossy_stone_brick_stairs, polished_diorite_stairs, mossy_cobblestone_stairs, end_stone_brick_stairs, stone_stairs, smooth_sandstone_stairs, smooth_quartz_stairs, granite_stairs, andesite_stairs, red_nether_brick_stairs, polished_andesite_stairs, diorite_stairs, crimson_stairs, warped_stairs, blackstone_stairs, polished_blackstone_brick_stairs, polished_blackstone_stairs, tuff_stairs, polished_tuff_stairs, tuff_brick_stairs, sulfur_stairs, polished_sulfur_stairs, sulfur_brick_stairs, cinnabar_stairs, polished_cinnabar_stairs, cinnabar_brick_stairs, waxed_cut_copper_stairs, waxed_exposed_cut_copper_stairs, waxed_weathered_cut_copper_stairs, waxed_oxidized_cut_copper_stairs, cobbled_deepslate_stairs, polished_deepslate_stairs, deepslate_tile_stairs, deepslate_brick_stairs
-- [ ] **WallBlock** (32) - `getFluidState`, `getStateForPlacement`, `updateShape`  
+- [x] **WallBlock** (32) - `getFluidState`, `getStateForPlacement`, `updateShape`  
   resin_brick_wall, cobblestone_wall, mossy_cobblestone_wall, brick_wall, prismarine_wall, red_sandstone_wall, mossy_stone_brick_wall, granite_wall, stone_brick_wall, mud_brick_wall, nether_brick_wall, andesite_wall, red_nether_brick_wall, sandstone_wall, end_stone_brick_wall, diorite_wall, blackstone_wall, polished_blackstone_brick_wall, polished_blackstone_wall, tuff_wall, polished_tuff_wall, tuff_brick_wall, sulfur_wall, polished_sulfur_wall, sulfur_brick_wall, cinnabar_wall, polished_cinnabar_wall, cinnabar_brick_wall, cobbled_deepslate_wall, polished_deepslate_wall, deepslate_tile_wall, deepslate_brick_wall
-- [ ] **GlazedTerracottaBlock** (16) - `getStateForPlacement`  
+- [x] **GlazedTerracottaBlock** (16) - `getStateForPlacement`  
   white_glazed_terracotta, orange_glazed_terracotta, magenta_glazed_terracotta, light_blue_glazed_terracotta, yellow_glazed_terracotta, lime_glazed_terracotta, pink_glazed_terracotta, gray_glazed_terracotta, light_gray_glazed_terracotta, cyan_glazed_terracotta, purple_glazed_terracotta, blue_glazed_terracotta, brown_glazed_terracotta, green_glazed_terracotta, red_glazed_terracotta, black_glazed_terracotta
-- [ ] **StainedGlassPaneBlock** (16) - `getFluidState`, `getStateForPlacement`, `updateShape`  
+- [x] **StainedGlassPaneBlock** (16) - `getFluidState`, `getStateForPlacement`, `updateShape`  
   white_stained_glass_pane, orange_stained_glass_pane, magenta_stained_glass_pane, light_blue_stained_glass_pane, yellow_stained_glass_pane, lime_stained_glass_pane, pink_stained_glass_pane, gray_stained_glass_pane, light_gray_stained_glass_pane, cyan_stained_glass_pane, purple_stained_glass_pane, blue_stained_glass_pane, brown_stained_glass_pane, green_stained_glass_pane, red_stained_glass_pane, black_stained_glass_pane
-- [ ] **FenceBlock** (14) - `getFluidState`, `getStateForPlacement`, `updateShape`, `useWithoutItem`  
+- [x] **FenceBlock** (14) - `getFluidState`, `getStateForPlacement`, `updateShape`, `useWithoutItem`  
   oak_fence, nether_brick_fence, spruce_fence, birch_fence, jungle_fence, acacia_fence, cherry_fence, dark_oak_fence, pale_oak_fence, mangrove_fence, poplar_fence, bamboo_fence, crimson_fence, warped_fence
-- [ ] **IronBarsBlock** (6) - `getFluidState`, `getStateForPlacement`, `updateShape`  
+- [x] **IronBarsBlock** (6) - `getFluidState`, `getStateForPlacement`, `updateShape`  
   iron_bars, waxed_copper_bars, waxed_exposed_copper_bars, waxed_weathered_copper_bars, waxed_oxidized_copper_bars, glass_pane
-- [ ] **LanternBlock** (6) - `canSurvive`, `getFluidState`, `getStateForPlacement`, `updateShape`  
+- [x] **LanternBlock** (6) - `canSurvive`, `getFluidState`, `getStateForPlacement`, `updateShape`  
   lantern, soul_lantern, waxed_copper_lantern, waxed_exposed_copper_lantern, waxed_weathered_copper_lantern, waxed_oxidized_copper_lantern
-- [ ] **ChainBlock** (5) - `getFluidState`, `getStateForPlacement`, `updateShape`  
+- [x] **ChainBlock** (5) - `getFluidState`, `getStateForPlacement`, `updateShape`  
   iron_chain, waxed_copper_chain, waxed_exposed_copper_chain, waxed_weathered_copper_chain, waxed_oxidized_copper_chain
-- [ ] **WaterloggedTransparentBlock** (4) - `getFluidState`, `getStateForPlacement`, `updateShape`  
+- [x] **WaterloggedTransparentBlock** (4) - `getFluidState`, `getStateForPlacement`, `updateShape`  
   waxed_copper_grate, waxed_exposed_copper_grate, waxed_weathered_copper_grate, waxed_oxidized_copper_grate
-- [ ] **HugeMushroomBlock** (3) - `getStateForPlacement`, `updateShape`  
+- [x] **HugeMushroomBlock** (3) - `getStateForPlacement`, `updateShape`  
   brown_mushroom_block, red_mushroom_block, mushroom_stem
 - [ ] **CarvedPumpkinBlock** (2) - `getStateForPlacement`, `onPlace`  
   carved_pumpkin, jack_o_lantern
-- [ ] **BarrierBlock** (1) - `getFluidState`, `getStateForPlacement`, `updateShape`  
+- [x] **BarrierBlock** (1) - `getFluidState`, `getStateForPlacement`, `updateShape`  
   barrier
-- [ ] **EndRodBlock** (1) - `getStateForPlacement`  
+- [x] **EndRodBlock** (1) - `getStateForPlacement`  
   end_rod
 - [ ] **GlowLichenBlock** (1) - `canBeReplaced(BlockState,BlockPlaceContext)`, `canSurvive`, `getFluidState`, `getStateForPlacement`, `updateShape`  
   glow_lichen
 - [ ] **HangingMossBlock** (1) - `canSurvive`, `tick`, `updateShape`  
   pale_hanging_moss
-- [ ] **HeavyCoreBlock** (1) - `getFluidState`, `getStateForPlacement`, `updateShape`  
+- [x] **HeavyCoreBlock** (1) - `getFluidState`, `getStateForPlacement`, `updateShape`  
   heavy_core
 - [ ] **LightBlock** (1) - `getCloneItemStack`, `getFluidState`, `updateShape`, `useWithoutItem`  
   light
-- [ ] **MangroveRootsBlock** (1) - `getFluidState`, `getStateForPlacement`, `updateShape`  
+- [x] **MangroveRootsBlock** (1) - `getFluidState`, `getStateForPlacement`, `updateShape`  
   mangrove_roots
 - [ ] **MossyCarpetBlock** (1) - `canSurvive`, `getStateForPlacement`, `setPlacedBy`, `updateShape`  
   pale_moss_carpet
@@ -315,7 +316,7 @@ Needs: Water and lava: flowing (`FlowingFluid.tick`), waterlogging (`getFluidSta
 - [ ] **WetSpongeBlock** (1) - `onPlace`  
   wet_sponge
 
-## 6. Random ticks: growth, spread and decay (18 of 128 blocks)
+## 6. Random ticks: growth, spread and decay (42 of 128 blocks)
 
 Needs: Random block ticks are there, and sections whose ticks could do nothing are passed by: a class that is ported says in `state::kRandom` when its tick can act (`RANDOM_TICK_KINDS` in gen_game.py; docs/architecture.md, "Block updates"). Still needed: bone meal, tree and mushroom features for what grows into a structure, fire's spread.
 
@@ -327,11 +328,11 @@ Needs: Random block ticks are there, and sections whose ticks could do nothing a
   cherry_leaves, pale_oak_leaves, red_poplar_leaves, orange_poplar_leaves, yellow_poplar_leaves, azalea_leaves, flowering_azalea_leaves
 - [ ] **TintedParticleLeavesBlock** (5) - `getFluidState`, `getStateForPlacement`, `isRandomlyTicking`, `randomTick`, `tick`, `updateShape`  
   oak_leaves, birch_leaves, jungle_leaves, acacia_leaves, dark_oak_leaves
-- [ ] **WeatheringCopperBarsBlock** (4) - `getFluidState`, `getStateForPlacement`, `isRandomlyTicking`, `randomTick`, `updateShape`  
+- [x] **WeatheringCopperBarsBlock** (4) - `getFluidState`, `getStateForPlacement`, `isRandomlyTicking`, `randomTick`, `updateShape`  
   copper_bars, exposed_copper_bars, weathered_copper_bars, oxidized_copper_bars
 - [ ] **WeatheringCopperBulbBlock** (4) - `getAnalogOutputSignal`, `hasAnalogOutputSignal`, `isRandomlyTicking`, `neighborChanged`, `onPlace`, `randomTick`  
   copper_bulb, exposed_copper_bulb, weathered_copper_bulb, oxidized_copper_bulb
-- [ ] **WeatheringCopperChainBlock** (4) - `getFluidState`, `getStateForPlacement`, `isRandomlyTicking`, `randomTick`, `updateShape`  
+- [x] **WeatheringCopperChainBlock** (4) - `getFluidState`, `getStateForPlacement`, `isRandomlyTicking`, `randomTick`, `updateShape`  
   copper_chain, exposed_copper_chain, weathered_copper_chain, oxidized_copper_chain
 - [ ] **WeatheringCopperChestBlock** (4, *block entity*) - `affectNeighborsAfterRemoval`, `getAnalogOutputSignal`, `getFluidState`, `getMenuProvider`, `getStateForPlacement`, `hasAnalogOutputSignal`, `isRandomlyTicking`, `randomTick`, `shouldChangedStateKeepBlockEntity`, `tick`, `triggerEvent`, `updateShape`, `useWithoutItem`  
   copper_chest, exposed_copper_chest, weathered_copper_chest, oxidized_copper_chest
@@ -339,15 +340,15 @@ Needs: Random block ticks are there, and sections whose ticks could do nothing a
   copper_door, exposed_copper_door, weathered_copper_door, oxidized_copper_door
 - [ ] **WeatheringCopperGolemStatueBlock** (4, *block entity*) - `affectNeighborsAfterRemoval`, `getAnalogOutputSignal`, `getCloneItemStack`, `getFluidState`, `getMenuProvider`, `getStateForPlacement`, `hasAnalogOutputSignal`, `isRandomlyTicking`, `randomTick`, `shouldChangedStateKeepBlockEntity`, `triggerEvent`, `updateShape`, `useItemOn`  
   copper_golem_statue, exposed_copper_golem_statue, weathered_copper_golem_statue, oxidized_copper_golem_statue
-- [ ] **WeatheringCopperGrateBlock** (4) - `getFluidState`, `getStateForPlacement`, `isRandomlyTicking`, `randomTick`, `updateShape`  
+- [x] **WeatheringCopperGrateBlock** (4) - `getFluidState`, `getStateForPlacement`, `isRandomlyTicking`, `randomTick`, `updateShape`  
   copper_grate, exposed_copper_grate, weathered_copper_grate, oxidized_copper_grate
-- [ ] **WeatheringCopperSlabBlock** (4) - `canBeReplaced(BlockState,BlockPlaceContext)`, `getFluidState`, `getStateForPlacement`, `isRandomlyTicking`, `randomTick`, `updateShape`  
+- [x] **WeatheringCopperSlabBlock** (4) - `canBeReplaced(BlockState,BlockPlaceContext)`, `getFluidState`, `getStateForPlacement`, `isRandomlyTicking`, `randomTick`, `updateShape`  
   cut_copper_slab, exposed_cut_copper_slab, weathered_cut_copper_slab, oxidized_cut_copper_slab
-- [ ] **WeatheringCopperStairBlock** (4) - `getExplosionResistance`, `getFluidState`, `getStateForPlacement`, `isRandomlyTicking`, `randomTick`, `updateShape`  
+- [x] **WeatheringCopperStairBlock** (4) - `getExplosionResistance`, `getFluidState`, `getStateForPlacement`, `isRandomlyTicking`, `randomTick`, `updateShape`  
   cut_copper_stairs, exposed_cut_copper_stairs, weathered_cut_copper_stairs, oxidized_cut_copper_stairs
 - [ ] **WeatheringCopperTrapDoorBlock** (4) - `getFluidState`, `getStateForPlacement`, `isRandomlyTicking`, `neighborChanged`, `onExplosionHit`, `randomTick`, `updateShape`, `useWithoutItem`  
   copper_trapdoor, exposed_copper_trapdoor, weathered_copper_trapdoor, oxidized_copper_trapdoor
-- [ ] **WeatheringLanternBlock** (4) - `canSurvive`, `getFluidState`, `getStateForPlacement`, `isRandomlyTicking`, `randomTick`, `updateShape`  
+- [x] **WeatheringLanternBlock** (4) - `canSurvive`, `getFluidState`, `getStateForPlacement`, `isRandomlyTicking`, `randomTick`, `updateShape`  
   copper_lantern, exposed_copper_lantern, weathered_copper_lantern, oxidized_copper_lantern
 - [ ] **WeatheringLightningRodBlock** (4) - `affectNeighborsAfterRemoval`, `getDirectSignal`, `getFluidState`, `getStateForPlacement`, `isRandomlyTicking`, `isSignalSource`, `onPlace`, `ownSignal`, `randomTick`, `tick`, `updateShape`  
   lightning_rod, exposed_lightning_rod, weathered_lightning_rod, oxidized_lightning_rod

@@ -625,7 +625,7 @@ differs:
 - an explosion hurts nothing but items (nothing else has health): a mob is thrown and lives,
   an armor stand breaks with its sound but without its particles.
 
-## Block updates (src/server/block_updates.cpp, falling.cpp, src/world/ticks.*, dimension.*)
+## Block updates (src/server/block_updates.cpp, block_shapes.cpp, falling.cpp, src/world/ticks.*, dimension.*)
 
 A block that is set is the beginning of something. The blocks around it hear of it, and some
 change: a torch whose wall is gone breaks; sand with nothing under it asks to be looked at two
@@ -633,7 +633,9 @@ ticks from now; a lamp that lost its signal goes out four ticks later; and the d
 grass is grass too, whenever chance has it. Those are the three mechanisms every block with a
 behaviour is made of - neighbour updates, scheduled ticks, random ticks - and with them came
 the first blocks that need them: torches, the redstone lamp, amethyst, grass and mycelium that
-spread and die, nylium, copper that weathers, and what falls - sand, gravel, concrete powder.
+spread and die, nylium, copper that weathers, what falls - sand, gravel, concrete powder - and
+the blocks whose whole behaviour is the shape they take beside their neighbours: slabs,
+stairs, fences, panes, walls.
 
 One thing holds for all three: **the order is the behaviour**. Which of two blocks hears of a
 change first, which of two ticks that are due in the same game tick runs first - whatever
@@ -814,9 +816,85 @@ sent twice, as in vanilla - at once to those who see the entity (`block_update`,
 `TransientBlock`, whatever its chunk shows meanwhile), and with the chunk's changes to everyone. A falling block is saved with its chunk (`server/persist.cpp`,
 entity records version 2), and nothing can be built where one is.
 
+### A state that is a shape (`server/block_shapes.cpp`)
+
+A slab, stairs, a fence, a pane, a wall: nothing of theirs ticks, and everything about them is
+which of their states they are in. That is asked twice - `Block.getStateForPlacement` when one
+is placed (`Game::shaped_for_placement`) and `BlockBehaviour.updateShape` when a block beside
+one changes (`Game::shaped_update`) - and both answers are computed from the same few
+questions about the neighbours, so both live in one file, class by class:
+
+- **slabs** are the half that was clicked - the face, or the height of the click on a side
+  (`BlockPlaceContext.getClickLocation`, which is the clicked block's position plus the cursor
+  the packet carries, as doubles, against the position the block goes to). Two halves of one
+  kind are one block: `SlabBlock.canBeReplaced(state, context)` lets a slab be "replaced" by its
+  own item - from the side its free half is on when the slab itself was clicked, always when
+  it is merely where the new block would go (`BlockPlaceContext.canPlace`) - and the placement
+  then answers `type=double`. A double slab drops two: its loot table says so by state, which
+  mcgen checks of every slab and `Game::block_drop` does by kind;
+- **stairs** face the way their player looks, upside down under a block or on the upper half
+  of a side, and `StairBlock.getStairsShape` turns the corner: outer where the stairs behind
+  them stand across, inner where those in front do - unless the stairs beside them, on the side
+  the corner would open to, run on straight as they do (`canTakeShape`);
+- **fences, panes, bars and walls** have an arm towards what takes one. What that is differs
+  by class and is three lines each (`connects`): a whole face - unless the block is one that
+  takes no arms (`Block.isExceptionForConnection`: leaves, pumpkins, a barrier, shulker boxes) -
+  then for a fence the fences that are wooden as it is or is not, and a gate in line; for a
+  pane other panes, bars and walls; for a wall other walls, panes and gates;
+- **a wall** also looks up: its sides are tall where the underside of the block on top covers
+  them, and it has a post if a wall with a post stands on it, if it is alone, an end or a
+  corner, or - running straight and low - if what is on it covers the post or is in
+  `#wall_post_override` (`WallBlock.shouldRaisePost`);
+- **lanterns** hang or stand by the first of the directions their player looks along that
+  holds them (`BlockPlaceContext.getNearestLookingDirections` - against a face, into that face
+  first), and break when it goes; **chains** lie along the axis of the clicked face; an **end
+  rod** points out of it, and back at a rod that points at it; **glazed terracotta** faces its
+  player; a **mushroom block** has skin on every side but those where more of it is, and does
+  not grow it back.
+
+None of this names a block. A family has one layout of properties - `props::slab`,
+`props::stairs`, `props::cross`, `props::wall`... - which the generator holds every block of
+the family to (`FAMILY_LAYOUTS`: 97 slabs are one line), so a state is its block's first state
+plus what the properties add. And what a neighbour is to these blocks, beyond the sturdy faces
+the torches already asked for, is one byte a state for the blocks beside it and one for the
+block above:
+
+- `state::kConnect`: takes no arms; is in `#fences`, in `#wooden_fences`, in `#walls`; is an
+  `IronBarsBlock`; is a fence gate that joins north-south, or west-east
+  (`FenceGateBlock.connectsToDirection`, by its `facing`); lets nothing hang from the middle of
+  its underside (`#unstable_bottom_center`);
+- `state::kWallAbove`: which of the wall's five parts - four arms and the post - the bottom
+  face of its collision shape covers (`WallBlock.isCovered` against `TEST_SHAPES_WALL` and
+  `TEST_SHAPE_POST`, which mcgen reads from the class and works out per state from the
+  shape's boxes); `#wall_post_override`; a wall with a post.
+
+So a fence beside a block of an unported class - a gate, a shulker box of an imported world -
+still joins it as vanilla does: the tables are made for every state there is.
+
+A class whose `updateShape` does nothing but ask for the tick of the water in it (slabs,
+chains, grates) has no shape hook at all (`NO_SHAPE_HOOK`): the twelve updates of a change in
+a house of slabs stay a load and a branch each.
+
+**Water.** A block that can hold water (`SimpleWaterloggedBlock`) is placed `waterlogged` into
+a source of it and dry anywhere else, flowing water included (`FluidState.is(Fluids.WATER)`);
+it keeps the water while it stands, leaves the water's block behind when it goes
+(`Level.removeBlock`), resists an explosion as water does while it holds some
+(`ExplosionDamageCalculator`: the more of the block's resistance and the fluid's), and the
+second half of a slab drives the water out. What vanilla does besides is a fluid tick on every
+update - the water flowing out of the block - and there are none: the water stays where it is.
+Only an imported world has any, and `/setblock` refuses a waterlogged state as it refuses
+water.
+
+**Copper.** The copper stairs, slabs, bars, chains, lanterns and grates that are not waxed
+weather as the full block does (`ChangeOverTimeBlock`, the same random tick), and
+`WeatheringCopper.getNext(state)` is the next block `withPropertiesOf` this one: with one
+layout a family, that is the next block's first state plus this state's offset
+(`BlockInfo::next_stage`). Weathering stopped being a kind of block for that - it is whatever
+has a next stage.
+
 ### Compared with vanilla
 
-`tools/vanilla/block_probe.py` runs both servers through the same 55 steps - two bots, one
+`tools/vanilla/block_probe.py` runs both servers through the same 110 steps - two bots, one
 building, one watching from three blocks off, and the console - and compares what each bot is
 told: every block change, level event, falling block, primed TNT and dropped item, in the
 order it came and by the tick it came in. It starts the servers itself; vanilla gets a new flat world every time.
@@ -846,6 +924,28 @@ In the last recordings nothing differs, in any step, for either bot. What that c
   dirt; copper goes all the way to oxidized; budding amethyst has a full cluster on each of
   five sides, each facing away from it; nylium under a stone is netherrack; and where nothing
   was done nothing happens;
+- **stairs**: facing by where their player looks; an outer corner when stairs are put behind
+  them, across, and straight again when those go; an inner corner from stairs in front; none
+  while stairs beside them run on straight; stairs placed into a corner taking it at once;
+  upside down on the upper half of a side, and no corner between halves;
+- **slabs**: the half by the face and by the height of the click; the same slab on a bottom
+  slab, against the side a top slab hangs on, into a slab's own low side and from below, each
+  making one block; a click high on a top slab's side putting another beside it; another kind
+  of slab lying on top; a double slab destroyed leaving a stack of two, half a one one;
+- **fences, panes, bars, walls**: an arm to a stone and to each other, none between a wooden
+  fence and a nether brick one, none between fence and pane; a wall's end, corner and straight
+  run with and without a post; tall under a stone and low again; a post under a torch and
+  under a wall; a pane and a wall holding each other; all of them letting go of a stone that
+  goes, nothing breaking; a block placed against a fence by a click on it;
+- **the rest of the shapes**: a lantern hung under a block and stood on the ground, refused
+  where nothing holds it, falling with its item when the block it hangs from goes; chains
+  along three axes; an end rod on a rod turning round; glazed terracotta facing its player;
+  two mushroom blocks losing the skin between them and one keeping it lost; a copper grate;
+- **shapes by command**: `/setblock` of a fence between two stones, of stairs beside stairs and
+  into a corner, of a pane with arms nobody holds (the properties that were spelled out stay,
+  the others are the neighbours' doing), of one set `strict`; `/fill` of a row of walls, and of
+  air over it, destroying;
+- **copper stairs**, upside down and facing east, weathering to oxidized stairs that are both;
 - **TNT** on five sides of a block of redstone is primed west, east, up, north, south.
 
 What a recording cannot say is said by the unit tests: the tick queue's order against a model
@@ -860,6 +960,9 @@ Differences that remain, by decision:
   the cause - and this server at the end of the tick, with everything else;
 - the entities of a tick are told about in the order they were made; vanilla walks a hash map
   of them;
+- the chunks whose blocks changed in a tick are told in the order of their coordinates;
+  vanilla walks a hash set of chunk holders, by identity. (It showed when a recording's spot
+  lay across a chunk border: the probe compares each chunk's changes in their own order.)
 - which cells the random ticks fall on (see above);
 - entities - falling blocks too - tick wherever their chunk ticks, not within the simulation
   distance (see "Physics").
@@ -875,9 +978,15 @@ tick queue under load and the random pass belong with the first claim that any o
 ### What is not there
 
 - **Fluids.** No fluid ticks (vanilla's second `LevelTicks`, run after the blocks'): a
-  waterlogged block that would ask for one on an update does not. Ice does not melt - it
-  would leave water - and lava sets nothing alight (a fluid's random tick). Concrete powder
-  hardens beside water, which only an imported world has, and that water does not flow.
+  waterlogged block that would ask for one on an update does not, and the water in a slab, a
+  fence or a wall stays in it. Ice does not melt - it would leave water - and lava sets
+  nothing alight (a fluid's random tick). Concrete powder hardens beside water, which only an
+  imported world has, and that water does not flow.
+- **Of the shapes**: a fence takes no lead (`FenceBlock.useWithoutItem`: nothing is on one, and
+  the click passes as it does in vanilla then); a wall under bamboo or pointed dripstone -
+  blocks whose collision shape depends on where they stand - reads the shape they have in the
+  middle of their cell; and what is not ported is not placed: fence gates, doors, trapdoors,
+  the path, the light block, carved pumpkins, what grows on faces.
 - **The weather.** Nothing rains or snows on a block (`tickPrecipitation`), no lightning, and
   rain takes nothing from the sky's light. (The time of day does: see "Time".)
 - **Game rules.** `random-tick-speed` and `advance-time` are settings of the server; blocks and
@@ -941,7 +1050,9 @@ happens inside a tick.)
 The tables it needs come from the jar too (`tools/mcgen/gen_physics.py`): a byte per block
 state (what kind of collision shape, whether it reaches out of its block, which of 12
 "materials" - friction, speed and jump factor, bounce, what it does to an entity), and 210
-collision shapes as grids of cells (183 of them made of several boxes). The generator stops rather than guess: at a placeable
+collision shapes as the grids of cells vanilla holds them as - each shape's own coordinates and
+cells, written out by the extractor (`VoxelShape.getCoords`; of the 183 shapes of several boxes,
+42 have lines no box ends on: a piston's head, a straw bed). The generator stops rather than guess: at a placeable
 block whose shape depends on who asks, at a block hook that acts on entities and is not
 ported, at a living entity class that declares a movement method the port was not written
 against, at a new answer to `getMoveSimulationType`.
@@ -1088,7 +1199,8 @@ latter, and one cache miss an item was two thirds of the pass.
 
 ### Compared with vanilla, and what is not there
 
-- Fluids: nothing floats, nothing is carried. No block holds one yet.
+- Fluids: nothing floats, nothing is carried - not in an imported world's water, not in the
+  water of a waterlogged block.
 - A brain. `living_tick` is `LivingEntity.travel` with no input: a mob falls, slides, steps
   where it is pushed, and stands. The classes that move in a way of their own - what flies,
   swims, hangs, climbs or flops (`gen_physics.OWN_MOVEMENT`) - are not moved at all.
@@ -1098,8 +1210,6 @@ latter, and one cache miss an item was two thirds of the pass.
 - With several neighbours at once, `pushEntities` adds their pushes in the order of our grid's
   cells, vanilla in the order of its entity sections: the sum may differ in its last bit.
 - A living entity that bounces is sent as one step of its path, not two.
-- Shapes of several boxes are grids cut by their boxes' faces. Vanilla's own grid for such a
-  shape can have more cuts; that shows only for an entity that is already inside the shape.
 - Entities that collide with each other (boats, shulkers), the world border, pistons, powder
   snow, climbing.
 
@@ -1870,9 +1980,11 @@ Roughly in dependency order:
    built with `text::Text`.)
 7. **Blocks**: `docs/blocks-roadmap.md`. Neighbour updates, scheduled ticks and random ticks
    are there (see "Block updates"), so a block class is its own hooks now and no longer a
-   missing system: slabs, stairs, fences and the other shapes, plants and what else needs
-   something to stand on. Then fluids - with them fluid ticks, ice, waterlogging - redstone,
-   the other block entities. And what the first four still lack: experience orbs.
+   missing system; slabs, stairs, fences, panes and walls are done ("A state that is a
+   shape"). Next: plants and what else needs something to stand on, and the blocks that
+   answer a click - doors, trapdoors, fence gates. Then fluids - with them fluid ticks, ice,
+   water that leaves a waterlogged block - redstone, the other block entities. And what the
+   first four still lack: experience orbs.
 8. **Commands**: an SNBT reader (block entity data, item components, `/summon`'s tag, `nbt=`),
    `facing`, then the commands that wait for their subject. **Chat**: signed (see "Chat").
    **Time**: the weather, game rules.

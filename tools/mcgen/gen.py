@@ -373,7 +373,7 @@ STATE_FLAGS = [
 # placement kind only when every hook vanilla runs for it is one the server implements (see
 # placement_kind below) - everything else stays kPlaceNone until its behaviour is written.
 BLOCK_FLAGS = [
-    ("kPlaceMask", 0xF, "placement kind, one of:"),
+    ("kPlaceMask", 0x3F, "placement kind, one of:"),
     ("kPlaceNone", 0, "not placeable yet: the block or its item has behaviour that is not implemented"),
     ("kPlaceDefault", 1, "Block.getStateForPlacement(): the default state"),
     ("kPlaceAxis", 2, "RotatedPillarBlock: axis = clicked face's axis; alt = states for x, y, z"),
@@ -385,11 +385,21 @@ BLOCK_FLAGS = [
     ("kPlaceCluster", 7, "AmethystClusterBlock: `facing` = the clicked face, waterlogged in water (props::amethyst_cluster)"),
     ("kPlaceLamp", 8, "RedstoneLampBlock: lit while a signal arrives (props::redstone_lamp)"),
     ("kPlaceConcretePowder", 9, "ConcretePowderBlock: its concrete (alt[0]) when it is placed in or against water"),
-    ("kSnowTag", 0x10, "member of #minecraft:snow (makes the SnowyBlock below it snowy)"),
-    ("kInteractive", 0x20, "overrides useItemOn/useWithoutItem: a click may be consumed by the block"),
-    ("kGameMaster", 0x40, "GameMasterBlock: only operators may break it"),
-    ("kCustomReplace", 0x80, "overrides canBeReplaced(state, context): kReplaceable alone does not decide"),
-    ("kCustomClone", 0x100, "overrides getCloneItemStack: \"pick block\" gives something other than a plain stack of its item"),
+    ("kPlaceSlab", 10, "SlabBlock: the half that was clicked, or the other half of the slab that is there (props::slab)"),
+    ("kPlaceStairs", 11, "StairBlock: away from the player, the clicked half, the corner its neighbours make (props::stairs)"),
+    ("kPlaceCross", 12, "FenceBlock / IronBarsBlock: an arm to each side that takes one (props::cross)"),
+    ("kPlaceWall", 13, "WallBlock: sides low or tall by what stands on it, a post where it needs one (props::wall)"),
+    ("kPlaceHorizontal", 14, "GlazedTerracottaBlock: `facing` = opposite of the player's horizontal direction (props::horizontal)"),
+    ("kPlaceChain", 15, "ChainBlock: axis = clicked face's axis, waterlogged in water (props::chain)"),
+    ("kPlaceLantern", 16, "LanternBlock: hanging or standing by where the player looks and what holds it (props::lantern)"),
+    ("kPlaceEndRod", 17, "EndRodBlock: `facing` = the clicked face, turned round on a rod that points the same way (props::end_rod)"),
+    ("kPlaceWaterlogged", 18, "the default state, waterlogged in water (props::waterlogged)"),
+    ("kPlaceMushroom", 19, "HugeMushroomBlock: a side is skin unless more of the same block is there (props::mushroom)"),
+    ("kSnowTag", 0x40, "member of #minecraft:snow (makes the SnowyBlock below it snowy)"),
+    ("kInteractive", 0x80, "overrides useItemOn/useWithoutItem: a click may be consumed by the block"),
+    ("kGameMaster", 0x100, "GameMasterBlock: only operators may break it"),
+    ("kCustomReplace", 0x200, "overrides canBeReplaced(state, context): kReplaceable alone does not decide"),
+    ("kCustomClone", 0x400, "overrides getCloneItemStack: \"pick block\" gives something other than a plain stack of its item"),
 ]
 
 # proto::gen::state::kHooks: which of the hooks a block change runs the state's block has - of a
@@ -414,6 +424,33 @@ RANDOM_FLAGS = [
     ("kNylium", "NyliumBlock: turns into netherrack under what smothers it"),
     ("kSmothersNylium", "as the block above nylium: NyliumBlock.canBeNylium is false"),
 ]
+
+# proto::gen::state::kConnect: what a state is to a fence, a pane or a wall beside it
+# (FenceBlock.connectsTo, IronBarsBlock.attachsTo, WallBlock.connectsTo) - beyond its sturdy faces -
+# and to what hangs under it.
+CONNECT_FLAGS = [
+    ("kConnectException", "Block.isExceptionForConnection: leaves, a barrier, a pumpkin, a melon, a shulker box - no arm for a whole face"),
+    ("kConnectFence", "#fences"),
+    ("kConnectWoodenFence", "#wooden_fences: a fence joins the fences that are wooden as it is, or not as it is not"),
+    ("kConnectWall", "#walls"),
+    ("kConnectBars", "an IronBarsBlock (bars, panes)"),
+    ("kConnectGateNS", "a FenceGateBlock that joins what stands north or south of it (FenceGateBlock.connectsToDirection)"),
+    ("kConnectGateWE", "...west or east of it"),
+    ("kUnstableBottomCenter", "#unstable_bottom_center: nothing hangs from the middle of its underside (Block.canSupportCenter)"),
+]
+# proto::gen::state::kWallAbove: what a wall reads off the state on top of it (WallBlock.updateShape:
+# the bottom face of its collision shape against WallBlock.TEST_SHAPES_WALL and TEST_SHAPE_POST).
+WALL_ABOVE_FLAGS = [
+    ("kCoversNorth", "the wall's north arm is covered: it is tall. This bit << (direction - kNorth) for south, west, east"),
+    ("kCoversSouth", ""),
+    ("kCoversWest", ""),
+    ("kCoversEast", ""),
+    ("kCoversPost", "...and its post: a straight wall raises one under it"),
+    ("kPostOverride", "#wall_post_override: the same, whatever its shape (a torch, a sign)"),
+    ("kWallPost", "a wall with a post of its own (`up`): the wall under it has one too"),
+]
+EXCEPTIONS_FOR_CONNECTION = ("minecraft:barrier", "minecraft:carved_pumpkin", "minecraft:jack_o_lantern", "minecraft:melon",
+                             "minecraft:pumpkin")  # Block.isExceptionForConnection; and LeavesBlock, #shulker_boxes
 
 ITEM_FLAGS = [
     ("kPlainBlockItem", 0x1, "the item class is exactly BlockItem (no place() override)"),
@@ -673,13 +710,16 @@ def build_block_tables(v: dict, blocks: dict, data: dict, static_regs: dict, van
         h = 0
         if ported:
             for name, hook, _ in HOOK_FLAGS:
+                if hook == "updateShape" and gh.get(hook) in gen_game.NO_SHAPE_HOOK:
+                    continue   # (it asks for the water's tick and nothing else)
                 h |= hbit[name] if hook and hook in gh else 0
         # FallingBlock.isFree
         h |= hbit["kFallThrough"] if (st["air"][i] or b["id"] in fire or cols["liquid"][i] or st["replaceable"][i]) else 0
         hooks[i] = h
         r = 0
-        if st["randomly_ticking"][i] and kind in gen_game.RANDOM_TICK_KINDS:
-            r |= rbit["kRandomTick"] | (rbit["kRandomAlways"] if kind in gen_game.RANDOM_TICK_ALWAYS else 0)
+        weathers = bool(ported) and game["blocks"][b["name"]]["class"][0] in gen_game.WEATHERING_CLASSES
+        if st["randomly_ticking"][i] and (kind in gen_game.RANDOM_TICK_KINDS or weathers):
+            r |= rbit["kRandomTick"] | (rbit["kRandomAlways"] if kind in gen_game.RANDOM_TICK_ALWAYS or weathers else 0)
         if kind in ("kSpreading", "kNylium"):
             # LightEngine.getLightDampeningInto(this, above, UP, ...) is read below with an empty shape for `this`.
             if st["occlusion_tuple"][i] != 0 or not st["randomly_ticking"][i]:
@@ -705,6 +745,101 @@ def build_block_tables(v: dict, blocks: dict, data: dict, static_regs: dict, van
 
     shapes = data["collision_shapes"]
     coll = [0xFFFF if c < 0 else c for c in st["collision_shape"]]
+
+    # ExplosionDamageCalculator.getBlockExplosionResistance takes the more of the block's and its
+    # fluid's; the server reads the fluid's off the fluid's block (world::blast_positions).
+    for fluid_class, fluid_block in (("WaterFluid", "minecraft:water"), ("LavaFluid", "minecraft:lava")):
+        own = re.search(r"getExplosionResistance\(\) \{\s*return ([0-9.]+)f?;", pseudo_of(
+            v["id"], [f"net.minecraft.world.level.material.{fluid_class}"], "getExplosionResistance"))
+        block = next(b for b in ext_blocks if b["name"] == fluid_block)
+        if not own or float(own.group(1)) != block["explosion_resistance"]:
+            die(f"{fluid_class}.getExplosionResistance is not {fluid_block}'s any more: give fluids a resistance of their own")
+
+    # ---- what a fence, a pane and a wall ask of the states around them
+    cbit = {name: 1 << i for i, (name, _) in enumerate(CONNECT_FLAGS)}
+    wbit = {name: 1 << i for i, (name, _) in enumerate(WALL_ABOVE_FLAGS)}
+    fences, wooden_fences, walls = tagged("fences"), tagged("wooden_fences"), tagged("walls")
+    shulkers, post_override, unstable_bottom = tagged("shulker_boxes"), tagged("wall_post_override"), tagged("unstable_bottom_center")
+    for name in EXCEPTIONS_FOR_CONNECTION:
+        if name not in block_ids:
+            die(f"{name} is no block any more: read Block.isExceptionForConnection again")
+    exceptions = {block_ids[name] for name in EXCEPTIONS_FOR_CONNECTION} | shulkers
+    wall_tests = game["statics"].get("net.minecraft.world.level.block.WallBlock", {})
+    try:
+        (post_test,) = wall_tests["TEST_SHAPE_POST"]
+        side_tests = [wall_tests["TEST_SHAPES_WALL"][d][0] for d in ("NORTH", "SOUTH", "WEST", "EAST")]
+        if any(len(wall_tests["TEST_SHAPES_WALL"][d]) != 1 for d in ("NORTH", "SOUTH", "WEST", "EAST")):
+            raise ValueError
+    except (KeyError, ValueError):
+        die("gamedata/statics.json: WallBlock.TEST_SHAPE_POST / TEST_SHAPES_WALL are not one box each any more")
+    game_shapes, game_coll = game["states"]["shapes"], cols["collision_shape"]
+
+    def covers(rects: list, test: list) -> bool:
+        """WallBlock.isCovered: no part of the test shape's column lies outside the rectangles
+        (x0, z0, x1, z1) - Shapes.joinIsNotEmpty(test, face, ONLY_FIRST), which takes coordinates
+        nearer than 1e-7 for one."""
+        x0, z0, x1, z1 = test[0], test[2], test[3], test[5]
+        xs = sorted({x0, x1} | {v for r in rects for v in (r[0], r[2]) if x0 < v < x1})
+        zs = sorted({z0, z1} | {v for r in rects for v in (r[1], r[3]) if z0 < v < z1})
+        for xa, xb in zip(xs, xs[1:]):
+            for za, zb in zip(zs, zs[1:]):
+                if xb - xa < 1e-7 or zb - za < 1e-7:
+                    continue
+                cx, cz = (xa + xb) / 2, (za + zb) / 2
+                if not any(r[0] <= cx <= r[2] and r[1] <= cz <= r[3] for r in rects):
+                    return False
+        return True
+
+    connect = bytearray(n)
+    wall_above = bytearray(n)
+    cover_cache: dict[tuple, int] = {}
+    for b in ext_blocks:
+        gb = game["blocks"][b["name"]]
+        chain = gb["class"]
+        c = 0
+        c |= cbit["kConnectException"] if (b["id"] in exceptions or "LeavesBlock" in chain) else 0
+        c |= cbit["kConnectFence"] if b["id"] in fences else 0
+        c |= cbit["kConnectWoodenFence"] if b["id"] in wooden_fences else 0
+        c |= cbit["kConnectWall"] if b["id"] in walls else 0
+        c |= cbit["kConnectBars"] if "IronBarsBlock" in chain else 0
+        c |= cbit["kUnstableBottomCenter"] if b["id"] in unstable_bottom else 0
+        if b["id"] in wooden_fences and b["id"] not in fences:
+            die(f"{b['name']}: in #wooden_fences and not in #fences - FenceBlock.isSameFence asks #fences first")
+        # What the server takes a block's kind for: the class, with its subclasses.
+        for cls, kind in (("StairBlock", "kStairs"), ("WallBlock", "kWall")):
+            if (cls in chain) != ((ported_of[b["name"]] or (None,))[0] == kind):
+                die(f"{b['name']}: {cls} and block_kind::{kind} are not the same blocks - StairBlock.isStairs is read off the kind")
+        for s in blocks[b["name"]]["states"]:
+            i, props = s["id"], s.get("properties", {})
+            f = c
+            if "FenceGateBlock" in chain:
+                if props.get("facing") not in ("north", "south", "west", "east"):
+                    die(f"{b['name']}: a fence gate without a horizontal `facing`")
+                # connectsToDirection(state, d): facing.getAxis() == d.getClockWise().getAxis()
+                f |= cbit["kConnectGateNS"] if props["facing"] in ("west", "east") else cbit["kConnectGateWE"]
+            connect[i] = f
+            # BlockState.getCollisionShape(level, pos).getFaceShape(DOWN): the cells of the layer at
+            # y = 1e-7 (VoxelShape.calculateFace), which is what its boxes are that reach across it.
+            # A shape that depends on where the block is (bamboo, dripstone) or on its block
+            # entity (a shulker box) is taken as gamedata asked for it: at no offset, shut.
+            boxes = shapes[st["collision_shape"][i]] if st["collision_shape"][i] >= 0 else game_shapes[game_coll[i]]
+            key = tuple(tuple(q) for q in boxes)
+            if key not in cover_cache:
+                rects = [(q[0], q[2], q[3], q[5]) for q in boxes if q[1] <= 1e-7 < q[4]]
+                w = wbit["kCoversPost"] if covers(rects, post_test) else 0
+                for d, test in enumerate(side_tests):
+                    w |= wbit["kCoversNorth"] << d if covers(rects, test) else 0
+                cover_cache[key] = w
+            w = cover_cache[key]
+            w |= wbit["kPostOverride"] if b["id"] in post_override else 0
+            if "WallBlock" in chain:
+                if props.get("up") not in ("true", "false"):
+                    die(f"{b['name']}: a wall without `up`")
+                w |= wbit["kWallPost"] if props["up"] == "true" else 0
+            wall_above[i] = w
+    stone = next((b["default_state"] for b in ext_blocks if b["name"] == "minecraft:stone"), None)
+    if stone is None or wall_above[stone] != 0x1F or wall_above[0] != 0:
+        die("kWallAbove: a full block does not cover a wall's every test shape, or air covers one")
     if len(shapes) >= 0xFFFF:
         die("too many collision shapes for 16-bit ids")
 
@@ -719,6 +854,8 @@ def build_block_tables(v: dict, blocks: dict, data: dict, static_regs: dict, van
         "state_random.bin": bytes(random_ticks),
         "state_sturdy_full.bin": bytes(cols["sturdy_full"]),
         "state_sturdy_center.bin": bytes(cols["sturdy_center"]),
+        "state_connect.bin": bytes(connect),
+        "state_wall_above.bin": bytes(wall_above),
     }
 
     hdr = HEADER.format(id=v["id"], proto=v["protocol_version"])
@@ -744,6 +881,12 @@ namespace proto::gen::state {
     o.append("\n// kRandom[state]\n")
     for name, why in RANDOM_FLAGS:
         o.append(f"inline constexpr unsigned char {name} = 0x{rbit[name]:02X};  // {why}\n")
+    o.append("\n// kConnect[state]\n")
+    for name, why in CONNECT_FLAGS:
+        o.append(f"inline constexpr unsigned char {name} = 0x{cbit[name]:02X};  // {why}\n")
+    o.append("\n// kWallAbove[state]\n")
+    for name, why in WALL_ABOVE_FLAGS:
+        o.append(f"inline constexpr unsigned char {name} = 0x{wbit[name]:02X};{'  // ' + why if why else ''}\n")
     o.append("""
 inline constexpr unsigned char kFlags[] = {
 #embed "state_flags.bin"
@@ -761,6 +904,12 @@ inline constexpr unsigned char kSturdyFull[] = {
 };
 inline constexpr unsigned char kSturdyCenter[] = {
 #embed "state_sturdy_center.bin"
+};
+inline constexpr unsigned char kConnect[] = {
+#embed "state_connect.bin"
+};
+inline constexpr unsigned char kWallAbove[] = {
+#embed "state_wall_above.bin"
 };
 // emission << 4 | dampening  (BlockState.getLightEmission() / getLightDampening())
 inline constexpr unsigned char kLight[] = {
@@ -782,6 +931,7 @@ inline constexpr unsigned char kFluidLegacyBytes[] = {
 };
 static_assert(sizeof kFlags == kCount && sizeof kLight == kCount && sizeof kOcclusion == kCount);
 static_assert(sizeof kHooks == kCount && sizeof kRandom == kCount && sizeof kSturdyFull == kCount && sizeof kSturdyCenter == kCount);
+static_assert(sizeof kConnect == kCount && sizeof kWallAbove == kCount);
 static_assert(sizeof kBlockBytes == 2 * kCount && sizeof kCollisionBytes == 2 * kCount && sizeof kFluidLegacyBytes == 2 * kCount);
 
 constexpr unsigned u16_at(const unsigned char* t, unsigned i) { return t[2 * i] | static_cast<unsigned>(t[2 * i + 1]) << 8; }
@@ -837,7 +987,9 @@ struct BlockInfo {
     unsigned short item;        // item that places it, 0 (minecraft:air) = none
     unsigned short flags;       // kPlace* kind in the low bits, then the k* bits below
     unsigned short alt[3];      // states its placement kind chooses between (see kPlace*) - and then, by kind:
-                                // kSpreading: [2] the soil it dies into; kWeathering: [0] its next stage, 0 for none
+                                // kSpreading: [2] the soil it dies into
+    unsigned short next_stage;  // WeatheringCopper.getNext() of a block that weathers: the first state of the block it
+                                // becomes, with the properties it has (+ state - first_state); 0: it does not
     unsigned short place_sound, break_sound;  // sound_event registry ids
     float sound_volume, sound_pitch;
     float explosion_resistance; // Block.getExplosionResistance()
@@ -845,10 +997,11 @@ struct BlockInfo {
     float bounce;               // Block.getBounceRestitution(): what an entity landing on it keeps of its fall
     // What an explosion without drop decay leaves of the block (its loot table for an empty tool):
     // drop[0] with probability drop_chance, else drop[1]; item 0 = nothing. Only for blocks that
-    // can be in the world (placeable ones) - the others have none.
+    // can be in the world (placeable ones) - the others have none. A double slab leaves twice
+    // the count (block_kind::kSlab: its table says so by state).
     struct Drop {
         unsigned short item;
-        unsigned char min, max;  // the count is uniform in [min, max]
+        signed char min, max;    // the count is uniform in [min, max]; one below 1 is nothing
     } drop[2];
     float drop_chance;
     unsigned char kind;         // block_kind::*: the behaviour the server implements for its class
@@ -897,6 +1050,22 @@ namespace block_flag {
         for p in gb["properties"]:
             info.append(f"inline constexpr unsigned k{p['name'].capitalize()}Stride = {p['stride']};  // {', '.join(p['values'])}\n")
         info.append(f"}}  // namespace {name.split(':', 1)[1]}\n")
+    for family, (classes, layout) in gen_game.FAMILY_LAYOUTS.items():
+        members = [b["name"] for b in ext_blocks if game["blocks"][b["name"]]["class"][0] in classes]
+        if not members or {game["blocks"][m]["class"][0] for m in members} != classes:
+            die(f"props::{family}: no block of one of {sorted(classes)}")
+        for name in members:
+            have = [(p["name"], p["values"]) for p in game["blocks"][name]["properties"]]
+            if have != [(k, list(vals)) for k, vals in layout] or not ported_of[name]:
+                die(f"{name}: its block state properties are {have}, the server's port of its family expects {layout}")
+        strides = {(p["name"], p["stride"]) for m in members for p in game["blocks"][m]["properties"]}
+        if len(strides) != len(layout):
+            die(f"props::{family}: its blocks do not share one layout")
+        info.append(f"namespace {family} {{  // {', '.join(sorted(classes))}\n")
+        for p in game["blocks"][members[0]]["properties"]:
+            pname = "".join(part.capitalize() for part in p["name"].split("_"))
+            info.append(f"inline constexpr unsigned k{pname}Stride = {p['stride']};  // {', '.join(p['values'])}\n")
+        info.append(f"}}  // namespace {family}\n")
     info.append("}  // namespace props\n\n}  // namespace proto::gen\n")
     files["block_info.hpp"] = "".join(info)
 
@@ -912,7 +1081,7 @@ namespace proto::gen {
 
     bf = {name: value for name, value, _ in BLOCK_FLAGS}
     custom_clone = blocks_with_custom_clone(v["id"], {b["class"] for b in ext_blocks})
-    kinds = [0] * 16
+    kinds = [0] * (bf["kPlaceMask"] + 1)
     placeable_names: set[str] = set()
     loot = gen_game.Loot(vanilla, item_ids)
     be_ids = {n: e["protocol_id"] for n, e in static_regs["minecraft:block_entity_type"]["entries"].items()}
@@ -955,10 +1124,15 @@ namespace proto::gen {
             cls = gb["class"][0]
             if any(h in gb["hooks"] for h in signal_hooks) and cls != "PoweredBlock":
                 die(f"{name}: a placeable block with a redstone signal of its own ({cls}) - TNT would have to know")
-            if any(h in gb["hooks"] for h in drop_hooks) and cls != "TntBlock":
-                die(f"{name}: a placeable block that overrides {[h for h in drop_hooks if h in gb['hooks']]}")
+            # (StairBlock.getExplosionResistance is its base block's: what blockdata.json has, and the
+            # same as its own setting - checked below.)
+            overridden = [h for h in drop_hooks if h in gb["hooks"] and (h, gb["hooks"][h]) != ("getExplosionResistance", "StairBlock")]
+            if overridden and cls != "TntBlock":
+                die(f"{name}: a placeable block that overrides {overridden}")
             # TntBlock.dropFromExplosion is false: it is primed instead (wasExploded).
-            drops = [] if cls == "TntBlock" else loot.explosion_drops(name, gb.get("loot_table"))
+            drops = [] if cls == "TntBlock" else loot.explosion_drops(name, gb.get("loot_table"), "SlabBlock" in gb["class"])
+            if ("SlabBlock" in gb["class"]) != ((ported or (None,))[0] == "kSlab"):
+                die(f"{name}: SlabBlock and block_kind::kSlab are not the same blocks")
         drops += [(1.0, 0, 0, 0)] * (2 - len(drops))
         be = gb.get("block_entity_type")
         if (be is not None) != bool(b["entity_block"]) or (be is not None and be_ids[be] >= 0xFF):
@@ -989,13 +1163,20 @@ namespace proto::gen {
             if age not in weather_states:
                 die(f"{name}: a WeatheringCopper block without a weatherState of {weather_states}")
             weather = weather_states.index(age) + 1
-        if own_kind == "kWeathering":
-            if not weather or blocks[name].get("properties"):
-                die(f"{name}: a weathering full block without an age, or with properties (getNext copies them)")
+        next_stage = 0
+        if ported and gb["class"][0] in gen_game.WEATHERING_CLASSES:
+            if not weather:
+                die(f"{name}: a weathering block without an age")
             nxt = weathering_next.get(name)
-            alt = [default_of(nxt) if nxt else 0, 0, 0]
             if any(st["randomly_ticking"][s["id"]] != (nxt is not None) for s in blocks[name]["states"]):
                 die(f"{name}: isRandomlyTicking is not 'it has a next stage'")
+            if nxt:
+                # BlockState.withPropertiesOf: the same values of the same properties - the same offset.
+                into = next(x for x in ext_blocks if x["name"] == nxt)
+                if game["blocks"][nxt]["properties"] != gb["properties"] or not placement_kind(
+                        into, ext_items.get(into["item"]), ported_of[nxt]):
+                    die(f"{name}: weathers into {nxt}, which has other properties or cannot be in the world")
+                next_stage = first[nxt]
         f = kind
         f |= bf["kSnowTag"] if b["id"] in snow else 0
         f |= bf["kInteractive"] if not (hook_default(b, "useItemOn") and hook_default(b, "useWithoutItem")) else 0
@@ -1004,7 +1185,7 @@ namespace proto::gen {
         f |= bf["kCustomClone"] if b["class"] in custom_clone else 0
         snd = b["sound"]
         t.append(f"    {{{first[name]}, {len(blocks[name]['states'])}, {b['default_state']}, {item_ids[b['item']]}, 0x{f:X}, "
-                 f"{{{alt[0]}, {alt[1]}, {alt[2]}}}, {sound(snd['place'])}, {sound(snd['break'])}, "
+                 f"{{{alt[0]}, {alt[1]}, {alt[2]}}}, {next_stage}, {sound(snd['place'])}, {sound(snd['break'])}, "
                  f"{cfloat(snd['volume'])}f, {cfloat(snd['pitch'])}f, {cfloat(settings['explosionResistance'])}f, "
                  f"{cfloat(settings['speedFactor'])}f, {cfloat(settings['bounceRestitution'])}f, "
                  f"{{{{{drops[0][1]}, {drops[0][2]}, {drops[0][3]}}}, {{{drops[1][1]}, {drops[1][2]}, {drops[1][3]}}}}}, "
@@ -1118,7 +1299,7 @@ namespace proto::gen {
     files["items.hpp"] = "".join(it)
 
     entity_ids = {n.split(":", 1)[1]: e["protocol_id"] for n, e in static_regs["minecraft:entity_type"]["entries"].items()}
-    physics = gen_physics.emit(hdr, v["id"], ext_blocks, st, shapes, game, tagged, placeable_names, entity_ids, cfloat32)
+    physics = gen_physics.emit(hdr, v["id"], ext_blocks, st, shapes, data.get("collision_grids", []), game, tagged, placeable_names, entity_ids, cfloat32)
     physics_stats = physics.pop("_physics_stats")
     files.update(physics)
     files["_stats"] = {"placeable": sum(kinds[1:]), "blocks": len(ext_blocks), **physics_stats}
@@ -1625,7 +1806,7 @@ def print_stats(out: Path, stats: dict) -> None:
     print(f"mcgen: generated {out.relative_to(ROOT)}: {stats['registries']} registries, {stats['entries']} entries, "
           f"{stats['tags']} tags, {stats['blocks']} blocks ({stats['placeable']} placeable), {stats['entity_types']} entity types, "
           f"{stats['crafting']} crafting and {stats['smelting']} smelting recipes ({stats['recipes_skipped']} of other kinds left out), "
-          f"{stats['materials']} block materials, {stats['shapes_grid']} collision grids ({stats['shapes_inexact']} of several boxes), "
+          f"{stats['materials']} block materials, {stats['shapes_grid']} collision grids, "
           f"{stats['movers']} entity types that move, packet ids from {stats['packets']}")
     changed = stats["changed"]  # the rest was left as it was, so nothing that includes it is rebuilt
     print(f"mcgen: {len(changed)} of {stats['files']} files changed" + (f": {', '.join(changed)}" if changed else ""))

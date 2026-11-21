@@ -32,6 +32,18 @@ from mcgen import die
 #             them. The port was written against exactly this set: a hook that appears or
 #             disappears in a new version means the class has to be read again.
 #   item      (optional) the class of the item that places it, when that is not plain BlockItem
+_WEATHERS = {"isRandomlyTicking", "randomTick"}
+_SLAB = {"canBeReplaced(BlockState,BlockPlaceContext)", "getFluidState", "getShape", "isPathfindable", "updateShape",
+         "useShapeForLightOcclusion", "createBlockStateDefinition", "getStateForPlacement"}
+_STAIRS = {"getFluidState", "getShape", "isPathfindable", "mirror", "rotate", "updateShape", "useShapeForLightOcclusion",
+           "createBlockStateDefinition", "getExplosionResistance", "getStateForPlacement"}
+_CROSS = {"getCollisionShape", "getFluidState", "getShape", "getVisualShape", "isPathfindable", "mirror", "propagatesSkylightDown",
+          "rotate", "updateShape", "createBlockStateDefinition", "getStateForPlacement"}  # CrossCollisionBlock and what both add
+_CHAIN = {"getFluidState", "getShape", "isPathfindable", "rotate", "updateShape", "createBlockStateDefinition", "getStateForPlacement"}
+_LANTERN = {"canSurvive", "getFluidState", "getShape", "isPathfindable", "updateShape", "createBlockStateDefinition",
+            "getStateForPlacement"}
+_GRATE = {"getFluidState", "getShadeBrightness", "getVisualShape", "propagatesSkylightDown", "skipRendering", "updateShape",
+          "createBlockStateDefinition", "getStateForPlacement"}
 PORTED_BLOCKS = {
     "ChestBlock": ("kChest", "kPlaceChest", {
         "affectNeighborsAfterRemoval", "getAnalogOutputSignal", "getFluidState", "getMenuProvider", "getShape",
@@ -53,7 +65,7 @@ PORTED_BLOCKS = {
     "MyceliumBlock": ("kSpreading", "kPlaceSnowy", {
         "randomTick", "updateShape", "createBlockStateDefinition", "getStateForPlacement", "animateTick"}),
     "NyliumBlock": ("kNylium", "kPlaceDefault", {"randomTick"}),
-    "WeatheringCopperFullBlock": ("kWeathering", "kPlaceDefault", {"isRandomlyTicking", "randomTick"}),
+    "WeatheringCopperFullBlock": ("kPlain", "kPlaceDefault", {"isRandomlyTicking", "randomTick"}),
     "BuddingAmethystBlock": ("kBuddingAmethyst", "kPlaceDefault", {"onProjectileHit", "randomTick"}),
     "AmethystClusterBlock": ("kAmethystCluster", "kPlaceCluster", {
         "canSurvive", "getFluidState", "getShape", "mirror", "onProjectileHit", "rotate", "updateShape",
@@ -67,14 +79,58 @@ PORTED_BLOCKS = {
     "ColoredFallingBlock": ("kFalling", "kPlaceDefault", {"onPlace", "tick", "updateShape", "animateTick"}),
     "ConcretePowderBlock": ("kConcretePowder", "kPlaceConcretePowder", {
         "onPlace", "tick", "updateShape", "animateTick", "getStateForPlacement"}),
+    # ---- shapes: a state from how the block is placed and what stands beside it (server/block_shapes.cpp).
+    # `waterlogged` is in most of them: getFluidState answers water, and updateShape asks for the
+    # water's tick - of which there is none, so a class whose updateShape does nothing else has no
+    # shape hook here (NO_SHAPE_HOOK).
+    "SlabBlock": ("kSlab", "kPlaceSlab", _SLAB),
+    "StairBlock": ("kStairs", "kPlaceStairs", _STAIRS),
+    "FenceBlock": ("kFence", "kPlaceCross", _CROSS | {"getOcclusionShape", "useWithoutItem"}),
+    "IronBarsBlock": ("kBars", "kPlaceCross", _CROSS | {"skipRendering"}),
+    "StainedGlassPaneBlock": ("kBars", "kPlaceCross", _CROSS | {"skipRendering"}),
+    "WallBlock": ("kWall", "kPlaceWall", {
+        "getCollisionShape", "getFluidState", "getShape", "isPathfindable", "mirror", "propagatesSkylightDown", "rotate",
+        "updateShape", "createBlockStateDefinition", "getStateForPlacement"}),
+    "GlazedTerracottaBlock": ("kPlain", "kPlaceHorizontal", {"mirror", "rotate", "createBlockStateDefinition", "getStateForPlacement"}),
+    "ChainBlock": ("kPlain", "kPlaceChain", _CHAIN),
+    "LanternBlock": ("kLantern", "kPlaceLantern", _LANTERN),
+    "EndRodBlock": ("kPlain", "kPlaceEndRod", {
+        "getShape", "isPathfindable", "mirror", "rotate", "animateTick", "createBlockStateDefinition", "getStateForPlacement"}),
+    "WaterloggedTransparentBlock": ("kPlain", "kPlaceWaterlogged", _GRATE),
+    "HugeMushroomBlock": ("kMushroom", "kPlaceMushroom", {
+        "mirror", "rotate", "updateShape", "createBlockStateDefinition", "getStateForPlacement"}),
+    "BarrierBlock": ("kPlain", "kPlaceWaterlogged", {
+        "getFluidState", "getRenderShape", "getShadeBrightness", "propagatesSkylightDown", "updateShape",
+        "createBlockStateDefinition", "getStateForPlacement"}),
+    "HeavyCoreBlock": ("kPlain", "kPlaceWaterlogged", {
+        "getFluidState", "getShape", "isPathfindable", "updateShape", "createBlockStateDefinition", "getStateForPlacement"}),
+    "MangroveRootsBlock": ("kPlain", "kPlaceWaterlogged", {
+        "getFluidState", "skipRendering", "updateShape", "createBlockStateDefinition", "getStateForPlacement"}),
+    # ...and the copper of them that weathers: the same class with ChangeOverTimeBlock's random tick.
+    "WeatheringCopperSlabBlock": ("kSlab", "kPlaceSlab", _SLAB | _WEATHERS),
+    "WeatheringCopperStairBlock": ("kStairs", "kPlaceStairs", _STAIRS | _WEATHERS),
+    "WeatheringCopperBarsBlock": ("kBars", "kPlaceCross", _CROSS | {"skipRendering"} | _WEATHERS),
+    "WeatheringCopperChainBlock": ("kPlain", "kPlaceChain", _CHAIN | _WEATHERS),
+    "WeatheringLanternBlock": ("kLantern", "kPlaceLantern", _LANTERN | _WEATHERS),
+    "WeatheringCopperGrateBlock": ("kPlain", "kPlaceWaterlogged", _GRATE | _WEATHERS),
 }
 BLOCK_KINDS = ["kPlain", "kChest", "kFurnace", "kCraftingTable", "kTnt", "kPowered", "kSnowy", "kSpreading", "kNylium",
-               "kWeathering", "kBuddingAmethyst", "kAmethystCluster", "kTorch", "kWallTorch", "kLamp", "kFalling",
-               "kConcretePowder"]
+               "kBuddingAmethyst", "kAmethystCluster", "kTorch", "kWallTorch", "kLamp", "kFalling", "kConcretePowder",
+               "kSlab", "kStairs", "kFence", "kBars", "kWall", "kLantern", "kMushroom"]
 # The kinds whose randomTick is ported, and of those the ones whose tick may act whatever stands
 # around the block (the others are asked what is around them: state::kSmothers and its like).
-RANDOM_TICK_KINDS = {"kSpreading", "kNylium", "kWeathering", "kBuddingAmethyst"}
-RANDOM_TICK_ALWAYS = {"kWeathering", "kBuddingAmethyst"}
+RANDOM_TICK_KINDS = {"kSpreading", "kNylium", "kBuddingAmethyst"}
+RANDOM_TICK_ALWAYS = {"kBuddingAmethyst"}
+# The ported classes whose randomTick is ChangeOverTimeBlock.changeOverTime (copper), whatever
+# else the class is: it weathers into WeatheringCopper.NEXT_BY_BLOCK's block with the same
+# properties (BlockInfo::next_stage), and may do so whatever stands around it.
+WEATHERING_CLASSES = {"WeatheringCopperFullBlock", "WeatheringCopperSlabBlock", "WeatheringCopperStairBlock",
+                      "WeatheringCopperBarsBlock", "WeatheringCopperChainBlock", "WeatheringLanternBlock",
+                      "WeatheringCopperGrateBlock"}
+# Classes whose updateShape only asks for the tick of the water in a waterlogged block
+# (ticks.scheduleTick(pos, Fluids.WATER, ...), then super): with no fluid ticks it does nothing,
+# and their states carry no kHookShape.
+NO_SHAPE_HOOK = {"SlabBlock", "ChainBlock", "WaterloggedTransparentBlock", "BarrierBlock", "HeavyCoreBlock", "MangroveRootsBlock"}
 # Placeable blocks whose class overrides randomTick and is not ported: what they would do waits
 # for something else. Named here so that a new one stops the generator.
 RANDOM_TICK_GAPS = {"IceBlock": "melts into water: it waits for fluids"}
@@ -97,6 +153,28 @@ STATE_LAYOUTS = {
     "minecraft:large_amethyst_bud": _CLUSTER,
     "minecraft:amethyst_cluster": _CLUSTER,
     "minecraft:snow": [("layers", ["1", "2", "3", "4", "5", "6", "7", "8"])],
+}
+# The same for whole families: props::<name> has the strides (no kFirst: BlockInfo::first_state),
+# and every block whose own class is one of the classes has exactly this layout.
+_WET = ("waterlogged", ["true", "false"])
+_BOOL = ["true", "false"]
+_SIDE = ["none", "low", "tall"]
+FAMILY_LAYOUTS = {
+    "slab": ({"SlabBlock", "WeatheringCopperSlabBlock"}, [("type", ["top", "bottom", "double"]), _WET]),
+    "stairs": ({"StairBlock", "WeatheringCopperStairBlock"},
+               [("facing", ["north", "south", "west", "east"]), ("half", ["top", "bottom"]),
+                ("shape", ["straight", "inner_left", "inner_right", "outer_left", "outer_right"]), _WET]),
+    "cross": ({"FenceBlock", "IronBarsBlock", "StainedGlassPaneBlock", "WeatheringCopperBarsBlock"},
+              [("east", _BOOL), ("north", _BOOL), ("south", _BOOL), _WET, ("west", _BOOL)]),
+    "wall": ({"WallBlock"}, [("east", _SIDE), ("north", _SIDE), ("south", _SIDE), ("up", _BOOL), _WET, ("west", _SIDE)]),
+    "horizontal": ({"GlazedTerracottaBlock"}, [("facing", ["north", "south", "west", "east"])]),
+    "chain": ({"ChainBlock", "WeatheringCopperChainBlock"}, [("axis", ["x", "y", "z"]), _WET]),
+    "lantern": ({"LanternBlock", "WeatheringLanternBlock"}, [("hanging", _BOOL), _WET]),
+    "end_rod": ({"EndRodBlock"}, [("facing", ["north", "east", "south", "west", "up", "down"])]),
+    "waterlogged": ({"WaterloggedTransparentBlock", "WeatheringCopperGrateBlock", "BarrierBlock", "HeavyCoreBlock",
+                     "MangroveRootsBlock"}, [_WET]),
+    "mushroom": ({"HugeMushroomBlock"}, [("down", _BOOL), ("east", _BOOL), ("north", _BOOL), ("south", _BOOL), ("up", _BOOL),
+                                         ("west", _BOOL)]),
 }
 
 # Sounds and particles the server sends by id (static registries: sound_event, particle_type).
@@ -164,6 +242,8 @@ class Loot:
     def __init__(self, vanilla, item_ids: dict[str, int]):
         self.vanilla = vanilla
         self.item_ids = item_ids
+        self.block = ""        # the block whose table is being read
+        self.doubles = False   # ...and whether its table gives two for `type=double` (a slab's)
 
     def read(self, kind: str, name: str):
         path = f"data/minecraft/{kind}/{name.split(':', 1)[1]}.json"
@@ -205,6 +285,12 @@ class Loot:
             return lo, hi
         for m in modifiers if isinstance(modifiers, list) else [modifiers]:
             kind = m["type"]
+            # A slab's: two of it for the double slab. That is a state, not a draw - the server
+            # doubles the count for it (Game::block_drop), and mcgen holds every slab to this form.
+            if kind == "minecraft:set_count" and m.get("count") == 2 and not m.get("add") and m.get("condition") == {
+                    "type": "minecraft:match_block", "blocks": self.block, "state": {"type": "double"}}:
+                self.doubles = True
+                continue
             if "condition" in m or "conditions" in m:
                 die(f"{where}: a conditional loot function")
             if kind == "minecraft:set_count":
@@ -224,8 +310,10 @@ class Loot:
                 if m["formula"] not in ("minecraft:ore_drops", "minecraft:uniform_bonus_count"):
                     die(f"{where}: apply_bonus formula {m['formula']} draws even without the enchantment")
             elif kind == "minecraft:limit_count":
+                # A floor of nothing under a range that begins below it (a mushroom block: -6..2,
+                # most often none) is kept as the range: a count below one drops nothing.
                 limit = m["limit"]
-                if lo < limit.get("min", lo) or hi > limit.get("max", hi):
+                if (lo < limit.get("min", lo) and limit["min"] != 0) or hi > limit.get("max", hi):
                     die(f"{where}: limit_count cuts into the range {lo}..{hi}")
             elif kind == "minecraft:explosion_decay":
                 pass  # needs LootContextParams.EXPLOSION_RADIUS, which a TNT's explosion does not set
@@ -246,7 +334,7 @@ class Loot:
             return []
         if e["type"] == "minecraft:item":
             lo, hi = self.count(e.get("modifier"), where)
-            if not 1 <= lo <= hi <= 99:
+            if not (-128 <= lo <= hi <= 99 and hi >= 1):
                 die(f"{where}: drops {lo}..{hi}")
             return [(1.0 if chance is True else chance, self.item_ids[e["name"]], lo, hi)]
         if e["type"] == "minecraft:alternatives":
@@ -260,11 +348,21 @@ class Loot:
             return out
         die(f"{where}: loot entry type {e['type']}")
 
-    def explosion_drops(self, block: str, table_name: str | None) -> list[tuple[float, int, int, int]]:
+    def explosion_drops(self, block: str, table_name: str | None, slab: bool = False) -> list[tuple[float, int, int, int]]:
+        """`slab`: the block is a SlabBlock - its table must give two for the double slab, and no other's may."""
         if not table_name:
+            if slab:
+                die(f"{block}: a slab without a loot table")
             return []
         t = self.read("loot_table", table_name)
         where = f"loot table of {block}"
+        self.block, self.doubles = block, False
+        out = self.reduce(t, where)
+        if self.doubles != slab or (slab and (len(out) != 1 or out[0][0] < 1.0 or (out[0][2], out[0][3]) != (1, 1))):
+            die(f"{where}: {'not ' if slab else ''}a slab's table (one of it, two for the double slab) - Game::block_drop goes by the class")
+        return out
+
+    def reduce(self, t: dict, where: str) -> list[tuple[float, int, int, int]]:
         if "functions" in t or "modifier" in t:
             die(f"{where}: table-wide functions")
         pools = t.get("pools", [])

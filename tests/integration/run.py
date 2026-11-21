@@ -739,9 +739,9 @@ def placement_rules(srv: Server):
     expect_ack(a, seq)
     assert mc.parse_section_blocks_update(b.expect("section_blocks_update")) == back
 
-    # A block whose placement needs behaviour that is not written yet (stairs: facing, shape) is not
-    # placed at all; the client is told what is really there.
-    give(a, 39, mc.ITEM["kOakStairs"])
+    # A block whose placement needs behaviour that is not written yet (a lever: what it is on, its
+    # signal) is not placed at all; the client is told what is really there.
+    give(a, 39, mc.ITEM["kLever"])
     a.send("set_carried_item", struct.pack(">h", 3))
     seq += 1
     click(a, (8, -61, 12), 1, seq=seq)
@@ -2438,6 +2438,443 @@ def random_ticks(srv: Server):
         assert buds[pos] - (mc.BLOCK[kind] - 9) == index * 2 + 1, (pos, buds[pos], kind)
 
 
+# ----------------------------------------------------------------------------- blocks whose state is their shape
+
+# States of a family, counted from the block's default (mc.BLOCK) by the layout blocks.json gives
+# its properties: in the report's order, the last one running fastest, `true` before `false`.
+FACING4 = ("north", "south", "west", "east")
+STAIR_SHAPES = ("straight", "inner_left", "inner_right", "outer_left", "outer_right")
+
+
+def stairs(block: str, facing: str, half: str = "bottom", shape: str = "straight", wet: bool = False) -> int:
+    """facing x half (top, bottom) x shape x waterlogged; the default is north, bottom, straight, dry."""
+    return (mc.BLOCK[block] - 11 + FACING4.index(facing) * 20 + ("top", "bottom").index(half) * 10 +
+            STAIR_SHAPES.index(shape) * 2 + (0 if wet else 1))
+
+
+def slab(block: str, kind: str = "bottom", wet: bool = False) -> int:
+    """type (top, bottom, double) x waterlogged; the default is the bottom half, dry."""
+    return mc.BLOCK[block] - 3 + ("top", "bottom", "double").index(kind) * 2 + (0 if wet else 1)
+
+
+def cross(block: str, arms: str = "", wet: bool = False) -> int:
+    """A fence, bars, a pane: east, north, south, waterlogged, west; the default has no arms and is
+    dry. `arms`: the letters of the sides that have one."""
+    return (mc.BLOCK[block] - 31 + (0 if "e" in arms else 16) + (0 if "n" in arms else 8) + (0 if "s" in arms else 4) +
+            (0 if wet else 2) + (0 if "w" in arms else 1))
+
+
+def wall(block: str, up: bool = True, wet: bool = False, **sides: str) -> int:
+    """east, north, south (none, low, tall) x up x waterlogged x west; the default is a post alone, dry."""
+    def side(name: str) -> int:
+        return ("none", "low", "tall").index(sides.get(name, "none"))
+    return (mc.BLOCK[block] - 3 + side("east") * 108 + side("north") * 36 + side("south") * 12 + (0 if up else 6) +
+            (0 if wet else 3) + side("west"))
+
+
+def hold(c: Client, slot: int) -> None:
+    c.send("set_carried_item", struct.pack(">h", slot))
+
+
+def upper(face: int) -> tuple:
+    """A click on the upper half of a side face."""
+    return {2: (0.5, 0.75, 0.0), 3: (0.5, 0.75, 1.0), 4: (0.0, 0.75, 0.5), 5: (1.0, 0.75, 0.5)}[face]
+
+
+def lower(face: int) -> tuple:
+    return {2: (0.5, 0.25, 0.0), 3: (0.5, 0.25, 1.0), 4: (0.0, 0.25, 0.5), 5: (1.0, 0.25, 0.5)}[face]
+
+
+@test()
+def slabs(srv: Server):
+    """A slab is the half that was clicked; the same slab into the free half makes one block of
+    two, which drops two."""
+    a, b = srv.client(), srv.client()
+    join(a, "Alice")
+    join(b, "Bob")
+    a.expect("player_info_update")
+    for cl in (a, b):
+        cl.send("player_loaded")
+    settle(a, b)
+    make_op(srv, a, "Alice")
+    stone = mc.BLOCK["kStone"]
+    oak = lambda kind="bottom": slab("kOakSlab", kind)   # noqa: E731
+    give(a, 36, I["kStone"], 16)
+    give(a, 37, I["kOakSlab"], 16)
+    give(a, 38, I["kStoneSlab"], 16)
+    # On the ground: the bottom half. On that half: the block is full.
+    hold(a, 1)
+    click(a, (8, -61, 11), 1, seq=1)
+    assert shows(collect(a), {(8, -60, 11): oak()})
+    click(a, (8, -60, 11), 1, seq=2, cursor=(0.5, 0.5, 0.5))
+    assert shows(collect(a), {(8, -60, 11): oak("double")})
+    assert collect(b) == {(8, -60, 11): oak("double")}
+    # A double slab takes no more: the next one lies on it.
+    click(a, (8, -60, 11), 1, seq=3)
+    assert shows(collect(a), {(8, -60, 11): oak("double"), (8, -59, 11): oak()})
+    # Against the side of a block: the half that was clicked. And against the same side again,
+    # the other half: the slab that is there is filled (BlockPlaceContext.canPlace asks it).
+    hold(a, 0)
+    click(a, (10, -61, 11), 1, seq=4)
+    hold(a, 1)
+    click(a, (10, -60, 11), 4, seq=5, cursor=upper(4))
+    assert shows(collect(a), {(10, -60, 11): stone, (9, -60, 11): oak("top")})
+    click(a, (10, -60, 11), 4, seq=6, cursor=lower(4))
+    assert shows(collect(a), {(9, -60, 11): oak("double")})
+    # ...but a click on the half itself fills it only from where its free half is: on a top
+    # slab's upper half the click is against its side, and the slab goes beside it.
+    click(a, (10, -60, 11), 5, seq=7, cursor=upper(5))
+    assert shows(collect(a), {(11, -60, 11): oak("top")})
+    click(a, (11, -60, 11), 3, seq=8, cursor=upper(3))
+    assert shows(collect(a), {(11, -60, 11): oak("top"), (11, -60, 12): oak("top")})
+    click(a, (11, -60, 11), 3, seq=9, cursor=lower(3))
+    assert shows(collect(a), {(11, -60, 11): oak("double")})
+    # Under a block: the top half; and from below into that half.
+    hold(a, 0)
+    click(a, (6, -61, 11), 1, seq=10)
+    click(a, (6, -60, 11), 1, seq=11)
+    dig(a, (6, -60, 11), seq=12)
+    hold(a, 1)
+    click(a, (6, -59, 11), 0, seq=13, cursor=(0.5, 0.0, 0.5))
+    assert shows(collect(a), {(6, -60, 11): oak("top")})
+    click(a, (6, -60, 11), 0, seq=14, cursor=(0.5, 0.5, 0.5))
+    assert shows(collect(a), {(6, -60, 11): oak("double")})
+    # Another kind of slab is another block: it does not fill the half, it lies on it.
+    click(a, (11, -61, 9), 1, seq=15)
+    hold(a, 2)
+    click(a, (11, -60, 9), 1, seq=16, cursor=(0.5, 0.5, 0.5))
+    assert shows(collect(a), {(11, -60, 9): oak(), (11, -59, 9): slab("kStoneSlab")})
+    collect(b)
+    # What a double slab drops: two, as one stack. A half drops one.
+    got = run_command(a, "setblock 9 -60 11 air destroy")
+    assert got["blocks"] == {(9, -60, 11): AIR}, got
+    got = run_command(a, "setblock 11 -60 12 air destroy")
+    assert got["blocks"] == {(11, -60, 12): AIR}, got
+    collect(b)
+    for cl in (a, b):
+        dropped = sorted(e.data[D_ITEM][1] for e in items_of(cl, "kOakSlab"))
+        assert dropped == [plain("kOakSlab", 1), plain("kOakSlab", 2)], dropped
+    # A command sets any of the three.
+    got = run_command(a, "setblock 9 -60 11 oak_slab[type=double]")
+    assert got["blocks"] == {(9, -60, 11): oak("double")}, got
+
+
+@test()
+def stairs_turn_corners(srv: Server):
+    """Stairs face the way their player looks, upside down where the upper half was clicked, and
+    turn a corner where the stairs behind or in front of them stand across - again whenever a
+    block beside them changes."""
+    a, b = srv.client(), srv.client()
+    join(a, "Alice")
+    join(b, "Bob")
+    a.expect("player_info_update")
+    for cl in (a, b):
+        cl.send("player_loaded")
+    settle(a, b)
+    oak = lambda *args: stairs("kOakStairs", *args)   # noqa: E731
+    give(a, 36, I["kStone"], 16)
+    give(a, 37, I["kOakStairs"], 16)
+    hold(a, 1)
+    look(a, 0.0, 0.0)                                   # south
+    click(a, (8, -61, 5), 1, seq=1)
+    assert shows(collect(a), {(8, -60, 5): oak("south")})
+    # Stairs behind them (south of stairs that face south), across: an outer corner.
+    look(a, -90.0, 0.0)                                 # east
+    click(a, (8, -61, 6), 1, seq=2)
+    changes = collect(a)
+    assert shows(changes, {(8, -60, 6): oak("east"), (8, -60, 5): oak("south", "bottom", "outer_left")})
+    assert collect(b) == {(8, -60, 6): oak("east"), (8, -60, 5): oak("south", "bottom", "outer_left")}
+    # They go: straight again.
+    dig(a, (8, -60, 6), seq=3)
+    assert collect(a) == {(8, -60, 6): AIR, (8, -60, 5): oak("south")}
+    # Stairs in front of them, across: an inner corner.
+    look(a, 90.0, 0.0)                                  # west
+    click(a, (8, -61, 4), 1, seq=4)
+    assert shows(collect(a), {(8, -60, 4): oak("west"), (8, -60, 5): oak("south", "bottom", "inner_right")})
+    # ...unless the stairs on that side of them go on as they do (canTakeShape): a straight run.
+    look(a, 0.0, 0.0)
+    click(a, (7, -61, 5), 1, seq=5)
+    assert shows(collect(a), {(7, -60, 5): oak("south"), (8, -60, 5): oak("south")})
+    dig(a, (7, -60, 5), seq=6)
+    assert collect(a) == {(7, -60, 5): AIR, (8, -60, 5): oak("south", "bottom", "inner_right")}
+    # Stairs that are placed into a corner take it at once: facing north, with the stairs that
+    # face west in front of them (south of them).
+    look(a, 180.0, 0.0)                                 # north
+    dig(a, (8, -60, 5), seq=7)
+    collect(a)
+    click(a, (8, -61, 3), 1, seq=8)
+    assert shows(collect(a), {(8, -60, 3): oak("north", "bottom", "inner_left")})
+    # The upper half of a side, or the underside of a block: upside down. Halves do not corner each other.
+    hold(a, 0)
+    click(a, (10, -61, 11), 1, seq=9)
+    hold(a, 1)
+    look(a, 0.0, 0.0)
+    click(a, (10, -60, 11), 5, seq=10, cursor=upper(5))
+    assert shows(collect(a), {(11, -60, 11): oak("south", "top")})
+    click(a, (10, -60, 11), 4, seq=11, cursor=lower(4))
+    assert shows(collect(a), {(9, -60, 11): oak("south")})
+    look(a, -90.0, 0.0)
+    click(a, (11, -60, 11), 3, seq=12, cursor=lower(3))     # south of the upside-down ones, the right way up
+    assert shows(collect(a), {(11, -60, 12): oak("east"), (11, -60, 11): oak("south", "top")})
+    collect(b)
+    assert not a.level_events and not of_type(b, "kItem")
+
+
+@test()
+def fences_panes_and_walls(srv: Server):
+    """A fence, a pane and a wall reach for what stands beside them - a whole face, their own
+    kind - and let go when it leaves; a wall's sides are tall under a block, and it has a post
+    where it ends, turns, or carries something that wants one."""
+    a, b = srv.client(), srv.client()
+    join(a, "Alice")
+    join(b, "Bob")
+    a.expect("player_info_update")
+    for cl in (a, b):
+        cl.send("player_loaded")
+    settle(a, b)
+    stone = mc.BLOCK["kStone"]
+    fence = lambda arms="": cross("kOakFence", arms)                  # noqa: E731
+    pane = lambda arms="": cross("kGlassPane", arms)                  # noqa: E731
+    cobble = lambda **sides: wall("kCobblestoneWall", **sides)        # noqa: E731
+    for slot, item in enumerate(("kStone", "kOakFence", "kNetherBrickFence", "kGlassPane", "kCobblestoneWall", "kTorch", "kIronBars")):
+        give(a, 36 + slot, I[item], 16)
+    click(a, (8, -61, 11), 1, seq=1)
+    hold(a, 1)
+    click(a, (9, -61, 11), 1, seq=2)
+    assert shows(collect(a), {(8, -60, 11): stone, (9, -60, 11): fence("w")})
+    click(a, (10, -61, 11), 1, seq=3)
+    assert shows(collect(a), {(10, -60, 11): fence("w"), (9, -60, 11): fence("ew")})
+    assert collect(b) == {(8, -60, 11): stone, (10, -60, 11): fence("w"), (9, -60, 11): fence("ew")}
+    # A fence of brick and a fence of wood are not one fence.
+    hold(a, 2)
+    click(a, (11, -61, 11), 1, seq=4)
+    changes = collect(a)
+    assert shows(changes, {(11, -60, 11): cross("kNetherBrickFence")}) and (10, -60, 11) not in changes
+    # Panes hold on to a whole face and to each other - not to a fence, nor a fence to them.
+    hold(a, 3)
+    click(a, (8, -61, 12), 1, seq=5)
+    assert shows(collect(a), {(8, -60, 12): pane("n")})
+    click(a, (9, -61, 12), 1, seq=6)
+    changes = collect(a)
+    assert shows(changes, {(9, -60, 12): pane("w"), (8, -60, 12): pane("en")}) and (9, -60, 11) not in changes
+    hold(a, 6)                                               # iron bars are panes to a pane
+    click(a, (10, -61, 12), 1, seq=7)
+    assert shows(collect(a), {(10, -60, 12): cross("kIronBars", "w"), (9, -60, 12): pane("ew")})
+    # A wall: beside a block, an end with a post; two walls; three - the middle one runs straight
+    # and has no post.
+    hold(a, 4)
+    click(a, (8, -61, 10), 1, seq=8)
+    assert shows(collect(a), {(8, -60, 10): cobble(south="low")})
+    click(a, (7, -61, 10), 1, seq=9)
+    assert shows(collect(a), {(7, -60, 10): cobble(east="low"), (8, -60, 10): cobble(south="low", west="low")})
+    click(a, (6, -61, 10), 1, seq=10)
+    assert shows(collect(a), {(6, -60, 10): cobble(east="low"), (7, -60, 10): cobble(up=False, east="low", west="low")})
+    # A block on it: its sides are tall. A torch on it: a post. Neither: as before.
+    hold(a, 0)
+    click(a, (7, -60, 10), 1, seq=11)
+    assert shows(collect(a), {(7, -59, 10): stone, (7, -60, 10): cobble(up=False, east="tall", west="tall")})
+    dig(a, (7, -59, 10), seq=12)
+    assert collect(a) == {(7, -59, 10): AIR, (7, -60, 10): cobble(up=False, east="low", west="low")}
+    hold(a, 5)
+    click(a, (7, -60, 10), 1, seq=13)
+    assert shows(collect(a), {(7, -59, 10): mc.BLOCK["kTorch"], (7, -60, 10): cobble(east="low", west="low")})
+    dig(a, (7, -59, 10), seq=14)
+    assert collect(a) == {(7, -59, 10): AIR, (7, -60, 10): cobble(up=False, east="low", west="low")}
+    # A wall under a wall with a post has one; a pane and a wall hold each other.
+    hold(a, 4)
+    click(a, (7, -60, 10), 1, seq=15)
+    assert shows(collect(a), {(7, -59, 10): cobble(), (7, -60, 10): cobble(east="low", west="low")})
+    hold(a, 3)
+    click(a, (6, -61, 11), 1, seq=16)
+    assert shows(collect(a), {(6, -60, 11): pane("n"), (6, -60, 10): cobble(east="low", south="low")})
+    collect(b)
+    # The stone goes: everything that held on to it lets go, and nothing breaks.
+    dig(a, (8, -60, 11), seq=17)
+    gone = {(8, -60, 11): AIR, (9, -60, 11): fence("e"), (8, -60, 12): pane("e"), (8, -60, 10): cobble(west="low")}
+    assert collect(a) == gone
+    assert collect(b) == gone
+    # (Bob saw three blocks break under Alice's hand: the stone and the torch on the wall, and this one.)
+    assert [e[:2] for e in b.level_events] == [(DESTROY_BLOCK, pos) for pos in ((7, -59, 10), (7, -59, 10), (8, -60, 11))]
+    assert not of_type(b, "kItem")
+    # A click on a fence is the fence's first (a lead would be tied to it): with nothing on a
+    # lead it passes, and the block in hand is placed against it.
+    hold(a, 0)
+    click(a, (9, -60, 11), 2, seq=18, cursor=(0.5, 0.5, 0.375))
+    assert shows(collect(a), {(9, -60, 10): stone, (9, -60, 11): fence("en"), (8, -60, 10): cobble(east="low", west="low", up=False)})
+
+
+@test()
+def lanterns_chains_and_other_shapes(srv: Server):
+    """A lantern hangs or stands by where its player looks and what is there to hold it, and
+    breaks when that goes; a chain lies along the face it is put on, an end rod points out of
+    it, glazed terracotta faces its player, a mushroom block has no skin towards its own kind."""
+    a, b = srv.client(), srv.client()
+    join(a, "Alice")
+    join(b, "Bob")
+    a.expect("player_info_update")
+    for cl in (a, b):
+        cl.send("player_loaded")
+    settle(a, b)
+    standing = mc.BLOCK["kLantern"]
+    hanging = standing - 2                                   # hanging (true, false) x waterlogged
+    for slot, item in enumerate(("kStone", "kLantern", "kIronChain", "kEndRod", "kWhiteGlazedTerracotta", "kBrownMushroomBlock",
+                                 "kWaxedCopperGrate", "kBarrier")):
+        give(a, 36 + slot, I[item], 16)
+    # A stone in the air, two above the ground.
+    click(a, (10, -61, 11), 1, seq=1)
+    click(a, (10, -60, 11), 1, seq=2)
+    dig(a, (10, -60, 11), seq=3)
+    collect(a)
+    hold(a, 1)
+    look(a, 0.0, 0.0)
+    click(a, (10, -59, 11), 0, seq=4, cursor=(0.5, 0.0, 0.5))    # against its underside: up comes first, it hangs
+    assert shows(collect(a), {(10, -60, 11): hanging})
+    click(a, (8, -61, 11), 1, seq=5)                             # on the ground: it stands
+    assert shows(collect(a), {(8, -60, 11): standing})
+    # Against the stone's side, with nothing under and nothing over the place: it cannot be.
+    click(a, (10, -59, 11), 5, seq=6, cursor=(1.0, 0.5, 0.5))
+    assert collect(a).get((11, -59, 11), AIR) == AIR
+    collect(b)
+    # What it hangs from goes: it breaks, and drops.
+    dig(a, (10, -59, 11), seq=7)
+    assert collect(a) == {(10, -59, 11): AIR, (10, -60, 11): AIR}
+    collect(b)
+    assert a.level_events == [(DESTROY_BLOCK, (10, -60, 11), hanging, False)], a.level_events
+    settle(a, b)
+    assert [e.data[D_ITEM][1] for e in items_of(b, "kLantern")] == [plain("kLantern", 1)]
+    dig(a, (8, -61, 11), seq=8)                                  # ...and the one that stands, with its ground
+    assert collect(a) == {(8, -61, 11): AIR, (8, -60, 11): AIR}
+
+    # A chain: along the axis of the face it is put on (x, y, z; then waterlogged).
+    chain = mc.BLOCK["kIronChain"]                               # y, dry
+    hold(a, 0)
+    click(a, (10, -61, 9), 1, seq=9)
+    hold(a, 2)
+    click(a, (10, -60, 9), 1, seq=10)
+    click(a, (10, -60, 9), 4, seq=11, cursor=(0.0, 0.5, 0.5))
+    click(a, (10, -60, 9), 2, seq=12, cursor=(0.5, 0.5, 0.0))
+    assert shows(collect(a), {(10, -59, 9): chain, (9, -60, 9): chain - 2, (10, -60, 8): chain + 2})
+    # An end rod: out of the face - and on a rod that points that way, back at it.
+    rod = mc.BLOCK["kEndRod"]                                    # facing: north, east, south, west, up, down
+    hold(a, 3)
+    click(a, (6, -61, 11), 1, seq=13)
+    assert shows(collect(a), {(6, -60, 11): rod})
+    click(a, (6, -60, 11), 1, seq=14)
+    click(a, (10, -60, 9), 5, seq=15, cursor=(1.0, 0.5, 0.5))
+    assert shows(collect(a), {(6, -59, 11): rod + 1, (11, -60, 9): rod - 3})
+    # Glazed terracotta faces whoever places it.
+    hold(a, 4)
+    look(a, 0.0, 0.0)                                            # looking south: it faces north
+    click(a, (6, -61, 9), 1, seq=16)
+    look(a, -90.0, 0.0)                                          # looking east: west
+    click(a, (6, -61, 8), 1, seq=17)
+    glazed = mc.BLOCK["kWhiteGlazedTerracotta"]
+    assert shows(collect(a), {(6, -60, 9): glazed, (6, -60, 8): glazed + 2})
+    # Mushroom blocks: down, east, north, south, up, west - skin where no other of it is.
+    cap = mc.BLOCK["kBrownMushroomBlock"]
+    hold(a, 5)
+    click(a, (8, -61, 5), 1, seq=18)
+    click(a, (9, -61, 5), 1, seq=19)
+    assert shows(collect(a), {(8, -60, 5): cap + 16, (9, -60, 5): cap + 1})
+    dig(a, (9, -60, 5), seq=20)
+    assert collect(a) == {(9, -60, 5): AIR}                      # (the skin does not grow back)
+    # What is only ever dry or waterlogged: dry.
+    hold(a, 6)
+    click(a, (11, -61, 6), 1, seq=21)
+    hold(a, 7)
+    click(a, (11, -61, 7), 1, seq=22)
+    assert shows(collect(a), {(11, -60, 6): mc.BLOCK["kWaxedCopperGrate"], (11, -60, 7): mc.BLOCK["kBarrier"]})
+
+
+@test(random_tick_speed=4096, simulation_distance=2)
+def copper_keeps_its_shape(srv: Server):
+    """Copper that has a shape weathers like the block of it - and stays what it was: stairs
+    upside down, facing east, are that at every stage."""
+    a = srv.client()
+    join(a, "Alice", view=2)
+    a.send("player_loaded")
+    settle(a)
+    give(a, 36, I["kStone"], 4)
+    give(a, 37, I["kCutCopperStairs"], 4)
+    give(a, 38, I["kCutCopperSlab"], 4)
+    give(a, 39, I["kWaxedCutCopperStairs"], 4)
+    click(a, (8, -61, 6), 1, seq=1)
+    hold(a, 1)
+    look(a, -90.0, 0.0)
+    click(a, (8, -60, 6), 5, seq=2, cursor=upper(5))
+    stages = [stairs(k, "east", "top") for k in ("kCutCopperStairs", "kExposedCutCopperStairs", "kWeatheredCutCopperStairs",
+                                                  "kOxidizedCutCopperStairs")]
+    hold(a, 2)
+    click(a, (8, -61, 11), 1, seq=3)
+    click(a, (8, -60, 11), 1, seq=4, cursor=(0.5, 0.5, 0.5))     # a double slab of it
+    hold(a, 3)
+    click(a, (10, -61, 11), 1, seq=5)                            # waxed: it stays as it is
+    seen = []
+
+    def weathered(ch: dict) -> bool:
+        state = ch.get((9, -60, 6))
+        if state is not None and state not in seen[-1:]:
+            seen.append(state)
+        return state == stages[-1] and ch.get((8, -60, 11)) == slab("kOxidizedCutCopperSlab", "double")
+
+    changes = until(a, weathered, ticks=2400)
+    assert seen == [s for s in stages if s in seen] and len(seen) >= 3, (seen, stages)
+    assert changes[(10, -60, 11)] == stairs("kWaxedCutCopperStairs", "east"), changes
+
+
+@test()
+def placed_in_water():
+    """A block that can hold water holds the source it is placed into, and leaves it behind when it
+    goes; flowing water is displaced. (The water is an imported world's: nothing here makes any.)"""
+    world = tempfile.mkdtemp(prefix="world-water-")
+    srv = None
+    try:
+        flowing = {"id": "minecraft:water", "properties": {"level": "3"}}
+        anvil_world(world, extra={(x, 4, 8): "minecraft:water" for x in (2, 3, 4, 5, 6, 7)} | {(8, 4, 8): flowing})
+        srv = Server(EXE, world=world, start_timeout=30)
+        c = srv.client()
+        join(c, "Alice", view=2)
+        c.send("player_loaded")
+        settle(c)
+        water = mc.BLOCK["kWater"]
+        for slot, item in enumerate(("kOakSlab", "kOakStairs", "kOakFence", "kCobblestoneWall", "kLantern", "kIronChain", "kBarrier")):
+            give(c, 36 + slot, I[item], 16)
+        look(c, 0.0, 0.0)
+        click(c, (2, -61, 8), 1, seq=1)                          # on the ground under the water: into it
+        hold(c, 1)
+        click(c, (3, -61, 8), 1, seq=2)
+        hold(c, 2)
+        click(c, (4, -61, 8), 1, seq=3)
+        hold(c, 3)
+        click(c, (5, -61, 8), 1, seq=4)
+        hold(c, 4)
+        click(c, (6, -61, 8), 1, seq=5)
+        hold(c, 5)
+        click(c, (7, -61, 8), 1, seq=6)
+        hold(c, 6)
+        click(c, (8, -61, 8), 1, seq=7)                          # water that flows is no source: dry
+        wet = {(2, -60, 8): slab("kOakSlab", "bottom", True), (3, -60, 8): stairs("kOakStairs", "south", "bottom", "straight", True),
+               (4, -60, 8): cross("kOakFence", "", True), (5, -60, 8): wall("kCobblestoneWall", True, True),
+               (6, -60, 8): mc.BLOCK["kLantern"] - 1, (7, -60, 8): mc.BLOCK["kIronChain"] - 1, (8, -60, 8): mc.BLOCK["kBarrier"]}
+        assert shows(collect(c), wet)
+        # The second half of a slab drives the water out (SlabBlock.getStateForPlacement).
+        hold(c, 0)
+        click(c, (2, -60, 8), 1, seq=8, cursor=(0.5, 0.5, 0.5))
+        assert shows(collect(c), {(2, -60, 8): slab("kOakSlab", "double")})
+        # What goes leaves its water where it was (Level.removeBlock: the fluid's block).
+        dig(c, (3, -60, 8), seq=9)
+        dig(c, (4, -60, 8), seq=10)
+        dig(c, (2, -60, 8), seq=11)
+        dig(c, (8, -60, 8), seq=12)
+        assert collect(c) == {(3, -60, 8): water, (4, -60, 8): water, (2, -60, 8): AIR, (8, -60, 8): AIR}
+        assert srv.stop() == 0, srv.read_log()
+        os.unlink(srv.log.name)
+    finally:
+        if srv:
+            srv.stop()
+        shutil.rmtree(world, ignore_errors=True)
+
+
 @test()
 def falling_block_survives_a_restart():
     """A block that is falling when the server stops is falling when it starts again, and lands."""
@@ -2778,8 +3215,8 @@ def command_blocks(srv: Server):
     assert run_command(a, "setblock 8 -60 11")["said"] == [failure(tr("command.unknown.command")), here("setblock 8 -60 11", 17)]
     assert run_command(a, "setblock 8 999 11 stone")["said"] == [failure(tr("argument.pos.outofworld"))]
     assert run_command(a, "setblock 100000 -60 11 stone")["said"] == [failure(tr("argument.pos.unloaded"))]
-    got = run_command(a, "setblock 8 -60 11 oak_stairs")
-    assert got["said"] == [failure("The block minecraft:oak_stairs is not supported by this server yet")] and not got["blocks"]
+    got = run_command(a, "setblock 8 -60 11 lever")
+    assert got["said"] == [failure("The block minecraft:lever is not supported by this server yet")] and not got["blocks"]
     got = run_command(a, "setblock 8 -60 11 chest[waterlogged=true]")
     assert got["said"] == [failure("The block minecraft:chest cannot hold a fluid on this server yet")]
 
@@ -4315,9 +4752,10 @@ def anvil_region(path: str, chunks: dict) -> None:
         f.write(header + body)
 
 
-def anvil_world(path: str) -> dict:
+def anvil_world(path: str, extra: dict | None = None) -> dict:
     """The world: nine chunks of a flat desert around the origin's north-east, with things in the
-    first; one chunk in the region across the origin; one that vanilla had not finished."""
+    first (and `extra`: more of them, {(x, y, z): state}); one chunk in the region across the
+    origin; one that vanilla had not finished."""
     import gzip
     version = mc.META["world_version"]
     os.makedirs(os.path.join(path, "data", "minecraft"))
@@ -4345,6 +4783,7 @@ def anvil_world(path: str) -> dict:
         (9, 4, 1): {"id": "minecraft:oak_stairs", "properties": {"shape": "no such shape"}},   # an unknown value: the default's
         (11, 4, 1): "minecraft:glowstone",
     }
+    things.update(extra or {})
     block_entities = [
         {"id": "minecraft:chest", "x": 1, "y": -60, "z": 1, "keepPacked": mc.Byte(0), "components": {},
          "Items": [{"Slot": mc.Byte(0), "id": "minecraft:stone", "count": 20}, {"Slot": mc.Byte(26), "id": "minecraft:diamond"}]},

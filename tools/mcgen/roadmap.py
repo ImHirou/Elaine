@@ -41,8 +41,10 @@ MILESTONES = [
     ("Block entities and menus: the first four", "Menus over containers, recipes, a furnace's tick, primed TNT and explosions.",
      r"^(ChestBlock|FurnaceBlock|CraftingTableBlock|TntBlock)$"),
     ("Shapes: a state from how the block is placed and what stands beside it",
-     "BlockPlaceContext in full (the clicked face and where on it, the player's look, replacing a block with more of itself). "
-     "`updateShape` for every neighbour change is there (`Game::update_shape`; podzol under snow is the first). No ticking.",
+     "BlockPlaceContext - the clicked face and where on it, the player's look, a block replaced by more of itself - and "
+     "`updateShape` for every neighbour change are there (`server/block_shapes.cpp`: slabs, stairs, fences, panes, walls, "
+     "lanterns, chains). What is left has a rule of its own: a path that turns to dirt, a pumpkin that makes a golem, "
+     "what grows on the faces of other blocks.",
      r"^(SnowyBlock|SlabBlock|StairBlock|WallBlock|FenceBlock|IronBarsBlock|StainedGlassPaneBlock|GlazedTerracottaBlock|ChainBlock|"
      r"LanternBlock|EndRodBlock|HugeMushroomBlock|CarvedPumpkinBlock|EquipableCarvedPumpkinBlock|BarrierBlock|LightBlock|PathBlock|"
      r"MangroveRootsBlock|WaterloggedTransparentBlock|HeavyCoreBlock|PointedDripstoneBlock|RodBlock|DirectionalBlock|"
@@ -181,7 +183,8 @@ A box is ticked when every block of the class can be placed; `(n of m)` says how
 Some blocks that are ticked still do less than in vanilla, because a system around them is
 missing; those gaps are listed under "Systems" below and in docs/architecture.md, never
 silently: ice does not melt (it would leave water), concrete powder meets no water that
-flows, ores give no experience, an amethyst block does not chime.
+flows, the water in a waterlogged slab or fence stays where it is, a fence takes no lead, ores
+give no experience, an amethyst block does not chime.
 
 ## Systems
 

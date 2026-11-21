@@ -14,6 +14,8 @@
 //   SnowyBlock, SpreadingSnowyBlock (grass, mycelium), NyliumBlock, ChangeOverTimeBlock /
 //   WeatheringCopper, BuddingAmethystBlock, AmethystClusterBlock, BaseTorchBlock, WallTorchBlock,
 //   RedstoneLampBlock, FallingBlock, ConcretePowderBlock, TntBlock, ChestBlock (their hooks)
+// The blocks whose state is their shape - stairs, fences, panes, walls, lanterns, mushroom
+// blocks - answer updateShape in server/block_shapes.cpp.
 //
 // The order is the point. A neighbour update is not run where it is made: it is put on a stack,
 // and what an update makes while it runs is run before what was waiting (depth first, in the
@@ -162,13 +164,23 @@ bool Game::break_block(BlockPos pos, bool drop, i32 limit) {
     return set_block(pos, static_cast<BlockState>(st::fluid_legacy_of(state)), kUpdateAll, limit);
 }
 
-// Block.dropResources(state, level, pos, blockEntity, null, ItemStack.EMPTY): the loot table,
-// reduced by mcgen to what it gives without a tool (BlockInfo::drop).
+// Block.dropResources(state, level, pos, blockEntity, null, ItemStack.EMPTY)
 void Game::drop_resources(BlockState state, BlockPos pos) {
+    ItemStack stack = block_drop(state);
+    if (!stack.empty()) pop_resource(pos, std::move(stack));
+}
+
+// Block.getDrops without a tool: the loot table, reduced by mcgen to what it gives then
+// (BlockInfo::drop) - the first candidate with its chance, else the second; a count that comes
+// out below one is nothing (a mushroom block, most times); and a double slab is two.
+ItemStack Game::block_drop(BlockState state) {
     const world::BlockInfo& info = world::block_info_of(state);
     const world::BlockInfo::Drop& drop =
         info.drop_chance >= 1.0f || random_float() < info.drop_chance ? info.drop[0] : info.drop[1];
-    if (drop.item) pop_resource(pos, ItemStack(drop.item, drop.min + random_int(static_cast<u32>(drop.max - drop.min) + 1u)));
+    if (!drop.item) return {};
+    i32 count = drop.min + static_cast<i32>(random_int(static_cast<u32>(drop.max - drop.min) + 1u));
+    if (info.kind == block_kind::kSlab && (state - info.first_state) / props::slab::kTypeStride == 2) count *= 2;  // type=double
+    return count > 0 ? ItemStack(drop.item, static_cast<u32>(count)) : ItemStack();
 }
 
 // Block.popResource: near the middle of the block, tossed up.
@@ -329,7 +341,7 @@ BlockState Game::update_shape(BlockState state, BlockPos pos, u32 dir, BlockPos 
         case block_kind::kFalling:  // FallingBlock: it looks whether it still lies on something
             schedule_tick(pos, state, kFallDelay);
             return state;
-        default: return state;
+        default: return shaped_update(state, info, pos, dir, neighbour);  // server/block_shapes.cpp
     }
 }
 
@@ -372,6 +384,12 @@ bool Game::can_survive(BlockState state, BlockPos pos) const {
         case block_kind::kAmethystCluster: {
             const u32 facing = cluster_facing(state, info);
             return world::face_sturdy(state_for_client(step(pos, world::opposite(facing))), facing);
+        }
+        case block_kind::kLantern: {  // LanternBlock: Block.canSupportCenter of what it hangs from or stands on
+            if ((state - info.first_state) / props::lantern::kHangingStride != 0)  // (hanging: true, false)
+                return world::face_sturdy_center(state_for_client({pos.x, pos.y - 1, pos.z}), world::kUp);
+            const BlockState above = state_for_client({pos.x, pos.y + 1, pos.z});
+            return !(st::kConnect[above] & st::kUnstableBottomCenter) && world::face_sturdy_center(above, world::kDown);
         }
         default: return true;
     }
@@ -460,13 +478,14 @@ void Game::run_random_ticks() {
 
 // BlockBehaviour.randomTick, for the classes whose random tick is ported (state::kRandomTick).
 void Game::random_tick(BlockState state, BlockPos pos) {
-    switch (world::block_info_of(state).kind) {
+    const world::BlockInfo& info = world::block_info_of(state);
+    if (info.next_stage) return tick_weathering(state, pos);  // copper, whatever else its class is
+    switch (info.kind) {
         case block_kind::kSpreading: tick_spreading(state, pos); break;
         case block_kind::kNylium:  // NyliumBlock: netherrack under what shuts the light out
             if (st::kRandom[state_for_client({pos.x, pos.y + 1, pos.z})] & st::kSmothersNylium)
                 set_block(pos, static_cast<BlockState>(gen::block::kNetherrack));
             break;
-        case block_kind::kWeathering: tick_weathering(state, pos); break;
         case block_kind::kBuddingAmethyst: tick_budding_amethyst(pos); break;
         default: break;
     }
@@ -526,7 +545,8 @@ void Game::tick_weathering(BlockState state, BlockPos pos) {
     }
     const float chance = static_cast<float>(older + 1) / static_cast<float>(older + same + 1);
     const float modified = chance * chance * (own == 1 ? 0.75f : 1.0f);  // WeatheringCopper.getChanceModifier
-    if (random_float() < modified && info.alt[0]) set_block(pos, info.alt[0]);
+    // WeatheringCopper.getNext(state): the next block, with this one's properties.
+    if (random_float() < modified) set_block(pos, static_cast<BlockState>(info.next_stage + (state - info.first_state)));
 }
 
 // BuddingAmethystBlock.randomTick: one time in five a bud on one of its sides grows a stage -

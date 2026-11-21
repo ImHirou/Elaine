@@ -688,12 +688,17 @@ void blast_positions(const Dimension& w, double x, double y, double z, float rad
                         break;
                     const u32 cell = static_cast<u32>(((bx - cx) * side + (by - cy)) * side + (bz - cz));
                     DCHECK(cell < static_cast<u32>(side * side * side));
-                    // ExplosionDamageCalculator.getBlockExplosionResistance: air does not resist.
-                    // (Nor would a fluid: none can be in the world yet.)
+                    // ExplosionDamageCalculator.getBlockExplosionResistance: air does not resist; a
+                    // block resists as itself or as the fluid in it, whichever is more (a slab in
+                    // water as water does). A fluid's resistance is its block's: mcgen checks.
                     float resistance = scratch.resistance[cell];
                     if (resistance == kUnknown) {
                         const BlockState state = w.block(bx, by, bz);
                         resistance = state == kAir || is_air(state) ? kNoResistance : block_info_of(state).explosion_resistance;
+                        if (flags_of(state) & state::kHasFluid)
+                            resistance = std::max(
+                                resistance,
+                                block_info_of(static_cast<BlockState>(state::fluid_legacy_of(state))).explosion_resistance);
                         scratch.resistance[cell] = resistance;
                     }
                     if (resistance >= 0) power -= (resistance + kStep) * kStep;

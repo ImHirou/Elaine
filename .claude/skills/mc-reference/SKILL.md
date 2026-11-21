@@ -146,6 +146,20 @@ pseudo-code did not). Where a counter's first value matters, read the `dup_x1` i
   Read this version's code, not what is remembered of another's: in 26.3 `LevelChunkTicks.pack` sorts what it
   saves (`SUB_TICK_ORDERING`), the game rules are a registry (`gamerule minecraft:random_tick_speed`), and a
   falling block that lands sends `add_transient_block` beside its `block_update`.
+- **The state a block is placed as**: `getStateForPlacement` of its class, over a `BlockPlaceContext` - read that
+  class too. `getClickedPos()` is where the block *goes* (the clicked block only when that is replaced);
+  `getClickLocation()` is the clicked block's position plus the packet's cursor floats, as doubles;
+  `getNearestLookingDirections()` puts "into the clicked face" first unless the clicked block is replaced. And
+  `canBeReplaced(state, context)` is asked twice: of the clicked block while `replacingClickedOnBlock()` still
+  answers true (the constructor), then - `canPlace()` - of what stands where the block would go, with it false.
+  That second question is how a slab is filled from the side.
+- **Which chunk's changes a tick sends first is no rule**: `ServerChunkCache.chunkHoldersToBroadcast` is a
+  `ReferenceOpenHashSet`, walked in identity-hash order. Within a chunk it is sections bottom up, one packet a
+  section. A probe that compares the order of block changes must not compare it across chunks.
+- **Collision shapes** are `VoxelShape`s: coordinates per axis and a bit a cell. `mcgen.py blockdata` writes both the
+  boxes and that grid (`collision_grids`); most joined shapes have exactly the lines their boxes' faces cut, 42 of
+  330 have more (a piston's head, a straw bed). `getFaceShape(direction)` is the layer of cells at 1e-7 inside
+  that face, stretched over the whole axis - what `WallBlock` holds its test shapes against.
 
 ## What only exists once the game has loaded: `mcgen.py data`
 

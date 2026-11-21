@@ -280,11 +280,8 @@ void Game::explode(double x, double y, double z, float radius) {
         if (state == world::kAir || world::is_air(state)) continue;
         const world::BlockInfo& info = world::block_info_of(state);
         if (info.kind != block_kind::kTnt) {
-            // BlockBehaviour.onExplosionHit -> getDrops: the first candidate with its chance, else the second.
-            const world::BlockInfo::Drop& drop =
-                info.drop_chance >= 1.0f || random_float() < info.drop_chance ? info.drop[0] : info.drop[1];
-            if (drop.item) {
-                ItemStack stack(drop.item, drop.min + random_int(static_cast<u32>(drop.max - drop.min) + 1u));
+            // BlockBehaviour.onExplosionHit -> getDrops
+            if (ItemStack stack = block_drop(state); !stack.empty()) {
                 // addOrAppendStack: ItemEntity.areMergable / merge(.., 16) against every stack so far.
                 for (Collected& c : collected_) {
                     if (stack.count() + c.stack.count() > stack.max_stack() || !item::same_item_same_components(c.stack, stack))

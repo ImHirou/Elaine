@@ -95,11 +95,12 @@ defaults to what suits a big server.*
 
 *All 1286 blocks, each doing everything it does in vanilla.*
 
-- [x] Breaking and placing; 355 blocks can be placed
+- [x] Breaking and placing; 675 blocks can be placed
 - [x] Neighbour updates, scheduled ticks and random ticks, in vanilla's order
 - [x] Chest, furnace, crafting table, TNT and explosions
 - [x] What falls (sand, gravel, concrete powder), torches, the redstone lamp, amethyst, grass and mycelium, copper that weathers
-- [ ] The shapes: slabs, stairs, fences, walls, doors
+- [x] The shapes: slabs, stairs, fences, panes, walls, lanterns, chains - placed as vanilla places them, joined to what stands beside them
+- [ ] Doors, trapdoors, fence gates and what else answers a click
 - [ ] Plants and everything that needs something to stand on
 - [ ] Fluids
 - [ ] Redstone and pistons

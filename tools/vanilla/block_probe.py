@@ -16,9 +16,14 @@ from the console - destroying, sand into the air and forty blocks up, a torch in
 the block under it, a lamp beside a block of redstone; sand on a stone that goes, sand and
 concrete powder and gravel placed in the air, gravel onto a torch. Then the random ticks, at 4096 a
 section instead of 3: grass taking bare dirt and dying under a stone, copper weathering,
-amethyst budding, nylium dying - and grass by the time of day: the clock is stopped and set from the
-console to either side of the two ticks of the day at which the sky gives grass light enough to
-spread. Last, TNT on five sides of a block of redstone.
+amethyst budding, nylium dying, copper stairs weathering as the stairs they are - and grass by the
+time of day: the clock is stopped and set from the console to either side of the two ticks of the day
+at which the sky gives grass light enough to spread. Then the blocks whose state is their shape:
+stairs that turn corners and stop turning them, slabs by the half that is clicked and two halves
+that become one block, fences, panes and walls that reach for what stands beside them and let
+go of it, a wall under a block, a torch and a wall, lanterns that hang and stand and fall, chains,
+end rods, glazed terracotta, mushroom blocks - by hand, and by `/setblock` and `/fill`. Last, TNT
+on five sides of a block of redstone.
 
 `vanilla` starts the reference server under the rules in AGENTS.md (from .cache/vanilla-server/,
 the cached jar, Java 25; gamemode=creative, level-type=flat, spawn-protection=0,
@@ -53,6 +58,9 @@ Reading the diff:
     (vanilla's is a hash map's). So three things are compared of a step, each in the order it
     came and none against another: what is said about blocks, which entities appear, and what
     is said of each entity.
+  * The chunks whose blocks changed in a tick are told one after another, in an order that is
+    nobody's rule: vanilla walks a hash set of chunk holders (by identity), this server sorts
+    them. Where a step's changes lie in two chunks, each chunk's are compared in their order.
   * Sounds this server does not make (a block being placed, footsteps) are left out; so is
     where an item that dropped flies. What an explosion takes and throws about is chance, and
     container_probe.py's subject: once the fuses burn, the explosions are counted.
@@ -264,7 +272,7 @@ def record(port: int, out_path: str, name_a: str, name_b: str, random_ticks=None
     # ---- random ticks
     if random_ticks:
         at = place(2)
-        hotbar("kStone", "kDirt", "kCopperBlock", "kBuddingAmethyst", "kCrimsonNylium")
+        hotbar("kStone", "kDirt", "kCopperBlock", "kBuddingAmethyst", "kCrimsonNylium", "kCutCopperStairs")
         grass, dirt = mc.BLOCK["kGrassBlock"], mc.BLOCK["kDirt"]
         cluster = range(mc.BLOCK["kAmethystCluster"] - 9, mc.BLOCK["kAmethystCluster"] + 3)   # its twelve states
         random_ticks(True)
@@ -285,7 +293,13 @@ def record(port: int, out_path: str, name_a: str, name_b: str, random_ticks=None
              until=lambda blocks: all(blocks.get(p) in cluster for p in buds), about=[at(5, 1, 3)] + buds)
         step("B places crimson nylium and a stone on it: netherrack", lambda: (b.select(4), b.use(at(1, 0, 3)), b.select(0), b.use(at(1, 1, 3))),
              ticks=400, until=lambda blocks: blocks.get(at(1, 1, 3)) == mc.BLOCK["kNetherrack"], about=[at(1, 1, 3), at(1, 2, 3)])
-        step("and then it is quiet", ticks=30, about=untouched + buds + [at(5, 1, 0), at(1, 1, 3)])
+        # Copper with a shape weathers into the next block with the same shape: stairs upside down, facing east.
+        oxidized = mc.BLOCK["kOxidizedCutCopperStairs"] - 11 + 3 * 20 + 1     # facing east, half top, straight, dry
+        step("B places cut copper stairs upside down against a stone: they weather as they are",
+             lambda: (b.select(0), b.use(at(0, 0, 2)), b.select(5), b.look(-90.0, 0.0),
+                      b.use(at(0, 1, 2), face=EAST, cursor=(1.0, 0.75, 0.5)), b.look(0.0, 0.0)), ticks=2400,
+             until=lambda blocks: blocks.get(at(1, 1, 2)) == oxidized, about=[at(1, 1, 2)])
+        step("and then it is quiet", ticks=30, about=untouched + buds + [at(5, 1, 0), at(1, 1, 3), at(1, 1, 2)])
         if console:
             # The time of day. Grass spreads where the light above it is nine or more - the sky's
             # fifteen less what the hour takes: six levels at tick 13014 of the day, seven from
@@ -306,6 +320,97 @@ def record(port: int, out_path: str, name_a: str, name_b: str, random_ticks=None
             console("time resume")
         random_ticks(False)
         idle(4)
+
+    # ---- stairs and slabs: the half that is clicked, the corner the neighbours make, two halves that are one block
+    at = place(3)
+    hotbar("kStone", "kOakStairs", "kOakSlab", "kStoneSlab")
+    DOWN_FACE = 0
+    upper = {NORTH: (0.5, 0.75, 0.0), SOUTH: (0.5, 0.75, 1.0), WEST: (0.0, 0.75, 0.5), EAST: (1.0, 0.75, 0.5)}
+    lower = {NORTH: (0.5, 0.25, 0.0), SOUTH: (0.5, 0.25, 1.0), WEST: (0.0, 0.25, 0.5), EAST: (1.0, 0.25, 0.5)}
+    step("B, looking south, places stairs", lambda: (b.select(1), b.look(0.0, 0.0), b.use(at(0, 0, 3))))
+    step("B, looking east, places stairs behind them: an outer corner", lambda: (b.look(-90.0, 0.0), b.use(at(0, 0, 4))))
+    step("B breaks the second stairs: straight again", lambda: b.dig(at(0, 1, 4)))
+    step("B, looking west, places stairs in front of them: an inner corner", lambda: (b.look(90.0, 0.0), b.use(at(0, 0, 2))))
+    step("B, looking south, places stairs west of the first: they run straight on", lambda: (b.look(0.0, 0.0), b.use(at(-1, 0, 3))))
+    step("B breaks those: the corner again", lambda: b.dig(at(-1, 1, 3)))
+    step("B breaks the first and, looking north, places stairs north of the ones that face west: into the corner",
+         lambda: (b.dig(at(0, 1, 3)), b.look(180.0, 0.0), b.use(at(0, 0, 1)), b.look(0.0, 0.0)))
+    step("B builds a stone and places stairs against the upper half of its east side, the lower half of its west",
+         lambda: (b.select(0), b.use(at(2, 0, 4)), b.select(1), b.use(at(2, 1, 4), face=EAST, cursor=upper[EAST]),
+                  b.use(at(2, 1, 4), face=WEST, cursor=lower[WEST])))
+    step("B, looking east, places stairs south of the upside-down ones: halves do not turn each other",
+         lambda: (b.look(-90.0, 0.0), b.use(at(3, 1, 4), face=SOUTH, cursor=lower[SOUTH]), b.look(0.0, 0.0)))
+    # Slabs.
+    step("B places a slab on the ground", lambda: (b.select(2), b.use(at(-2, 0, 2))))
+    step("...and the same slab on it: one block", lambda: b.use(at(-2, 1, 2), cursor=(0.5, 0.5, 0.5)))
+    step("...and another: it lies on the double slab", lambda: b.use(at(-2, 1, 2)))
+    step("B builds a stone and places a slab against the upper half of its north side",
+         lambda: (b.select(0), b.use(at(-2, 0, 5)), b.select(2), b.use(at(-2, 1, 5), face=NORTH, cursor=upper[NORTH])))
+    step("...and against the lower half of the same side: the top slab is filled",
+         lambda: b.use(at(-2, 1, 5), face=NORTH, cursor=lower[NORTH]))
+    step("B places a slab against the upper half of the stone's west side, and clicks that slab's side, high: another beside it",
+         lambda: (b.use(at(-2, 1, 5), face=WEST, cursor=upper[WEST]), b.use(at(-3, 1, 5), face=NORTH, cursor=upper[NORTH])))
+    step("...and low: the slab itself is filled", lambda: b.use(at(-3, 1, 5), face=NORTH, cursor=lower[NORTH]))
+    step("B clicks the top slab that is left from below: filled",
+         lambda: b.use(at(-3, 1, 4), face=DOWN_FACE, cursor=(0.5, 0.5, 0.5)))
+    step("B places a slab on the ground and a stone slab on it: two blocks",
+         lambda: (b.use(at(-1, 0, 1)), b.select(3), b.use(at(-1, 1, 1), cursor=(0.5, 0.5, 0.5))))
+    if console:
+        step("the console destroys a double slab, and half a one: two of it, and one",
+             lambda: (setblock(at(-2, 1, 2), "minecraft:air destroy"), setblock(at(-1, 1, 1), "minecraft:air destroy")), ticks=12)
+        step("the console sets stairs beside stairs, a slab that is double, and stairs in a corner",
+             lambda: (setblock(at(1, 1, 1), "minecraft:oak_stairs[facing=east]"), setblock(at(3, 1, 2), "minecraft:oak_slab[type=double]"),
+                      setblock(at(2, 1, 1), "minecraft:oak_stairs[facing=south]")), ticks=10)
+
+    # ---- fences, panes and walls: what they reach for; lanterns, chains, rods, glazed terracotta, mushroom blocks
+    at = place(4)
+    hotbar("kStone", "kOakFence", "kNetherBrickFence", "kGlassPane", "kCobblestoneWall", "kTorch", "kIronBars", "kLantern", "kIronChain")
+    step("B places a stone and a fence beside it", lambda: (b.select(0), b.use(at(0, 0, 3)), b.select(1), b.use(at(1, 0, 3))))
+    step("...a second fence", lambda: b.use(at(2, 0, 3)))
+    step("...and a nether brick fence beside the two of wood", lambda: (b.select(2), b.use(at(3, 0, 3))))
+    step("B places a pane south of the stone, a second beside it, and iron bars beside that",
+         lambda: (b.select(3), b.use(at(0, 0, 4)), b.use(at(1, 0, 4)), b.select(6), b.use(at(2, 0, 4))))
+    step("B places a wall north of the stone", lambda: (b.select(4), b.use(at(0, 0, 2))))
+    step("...a second, west of it", lambda: b.use(at(-1, 0, 2)))
+    step("...a third: the one in the middle has no post", lambda: b.use(at(-2, 0, 2)))
+    step("B places a stone on the middle wall: tall", lambda: (b.select(0), b.use(at(-1, 1, 2))))
+    step("B breaks it: low", lambda: b.dig(at(-1, 2, 2)))
+    step("B places a torch on the middle wall: a post", lambda: (b.select(5), b.use(at(-1, 1, 2))))
+    step("B breaks it: none", lambda: b.dig(at(-1, 2, 2)))
+    step("B places a wall on the middle wall: a post under a post", lambda: (b.select(4), b.use(at(-1, 1, 2))))
+    step("B places a pane south of the third wall: a corner", lambda: (b.select(3), b.use(at(-2, 0, 3))))
+    step("B breaks the stone: everything lets go of it", lambda: b.dig(at(0, 1, 3)), ticks=12)
+    step("B clicks the fence's north side with a stone: it is placed there", ticks=10,
+         action=lambda: (b.select(0), b.use(at(1, 1, 3), face=NORTH, cursor=(0.5, 0.5, 0.375))))
+    # Lanterns: under a block they hang, on one they stand; neither, and they are not placed.
+    step("B builds a stone in the air", lambda: (b.use(at(2, 0, 1)), b.use(at(2, 1, 1)), b.dig(at(2, 1, 1))))
+    step("B hangs a lantern under it", lambda: (b.select(7), b.use(at(2, 2, 1), face=DOWN_FACE, cursor=(0.5, 0.0, 0.5))))
+    step("B stands a lantern on the ground", lambda: b.use(at(3, 0, 1)))
+    step("B clicks the side of the stone in the air with a lantern: nothing holds one there",
+         lambda: b.use(at(2, 2, 1), face=EAST, cursor=(1.0, 0.5, 0.5)))
+    step("B breaks the stone the lantern hangs from", lambda: b.dig(at(2, 2, 1)), ticks=12)
+    step("B places a chain on the ground, one against its west side and one against its north",
+         lambda: (b.select(8), b.use(at(-2, 0, 5)), against(at(-2, 1, 5), WEST), against(at(-2, 1, 5), NORTH)))
+    hotbar("kStone", "kEndRod", "kWhiteGlazedTerracotta", "kBrownMushroomBlock", "kWaxedCopperGrate")
+    step("B places an end rod on the ground, one on that, and one against the side of the lower",
+         lambda: (b.select(1), b.use(at(1, 0, 5)), b.use(at(1, 1, 5)), against(at(1, 1, 5), EAST)))
+    step("B places glazed terracotta looking south, and looking east",
+         lambda: (b.select(2), b.look(0.0, 0.0), b.use(at(3, 0, 4)), b.look(-90.0, 0.0), b.use(at(3, 0, 5)), b.look(0.0, 0.0)))
+    step("B places two mushroom blocks side by side, and a copper grate", ticks=10,
+         action=lambda: (b.select(3), b.use(at(-1, 0, 4)), b.use(at(-1, 0, 5)), b.select(4), b.use(at(0, 0, 5))))
+    step("B breaks one of the mushroom blocks", lambda: b.dig(at(-1, 1, 5)), ticks=12)
+    if console:
+        # What a command sets takes the shape its neighbours give it; what a command fills does too.
+        step("the console sets two stones, a fence between them and a wall north of the fence",
+             lambda: (setblock(at(-3, 1, -2), "minecraft:stone"), setblock(at(-1, 1, -2), "minecraft:stone"),
+                      setblock(at(-2, 1, -2), "minecraft:oak_fence"), setblock(at(-2, 1, -3), "minecraft:cobblestone_wall")), ticks=10)
+        step("the console fills a row of walls north of that wall", ticks=10,
+             action=lambda: console("fill {} {} {} {} {} {} minecraft:cobblestone_wall".format(*at(-3, 1, -4), *at(-1, 1, -4))))
+        step("the console sets a pane with arms nobody holds, and one strictly",
+             lambda: (setblock(at(-2, 1, -5), "minecraft:glass_pane[east=true,west=true]"),
+                      setblock(at(0, 1, -4), "minecraft:glass_pane[north=true] strict")), ticks=10)
+        step("the console fills the row with air, destroying", ticks=12,
+             action=lambda: console("fill {} {} {} {} {} {} minecraft:air destroy".format(*at(-3, 1, -4), *at(-1, 1, -4))))
 
     # ---- TNT, last, for what it leaves: a signal reaches the six blocks around it in an order
     at = place(5)
@@ -359,17 +464,18 @@ def _normalise(rec: dict, who: str) -> dict[str, list]:
         timed = st.get("about") is None     # (a step about random ticks says what it is about)
         final: dict = {}           # for the steps that are about random ticks: what the blocks ended up as
 
-        def row(kind: str, text: str, ms: int | None = None) -> None:
+        def row(kind: str, text: str, ms: int | None = None, chunk: tuple = ()) -> None:
             """`ms`: when it came - of what a server sends with its tick. A level event and a
             sound are sent when they happen: by vanilla between two ticks if a packet was the
-            cause, a moment before that tick's block changes; by ours with them."""
+            cause, a moment before that tick's block changes; by ours with them. `chunk`: of a
+            block change, the chunk it is in (see _streams)."""
             nonlocal first
             if ms is None or not timed:
                 rows.append((kind, text))
                 return
             if first is None:
                 first = ms
-            rows.append((kind, f"+{round((ms - first) / 50)}t {text}"))
+            rows.append((kind, f"+{round((ms - first) / 50)}t {text}", *chunk))
 
         about = None if st.get("about") is None else {tuple(p) for p in st["about"]}
         if st.get("loose"):
@@ -384,7 +490,8 @@ def _normalise(rec: dict, who: str) -> dict[str, list]:
                         if about is None or tuple(pos) in about:
                             final[_rel(pos, origin)] = state
                     elif state not in SOIL:     # (a random tick, whenever it falls: see the top)
-                        row("block", f"{_rel(pos, origin)} = {state}", ms)
+                        row("block", f"{_rel(pos, origin)} = {state}", ms,
+                            ((pos[0] // 16 - origin[0] // 16, pos[2] // 16 - origin[2] // 16),))
             elif name == "level_event":
                 kind = r.i32()
                 where = mc.unpack_block_pos(r.u64())
@@ -473,10 +580,27 @@ def _normalise(rec: dict, who: str) -> dict[str, list]:
     return out
 
 
+def _chunk_by_chunk(rows: list) -> list:
+    """The block changes of one tick, chunk after chunk: which chunk a server tells first is
+    chance (see the top), what it says of each, and in which order, is not."""
+    out, i = [], 0
+    while i < len(rows):
+        j = i + 1
+        if rows[i][0] == "block" and len(rows[i]) > 2:
+            tick = rows[i][1].split()[0]
+            while j < len(rows) and rows[j][0] == "block" and len(rows[j]) > 2 and rows[j][1].split()[0] == tick:
+                j += 1
+            out += sorted(rows[i:j], key=lambda r: r[2])    # (stable: a chunk's own changes stay as they came)
+        else:
+            out.append(rows[i])
+        i = j
+    return out
+
+
 def _streams(rows: list) -> tuple:
     """What is compared of a step: what is said about blocks, in its order; which entities
     appear, in theirs; and what is said of each entity, in its own (see the top)."""
-    blocks = [r for r in rows if r[0] in OF_BLOCKS]
+    blocks = _chunk_by_chunk([r for r in rows if r[0] in OF_BLOCKS])
     appear = [r for r in rows if r[0] == "add_entity"]
     each: dict[str, list] = {}
     for r in rows:

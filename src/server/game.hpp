@@ -399,6 +399,7 @@ class Game {
     bool remove_block(proto::BlockPos pos);
     bool break_block(proto::BlockPos pos, bool drop, i32 limit = kUpdateLimit);
     void drop_resources(world::BlockState state, proto::BlockPos pos);
+    ItemStack block_drop(world::BlockState state);
     void pop_resource(proto::BlockPos pos, ItemStack stack);
     void level_event(u32 type, proto::BlockPos pos, i32 data, u32 except = kNone);
     void update_neighbors_at(proto::BlockPos pos, u32 source_block);
@@ -426,6 +427,14 @@ class Game {
     u32 raw_brightness(proto::BlockPos pos) const;
     void recheck_chest(proto::BlockPos pos);
     world::BlockState chest_update_shape(world::BlockState state, u32 dir, world::BlockState neighbour) const;
+    // ---- blocks whose state is their shape: slabs, stairs, fences, panes, walls... (server/block_shapes.cpp)
+    world::BlockState shaped_for_placement(u32 pi, const proto::sb::UseItemOn& u, const world::BlockInfo& block, u32 kind,
+                                           proto::BlockPos at, bool replacing_clicked) const;
+    world::BlockState shaped_update(world::BlockState state, const world::BlockInfo& info, proto::BlockPos pos, u32 dir,
+                                    world::BlockState neighbour) const;
+    u32 stairs_shape(u32 facing, bool top, proto::BlockPos pos) const;
+    static bool slab_can_be_replaced(world::BlockState state, const ItemStack& held, const proto::sb::UseItemOn& u,
+                                     bool replacing_clicked);
     // Which chunks are simulated (server/chunks.cpp).
     void move_simulation(bool had, i32 old_cx, i32 old_cz, bool has, i32 cx, i32 cz);
     void simulate_adopted(world::Chunk& c);
@@ -479,8 +488,9 @@ class Game {
     bool destroy_block(u32 pi, proto::BlockPos pos);
     bool place_block(u32 pi, const proto::sb::UseItemOn& u, const ItemStack& held);
     world::BlockState state_for_placement(u32 pi, const proto::sb::UseItemOn& u, const world::BlockInfo& block, u32 kind,
-                                          proto::BlockPos at, bool replacing_clicked);
+                                          proto::BlockPos at, bool replacing_clicked) const;
     void nearest_looking_directions(u32 pi, u32 out[6]) const;
+    void placement_directions(u32 pi, u32 face, bool replacing_clicked, u32 out[6]) const;
     bool obstructed(world::BlockState s, proto::BlockPos pos) const;
     world::BlockState state_for_client(proto::BlockPos pos) const;
     void ack(u32 pi, i32 sequence) { ack_[pi] = std::max(ack_[pi], sequence); }

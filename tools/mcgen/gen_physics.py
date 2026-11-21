@@ -14,14 +14,10 @@ coordinates, and a bit per cell of the grid they cut. The grid is what an entity
 (VoxelShape.collideX walks cells), what it may step up to (every y coordinate is a candidate),
 and it has more lines than the boxes have faces: Shapes.create makes a box whose corners are
 multiples of 1/8 a regular grid of 1, 2, 4 or 8 cells an axis (soul sand is 1 x 8 x 1, seven
-cells full). The extractor (blockdata.json) wrote the boxes only, so:
-
-  * a shape of one box is rebuilt exactly - `create()` below is Shapes.create;
-  * a shape of several boxes gets the grid its boxes' faces cut, marked inexact. That is the
-    same shape for everything outside it; an entity that is INSIDE such a shape may be stopped
-    at a line vanilla has and this grid lacks. No block with such a shape can be placed yet,
-    and the generator refuses to make one placeable: teach Extract.java to write
-    VoxelShape.getCoords and the cells first.
+cells full), and where shapes were joined (Shapes.or) the grid may keep lines no box ends on (a
+piston's head is 8 x 8 x 4 cells, a straw bed has five layers). So the grids are not rebuilt
+from the boxes: the extractor writes each shape's own coordinates and cells (blockdata.json,
+`collision_grids`), and they are emitted as they are.
 """
 from __future__ import annotations
 
@@ -31,8 +27,6 @@ import zipfile
 
 import mcgen
 from mcgen import die, jar_for, version_info
-
-EPS = 1.0e-7
 
 # Block hooks that act on an entity. A placeable block may only override them in a class listed
 # here: (hook, declaring class) -> the Material field that stands for it, or None when what the
@@ -49,7 +43,7 @@ PORTED_ENTITY_HOOKS = {
     ("stepOn", "MagmaBlock"): None,                    # burns the living
 }
 # Classes whose getCollisionShape override returns one shape whoever asks (read in the jar).
-CONSTANT_COLLISION_SHAPE = {"SoulSandBlock", "MudBlock", "HoneyBlock"}
+CONSTANT_COLLISION_SHAPE = {"SoulSandBlock", "MudBlock", "HoneyBlock", "CrossCollisionBlock", "WallBlock"}
 
 MATERIAL_FLAGS = [
     ("kFence", 0x1, "#fences: an entity on it stands on it even 0.2 blocks down (Entity.getOnPos)"),
@@ -95,51 +89,6 @@ OWN_MOVEMENT = {"Allay", "Bat", "Bee", "Camel", "Creaking", "Ghast", "HappyGhast
 # does while it dies; a player answers AUTHORITATIVE_SIDE_AND_SERVER.)
 SIMULATION_DECLARES = {"Entity", "EnderDragon", "ExperienceOrb", "FallingBlockEntity", "ItemEntity", "Player", "PrimedTnt", "Projectile"}
 CLIENT_SIMULATED = {"ExperienceOrb", "FallingBlockEntity", "ItemEntity", "PrimedTnt", "Projectile"}
-
-
-def java_round(v: float) -> int:
-    import math
-    return math.floor(v + 0.5)
-
-
-def find_bits(lo: float, hi: float) -> int:
-    """Shapes.findBits: the number of halvings after which both ends lie on the grid, -1 for none."""
-    if lo < -EPS or hi > 1.0000001:
-        return -1
-    for bits in range(4):
-        n = 1 << bits
-        a, b = lo * n, hi * n
-        if abs(a - java_round(a)) < EPS * n and abs(b - java_round(b)) < EPS * n:
-            return bits
-    return -1
-
-
-def create(box: list[float]):
-    """Shapes.create(minX..maxZ): 'empty', 'block', or (coords per axis, set of full cells)."""
-    lo, hi = box[:3], box[3:]
-    if any(hi[a] - lo[a] < EPS for a in range(3)):
-        return "empty"
-    bits = [find_bits(lo[a], hi[a]) for a in range(3)]
-    if min(bits) < 0:       # ArrayVoxelShape over the block's one cell
-        return [[lo[a], hi[a]] for a in range(3)], {(0, 0, 0)}
-    if bits == [0, 0, 0]:
-        return "block"
-    size = [1 << b for b in bits]
-    # BitSetDiscreteVoxelShape.withFilledBounds, CubePointRange: coordinate i is i / size
-    first = [java_round(lo[a] * size[a]) for a in range(3)]
-    last = [java_round(hi[a] * size[a]) for a in range(3)]
-    cells = {(x, y, z) for x in range(first[0], last[0]) for y in range(first[1], last[1]) for z in range(first[2], last[2])}
-    return [[i / size[a] for i in range(size[a] + 1)] for a in range(3)], cells
-
-
-def box_grid(boxes: list[list[float]]):
-    """The grid the faces of several boxes cut (see the module comment: not vanilla's own)."""
-    coords = [sorted({b[a] for b in boxes} | {b[a + 3] for b in boxes}) for a in range(3)]
-    cells = set()
-    for b in boxes:
-        r = [range(coords[a].index(b[a]), coords[a].index(b[a + 3])) for a in range(3)]
-        cells |= {(x, y, z) for x in r[0] for y in r[1] for z in r[2]}
-    return coords, cells
 
 
 def cdouble(v: float) -> str:
@@ -193,41 +142,51 @@ def living_declarations(version: str, classes: set[str]) -> dict[str, set[str]]:
     return out
 
 
-def emit(hdr: str, version: str, ext_blocks: list, st: dict, shapes: list, game: dict, tagged, placeable: set[str],
+def emit(hdr: str, version: str, ext_blocks: list, st: dict, shapes: list, grids: list, game: dict, tagged, placeable: set[str],
          entity_ids: dict[str, int], cfloat32) -> dict:
-    """`st`: blockdata's per-state columns; `shapes`: its collision shapes (lists of boxes);
+    """`st`: blockdata's per-state columns; `shapes`: its collision shapes (lists of boxes), `grids`:
+    the same shapes as grids (x, y, z: coordinates; cells: '0' / '1' in BitSetDiscreteVoxelShape's order);
     `tagged(name)`: the block ids of a block tag; `placeable`: names of the blocks that can be placed."""
     n = len(st["block"])
     large_col = game["states"]["columns"]["large_collision_shape"]
     full_col = game["states"]["columns"]["collision_full_block"]
 
     # ---- shapes
-    kinds = []          # per shape id: 0 none, 1 cube, 2 box (one cell, not on the 1/8 grid), 3 grid
-    exact = []
+    if len(grids) != len(shapes):
+        die("blockdata.json has no grid for every collision shape - run: mcgen.py blockdata")
+    kinds = []          # per shape id: 0 none, 1 cube, 2 box (one cell, not the whole block), 3 grid
     records = []        # (coords offset, cells offset, nx, ny, nz)
     all_coords: list[float] = []
     all_cells: list[int] = []
-    for sid, boxes in enumerate(shapes):
-        made = "empty" if not boxes else create(boxes[0]) if len(boxes) == 1 else box_grid(boxes)
-        exact.append(len(boxes) <= 1)
-        if made == "empty":
-            if boxes:
-                die(f"collision shape {sid}: a box thinner than 1e-7")
+    for sid, (boxes, grid) in enumerate(zip(shapes, grids)):
+        coords = [grid["x"], grid["y"], grid["z"]]
+        size = [len(c) - 1 for c in coords]
+        if not boxes:
+            if any(coords) or grid["cells"]:
+                die(f"collision shape {sid}: no boxes, and a grid")
             kinds.append(0)
             records.append((0, 0, 0, 0, 0))
             continue
-        if made == "block":
-            kinds.append(1)
-            made = ([[0.0, 1.0]] * 3, {(0, 0, 0)})
-        else:
-            kinds.append(2 if len(boxes) == 1 and len(made[1]) == 1 and all(len(c) == 2 for c in made[0]) else 3)
-        coords, cells = made
-        size = [len(c) - 1 for c in coords]
+        if min(size) < 1 or len(grid["cells"]) != size[0] * size[1] * size[2] or any(c != sorted(c) for c in coords):
+            die(f"collision shape {sid}: its grid is not one")
+        cells = {(x, y, z) for x in range(size[0]) for y in range(size[1]) for z in range(size[2])
+                 if grid["cells"][(x * size[1] + y) * size[2] + z] == "1"}   # BitSetDiscreteVoxelShape.getIndex
+        # The grid and the boxes are two views of one shape: every box is whole cells, every full cell is in a box.
+        covered = set()
+        for b in boxes:
+            if any(b[a] not in coords[a] or b[a + 3] not in coords[a] for a in range(3)):
+                die(f"collision shape {sid}: a box that does not end on its grid's lines")
+            r = [range(coords[a].index(b[a]), coords[a].index(b[a + 3])) for a in range(3)]
+            covered |= {(x, y, z) for x in r[0] for y in r[1] for z in r[2]}
+        if covered != cells:
+            die(f"collision shape {sid}: its boxes and its cells are not the same space")
+        one_cell = size == [1, 1, 1]
+        kinds.append(1 if one_cell and coords == [[0.0, 1.0]] * 3 else 2 if one_cell else 3)
         if max(size) > 255 or len(all_coords) > 0xFFFF or len(all_cells) > 0xFFFF:
             die(f"collision shape {sid}: does not fit the Shape record")
         bits = 0
         for x, y, z in cells:
-            bits |= 1 << ((x * size[1] + y) * size[2] + z)      # BitSetDiscreteVoxelShape.getIndex
+            bits |= 1 << ((x * size[1] + y) * size[2] + z)
         words = [(bits >> (64 * i)) & 0xFFFFFFFFFFFFFFFF for i in range((size[0] * size[1] * size[2] + 63) // 64)]
         records.append((len(all_coords), len(all_cells), *size))
         all_coords += coords[0] + coords[1] + coords[2]
@@ -298,9 +257,6 @@ def emit(hdr: str, version: str, ext_blocks: list, st: dict, shapes: list, game:
         if name in placeable:
             if sid < 0:
                 die(f"{name}: a placeable block whose collision shape depends on who asks")
-            if not exact[sid]:
-                die(f"{name}: a placeable block whose collision shape has several boxes - the extractor has to write "
-                    "its VoxelShape grid first (see gen_physics.py)")
         state[i] = kind | (4 if is_large else 0) | rank[material_of[bid]] << 4
 
     o = [hdr, """
@@ -350,12 +306,11 @@ struct Shape {
     unsigned short coords;   // kShapeCoords: nx + 1 x coordinates, then ny + 1 of y, then nz + 1 of z
     unsigned short cells;    // kShapeCells: bit (x * ny + y) * nz + z is set for a full cell
     unsigned char nx, ny, nz;
-    bool exact;              // false: a shape of several boxes, whose grid here is the one its boxes' faces cut
 };
 """)
     o.append(f"inline constexpr Shape kShapes[{len(shapes)}] = {{\n")
     for sid, (co, ce, nx, ny, nz) in enumerate(records):
-        o.append(f"    {{{co}, {ce}, {nx}, {ny}, {nz}, {'true' if exact[sid] else 'false'}}},\n")
+        o.append(f"    {{{co}, {ce}, {nx}, {ny}, {nz}}},\n")
     o.append(f"}};\ninline constexpr double kShapeCoords[{max(len(all_coords), 1)}] = {{\n")
     for i in range(0, len(all_coords), 8):
         o.append("    " + ", ".join(cdouble(c) for c in all_coords[i:i + 8]) + ",\n")
@@ -427,6 +382,6 @@ struct Shape {
         name, mover, gravity, step, simulated = rows[i]
         o.append(f"    {{{mover}, {'true' if simulated else 'false'}, {cfloat32(step)}, {cdouble(gravity)}}},  // {name.split(':', 1)[1]}\n")
     o.append("};\n\n}  // namespace proto::gen::physics\n")
-    stats = {"materials": len(materials), "shapes_grid": sum(k == 3 for k in kinds), "shapes_inexact": sum(not e for e in exact),
+    stats = {"materials": len(materials), "shapes_grid": sum(k == 3 for k in kinds),
              "movers": sum(r[1] != "kMoverNone" for r in rows.values())}
     return {"physics.hpp": "".join(o), "state_physics.bin": bytes(state), "_physics_stats": stats}

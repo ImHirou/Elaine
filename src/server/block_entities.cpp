@@ -229,6 +229,9 @@ bool Game::use_block(u32 pi, BlockPos pos, BlockState state, const ItemStack& he
             p.menu.send_all(out(pi), p.threshold, containers(p));
             return true;
         }
+        // FenceBlock.useWithoutItem -> LeadItem.bindPlayerMobs: the mobs the player leads are tied
+        // to the fence. PASS when it leads none - and nothing is on a lead here.
+        case block_kind::kFence: return false;
         default: return false;
     }
 }
