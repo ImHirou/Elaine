@@ -146,6 +146,11 @@ class Menu {
     // (and a crafting grid) go back into the inventory, or out into the world - after which the
     // player's own menu is the open one again and knows what the client holds of the inventory.
     void close(const Ctx& cx);
+    // Player.remove, of a player who has disconnected: inventoryMenu.removed, then
+    // doCloseContainer. Nothing goes back into the inventory - that has been saved by now
+    // (PlayerList.remove) - so both cursors and the crafting grids are dropped
+    // (dropOrPlaceInInventory), and the player's own menu is what is left.
+    void leave(Effects& fx);
 
     // ---- what packets do
     // AbstractContainerMenu.clicked. False where vanilla's code runs into an exception (a slot

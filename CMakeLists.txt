@@ -159,6 +159,8 @@ add_library(core STATIC
   src/server/chunks.cpp
   src/server/import.cpp
   src/server/persist.cpp
+  src/server/files.cpp
+  src/server/player_data.cpp
   src/server/world_setup.cpp
   src/server/inventory.cpp
   src/server/inventory_actions.cpp
@@ -201,6 +203,7 @@ if(MC_TESTS)
       tests/unit/spsc_test.cpp
       tests/unit/world_test.cpp
       tests/unit/store_test.cpp
+      tests/unit/player_data_test.cpp
       tests/unit/ticks_test.cpp
       tests/unit/physics_test.cpp
       tests/unit/light_test.cpp

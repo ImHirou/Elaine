@@ -8,8 +8,8 @@
 > NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.
 
 Elaine is not a fork of the vanilla server and not a wrapper around it. It is a new server that an
-unmodified Minecraft client cannot tell from the vanilla one - and that is written so that five
-hundred players in one place are an ordinary evening and not an incident.
+unmodified Minecraft client cannot tell from the vanilla one - and that is written so that 500 
+players in one place are an ordinary evening.
 
 ## Status
 
@@ -137,7 +137,7 @@ cost per entity.*
 - [x] Creative mode
 - [ ] Game modes; survival - health, hunger, death, respawn, experience
 - [ ] Chat, signed as vanilla signs it
-- [ ] A player's data kept: position, inventory
+- [x] A player's data kept: position, inventory
 - [ ] Movement checks: vanilla's
 - [ ] Advancements, statistics, the recipe book
 

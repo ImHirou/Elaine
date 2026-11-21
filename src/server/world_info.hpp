@@ -7,6 +7,7 @@
 //     world.json                       what this server knows of the world: the format and data
 //                                      version it was saved by, its generator, its spawn
 //     chunks/minecraft/overworld/      region files of this server's own format (world/region.hpp)
+//     playerstate/<uuid>.bin           what is kept of a player (server/player_data.hpp)
 //
 // A directory that holds a vanilla world (level.dat) and no world.json is imported: every chunk of
 // its region files is written into ours, once, before the server starts to listen

@@ -27,7 +27,9 @@
 #include "proto/packets.hpp"
 #include "server/command.hpp"
 #include "server/console.hpp"
+#include "server/files.hpp"
 #include "server/inventory.hpp"
+#include "server/player_data.hpp"
 #include "server/prelogin.hpp"
 #include "server/settings.hpp"
 #include "server/world_info.hpp"
@@ -117,6 +119,22 @@ class Game {
         u32 container_counter = 0;
         proto::BlockPos open_pos{};
         u32 open_data[2] = {kNone, kNone};
+        // What is on disk of this player (save_player): the tick it was last looked at for
+        // saving, and a hash of the bytes that were written then.
+        u64 saved_tick = 0;
+        u64 saved_hash = 0;
+    };
+    // Somebody whose connection is the tick thread's already and whose file is still being
+    // read: a player from the moment it is (finish_join).
+    struct Joining {
+        u64 id;
+        u32 reactor;
+        net::InHeader h;
+        net::JoinTransport t;
+        JoinInfo info;
+        bool ready = false;  // its file has been read...
+        bool has_data = false;
+        PlayerData data;  // ...and held this
     };
     // Level.blockEvent: (b0, b1) for the block at a position, sent to who is near after the
     // tracker (ServerLevel.runBlockEvents).
@@ -167,6 +185,15 @@ class Game {
 
     void drain(u32 ri);
     void on_join(u32 ri, const net::InHeader& h, const u8* payload, u32 n);
+    void finish_join(u32 ri, const net::InHeader& h, const net::JoinTransport& t, JoinInfo& j, PlayerData* saved);
+    // What is kept of a player (server/player_data.hpp): read before it joins, written when it
+    // leaves and every autosave-seconds while it stays.
+    bool keeps_players() const { return !player_dir_.empty(); }
+    std::string player_path(Uuid uuid) const;
+    static void player_file_read(void* game, u64 id, std::span<const u8> bytes, bool found);
+    void admit_joining();
+    void save_player(u32 pi);
+    void autosave_players();
     void on_leave(u32 ri, const net::InHeader& h);
     void on_packet(u32 pi, const u8* body, u32 n);
 
@@ -462,6 +489,12 @@ class Game {
     std::vector<ChunkSender> senders_;
     std::vector<Player> players_;
     std::vector<std::vector<u32>> slot_to_player_;  // [reactor][slot] -> player index
+    std::vector<Joining> joining_;
+    u64 join_seq_ = 0;
+    std::string player_dir_;  // where players' files are; empty: nothing of a player is kept
+    u32 autosave_at_ = 0;     // autosave_players(): whose turn it is
+    base::ByteBuf player_scratch_;
+    Files files_;  // (after everything its answers touch: it waits for them when it goes)
 
     base::BufPool pool_;
     base::ByteBuf scratch_;

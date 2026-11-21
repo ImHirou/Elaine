@@ -3,11 +3,13 @@
 
 #include <cmath>
 #include <ctime>
+#include <filesystem>
 #include <thread>
 
 #include "base/clock.hpp"
 #include "base/log.hpp"
 #include "proto/packets.hpp"
+#include "text/text.hpp"
 
 #include PROTO_GEN_BLOBS_HPP
 #include PROTO_GEN_DIMENSION_TYPES_HPP
@@ -44,6 +46,7 @@ Game::Game(const Settings& s, std::vector<std::unique_ptr<net::Reactor>>& reacto
       world_(reg::dimension_type::kOverworld, std::string(kOverworld), generator_, s.compression_threshold, &workers,
              world.chunk_dir, s.sync_chunk_writes),
       tracker_(ents_, s.compression_threshold, s.entity_broadcast_range),
+      files_(workers, s.sync_chunk_writes),
       rng_(base::now_ns() | 1),
       console_(console) {
     random_value_ = static_cast<u32>(random());  // Level.randValue: RandomSource.create().nextInt()
@@ -73,6 +76,15 @@ Game::Game(const Settings& s, std::vector<std::unique_ptr<net::Reactor>>& reacto
     init_titles();
     init_commands();
     load_ops();
+    if (!world.dir.empty()) {
+        player_dir_ = world.dir + "/playerstate";
+        std::error_code ec;
+        std::filesystem::create_directories(player_dir_, ec);
+        if (ec) {
+            LOG_ERROR("cannot make %s: %s - nothing of a player will be kept", player_dir_.c_str(), ec.message().c_str());
+            player_dir_.clear();
+        }
+    }
 }
 
 Game::~Game() {
@@ -105,6 +117,7 @@ void Game::run(const std::atomic<bool>& stop) {
         entities_ticked_ = false;
         pump_chunks(t0);  // the chunks the workers have ready enter the world
         for (u32 ri = 0; ri < reactors_.size(); ++ri) drain(ri);
+        if (UNLIKELY(!joining_.empty())) admit_joining();
         run_console();  // DedicatedServer.tickConnection: the console's lines after the players' packets
         // ServerLevel.tick: tickTime - what packets scheduled was scheduled by the tick before -
         // then the block ticks that are due, then (ServerChunkCache.tickChunks) the random ticks.
@@ -131,6 +144,7 @@ void Game::run(const std::atomic<bool>& stop) {
         sync_menus();
         tick_furnaces();  // block entities tick after the entities
         tick_players();
+        autosave_players();
         // Not t0: a player who joined during drain() has keepalive_sent_ns > t0, and the unsigned
         // difference would wrap and send a keep-alive at once.
         if (++tick_ % 20 == 0) keepalives(base::now_ns());
@@ -173,6 +187,8 @@ void Game::run(const std::atomic<bool>& stop) {
         }
     }
     while (!players_.empty()) kick(static_cast<u32>(players_.size()) - 1, "Server closed");
+    for (const Joining& j : joining_) refuse(j.reactor, j.h, j.t, "Server closed");
+    joining_.clear();  // (their files, when they come, find nobody waiting)
     for (auto& r : reactors_) r->wake();
     save_world();
 }
@@ -251,17 +267,73 @@ void Game::on_join(u32 ri, const InHeader& h, const u8* payload, u32 n) {
         refuse(ri, h, t, "Internal error");
         return;
     }
+    // Whoever is here under this profile makes way - and is saved as it goes, which is what the
+    // newcomer is then given (Files answers from memory while a write is out).
     for (u32 i = 0; i < players_.size(); ++i) {
         if (players_[i].uuid == j.uuid) {
             kick(i, "You logged in from another location");
             break;
         }
     }
-    if (players_.size() >= s_.max_players) {
+    for (usize i = 0; i < joining_.size(); ++i) {
+        if (joining_[i].info.uuid == j.uuid) {
+            refuse(joining_[i].reactor, joining_[i].h, joining_[i].t, "You logged in from another location");
+            joining_.erase(joining_.begin() + static_cast<std::ptrdiff_t>(i));
+            break;
+        }
+    }
+    if (players_.size() + joining_.size() >= s_.max_players) {
         refuse(ri, h, t, "The server is full!");
         return;
     }
+    if (!keeps_players()) {
+        finish_join(ri, h, t, j, nullptr);
+        return;
+    }
+    // PlayerList.loadPlayerData: its file first - a worker reads it, and the player is one from
+    // the tick in which it has come back (the next one, as a rule).
+    const u64 id = ++join_seq_;
+    const std::string path = player_path(j.uuid);
+    joining_.push_back({id, ri, h, t, std::move(j), false, false, {}});
+    files_.read(path, this, id, &player_file_read);
+}
 
+std::string Game::player_path(Uuid uuid) const { return player_dir_ + "/" + text::uuid_string(uuid) + ".bin"; }
+
+// A player's file has been read (on the tick thread: from Workers::poll, or from Files::read
+// itself). Only noted here: whoever calls is in the middle of something.
+void Game::player_file_read(void* game, u64 id, std::span<const u8> bytes, bool found) {
+    Game& g = *static_cast<Game*>(game);
+    for (Joining& j : g.joining_) {
+        if (j.id != id) continue;
+        j.ready = true;
+        j.has_data = found && read_player(bytes, j.data);
+        // A file that cannot be read is not half taken: the player starts anew, and the file is
+        // replaced when it is next saved.
+        if (found && !j.has_data)
+            LOG_WARN("%s cannot be read: %s joins as a new player", g.player_path(j.info.uuid).c_str(), j.info.name.c_str());
+        return;
+    }
+    // Nobody: gone, or pushed out by a later login, while its file was read.
+}
+
+// Those whose files have come become players, in the order they came to the server in.
+void Game::admit_joining() {
+    usize kept = 0;
+    for (usize i = 0; i < joining_.size(); ++i) {
+        if (!joining_[i].ready) {
+            if (kept != i) joining_[kept] = std::move(joining_[i]);
+            ++kept;
+            continue;
+        }
+        Joining j = std::move(joining_[i]);
+        finish_join(j.reactor, j.h, j.t, j.info, j.has_data ? &j.data : nullptr);
+    }
+    joining_.resize(kept);
+}
+
+// `saved`: what is kept of this player from its last visit, null for a first one.
+void Game::finish_join(u32 ri, const InHeader& h, const net::JoinTransport& t, JoinInfo& j, PlayerData* saved) {
     const u32 pi = static_cast<u32>(players_.size());
     players_.emplace_back();
     Player& p = players_[pi];
@@ -283,19 +355,23 @@ void Game::on_join(u32 ri, const InHeader& h, const u8* payload, u32 n) {
     p.keepalive_sent_ns = base::now_ns();  // first keep-alive one interval from now
     p.loaded_at_tick = tick_ + kClientLoadTimeoutTicks;
     if (const u32 op = find_op(p.uuid); op != kNone) p.level = ops_[op].level;  // MinecraftServer.getProfilePermissions
+    p.saved_tick = tick_;
     const double spawn_y = spawn_[1];
+    // ServerPlayer.load: where it was and how it looked about, or the world's spawn.
+    const double x = saved ? saved->x : spawn_[0], y = saved ? saved->y : spawn_y, z = saved ? saved->z : spawn_[2];
+    const float yaw = saved ? saved->yaw : 0.0f, pitch = saved ? saved->pitch : 0.0f;
     // The entity: a player's row in the entity table is its index here (the store keeps players
     // in front). Whoever is near is shown it by the tracker at the end of this tick, after the
     // tab-list entry below - a client drops an add_entity for a player it has no entry for.
     entity::Store::Moves moved;
-    const u32 ei = tracker_.spawn(entity_type::kPlayer, true, p.uuid, spawn_[0], spawn_y, spawn_[2], 0, 0, moved);
+    const u32 ei = tracker_.spawn(entity_type::kPlayer, true, p.uuid, x, y, z, yaw, pitch, moved);
     DCHECK(ei == pi);
     (void)ei;
-    enter_push_grid(ents_.slot[pi], spawn_[0], spawn_[2], entity_type::kInfo[entity_type::kPlayer].width);
+    enter_push_grid(ents_.slot[pi], x, z, entity_type::kInfo[entity_type::kPlayer].width);
     ents_.set_skin_parts(pi, j.skin_parts);  // ServerPlayer.updateOptions
     ents_.set_main_hand(pi, j.main_hand);
-    pcx_.push_back(chunk_of(spawn_[0]));
-    pcz_.push_back(chunk_of(spawn_[2]));
+    pcx_.push_back(chunk_of(x));
+    pcz_.push_back(chunk_of(z));
     // ChunkMap.getPlayerViewDistance: what the client asked for, within 2 and the server's own.
     pview_.push_back(std::min<i32>(std::max<i32>(j.view_distance, 2), static_cast<i32>(s_.view_distance)));
     tracker_.set_view_distance(pi, static_cast<u32>(pview_[pi]));
@@ -305,6 +381,13 @@ void Game::on_join(u32 ri, const InHeader& h, const u8* payload, u32 n) {
     out_.push_back(pool_.get(kOutInitial));
     slot_to_player_[ri][h.slot] = pi;
     online_.store(static_cast<u32>(players_.size()), std::memory_order_relaxed);
+    if (saved) {
+        if (saved->on_ground) ents_.flags[pi] |= entity::flag::kOnGround;
+        p.flying = saved->flying;
+        for (u32 i = 0; i < inv::kSize; ++i) p.menu.inv.items[i] = std::move(saved->items[i]);
+        p.menu.inv.selected = saved->selected;
+        show_equipment(pi);  // nobody sees it yet: what it wears is known before anybody does
+    }
     LOG_INFO("%s (%s) joined [%zu online]", p.name.c_str(), j.remote.c_str(), players_.size());
 
     // Same order as vanilla's PlayerList.placeNewPlayer, minus what we do not simulate yet.
@@ -326,8 +409,9 @@ void Game::on_join(u32 ri, const InHeader& h, const u8* payload, u32 n) {
     login.enforces_secure_chat = false;
     send(pi, login);
 
-    send(pi, cb::PlayerAbilities{cb::PlayerAbilities::kInvulnerable | cb::PlayerAbilities::kCanFly |
-                                 cb::PlayerAbilities::kInstabuild});
+    send(pi,
+         cb::PlayerAbilities{static_cast<u8>(cb::PlayerAbilities::kInvulnerable | cb::PlayerAbilities::kCanFly |
+                                             cb::PlayerAbilities::kInstabuild | (p.flying ? cb::PlayerAbilities::kFlying : 0))});
     send(pi, cb::SetHeldSlot{p.menu.inv.selected});
     // What a client's screens ask about recipes: which items a furnace takes (the shift-click
     // it predicts), and so on. The recipe book stays empty: nothing is unlocked.
@@ -336,7 +420,7 @@ void Game::on_join(u32 ri, const InHeader& h, const u8* payload, u32 n) {
 
     p.teleport_id = 1;
     p.awaiting_teleport = true;
-    send(pi, cb::PlayerPosition{p.teleport_id, ents_.x[pi], ents_.y[pi], ents_.z[pi], 0, 0, 0, 0, 0, 0});
+    send(pi, cb::PlayerPosition{p.teleport_id, ents_.x[pi], ents_.y[pi], ents_.z[pi], 0, 0, 0, yaw, pitch, 0});
 
     // Tab list, as vanilla does it: one packet with everyone already here for the newcomer, then
     // the newcomer to everyone (itself included). Entries reuse each player's pre-encoded profile.
@@ -355,7 +439,7 @@ void Game::on_join(u32 ri, const InHeader& h, const u8* payload, u32 n) {
     // ServerLevel.addNewPlayer -> ChunkMap.updatePlayerStatus: the view is the player's from here
     // on. Its chunks go out batch by batch, from the end of this tick on (send_chunks).
     apply_view(pi, pcx_[pi], pcz_[pi], pview_[pi]);
-    // ServerPlayer.initInventoryMenu: the whole menu, which is empty - nothing is saved yet.
+    // ServerPlayer.initInventoryMenu: the whole menu.
     p.menu.send_all(out(pi), p.threshold);
     send(pi, cb::SystemChat{"Welcome, " + players_[pi].name + "!"});
 }
@@ -366,6 +450,8 @@ void Game::on_leave(u32 ri, const InHeader& h) {
         LOG_INFO("%s left", players_[pi].name.c_str());
         remove_player(pi);
     }
+    // Gone before its file was read: it never was a player.
+    std::erase_if(joining_, [&](const Joining& j) { return j.reactor == ri && j.h.slot == h.slot && j.h.gen == h.gen; });
     post(ri, {h.slot, h.gen, OutKind::Release, nullptr});  // the slot is ours to give back either way
 }
 
@@ -385,9 +471,14 @@ void Game::remove_player(u32 pi) {
     Player& p = players_[pi];
     const Uuid uuid = p.uuid;
     slot_to_player_[p.reactor][p.slot] = kNone;
-    // Player.remove closes the open menu. What it would hand back is not kept - nothing of a
-    // player is - but a chest must not go on counting an opener who left.
-    if (p.menu.kind() == Menu::Kind::kChest) {
+    // PlayerList.remove: the player is saved, then taken out of the level - and Player.remove
+    // takes its menus away: what was on a cursor or in a crafting grid falls where it stood,
+    // and a chest loses an opener.
+    save_player(pi);
+    const bool chest_open = p.menu.kind() == Menu::Kind::kChest;
+    p.menu.leave(effects_);
+    apply_effects(pi);
+    if (chest_open) {
         for (const u32 chest : p.open_data)
             if (chest != kNone && chests_[chest].alive) chest_closed(chest);
     }
@@ -423,6 +514,39 @@ void Game::remove_player(u32 pi) {
     out_.pop_back();
     online_.store(static_cast<u32>(players_.size()), std::memory_order_relaxed);
     broadcast(cb::PlayerInfoRemove{uuid});
+}
+
+// What is kept of a player, to its file - unless that holds these very bytes already.
+void Game::save_player(u32 pi) {
+    if (!keeps_players()) return;
+    Player& p = players_[pi];
+    p.saved_tick = tick_;
+    PlayerData d;
+    d.x = ents_.x[pi];
+    d.y = ents_.y[pi];
+    d.z = ents_.z[pi];
+    d.yaw = ents_.yaw[pi];
+    d.pitch = ents_.pitch[pi];
+    d.on_ground = ents_.flags[pi] & entity::flag::kOnGround;
+    d.flying = p.flying;
+    d.selected = p.menu.inv.selected;
+    for (u32 i = 0; i < inv::kSize; ++i) d.items[i] = p.menu.inv.items[i];
+    player_scratch_.clear();
+    write_player(player_scratch_, d);
+    u64 hash = 0xCBF29CE484222325ull;  // FNV-1a: only ever compared with the one before
+    for (u32 i = 0; i < player_scratch_.len; ++i) hash = (hash ^ player_scratch_.data[i]) * 0x100000001B3ull;
+    hash |= 1;  // (0: never saved)
+    if (hash == p.saved_hash) return;
+    p.saved_hash = hash;
+    files_.write(player_path(p.uuid), {player_scratch_.data, player_scratch_.len});
+}
+
+// PlayerList.saveAll, spread out: one player a tick is looked at, and saved when its last save
+// is autosave-seconds old. (The cold Player is touched for one of them, not for all.)
+void Game::autosave_players() {
+    if (players_.empty() || !keeps_players()) return;
+    if (++autosave_at_ >= players_.size()) autosave_at_ = 0;
+    if (tick_ - players_[autosave_at_].saved_tick >= 20ull * s_.autosave_seconds) save_player(autosave_at_);
 }
 
 // ---------------------------------------------------------------------------- packets

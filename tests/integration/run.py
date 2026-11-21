@@ -3528,6 +3528,100 @@ def open_and_check_chest(c: Client, pos: tuple, seq: int) -> None:
     settle(c)
 
 
+def player_file(name: str) -> str:
+    """The file an offline player's state is kept in: its UUID, dashed."""
+    h = mc.offline_uuid(name)
+    return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:]}.bin"
+
+
+def as_shown(degrees: float) -> float:
+    """An angle as a watcher has it: Mth.packDegrees - 256ths of a turn, rounded down."""
+    return (math.floor(degrees * 256 / 360) + 128) % 256 * 360 / 256 - 180
+
+
+@test()
+def a_player_comes_back(srv: Server):
+    """Whoever leaves is the same when it is back: where it stood and how it looked about, whether
+    it flew, what it had and which slot was in hand, what it wore - which others see again. What
+    was on its cursor it has dropped: it lies where it left. And a login from another place gets
+    what the first one had at that moment."""
+    a, b = srv.client(), srv.client()
+    join(a, "Alice")
+    jb = join(b, "Bob")
+    a.expect("player_info_update")
+    for cl in (a, b):
+        cl.send("player_loaded")
+    settle(a, b)
+    sword = (I["kDiamondSword"], 1, {"kDamage": 300})
+    give(b, 36, I["kStone"], 64)
+    b.send("set_creative_mode_slot", struct.pack(">h", 37) + mc.item_stack(I["kDiamondSword"], 1, {"kDamage": varint(300)}))
+    give(b, 20, I["kDirt"], 3)
+    give(b, 5, I["kDiamondHelmet"])
+    give(b, 45, I["kShield"])
+    for slot, stack in {36: plain("kStone", 64), 37: sword, 20: plain("kDirt", 3), 5: plain("kDiamondHelmet"), 45: plain("kShield")}.items():
+        b.slots[slot] = stack              # a client knows what it put there
+    b.send("set_carried_item", struct.pack(">h", 1))
+    b.send("player_abilities", b"\x02")    # flying
+    where, looks = (3.25, -55.5, 12.75), (123.5, -30.25)
+    b.send("move_player_pos_rot", struct.pack(">dddffB", *where, *looks, 0))
+    settle(a, b)
+    # The dirt onto the cursor: it is neither in the inventory nor saved - it falls as Bob goes.
+    menu_click(b, 20, 0, PICKUP)
+    settle(a, b, ticks=2)
+    assert b.cursor == plain("kDirt", 3) and b.slots[20] is None
+    had = list(b.slots)
+    assert not of_type(a, "kItem")
+    b.close()
+    a.expect("player_info_remove")
+    settle(a, ticks=6)
+    dropped = list(of_type(a, "kItem").values())
+    assert [e.data[D_ITEM] for e in dropped] == [(STACK, plain("kDirt", 3))], [e.data for e in dropped]
+    assert not of_type(a, "kPlayer")
+
+    # ---- back again, in the same run of the server.
+    b = srv.client()
+    jb = join(b, "Bob")
+    a.expect("player_info_update")
+    b.send("player_loaded")
+    settle(a, b)
+    assert jb["teleport"]["pos"] == where and jb["teleport"]["rot"] == looks, jb["teleport"]
+    assert jb["teleport"]["id"] == 1 and jb["teleport"]["relative"] == 0
+    assert jb["abilities"][0] == 0x01 | 0x02 | 0x04 | 0x08, jb["abilities"]     # ...and flying
+    assert jb["center"] == (0, 0)
+    assert b.menu_log[:2] == [("set_held_slot", 1), ("container_set_content", 1)], b.menu_log[:2]
+    assert b.held_slot == 1 and b.cursor is None
+    assert b.slots == had, (b.slots, had)
+    assert server_menu(b) == had
+    # Alice is shown him where he is, with what he holds and wears, in the bundle he comes in.
+    seen = a.entities[jb["login"]["entity_id"]]
+    assert seen.pos == where and (seen.yaw, seen.pitch) == (as_shown(looks[0]), as_shown(looks[1])), (seen.pos, seen.yaw, seen.pitch)
+    assert seen.equipment == {MAINHAND: sword, OFFHAND: plain("kShield"), HEAD: plain("kDiamondHelmet")} and seen.bundled, seen.equipment
+
+    # ---- a second login under the same name: the first is put out, and the second has what the
+    # first had when that happened - not what was last written.
+    give(b, 38, I["kGlowstone"], 7)
+    b.slots[38] = plain("kGlowstone", 7)
+    there = (5.5, -60.0, 2.5)
+    b.send("move_player_pos_rot", struct.pack(">dddffB", *there, 10.0, 20.0, 1))
+    b.send("player_abilities", b"\x00")
+    settle(a, b)
+    had = list(b.slots)
+    b2 = srv.client()
+    jb2 = join(b2, "Bob")
+    expect_kick(b, "a second login under the same name")
+    a.expect("player_info_remove")
+    a.expect("player_info_update")
+    assert jb2["teleport"]["pos"] == there and jb2["teleport"]["rot"] == (10.0, 20.0), jb2["teleport"]
+    assert jb2["abilities"][0] == 0x01 | 0x04 | 0x08, jb2["abilities"]
+    assert b2.slots == had and b2.held_slot == 1
+    # A newcomer is new: the world's spawn, empty hands.
+    c = srv.client()
+    check_join(join(c, "Carol"), "Carol")
+    assert c.slots == [None] * 46
+    # Bob's file is there; Alice's and Carol's come when they leave, or with the next autosave.
+    assert os.listdir(os.path.join(srv.world, "playerstate")) == [player_file("Bob")]
+
+
 @test()
 def the_world_is_kept():
     """What was built is there when the server starts again: every chunk a client is sent is the
@@ -3553,6 +3647,11 @@ def the_world_is_kept():
         assert mc.light_get(b.chunks[(1, 0)]["light"]["block"][1], 0, 4, 8) == 14
         stone = the_stone(b)
         where = stone.pos
+        # Alice herself: what she has left of it, and where she stands when the server stops.
+        stood, looked = (5.25, -60.0, 6.75), (90.0, 10.0)
+        a.send("move_player_pos_rot", struct.pack(">dddffB", *stood, *looked, 1))
+        hers = list(server_menu(a))
+        assert any(hers), hers
         assert srv.stop() == 0, srv.read_log()
         assert "world saved" in srv.read_log()
         os.unlink(srv.log.name)
@@ -3574,6 +3673,12 @@ def the_world_is_kept():
         back = the_stone(c)
         assert near(back.pos, where), (back.pos, where)
         open_and_check_chest(c, made["chest"], 1)
+        # Alice is back where she stood, with what she had; Bob too, and he had nothing.
+        a = srv.client()
+        ja = join(a, "Alice", view=3)
+        assert ja["teleport"]["pos"] == stood and ja["teleport"]["rot"] == looked, ja["teleport"]
+        assert a.slots == hers, (a.slots, hers)
+        assert sorted(os.listdir(os.path.join(world, "playerstate"))) == sorted(player_file(n) for n in ("Alice", "Bob"))
         # ...and a world is one server's: a second one on it does not start.
         try:
             Server(EXE, world=world)

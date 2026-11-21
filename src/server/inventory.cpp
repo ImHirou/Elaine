@@ -712,6 +712,23 @@ void Menu::close(const Ctx& cx) {
     open_ = Sync{};
 }
 
+void Menu::leave(Effects& fx) {
+    const auto drop = [&fx](ItemStack& s) {
+        if (!s.empty()) fx.push_back(Effect::drop(s.take(), false, false));
+    };
+    drop(kind_ == Kind::kInventory ? carried : own_carried_);  // inventoryMenu.removed: its cursor, its grid
+    result_ = {};
+    for (ItemStack& cell : craft) drop(cell);
+    if (kind_ == Kind::kInventory) return;
+    drop(carried);  // containerMenu.removed
+    if (kind_ == Kind::kCrafting) {
+        for (ItemStack& cell : table_) drop(cell);
+        table_result_ = {};
+    }
+    kind_ = Kind::kInventory;
+    open_ = Sync{};
+}
+
 ItemStack Menu::take_from_hand(bool all) {
     ItemStack& hand = inv.selected_item();
     ItemStack out = hand.split(all ? hand.count() : 1);

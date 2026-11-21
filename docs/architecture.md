@@ -73,6 +73,11 @@ the reactor only forwards. A connection closed while in play becomes a *zombie* 
 thread acknowledges with `Release`, so a `(slot, gen)` the tick thread still holds can never point at a
 new connection.
 
+The tick thread does not make a player of a Join record at once: it asks a worker for what is kept
+of that player and holds the connection (`Game::joining_`) until the file is back, a tick later as a
+rule ("Players" under "The world's life cycle"). A connection that closes meanwhile never was a
+player; its slot is released like any other.
+
 ### Tick thread (src/server/game.*)
 
 One tick, in vanilla's order (`MinecraftServer.tickChildren`):
@@ -618,9 +623,7 @@ differs:
 - a furnace gives no experience when it is emptied, ores blown up by a player's TNT none
   either: there are no experience orbs;
 - an explosion hurts nothing but items (nothing else has health): a mob is thrown and lives,
-  an armor stand breaks with its sound but without its particles;
-- a player's inventory is not kept when it leaves, so what it had on a menu's cursor or in a
-  crafting grid is not dropped at its feet.
+  an armor stand breaks with its sound but without its particles.
 
 ## Block updates (src/server/block_updates.cpp, falling.cpp, src/world/ticks.*, dimension.*)
 
@@ -1230,6 +1233,38 @@ further.
 vanilla's kind of lock, so a world is run by one server of either kind. An empty `level-name` is
 a world that is not kept: nothing is written, and no chunk ever leaves memory.
 
+### Players (server/player_data.*, server/files.*)
+
+What is kept of a player is one small file, `<level-name>/playerstate/<uuid>.bin`: where it
+stood, how it looked about, whether it was on the ground or flying, the slot in hand and the
+inventory - a version byte, then the fields, the stacks in the form a client sends them in
+(`server/player_data.hpp` has the layout). Vanilla keeps its own under `players/`, which an
+imported world brings along; this directory is ours alone.
+
+**Written** when the player leaves, whichever way (`Game::remove_player`: `PlayerList.remove`
+saves, then takes the player out of the level), and every `autosave-seconds` while it stays -
+one player a tick is looked at, so that the cold `Player` is touched for one of them and not for
+all, and a file is written only when its bytes differ from the ones written before. What was on
+a cursor or in a crafting grid is not in the file: `Player.remove` takes the menus away after
+the save, from a player that has disconnected, so those stacks are dropped where it stood
+(`Menu::leave`, `AbstractContainerMenu.dropOrPlaceInInventory`) and are the world's from then on.
+
+**Read** before the player is one. `Game::on_join` refuses or makes way as before, then asks for
+the file and keeps the connection in `joining_`; a worker reads it, and at the next tick's
+`admit_joining` - a fixed place, after the packets - `finish_join` makes the player: at the
+world's spawn with empty hands, or where and as the file says. The join is a tick later than it
+was, and no file is ever read on the tick thread. A file that cannot be read (another version,
+a place no player can be, bytes that are no stack) is not half taken: the log says so, the
+player starts anew, and the file is replaced by its next save.
+
+`server::Files` is the tick thread's side of such files: a read and a write are tasks for the
+workers, a write goes beside its file and is moved into place (whole or not there), one write
+of a file is out at a time and only the latest of what came meanwhile follows it. Until its
+last write has come back a file is answered from memory - a player who leaves and joins in the
+same tick, or who logs in from a second place and so puts its first self out, is given what
+that self had, not what the disk still says. At shutdown everyone is put out, which saves them,
+and `save_world` waits for the files before the chunks.
+
 ### Light, across leaving and coming back
 
 The light engine is a port, and so is this half of it (`ThreadedLevelLightEngine.updateChunkStatus`,
@@ -1316,8 +1351,9 @@ What does differ, and is a gap rather than a difference of the import:
 
 ### What is not there
 
-- **Players.** Nothing of a player is saved: where it was, what it had. `players/` of an imported
-  world is left alone.
+- **Players of an imported world.** `players/` of a vanilla world is left alone: whoever played
+  there starts anew here. Of our own players, what is not kept is what does not exist yet -
+  health, food, experience, effects, a game mode, an ender chest.
 - **A terrain generator.** Flat ground, or nothing.
 - **Export** back to Anvil; a converter for worlds saved by another data version.
 - **lz4** region files (`region-file-compression=lz4`): the import says so and stops.
@@ -1660,7 +1696,8 @@ Roughly in dependency order:
 
 1. **World**: chunks are stored, lit, cached as frames, loaded, saved and unloaded (see "The world's
    life cycle"). Next: a terrain generator - and with it the first lighting of a chunk on a worker -
-   players' data, the update tags of the block entities that are kept as tags, export to Anvil.
+   the players of an imported world, the update tags of the block entities that are kept as tags,
+   export to Anvil.
 2. **Entities**: the table, the tracker and physics exist (see "Entities", "Physics"). Next:
    attributes, the inferred jump, then mobs - spawning, AI; fluids. Known headroom in the tracker at 20 000 mobs: a
    summary bitmap over each row (the fan-out and the "what do I see" walk scan 320 mostly-zero words
