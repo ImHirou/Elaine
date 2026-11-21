@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Packet layouts for the protocol in proto/gen/current.hpp (Minecraft 26.3, protocol 777).
 //
 // Every layout here was read off the vanilla jar's StreamCodec (see the mc-reference skill);

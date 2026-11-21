@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """What commands need to know about the game by name: generated from the caches like everything else.
 
 Emitted files:

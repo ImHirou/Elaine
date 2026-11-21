@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // The number formats entity packets use, each a transcription of one vanilla method (26.3 jar).
 // They decide what a client reconstructs, so they reproduce Java's arithmetic exactly: float
 // where vanilla computes in float, round-half-up where it calls Math.round, no fused multiply-add.

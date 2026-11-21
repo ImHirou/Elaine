@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Handshake / status / login / configuration, i.e. everything a connection does before it
 // becomes a player. Runs on reactor threads; one shared instance, immutable after construction
 // (per-connection state hangs off net::Conn::pre).

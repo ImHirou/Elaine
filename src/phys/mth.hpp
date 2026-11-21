@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Mth.sin / Mth.cos: vanilla's sines are a table of 65536 floats, and what is computed from them
 // (which way a thrown item flies) is a float off that table, not the processor's sine.
 #pragma once

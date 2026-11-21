@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // TNT: the primed entity, its fuse, and the explosion.
 //
 // The rules are vanilla's, read from the 26.3 jar; each function names the method it follows:

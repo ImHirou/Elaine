@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // The argument types that are vanilla's own: coordinates, entity selectors, block states and
 // items. Each is the port of its parser in net.minecraft.commands.arguments (26.3) - the same
 // steps over the reader, the same error at the same cursor - named at each function.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Item benchmarks: what a stack costs to read from a client, to hold and to send, and what it
 // costs 500 players to look for items lying around them every tick.
 #include <random>

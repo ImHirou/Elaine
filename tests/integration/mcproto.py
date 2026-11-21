@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """A deliberately independent Minecraft protocol client for integration tests (stdlib only).
 
 Nothing here shares code with the server: wire primitives, framing, zlib, AES-CFB8 (libcrypto

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Section storage, the chunk map and the chunk wire format.
 //
 // The wire tests decode with an independent reader written from the vanilla layout (see the comment

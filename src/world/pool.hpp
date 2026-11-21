@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // BlockPool: fixed-size, cache-line-aligned blocks carved from large slabs.
 //
 // The world allocates a handful of sizes over and over (one per palette width, light arrays): a

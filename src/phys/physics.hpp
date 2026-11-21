@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Entity physics: where an entity that moves by itself is the next tick.
 //
 // A port of the parts of vanilla (26.3) that decide it, each read from the jar:

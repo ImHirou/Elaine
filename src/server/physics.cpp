@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // What moves by itself: the entities' own tick, in the order vanilla ticks them, and what
 // living things do to each other.
 //

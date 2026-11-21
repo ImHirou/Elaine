@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Recipes, the furnace, and the menus over a chest, a furnace and a crafting grid.
 //
 // Expected outcomes are worked out by hand from vanilla (26.3): RecipeManager / ShapedRecipePattern

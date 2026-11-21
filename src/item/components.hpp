@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Component patches: the part of an item stack that is not its item and its count.
 //
 // In vanilla a stack carries a DataComponentPatch - "these components are set to these values,

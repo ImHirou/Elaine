@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // mcgen gamedata, section "items": the code side of each item. Its data side - the default
 // components - is Mojang's own report (`mcgen.py reports` -> reports/item_components/).
 

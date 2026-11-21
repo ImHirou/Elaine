@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // mcgen gamedata: the generic half - turn any vanilla object into JSON without knowing its class.
 //
 // Rules, in order (enc): plain values as themselves; anything that lives in a static registry as its

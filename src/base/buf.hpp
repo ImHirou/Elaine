@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // ByteBuf: growable byte buffer used for every outbound stream and for frame reassembly.
 //
 // Encoders follow one pattern:   u8* p = buf.reserve(upper_bound);  p = put_x(p, ...);  buf.commit(p);

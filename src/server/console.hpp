@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // The server console: lines typed on stdin, handed to the tick thread to be run as commands
 // (vanilla's "Server console handler" thread and DedicatedServer.handleConsoleInputs).
 //

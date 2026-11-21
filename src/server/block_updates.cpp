@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // A block changes - and what follows from it: the blocks around it hear of it and take the
 // shape they have beside it, ticks that were asked for come due, and the random ticks fall.
 //

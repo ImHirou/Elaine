@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """When does a server show a player's arm swinging? Record it, on vanilla and on ours, and diff.
 
     swing_probe.py record <port> <out.json> [nameA nameB]

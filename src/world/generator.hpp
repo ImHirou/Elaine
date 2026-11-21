@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Chunk generators. A generator only fills blocks and biomes; everything derived from blocks
 // (heightmaps, sky sources, light) is computed by the Dimension, so a generator cannot get it wrong.
 #pragma once

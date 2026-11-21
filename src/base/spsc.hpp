@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Single-producer / single-consumer queues: the only way threads exchange data on hot paths.
 //
 //   SpscRing<T>   fixed-size trivially-copyable items (handles, pointers, small messages)

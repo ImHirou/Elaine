@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Chunk: one 16x16 column of sections plus everything derived from its blocks that the client is
 // sent (heightmaps, light) and the cached wire frame.
 //

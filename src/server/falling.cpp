@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Falling blocks: sand, gravel and concrete powder with nothing under them - a block that is an
 // entity for the length of its fall.
 //

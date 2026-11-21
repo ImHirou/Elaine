@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // The player as an entity: what its packets do to its row of the entity table, and its own tick.
 //
 // The rules are vanilla's, read from the 26.3 jar; each function names the method it follows:

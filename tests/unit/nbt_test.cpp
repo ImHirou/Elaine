@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Binary NBT: what the reader takes, what it refuses, how it weighs a tag, and what a tag looks
 // like written back. The byte strings are put together by hand from the tag layouts of the
 // 26.3 jar (NbtIo, the TagTypes, ListTag), not by the Writer under test.

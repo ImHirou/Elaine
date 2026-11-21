@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // The entity table and the tracker, tested from the outside: a miniature client decodes exactly
 // what a player's connection would carry and its picture of the world is compared with the truth.
 #include <gtest/gtest.h>

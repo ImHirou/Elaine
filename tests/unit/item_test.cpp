@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Item stacks and component patches: what a client may send, what is kept of it, and what a
 // stack answers about itself. The byte strings are written out by hand from the components'
 // StreamCodecs in the 26.3 jar, not produced by the code under test.

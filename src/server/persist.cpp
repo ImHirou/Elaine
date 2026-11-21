@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // What a chunk holds of the game's, as bytes: its block entities and the entities that stand in
 // it. world::Dimension stores the two parts with the chunk and hands them back when the chunk
 // returns (world/chunk_io.hpp); what is in them is decided here.

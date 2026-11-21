@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Command benchmarks: what a typed line costs before its handler runs, and what its answer
 // costs to put on the wire. None of it is a hot path - a line is typed by a person, and ten in
 // a row disconnect - the numbers say that it may allocate as it does.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "world/block.hpp"
 
 #include PROTO_GEN_BLOCK_TABLES_HPP

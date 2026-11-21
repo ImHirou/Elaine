@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "base/workers.hpp"
 
 #include <pthread.h>

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """What does a server do with a chest, a furnace, a crafting grid and TNT? Record it, on vanilla
 and on ours, and diff.
 

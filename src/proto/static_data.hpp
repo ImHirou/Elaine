@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Version-specific data that is generated offline and only needs framing at startup.
 #pragma once
 

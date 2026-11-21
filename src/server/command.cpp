@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // The command tree: Brigadier's CommandDispatcher (parse, the choice between readings, the
 // usage lines), its StringReader and argument types, and vanilla's Commands.finishParsing and
 // ClientboundCommandsPacket around them. Read from brigadier-1.3.11.jar and the 26.3 server jar.

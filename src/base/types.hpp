@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Fixed-width aliases, branch/inlining hints, byte-order and bit helpers.
 // Included everywhere; keep it free of heavy headers.
 #pragma once

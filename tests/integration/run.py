@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """End-to-end tests: start the real server binary and talk to it with mcproto.Client.
 
     python3 tests/integration/run.py build/release/elaine [-k substring] [--slow] [--keep-log]

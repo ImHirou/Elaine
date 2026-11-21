@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // mcgen gamedata, section "registries": every static registry that has no section of its own,
 // each entry as its id, class and fields. Attributes (default/min/max), mob effects (their attribute
 // modifiers), potions, game rules, sound events (fixed range), POI types (their block states), block

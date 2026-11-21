@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """mcgen: what entity physics reads off a block state and off an entity type.
 
 Emitted (included by src/world/collide.cpp and src/phys/):

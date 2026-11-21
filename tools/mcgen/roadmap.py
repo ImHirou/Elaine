@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Writes docs/blocks-roadmap.md: every block of the game, by the class that gives it its
 behaviour, as a checklist of what the server simulates and what is still to be ported.
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Commands: who may run them, what running one means here, and the server's own - written
 // against the same registration a plugin will use (server/command.hpp).
 //

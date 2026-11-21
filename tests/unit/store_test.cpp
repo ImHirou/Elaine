@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // The life of a chunk outside the game: workers, region files, a chunk as bytes, a dimension that
 // saves, forgets and reads back - and the import of a vanilla chunk.
 //

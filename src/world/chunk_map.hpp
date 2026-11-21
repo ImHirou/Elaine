@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // ChunkMap: (chunk x, chunk z) -> Chunk*, the lookup under every block access.
 //
 // Two levels: a region is a dense 32x32 grid of chunk pointers (the same granularity as an Anvil

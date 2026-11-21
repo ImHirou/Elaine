@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Tracker: who has been shown which entity, and the one pass per tick that tells them what moved.
 // It is the port of vanilla's ChunkMap.TrackedEntity + ServerEntity (26.3), reshaped around two
 // facts: every viewer of an entity is sent the SAME bytes, and viewers are few and contiguous.

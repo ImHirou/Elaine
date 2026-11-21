@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """What does a server make of the text and NBT in an item's components? Record it, on vanilla
 and on ours, and diff.
 

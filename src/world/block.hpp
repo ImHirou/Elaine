@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Block states as the world stores them: the vanilla state id (the number the wire uses), plus
 // accessors for the generated per-state tables. Everything here is a table load - no block is
 // special-cased in code, the properties come from the vanilla jar (tools/mcgen blockdata).

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // mcgen blockdata: dump what only exists once vanilla's static registries are built - per block
 // state light/fluid/shape properties, per block class hooks, and the item -> block mapping.
 //

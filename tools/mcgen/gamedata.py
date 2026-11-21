@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """mcgen gamedata / data: everything about the game that only exists once vanilla has loaded.
 
 `gamedata` RUNS tools/mcgen/extract/GameData.java against the jar and writes one JSON file per

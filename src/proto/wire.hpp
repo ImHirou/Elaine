@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Wire primitives: unchecked pointer writers ("put_*") and a sticky-error Reader.
 //
 // Writers never check capacity - the caller reserved an upper bound (see base::ByteBuf).

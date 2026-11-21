@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """What does a server do with a player's inventory? Record it, on vanilla and on ours, and diff.
 
     inventory_probe.py record <port> <out.json> [nameA nameB]

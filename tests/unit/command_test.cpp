@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Commands: the syntax lines, how a typed line is read against the tree (Brigadier's rules and
 // errors), the argument parsers, the `commands` packet, and the text a command answers with.
 //

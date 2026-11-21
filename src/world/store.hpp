@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // ChunkStore: where chunks come from and where they go - the region files of a dimension, what is
 // on its way into them, and the generator for everything that was never saved.
 //

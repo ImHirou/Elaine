@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Scheduled ticks: "tick the block at this position, so many game ticks from now".
 //
 // A port of vanilla's LevelTicks / LevelChunkTicks / ScheduledTick / SavedTick (26.3). What it

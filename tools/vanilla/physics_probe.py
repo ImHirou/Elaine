@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """What does vanilla's physics do with an entity - tick by tick, in exact doubles?
 
     physics_probe.py record <out.json> [--only REGEX]    # runs the vanilla server itself

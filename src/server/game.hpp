@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Game: the tick thread. Drains packets from the reactors, advances the world, and flushes one
 // buffer per player per tick.
 //

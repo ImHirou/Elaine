@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // mcgen gamedata, section "entities": entity types, and the classes behind them.
 //
 // "types" is one record per entity type; "classes" is one per Java class on the way from a type's

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Boxes against the blocks of a dimension: how far something can move, what it stands on, and
 // whether a line between two points is free.
 //

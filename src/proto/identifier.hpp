@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Identifier ("namespace:path"): the name of everything in a registry, an asset, a font.
 #pragma once
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Binary NBT: the tag tree of vanilla's saves and of everything structured in its protocol -
 // text components, block entities, custom item data.
 //

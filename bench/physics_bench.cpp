@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Physics benchmarks: what a tick of an entity that moves by itself costs, by what the entity
 // is doing at the time.
 //

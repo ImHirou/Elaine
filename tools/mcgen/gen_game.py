@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """mcgen code generation, the game-data half: what blocks and items *do*, as far as the server
 simulates it. Called from gen.py; everything here reads the jar's data pack and the caches of
 `mcgen.py reports` / `gamedata`, and runs nothing.

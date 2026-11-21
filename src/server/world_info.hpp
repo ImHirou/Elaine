@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // The world a server runs: where it is kept and what it is made of.
 //
 //   <level-name>/                      the world's directory

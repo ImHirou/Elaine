@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Grid: which entities stand in which square of the world. The spatial index behind "what could
 // this player see from here" once there are more entities than it pays to test one by one.
 //

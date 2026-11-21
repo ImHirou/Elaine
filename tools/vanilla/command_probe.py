@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """What does a server answer to commands? Record it, on vanilla and on ours, and diff.
 
     command_probe.py record <port> <out.json> [nameA nameB [console]]

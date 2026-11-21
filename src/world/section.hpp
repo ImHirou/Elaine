@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Section: the 16x16x16 block container - the structure everything per-block ends up reading.
 //
 // In memory (ours to choose, see AGENTS.md "Bit packing"):

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // NBT put together by hand, for tests: each function returns the bytes the tag layout of the
 // 26.3 jar (NbtIo, the TagTypes, ListTag) prescribes. Independent of nbt::Writer on purpose.
 #pragma once

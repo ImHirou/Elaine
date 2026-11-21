@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // VarInt (LEB128, max 5 bytes) - the most frequent primitive on the wire: every frame length,
 // packet id, string length and most ids. One-byte values take the first branch; everything
 // else is branch-free via BMI2 pdep/pext, with a scalar fallback for other targets.

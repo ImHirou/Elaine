@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Text: a component the server makes itself - what a command answers, what a kick says.
 //
 // The counterpart of transcode() (text/component.hpp), which carries a client's component

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Micro-benchmarks: the network hot paths here, the world in world_bench.cpp, entities in
 // entity_bench.cpp. Usage: bench [filter-substring]
 // Numbers are only meaningful from an optimized build (preset `release` or `native`), on a quiet

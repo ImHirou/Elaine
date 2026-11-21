@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Commands: the tree every "/..." line is read against, and how one is added to it.
 //
 // The tree and its reading are Brigadier's (com.mojang.brigadier 1.3.11, as vanilla 26.3 ships

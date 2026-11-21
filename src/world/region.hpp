@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Region files: where chunks are on disk. One file per 32 x 32 chunks, as in Anvil - and nothing
 // else as in Anvil.
 //

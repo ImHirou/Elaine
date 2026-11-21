@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Light engine tests.
 //
 // The engine is a port of vanilla's incremental algorithm. What that algorithm is supposed to

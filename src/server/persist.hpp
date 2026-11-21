@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // The records a chunk keeps for the game (server/persist.cpp has the layouts), for the two that
 // write them: the game itself, and the import of a vanilla world.
 #pragma once

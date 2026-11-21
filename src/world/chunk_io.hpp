@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // A chunk as bytes: what a region file holds for it (deflated there, world/region.hpp), and the
 // chunk outside the world that a worker makes of those bytes.
 //

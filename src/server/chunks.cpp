@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Chunks and the players around them: whose view holds which chunk, when a chunk goes out to a
 // client, which chunks have to be in the world for that - and what becomes of one that nobody
 // needs any more.

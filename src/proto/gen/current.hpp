@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // The protocol version this build speaks. This is the ONLY file that names a versioned
 // directory: a version bump is `mcgen generate` + replacing v777 below (bump-mc-version skill).
 #pragma once

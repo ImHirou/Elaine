@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Reactor: one io_uring event loop on one thread. Owns sockets, inbound decryption, frame
 // splitting/inflating and the send queues. Everything protocol-specific before the play state
 // is delegated to a PreSink on this same thread; play-state packets are copied into an SPSC

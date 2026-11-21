@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // A player's inventory and the menus over it: what is in which slot, what a click does, and
 // what the client has been told.
 //

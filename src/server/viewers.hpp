@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Which players have a chunk in their view: the scan behind every block and light broadcast,
 // behind "who is told that this chunk is ready", and behind "does anybody still need it".
 //

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // What block entities hold: a chest's 27 stacks, a furnace's three and its timers.
 //
 // Plain data and functions over it - no world, no packets - so that a furnace runs in a unit

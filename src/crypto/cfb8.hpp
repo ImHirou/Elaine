@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // AES-128-CFB8, the protocol's stream cipher (key == IV == shared secret), on AES-NI.
 //
 // CFB8 costs one AES block per *byte*, and encryption is serial per stream (each byte's

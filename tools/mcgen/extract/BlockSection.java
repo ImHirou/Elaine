@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // mcgen gamedata, sections "blocks" and "fluids": what a block (a fluid) is made of.
 //
 // "hooks" names the class that overrides each BlockBehaviour/Block method, by exact signature: the

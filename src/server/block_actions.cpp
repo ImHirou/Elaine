@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // What a (creative) player can do to blocks, and how the result reaches everyone who sees it.
 //
 // The rules are vanilla's, read from the 26.3 jar; each function names the method it follows:

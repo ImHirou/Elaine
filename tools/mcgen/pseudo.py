@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """mcgen pseudo: javap bytecode -> compact pseudo-code, for reading vanilla *logic* (stdlib only).
 
 `javap -c` prints one line per instruction; a 60-line vanilla method becomes 400 lines of stack

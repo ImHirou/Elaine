@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Does a vanilla world, imported, go out to a client as the vanilla server sends it?
 
     world_probe.py build <name>                  # runs vanilla: makes the world <name> and builds the fixture in it

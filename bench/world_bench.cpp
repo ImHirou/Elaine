@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // World benchmarks: the per-block paths (section get/set, chunk lookup), the chunk pipeline
 // (generate, light, encode + deflate) and the broadcast scan.
 //

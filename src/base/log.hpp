@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Minimal synchronous logger. Logging is a cold path: never call it per packet or per entity.
 #pragma once
 

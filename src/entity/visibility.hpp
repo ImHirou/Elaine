@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // The visibility kernel of the entity tracker: one player against every entity, 64 answers per
 // word. A header so that the benchmark can time it alone ("visibility scan").
 #pragma once

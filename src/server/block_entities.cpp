@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Blocks that are more than a state: a chest and a furnace (block entities) and the crafting
 // table (a menu without one). What happens around a block when it changes is
 // server/block_updates.cpp.

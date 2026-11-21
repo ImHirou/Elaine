@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Item entities: stacks lying in the world.
 //
 // The rules are vanilla's, read from the 26.3 jar; each function names the method it follows:

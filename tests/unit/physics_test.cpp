@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Entity physics against recordings of a vanilla server, and the collision code against itself.
 //
 // tests/unit/data/physics_vectors.bin is what tools/vanilla/physics_probe.py recorded on a vanilla

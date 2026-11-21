@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "world/collide.hpp"
 
 #include <algorithm>

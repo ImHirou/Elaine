@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Text components: vanilla's Component - the styled text of an item's name and lore, of signs
 // and books, of everything a player reads.
 //

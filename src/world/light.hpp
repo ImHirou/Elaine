@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // LightEngine: sky and block light, a port of vanilla's algorithm (net.minecraft.world.level.lighting
 // LightEngine / BlockLightEngine / SkyLightEngine / *SectionStorage / ChunkSkyLightSources, read from
 // the 26.3 jar) onto our own storage.

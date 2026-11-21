@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """mcgen code generation: .cache/mc/<version>/ -> src/proto/gen/v<protocol>/.
 
 Emitted files (all deterministic; none is in git - their lock is, see "the lock" below):

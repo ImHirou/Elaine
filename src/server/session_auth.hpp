@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Online-mode profile verification: blocking HTTPS calls to the session server on a small
 // worker pool, so reactor threads never wait on the network. Cold path (once per login).
 #pragma once

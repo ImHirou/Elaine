@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Import of a vanilla world: every chunk of its Anvil region files becomes a chunk of this
 // server's own (world/chunk_io.hpp), once, before the server starts.
 //

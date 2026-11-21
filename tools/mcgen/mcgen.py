@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """mcgen - Minecraft protocol data pipeline (stdlib only).
 
 Inputs come from Mojang's official jars (sha1-verified against piston-meta).

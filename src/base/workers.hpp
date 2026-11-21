@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Workers: threads for what must not run on the tick thread - reading and writing files,
 // inflating and deflating, generating a chunk.
 //

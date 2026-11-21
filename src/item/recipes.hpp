@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Recipes: what a crafting grid makes, what a furnace smelts, what burns.
 //
 // The recipes are the vanilla data pack's (tools/mcgen reduces data/minecraft/recipe to tables);

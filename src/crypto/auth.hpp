@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Login-time crypto (cold path, OpenSSL): the server RSA key, shared-secret decryption, the
 // session-server hash, offline-mode UUIDs and random bytes.
 #pragma once

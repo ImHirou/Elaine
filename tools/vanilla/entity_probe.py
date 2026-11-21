@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """What does a server tell one player about another? Record it, on vanilla and on ours, and diff.
 
     entity_probe.py record <port> <out.json> [nameA nameB]

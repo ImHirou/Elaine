@@ -1,0 +1,46 @@
+ELAINE PLUGIN EXCEPTION
+Version 1.0
+
+Elaine is free software, licensed under the GNU General Public License,
+either version 3 of the License or (at your option) any later version; see
+the file LICENSE. This file states an additional permission under section 7
+of version 3 of that License ("GPLv3"). It applies to Elaine as a whole and
+to every file of it that says "GPL-3.0-or-later".
+
+0. Definitions.
+
+  "Elaine" means the server in this repository, in source or object form,
+and any work based on it.
+
+  The "Plugin Interface" is the set of functions, data layouts and
+declarations that Elaine exposes to programs it loads at run time, for the
+purpose of being extended by them, and documents as its plugin interface.
+
+  An "Independent Plugin" is a program, such as a Lua script, that
+
+    a) Elaine loads at run time;
+    b) interacts with Elaine only through the Plugin Interface; and
+    c) is not derived from, and does not contain, any part of Elaine other
+       than what the Plugin Interface itself gives to a plugin.
+
+1. Additional permission.
+
+  As an additional permission under section 7 of GPLv3, the copyright
+holders of Elaine give you permission to combine Elaine with Independent
+Plugins, to convey such combinations, and to copy, modify and convey
+Independent Plugins under terms of your choice, provided that Elaine itself,
+and any modified version of it, is conveyed under the terms of the GNU
+General Public License.
+
+2. What this does not change.
+
+  Elaine, modified or not, stays under the GNU General Public License. A
+program that contains code of Elaine, or that reaches into Elaine by any
+means other than the Plugin Interface, is not an Independent Plugin, and
+this exception gives no permission for it.
+
+3. Modified versions.
+
+  If you modify Elaine, you may extend this exception to your version of it,
+but you are not obliged to do so. If you do not wish to do so, delete this
+exception statement from your version, as section 7 of GPLv3 allows.

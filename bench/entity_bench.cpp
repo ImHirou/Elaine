@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Entity benchmarks: what a tick of the entity tracker costs at the scale the server is built
 // for, and where that cost goes. Every scenario runs the real Store + Tracker against one output
 // buffer per player - everything but the sockets.

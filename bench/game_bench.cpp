@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Benchmarks of what blocks do: recipes, furnaces, an entity against the blocks.
 #include <cmath>
 #include <vector>

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "server/session_auth.hpp"
 
 #include <curl/curl.h>

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // mcgen gamedata, section "states": one column per question, indexed by block state id.
 //
 // Everything is asked of vanilla with an empty world around the block (EmptyBlockGetter, BlockPos.ZERO,

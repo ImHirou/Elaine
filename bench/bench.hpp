@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Shared by the benchmark files: best-of-5 timing loop and the name filter.
 #pragma once
 

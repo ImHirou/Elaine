@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // The inventory and its menu, click by click. Expected outcomes are worked out by hand from
 // vanilla's AbstractContainerMenu.doClick / InventoryMenu.quickMoveStack / Inventory.add (26.3).
 // The same kinds of click, end to end, are what tools/vanilla/inventory_probe.py replays against a

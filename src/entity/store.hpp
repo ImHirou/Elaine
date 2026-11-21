@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Store: every entity of a dimension - players, mobs, items, whatever comes - in ONE table of
 // parallel arrays (SoA) indexed by a dense entity index.
 //

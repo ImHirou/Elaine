@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // NBT and text component benchmarks: what a tag costs to read, to write back and to build, and
 // what a stack costs to read once it carries text.
 #include <vector>

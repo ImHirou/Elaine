@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Dimension: one level - its chunks, the light engine over them, the cache of wire frames, and
 // the coming and going of chunks.
 //

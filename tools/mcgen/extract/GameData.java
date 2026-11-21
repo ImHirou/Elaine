@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // mcgen gamedata: dump everything about the game that only exists once vanilla has loaded - what
 // Extract.java (blockdata) and Mojang's reports do not cover. One JSON file per section:
 //

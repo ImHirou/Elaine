@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Bit-packed arrays used by the world storage.
 //
 //   dense   entry i occupies bits [i*bits, (i+1)*bits) of a little-endian bit stream; bits is 1..8.

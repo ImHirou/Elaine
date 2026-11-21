@@ -1,10 +1,13 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "world/generator.hpp"
 
 namespace world {
 
 std::vector<FlatGenerator::Layer> FlatGenerator::default_layers() {
     namespace b = proto::gen::block;
-    return {{static_cast<BlockState>(b::kBedrock), 1}, {static_cast<BlockState>(b::kDirt), 2}, {static_cast<BlockState>(b::kGrassBlock), 1}};
+    return {{static_cast<BlockState>(b::kBedrock), 1},
+            {static_cast<BlockState>(b::kDirt), 2},
+            {static_cast<BlockState>(b::kGrassBlock), 1}};
 }
 
 FlatGenerator::FlatGenerator(i32 min_y, u32 sections, std::vector<Layer> layers, u16 biome)

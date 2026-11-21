@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // mcgen gamedata, sections "enums", "statics" and "menus": what is found by walking the server jar
 // rather than a registry.
 

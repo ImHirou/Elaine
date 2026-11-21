@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Server settings: server.properties-compatible keys plus a few of our own, overridable on the
 // command line as --key=value (e.g. --server-port=25570 --online-mode=false).
 #pragma once

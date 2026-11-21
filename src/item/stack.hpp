@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // ItemStack: what a slot holds - an item, a count and (rarely) a component patch. Eight bytes,
 // so that an inventory is a small dense array and a stack is passed around by value.
 //

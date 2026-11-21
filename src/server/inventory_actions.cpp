@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // What a player's packets do to its inventory, and what leaves the inventory for the world.
 //
 // The rules are vanilla's, read from the 26.3 jar; each function names the method it follows:

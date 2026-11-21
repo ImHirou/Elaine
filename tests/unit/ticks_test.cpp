@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Scheduled ticks and the counts behind random ticks.
 //
 // The order scheduled ticks run in is held against a model of vanilla's LevelTicks written out the

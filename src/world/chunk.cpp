@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "world/chunk.hpp"
 
 #include PROTO_GEN_PHYSICS_HPP

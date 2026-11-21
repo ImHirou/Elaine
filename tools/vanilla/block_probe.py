@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """What does a server do when a block changes beside another, when a scheduled tick comes due,
 when a random tick falls? Record it, on vanilla and on ours, and diff.
 

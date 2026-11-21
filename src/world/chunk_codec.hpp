@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Chunk -> wire. Layouts read from the 26.3 jar (LevelChunkSection.write, PalettedContainer$Data.write,
 // Strategy, SimpleBitStorage, ClientboundLevelChunkPacketData, ClientboundLightUpdatePacketData):
 //

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Text components: every spelling of a text the codec takes, the one spelling vanilla writes
 // back, and what is refused. Input and expected output are NBT written out by hand. The cases
 // are those of tools/vanilla/component_probe.py and a few variations of them: for the probe's
