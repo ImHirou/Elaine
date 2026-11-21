@@ -31,7 +31,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from mcgen import ROOT, die, find_tool, jar_for, vdir, version_info
+from mcgen import ROOT, die, find_tool, jar_for, vdir, version_info, write_stamp
 
 SECTIONS = ("states", "blocks", "fluids", "items", "entities", "registries", "enums", "statics", "menus")
 
@@ -73,6 +73,8 @@ def cmd_gamedata(args) -> None:
     if "entities" in sections:
         add_entity_data_defaults(args.version)
     verify(args.version, sections)
+    if not args.sections:  # a run of some sections leaves the others as old as they were
+        write_stamp(args.version, "gamedata")
     print(f"mcgen: wrote {out.relative_to(ROOT)}/")
 
 

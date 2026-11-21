@@ -2,8 +2,9 @@
 """mcgen - Minecraft protocol data pipeline (stdlib only).
 
 Inputs come from Mojang's official jars (sha1-verified against piston-meta).
-Everything downloaded or derived lands in .cache/mc/<version>/ (gitignored);
-only the generated C++ under src/proto/gen/ is committed.
+Everything downloaded or derived lands in .cache/mc/<version>/, and the generated C++ in
+src/proto/gen/v<protocol>/ - both gitignored: they are Mojang's data, and every clone makes them
+from the jar. What is committed of the generated code is its lock, src/proto/gen/v<protocol>.sha256.
 
 Commands:
   fetch     download + verify server.jar (and client.jar with --client), unpack inner jar
@@ -17,14 +18,16 @@ Commands:
             runtime: shapes, hooks, block/item/entity fields, attributes, registries, enums, menus
   data      look up a record in what `gamedata` extracted (reads the cache, runs nothing)
   pseudo    methods as compact pseudo-code with real local names (static, for reading logic)
-  generate  emit src/proto/gen/v<protocol>/ from the cache
-  check     verify the committed generated code matches what `generate` would emit
+  generate  emit src/proto/gen/v<protocol>/ from the cache, and write its lock
+  check     verify that the generated code is what the committed lock says (the build runs this)
+  setup     RUN everything a fresh clone needs, in order: fetch, reports, blockdata, gamedata -
+            each only if it is not already done - then generate, then check
 
 `packets` exists so packet ids can be obtained without executing the jar; when
 `reports` has been run its packets.json wins and the two must agree.
 
-`reports`, `blockdata` and `gamedata` are the only steps that execute downloaded code (the
-sha1-verified official jar). The first two only build vanilla's static registries; `gamedata` also
+`reports`, `blockdata` and `gamedata` - and `setup`, which runs them - are the only steps that
+execute downloaded code (the sha1-verified official jar). The first two only build vanilla's static registries; `gamedata` also
 loads the vanilla data pack, as a server does before it creates a world. None starts a server.
 """
 from __future__ import annotations
@@ -163,6 +166,44 @@ def find_tool(name: str, need_major: int) -> str:
         if m and int(m.group(1)) >= need_major:
             return str(c)
     die(f"no {name} >= {need_major} found (set JAVA_HOME)")
+
+
+# ----------------------------------------------------------------------------- stamps
+#
+# The three steps that run the jar take minutes and give the same files every time. Each leaves a
+# stamp - the jar it ran and the sources it ran it with - so that `setup` runs a step again only
+# when one of those changed, or its files are gone.
+
+EXTRACT = Path(__file__).resolve().parent / "extract"
+STEPS = {  # step -> (sources whose change makes its output stale, what it must have left under the version's directory)
+    "reports": ((), ("reports/packets.json", "reports/registries.json", "reports/blocks.json", "reports/commands.json",
+                     "reports/item_components", "datagen/libraries")),
+    "blockdata": (("extract/Extract.java",), ("extract/blockdata.json",)),
+    "gamedata": (("extract/*.java", "gamedata.py"), ("gamedata/states.json", "gamedata/blocks.json", "gamedata/entities.json")),
+}
+
+
+def stamp_key(version: str, step: str) -> str:
+    h = hashlib.sha256()
+    h.update(json.loads((vdir(version) / "version_meta.json").read_text())["downloads"]["server"]["sha1"].encode())
+    here = Path(__file__).resolve().parent
+    for pattern in STEPS[step][0]:
+        for src in sorted(here.glob(pattern)):
+            h.update(src.name.encode() + b"\0" + src.read_bytes())
+    return h.hexdigest()
+
+
+def stamp_is_current(version: str, step: str) -> bool:
+    d = vdir(version)
+    stamp = d / "stamps" / step
+    return (stamp.is_file() and stamp.read_text().strip() == stamp_key(version, step)
+            and all((d / out).exists() for out in STEPS[step][1]))
+
+
+def write_stamp(version: str, step: str) -> None:
+    stamp = vdir(version) / "stamps" / step
+    stamp.parent.mkdir(exist_ok=True)
+    stamp.write_text(stamp_key(version, step) + "\n")
 
 
 # ----------------------------------------------------------------------------- javap
@@ -423,6 +464,7 @@ def cmd_reports(args) -> None:
     if comp.exists():
         shutil.rmtree(comp)
     shutil.copytree(work / "out" / "reports" / "minecraft" / "components" / "item", comp)
+    write_stamp(args.version, "reports")
     print(f"mcgen: reports in {rep.relative_to(ROOT)}")
 
 
@@ -445,6 +487,7 @@ def cmd_blockdata(args) -> None:
     cmd = [java, "-cp", os.pathsep.join(str(j) for j in jars), str(src), str(out / "blockdata.json")]
     print(f"mcgen: running {src.relative_to(ROOT)} against {jars[0].name} ({len(jars) - 1} libraries)")
     subprocess.run(cmd, cwd=work, check=True)
+    write_stamp(args.version, "blockdata")
     print(f"mcgen: wrote {(out / 'blockdata.json').relative_to(ROOT)}")
 
 
@@ -474,9 +517,12 @@ def main() -> None:
     import gamedata  # noqa: E402
     gamedata.register(sub)
 
-    from gen import cmd_generate, cmd_check  # noqa: E402  (kept separate: it is the part that changes per version)
-    p = sub.add_parser("generate"); p.set_defaults(fn=cmd_generate)
-    p = sub.add_parser("check"); p.set_defaults(fn=cmd_check)
+    from gen import cmd_generate, cmd_check, cmd_setup  # noqa: E402  (kept separate: it is the part that changes per version)
+    p = sub.add_parser("generate", help="emit the tables from the cache, and their lock"); p.set_defaults(fn=cmd_generate)
+    p = sub.add_parser("check", help="are the generated tables what their lock says? (reads nothing else)")
+    p.add_argument("--quiet", action="store_true", help="say nothing when they are"); p.set_defaults(fn=cmd_check)
+    p = sub.add_parser("setup", help="RUN every step a fresh clone needs: fetch, reports, blockdata, gamedata, generate")
+    p.set_defaults(fn=cmd_setup)
 
     args = ap.parse_args()
     args.fn(args)

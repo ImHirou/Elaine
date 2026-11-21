@@ -35,11 +35,12 @@ Its files keep one record per line, so what the version changed outside the prot
 ## 3. Generate and switch
 
 ```sh
-python3 tools/mcgen/mcgen.py --version NEW generate      # writes src/proto/gen/v<NEWPROTO>/
+python3 tools/mcgen/mcgen.py --version NEW generate      # writes src/proto/gen/v<NEWPROTO>/ and its lock, v<NEWPROTO>.sha256
 ```
 Then replace the old directory name everywhere in `src/proto/gen/current.hpp` (it is the only source file that
 names one) and update `DEFAULT_VERSION` in `tools/mcgen/mcgen.py`. Keep the old `v<OLDPROTO>/` directory until the
-bump is finished (it is the diff base), then delete it.
+bump is finished (it is the diff base), then delete it. Neither directory is in git: what the bump commits of
+`src/proto/gen/` is `current.hpp`, the new lock, and the removal of the old one (`git rm v<OLDPROTO>.sha256`).
 
 ## 4. Find what changed
 
@@ -67,7 +68,7 @@ diff src/proto/gen/vOLD/registries.hpp src/proto/gen/vNEW/registries.hpp | grep 
 ## 5. Verify
 
 ```sh
-python3 tools/mcgen/mcgen.py check
+python3 tools/mcgen/mcgen.py check                       # the directory current.hpp names is what its lock says
 cmake --build --preset release && ctest --preset release
 cmake --build --preset dev && ASAN_OPTIONS=detect_leaks=1 python3 tests/integration/run.py build/dev/elaine
 ```

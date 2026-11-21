@@ -96,6 +96,30 @@ find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 find_package(CURL REQUIRED)
 find_package(Threads REQUIRED)
 
+# ---------------------------------------------------------------------------- generated tables
+# src/proto/gen/v<protocol>/ is Mojang's data: tools/mcgen makes it from the jar on every machine, and
+# git keeps only its lock (v<protocol>.sha256). The directory current.hpp names must be there, and -
+# checked before anything is compiled, on every build - be what the lock says: after a pull that moved
+# the lock, a build stops and says so instead of compiling against the tables of another commit.
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+file(STRINGS ${CMAKE_SOURCE_DIR}/src/proto/gen/current.hpp mc_gen_line REGEX "#define PROTO_GEN_DIR ")
+string(REGEX REPLACE ".*\"(.+)\".*" "\\1" MC_GEN_DIR "${mc_gen_line}")
+if(NOT IS_DIRECTORY ${CMAKE_SOURCE_DIR}/src/${MC_GEN_DIR})
+  message(FATAL_ERROR "src/${MC_GEN_DIR}/ is not there: it is generated from Mojang's jar, not kept in git.\n"
+    "Run ./install.sh (everything, once) or: python3 tools/mcgen/mcgen.py setup")
+endif()
+option(MC_GENERATED_CHECK "Stop a build whose generated tables are not what their lock says" ON)
+if(MC_GENERATED_CHECK)
+  add_custom_target(generated_check
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/mcgen/mcgen.py check --quiet
+    COMMENT "Generated tables against their lock" VERBATIM)
+endif()
+function(mc_needs_generated target)
+  if(MC_GENERATED_CHECK)
+    add_dependencies(${target} generated_check)
+  endif()
+endfunction()
+
 # ---------------------------------------------------------------------------- targets
 add_library(core STATIC
   src/base/log.cpp
@@ -154,10 +178,12 @@ add_library(core STATIC
 target_link_libraries(core
   PUBLIC mc_flags PkgConfig::URING Threads::Threads
   PRIVATE mc_core_flags PkgConfig::DEFLATE PkgConfig::YYJSON OpenSSL::Crypto CURL::libcurl)
+mc_needs_generated(core)
 
 add_executable(server_exe src/main.cpp)
 set_target_properties(server_exe PROPERTIES OUTPUT_NAME ${MC_EXE})
 target_link_libraries(server_exe PRIVATE core mc_core_flags)
+mc_needs_generated(server_exe)
 mc_lto_cache(server_exe)
 
 if(MC_TESTS)
@@ -184,14 +210,12 @@ if(MC_TESTS)
       tests/unit/command_test.cpp
     )
     target_link_libraries(unit_tests PRIVATE core GTest::gtest_main OpenSSL::Crypto)
+    mc_needs_generated(unit_tests)
     mc_lto_cache(unit_tests)
     add_test(NAME unit COMMAND unit_tests)
-    find_package(Python3 COMPONENTS Interpreter)
-    if(Python3_FOUND)
-      add_test(NAME integration
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/integration/run.py $<TARGET_FILE:server_exe>)
-      set_tests_properties(integration PROPERTIES TIMEOUT 480)
-    endif()
+    add_test(NAME integration
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/integration/run.py $<TARGET_FILE:server_exe>)
+    set_tests_properties(integration PROPERTIES TIMEOUT 480)
   else()
     message(WARNING "GoogleTest not found: unit tests are not built")
   endif()
@@ -201,5 +225,6 @@ if(MC_BENCH)
   add_executable(bench bench/bench.cpp bench/world_bench.cpp bench/entity_bench.cpp bench/item_bench.cpp
     bench/nbt_bench.cpp bench/game_bench.cpp bench/command_bench.cpp bench/physics_bench.cpp)
   target_link_libraries(bench PRIVATE core mc_core_flags OpenSSL::Crypto)
+  mc_needs_generated(bench)
   mc_lto_cache(bench)
 endif()

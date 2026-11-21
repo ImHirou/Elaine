@@ -2,6 +2,8 @@
 # Mojang's jars, reports, game data, the vanilla reference server and its worlds.
 /build/
 /.cache/
+# ...and what it generates from them (their lock, src/proto/gen/v*.sha256, is kept).
+/src/proto/gen/v*/
 /compile_commands.json
 /CMakeUserPresets.json
 

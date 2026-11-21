@@ -5,5 +5,5 @@
 # (git takes a file without NUL bytes for text). After the line above: the last match wins.
 *.bin binary
 
-# Emitted by tools/mcgen - reviewed as "regenerated", not line by line.
-src/proto/gen/v*/** linguist-generated=true
+# Written by `mcgen.py generate` - reviewed as "regenerated", not line by line.
+src/proto/gen/v*.sha256 linguist-generated=true

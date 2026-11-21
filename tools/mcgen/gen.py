@@ -1,6 +1,6 @@
 """mcgen code generation: .cache/mc/<version>/ -> src/proto/gen/v<protocol>/.
 
-Emitted files (all deterministic, all committed):
+Emitted files (all deterministic; none is in git - their lock is, see "the lock" below):
   meta.hpp            version constants
   packet_ids.hpp      packet ids per state/direction, name tables
   registries.hpp      network ids of every synchronized-registry entry (our order = sorted)
@@ -35,14 +35,14 @@ server only has to frame (and maybe compress) these once at startup.
 """
 from __future__ import annotations
 
-import filecmp
+import hashlib
 import json
 import re
 import sys
-import tempfile
 import zipfile
 from pathlib import Path
 
+import gamedata
 import gen_commands
 import gen_game
 import gen_physics
@@ -1439,17 +1439,58 @@ def generate_into(version: str, out: Path, reports: Path | None = None) -> dict:
     for name, content in tables.items():
         save(name, content)
     stats["files"] = len(saved)
+    stats["names"] = sorted(saved)
     stats["changed"] = sorted(name for name, changed in saved.items() if changed)
     return stats
 
 
+GEN_ROOT = ROOT / "src" / "proto" / "gen"
+
+
 def out_dir(version: str) -> Path:
-    return ROOT / "src" / "proto" / "gen" / f"v{version_info(version)['protocol_version']}"
+    return GEN_ROOT / f"v{version_info(version)['protocol_version']}"
 
 
-def cmd_generate(args) -> None:
-    out = out_dir(args.version)
-    stats = generate_into(args.version, out)
+def current_dir() -> Path:
+    """The directory current.hpp names: what the build includes, known without the cache."""
+    m = re.search(r'#define PROTO_GEN_DIR "proto/gen/([^"/]+)"', (GEN_ROOT / "current.hpp").read_text())
+    if not m:
+        die("src/proto/gen/current.hpp does not define PROTO_GEN_DIR")
+    return GEN_ROOT / m.group(1)
+
+
+# ----------------------------------------------------------------------------- the lock
+#
+# The generated directory is not in git: it is Mojang's data, and everybody makes it from the jar.
+# What is in git is its lock - src/proto/gen/v<protocol>.sha256, in sha256sum's format - which
+# says what the sources were written against. `generate` writes it, so a change of the generator
+# shows as a diff; `setup` and the build compare with it, so nobody compiles against other tables.
+
+def lock_path(out: Path) -> Path:
+    return out.with_name(out.name + ".sha256")
+
+
+def lock_of(out: Path, names: list[str]) -> str:
+    return "".join(f"{hashlib.sha256((out / n).read_bytes()).hexdigest()}  {n}\n" for n in sorted(names))
+
+
+def lock_problems(out: Path) -> list[str] | None:
+    """What of `out` differs from its lock, by file name; None when there is no lock."""
+    lock = lock_path(out)
+    if not lock.is_file():
+        return None
+    bad = []
+    for line in lock.read_text().splitlines():
+        digest, name = line.split("  ", 1)
+        path = out / name
+        if not path.is_file():
+            bad.append(f"{name} (missing)")
+        elif hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            bad.append(name)
+    return bad
+
+
+def print_stats(out: Path, stats: dict) -> None:
     print(f"mcgen: generated {out.relative_to(ROOT)}: {stats['registries']} registries, {stats['entries']} entries, "
           f"{stats['tags']} tags, {stats['blocks']} blocks ({stats['placeable']} placeable), {stats['entity_types']} entity types, "
           f"{stats['crafting']} crafting and {stats['smelting']} smelting recipes ({stats['recipes_skipped']} of other kinds left out), "
@@ -1459,15 +1500,54 @@ def cmd_generate(args) -> None:
     print(f"mcgen: {len(changed)} of {stats['files']} files changed" + (f": {', '.join(changed)}" if changed else ""))
 
 
-def cmd_check(args) -> None:
+def cmd_generate(args) -> None:
     out = out_dir(args.version)
-    with tempfile.TemporaryDirectory() as tmp:
-        generate_into(args.version, Path(tmp))
-        cmp = filecmp.dircmp(tmp, out)
-        bad = cmp.diff_files + cmp.left_only + cmp.right_only
-        if bad:
-            die(f"generated code is stale ({', '.join(sorted(bad))}) - run: mcgen.py generate")
-    print("mcgen: generated code is up to date")
+    stats = generate_into(args.version, out)
+    print_stats(out, stats)
+    lock = lock_path(out)
+    if put(lock, lock_of(out, stats["names"])):
+        print(f"mcgen: {lock.relative_to(ROOT)} changed: the tables are not what they were - commit it with what changed them")
+
+
+def verify_lock(out: Path) -> None:
+    """Stops unless `out` is what its lock says. Reads nothing but the two: no cache, no Java."""
+    lock = lock_path(out)
+    if not out.is_dir():
+        die(f"{out.relative_to(ROOT)}/ is not there: it is generated from Mojang's jar, not kept in git.\n"
+            "       Run ./install.sh (everything, once) or: python3 tools/mcgen/mcgen.py setup")
+    bad = lock_problems(out)
+    if bad is None:
+        die(f"{lock.relative_to(ROOT)} is missing: `mcgen.py generate` writes it, and it belongs in git")
+    if bad:
+        die(f"{out.relative_to(ROOT)}/ is not what {lock.name} says ({', '.join(bad)}).\n"
+            "       After a pull, or with nothing of tools/mcgen changed: python3 tools/mcgen/mcgen.py setup\n"
+            "       After a change of the generator: python3 tools/mcgen/mcgen.py generate, and commit the lock.\n"
+            "       If `setup` itself ends here, this machine generates other bytes than the lock's author:\n"
+            "       please report it with your Java and Python versions (-DMC_GENERATED_CHECK=OFF builds anyway).")
+
+
+def cmd_check(args) -> None:
+    out = current_dir()
+    verify_lock(out)
+    if not args.quiet:
+        print(f"mcgen: {out.relative_to(ROOT)}/ is what {lock_path(out).name} says")
+
+
+def cmd_setup(args) -> None:
+    """From nothing to the generated tables: every step that is not already done, then the lock."""
+    args.client, args.sections = False, []
+    mcgen.cmd_fetch(args)
+    for step, run in (("reports", mcgen.cmd_reports), ("blockdata", mcgen.cmd_blockdata), ("gamedata", gamedata.cmd_gamedata)):
+        if mcgen.stamp_is_current(args.version, step):
+            print(f"mcgen: {step}: already there")
+        else:
+            run(args)
+    out = out_dir(args.version)
+    print_stats(out, generate_into(args.version, out))
+    if out != current_dir():
+        print(f"mcgen: note: the build includes {current_dir().relative_to(ROOT)}/ (src/proto/gen/current.hpp), not this")
+    verify_lock(out)
+    print(f"mcgen: {out.relative_to(ROOT)}/ is what {lock_path(out).name} says - ready to build")
 
 
 _ = mcgen  # imported for its side-effect-free helpers; keeps linters quiet about the module import
