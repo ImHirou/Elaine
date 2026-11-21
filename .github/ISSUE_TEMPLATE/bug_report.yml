@@ -1,0 +1,49 @@
+name: Bug report
+description: Elaine does something a vanilla server does not, or crashes
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Vanilla is the specification: a bug is a difference from what the vanilla server does - or a crash, a hang, a leak.
+        **A vulnerability is not reported here**: see SECURITY.md.
+  - type: input
+    id: commit
+    attributes:
+      label: Commit
+      description: "`git rev-parse --short HEAD` of the server you ran"
+    validations:
+      required: true
+  - type: input
+    id: client
+    attributes:
+      label: Client
+      description: The Minecraft version, and whether the client is unmodified
+      placeholder: "26.3, unmodified"
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, step by step, and what the server or the client did
+    validations:
+      required: true
+  - type: textarea
+    id: vanilla
+    attributes:
+      label: What vanilla does
+      description: And how you know - you tried it on a vanilla server, a probe from tools/vanilla, the class in the jar
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Server log and settings
+      description: The server's output around the moment, and the settings that differ from the defaults (`--debug=true` says more)
+      render: text
+  - type: input
+    id: system
+    attributes:
+      label: System
+      description: Distribution, kernel (`uname -r`), compiler

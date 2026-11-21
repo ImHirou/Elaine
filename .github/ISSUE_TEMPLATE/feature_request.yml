@@ -1,0 +1,33 @@
+name: Something that is missing
+description: A part of the game Elaine does not have yet, or a need of an operator or a plugin author
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The README lists what is there and what is planned, area by area, and what Elaine will not be (Non-goals).
+        Most of what is missing is known - an issue is worth it when you want to work on it, or when the order matters to you.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options: [Protocol, Server, Config, World, Blocks, Tracking, Entity, Player, Items, Commands, Plugins, Performance, Other]
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What is missing
+      description: For game behaviour, name what vanilla does - the block, the command, the class in the jar if you know it
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why it matters to you
+  - type: checkboxes
+    id: work
+    attributes:
+      label: Working on it
+      options:
+        - label: I would like to implement this

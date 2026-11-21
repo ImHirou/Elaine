@@ -1,0 +1,125 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Every job runs in an Arch Linux container: Elaine needs a compiler with #embed (GCC 15+), which the
+# runners' own Ubuntu does not have, and Arch is what it is developed on. The image is rolling - a
+# job that breaks without a commit of ours broke on a new compiler or library, which is worth knowing.
+#
+# seccomp=unconfined: Docker's default profile blocks io_uring, and the server is io_uring.
+#
+# ./install.sh downloads the Minecraft server jar from Mojang and runs its data generator, as it
+# does on every contributor's machine (https://aka.ms/MinecraftEULA). Nothing of the jar or of what
+# is generated from it is uploaded or kept, except in this repository's own Actions cache.
+jobs:
+  checks:
+    name: Headers, formatting, generated tables
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+      options: --security-opt seccomp=unconfined
+    steps:
+      - run: pacman -Syu --noconfirm git clang
+      - uses: actions/checkout@v4
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Mojang's jar and what was extracted from it
+        uses: actions/cache@v4
+        with:
+          path: .cache/mc
+          key: mc-${{ hashFiles('tools/mcgen/mcgen.py', 'tools/mcgen/gamedata.py', 'tools/mcgen/extract/**') }}
+          restore-keys: mc-
+      - run: ./install.sh --yes --no-build
+      - run: tools/ci/checks.sh
+
+  release:
+    name: GCC, release, all tests
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+      options: --security-opt seccomp=unconfined
+    steps:
+      - run: pacman -Syu --noconfirm git
+      - uses: actions/checkout@v4
+      - name: Mojang's jar and what was extracted from it
+        uses: actions/cache@v4
+        with:
+          path: .cache/mc
+          key: mc-${{ hashFiles('tools/mcgen/mcgen.py', 'tools/mcgen/gamedata.py', 'tools/mcgen/extract/**') }}
+          restore-keys: mc-
+      - run: ./install.sh --yes
+      - run: ctest --preset release
+
+  sanitizers:
+    name: GCC, ASan + UBSan, integration tests
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+      options: --security-opt seccomp=unconfined
+    steps:
+      - run: pacman -Syu --noconfirm git
+      - uses: actions/checkout@v4
+      - name: Mojang's jar and what was extracted from it
+        uses: actions/cache@v4
+        with:
+          path: .cache/mc
+          key: mc-${{ hashFiles('tools/mcgen/mcgen.py', 'tools/mcgen/gamedata.py', 'tools/mcgen/extract/**') }}
+          restore-keys: mc-
+      - run: ./install.sh --yes --no-build
+      - run: cmake --preset dev && cmake --build --preset dev --target server_exe
+      - run: python3 tests/integration/run.py build/dev/elaine
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+
+  clang:
+    name: Clang, release, unit tests
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+      options: --security-opt seccomp=unconfined
+    env:
+      CXX: clang++
+    steps:
+      - run: pacman -Syu --noconfirm git clang lld llvm
+      - uses: actions/checkout@v4
+      - name: Mojang's jar and what was extracted from it
+        uses: actions/cache@v4
+        with:
+          path: .cache/mc
+          key: mc-${{ hashFiles('tools/mcgen/mcgen.py', 'tools/mcgen/gamedata.py', 'tools/mcgen/extract/**') }}
+          restore-keys: mc-
+      - run: ./install.sh --yes --no-build
+      - run: cmake --preset release && cmake --build --preset release --target server_exe unit_tests
+      - run: build/release/unit_tests
+
+  dco:
+    name: Every commit is signed off
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Signed-off-by on every commit of the pull request
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          bad=0
+          for c in $(git rev-list --no-merges "$BASE..$HEAD"); do
+            if ! git log -1 --format=%B "$c" | grep -qiE '^Signed-off-by: .+ <.+@.+>$'; then
+              echo "::error::$(git log -1 --format='%h %s' "$c") has no Signed-off-by line (git commit -s; see CONTRIBUTING.md)"
+              bad=1
+            fi
+          done
+          exit $bad
