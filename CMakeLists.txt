@@ -223,7 +223,7 @@ if(MC_TESTS)
     mc_lto_cache(unit_tests)
     add_test(NAME unit COMMAND unit_tests)
     add_test(NAME integration
-      COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/integration/run.py $<TARGET_FILE:server_exe>)
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/integration/run.py $<TARGET_FILE:server_exe> -j 0)
     set_tests_properties(integration PROPERTIES TIMEOUT 480)
   else()
     message(WARNING "GoogleTest not found: unit tests are not built")

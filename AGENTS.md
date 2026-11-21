@@ -38,13 +38,17 @@ cmake --build --preset release --target server_exe         # while iterating: on
                                                            # (elaine), unit_tests or bench, several may be named. Each is
                                                            # an LTO link of the whole program: 10 s alone, 40 s when all
                                                            # three run at once, which is what a build without --target does
-ctest --preset release                                     # unit tests + integration tests (~4 min); wants server_exe and unit_tests
+ctest --preset release                                     # unit tests + integration tests; wants server_exe and unit_tests
+tools/check.py -k chest --unit 'Container*'                # build what these need, run them, print a line a step and only
+                                                           # what failed; --failed: the scenarios that failed last time;
+                                                           # `tools/check.py full`: everything "done" asks for (the verify skill)
 cmake --preset dev && cmake --build --preset dev           # Debug + ASan/UBSan + DCHECKs; --target server_exe is all the
                                                            # line below needs: no tests, no benchmarks, a third fewer files
 ASAN_OPTIONS=detect_leaks=1 python3 tests/integration/run.py build/dev/elaine   # must be clean before "done"
 
 build/release/unit_tests --gtest_filter='Cfb8*'            # one unit suite
-python3 tests/integration/run.py build/release/elaine -k join   # one scenario; --slow adds the timer tests (15 s .. 5 min)
+python3 tests/integration/run.py build/release/elaine -k join   # one scenario; --slow adds the timer tests (15 s .. 5 min);
+                                                           # -j 0: scenarios side by side (all of them: one minute, not five)
 python3 tests/integration/run.py build/release/elaine -k crowd_500 --slow   # 500 bots in sight of each other: tick time, bytes
 build/release/bench [filter]                               # micro-benchmarks (release/native builds only); `bench tracker` = entities,
                                                            # `bench item` / `bench menu` / `bench pickup` = items, `bench nbt` / `bench text`,
@@ -127,7 +131,7 @@ bench/        micro-benchmarks;  tools/mcgen/  protocol data pipeline (gen.py: w
               through what blocks do to each other;  docs/architecture.md  the design in depth;
               docs/blocks-roadmap.md  every block, done or to do (generated)
 .claude/skills/  task playbooks (below)
-install.sh    a fresh clone to a built server;  tools/ci/checks.sh  what CI checks without building;  .github/  CI, templates
+install.sh    a fresh clone to a built server;  tools/check.py  build + test, quietly;  tools/ci/checks.sh  what CI checks without building;  .github/  CI, templates
 README.md (goals, by area), CONTRIBUTING.md, SECURITY.md, LICENSE (GPL-3.0), PLUGIN-EXCEPTION
 ```
 
@@ -137,6 +141,7 @@ Read the matching `SKILL.md` before starting that kind of task (agents without n
 
 | Skill | Use when |
 |---|---|
+| `.claude/skills/verify` | Building or testing anything: what to run while iterating, after a failure, before "done" |
 | `.claude/skills/mc-reference` | You need a fact about vanilla: a packet layout, an id, what the client does with a packet |
 | `.claude/skills/add-packet` | Implementing or changing any packet |
 | `.claude/skills/bump-mc-version` | Moving to a new Minecraft version |
@@ -337,8 +342,12 @@ Java plugin (Bukkit/Paper) compatibility is explicitly out of scope for now.
 - The integration tests prove framing, crypto, compression and sequencing. They do **not** prove that a
   layout matches the vanilla client — that comes from reading the jar. Say "verified against the jar"
   or "not verified" in your summary; a real-client check is the user's to run.
+- Scenarios run side by side (`run.py -j`, which ctest and `tools/check.py` use), each in a process of its own:
+  a scenario shares nothing with another - no fixed port, no file outside its own world - and waits for events
+  (`settle()`, `wait_log()`), not for an amount of time. One that measures the server's ticks or fills the cores
+  by itself is `@test(alone=True)` and runs after the rest.
 - Before calling work done: `ctest --preset release` passes **and** the integration suite is clean under
-  the `dev` preset (ASan/UBSan/LSan). The server must exit with code 0 on SIGTERM.
+  the `dev` preset (ASan/UBSan/LSan) - `tools/check.py full` runs both. The server must exit with code 0 on SIGTERM.
 
 ## Conventions
 

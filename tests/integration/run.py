@@ -2,14 +2,16 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """End-to-end tests: start the real server binary and talk to it with mcproto.Client.
 
-    python3 tests/integration/run.py build/release/elaine [-k substring] [--slow] [--keep-log]
+    python3 tests/integration/run.py build/release/elaine [-k substring]... [-j N] [--failed] [-q] [--slow] [--keep-log]
 
 Each scenario gets a fresh server on a free port. --slow adds the tests that wait on real timers
-(keep-alive every 15 s).
+(keep-alive every 15 s). -j runs N scenarios at a time, each in a process of its own (0: one a core, eight at most); --failed runs the ones that
+failed the last time this binary was tested; -q prints what failed and the last line, nothing else.
 """
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import http.server
 import json
 import math
@@ -33,17 +35,34 @@ from mcproto import Client, META, varint  # noqa: E402
 TESTS = []
 
 
-def test(fn=None, *, slow=False, **server_args):
+def test(fn=None, *, slow=False, alone=False, **server_args):
+    """`alone`: the scenario measures the server's ticks or fills the machine's cores by itself, so
+    with -j it runs after the others, with nothing beside it."""
     def deco(f):
-        TESTS.append((f, slow, server_args))
+        TESTS.append((f, slow, alone, server_args))
         return f
     return deco(fn) if fn else deco
 
 
+# Scenarios that run side by side (-j) are processes of their own, and each asks the kernel for free
+# ports. A port is free again the moment it was looked at, so two of them may be given the same one -
+# and the servers bind with SO_REUSEPORT: both would start, and share the connections. A port is
+# therefore claimed by a file in a directory the runs share before it is used.
+PORT_CLAIMS = os.environ.get("MC_TEST_PORT_CLAIMS")
+
+
 def free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+    while True:
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        if not PORT_CLAIMS:
+            return port
+        try:
+            os.close(os.open(os.path.join(PORT_CLAIMS, str(port)), os.O_CREAT | os.O_EXCL))
+            return port
+        except FileExistsError:
+            pass
 
 
 class Server:
@@ -3649,7 +3668,7 @@ def join_many(srv: Server, n: int, view: int, online: bool = False) -> list:
     return clients
 
 
-@test(max_players=100, view_distance=2)
+@test(alone=True, max_players=100, view_distance=2)
 def crowd(srv: Server):
     """60 players on one spot: everyone is shown everyone, and everyone's picture of the others is exact."""
     n = 60
@@ -3748,7 +3767,7 @@ def crowd_load(srv: Server, n: int, seconds: int, online: bool) -> None:
         c.close()
 
 
-@test(slow=True, max_players=200, view_distance=2, debug="true")
+@test(alone=True, slow=True, max_players=200, view_distance=2, debug="true")
 def ten_thousand_at_rest(srv: Server):
     """What a tick costs with ten thousand things lying about and nobody there: 150 bots each
     walk a row and drop a stone every block and a half - 68 of them, nothing near enough to
@@ -3830,13 +3849,13 @@ def ten_thousand_at_rest(srv: Server):
     account("items and armor stands", bots * each + 10000)
 
 
-@test(slow=True, max_players=500, view_distance=2, debug="true")
+@test(alone=True, slow=True, max_players=500, view_distance=2, debug="true")
 def crowd_500(srv: Server):
     """The worst case the server is built for, without encryption (offline mode)."""
     crowd_load(srv, 500, 11, online=False)
 
 
-@test(slow=True)
+@test(alone=True, slow=True)
 def crowd_500_online():
     """The same crowd in online mode: every byte of it goes through AES-CFB8 in the flush."""
     mock = MockSessionServer()
@@ -3849,7 +3868,7 @@ def crowd_500_online():
         assert code == 0, f"server exit code {code}\n{srv.read_log()[-2000:]}"
 
 
-@test(max_players=400)
+@test(alone=True, max_players=400)
 def many_players(srv: Server):
     n = 200
     errors = []
@@ -4451,45 +4470,132 @@ def a_vanilla_world_is_imported():
         shutil.rmtree(world, ignore_errors=True)
 
 
+def run_one(fn, sargs: dict, keep_log: bool) -> bool:
+    srv = None
+    t0 = time.time()
+    try:
+        if fn.__code__.co_argcount:
+            srv = Server(EXE, **sargs)
+            fn(srv)
+            code = srv.stop()
+            assert code == 0, f"server exit code {code}"
+        else:
+            fn()
+        print(f"PASS {fn.__name__} ({time.time() - t0:.2f}s)")
+        return True
+    except Exception:  # noqa: BLE001
+        print(f"FAIL {fn.__name__}")
+        traceback.print_exc()
+        if srv:
+            srv.stop()
+            print("---- server log (tail) ----")
+            print("\n".join(srv.read_log().splitlines()[-25:]))
+        return False
+    finally:
+        if srv and not keep_log:
+            os.unlink(srv.log.name)
+        elif srv:
+            print(f"    log: {srv.log.name}")
+
+
+def run_apart(names: list[str], alone: list[str], jobs: int, quiet: bool, keep_log: bool) -> list[str]:
+    """Every scenario in a process of its own, `jobs` at a time, then the ones that want the machine
+    to themselves. What a scenario printed comes out in one piece when it is over. Returns who failed."""
+    failed = []
+    claims = tempfile.mkdtemp(prefix="ports-")
+    env = dict(os.environ, MC_TEST_PORT_CLAIMS=claims)
+
+    def one(name: str) -> tuple[str, bool, str]:
+        cmd = [sys.executable, os.path.abspath(__file__), EXE, "--one", name] + (["--keep-log"] if keep_log else [])
+        try:
+            p = subprocess.run(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=900)
+            return name, p.returncode == 0, p.stdout
+        except subprocess.TimeoutExpired as e:
+            out = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+            return name, False, out + f"FAIL {name}: still running after 900 s\n"
+
+    def report(result: tuple[str, bool, str]) -> None:
+        name, ok, out = result
+        if not ok:
+            failed.append(name)
+        if not ok or not quiet:
+            sys.stdout.write(out)
+            sys.stdout.flush()
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max(1, jobs)) as pool:
+            for done in concurrent.futures.as_completed([pool.submit(one, n) for n in names]):
+                report(done.result())
+        for name in alone:
+            report(one(name))
+    finally:
+        shutil.rmtree(claims, ignore_errors=True)
+    return failed
+
+
 def main() -> int:
     global EXE
     ap = argparse.ArgumentParser()
     ap.add_argument("exe")
-    ap.add_argument("-k", default="", help="only tests whose name contains this")
+    ap.add_argument("-k", action="append", default=[], help="only tests whose name contains this (may be given more than once)")
+    ap.add_argument("-j", type=int, default=1, help="scenarios at a time (0: one a core, eight at most)")
+    ap.add_argument("--failed", action="store_true", help="only the tests that failed the last time this binary was tested")
+    ap.add_argument("-q", action="store_true", help="print only what failed, and the last line")
     ap.add_argument("--slow", action="store_true", help="include tests that wait on real timers")
     ap.add_argument("--keep-log", action="store_true")
+    ap.add_argument("--one", help=argparse.SUPPRESS)  # (a scenario by its whole name: what -j starts)
     args = ap.parse_args()
     EXE = os.path.abspath(args.exe)
 
-    failed = 0
-    for fn, slow, sargs in TESTS:
-        if args.k not in fn.__name__ or (slow and not args.slow):
+    if args.one:
+        for fn, _, _, sargs in TESTS:
+            if fn.__name__ == args.one:
+                return 0 if run_one(fn, sargs, args.keep_log) else 1
+        print(f"FAIL {args.one}: no such scenario")
+        return 1
+
+    # Who failed is kept beside the binary: a build directory is a preset, and each has its own.
+    failed_file = os.path.join(os.path.dirname(EXE), "integration-failed.txt")
+    before = set()
+    if os.path.exists(failed_file):
+        with open(failed_file) as f:
+            before = set(f.read().split())
+    chosen = []
+    for fn, slow, alone, sargs in TESTS:
+        name = fn.__name__
+        if args.failed:
+            if name not in before or (args.k and not any(k in name for k in args.k)):
+                continue
+        elif (args.k and not any(k in name for k in args.k)) or (slow and not args.slow):
             continue
-        srv = None
-        t0 = time.time()
-        try:
-            if fn.__code__.co_argcount:
-                srv = Server(EXE, **sargs)
-                fn(srv)
-                code = srv.stop()
-                assert code == 0, f"server exit code {code}"
-            else:
-                fn()
-            print(f"PASS {fn.__name__} ({time.time() - t0:.2f}s)")
-        except Exception:  # noqa: BLE001
-            failed += 1
-            print(f"FAIL {fn.__name__}")
-            traceback.print_exc()
-            if srv:
-                srv.stop()
-                print("---- server log (tail) ----")
-                print("\n".join(srv.read_log().splitlines()[-25:]))
-        finally:
-            if srv and not args.keep_log:
-                os.unlink(srv.log.name)
-            elif srv:
-                print(f"    log: {srv.log.name}")
-    print(f"{'FAILED' if failed else 'OK'}: {failed} failed")
+        chosen.append((fn, alone, sargs))
+    if args.failed and not chosen:
+        print("OK: nothing failed the last time")
+        return 0
+
+    t0 = time.time()
+    # A scenario mostly waits for ticks to pass: all of them, eight at a time on eight cores, take 58 s
+    # and a third of one core (four at a time: 94 s; one by one: 289 s).
+    jobs = args.j if args.j > 0 else max(1, min(8, os.cpu_count() or 1))
+    if jobs > 1 or args.q:
+        failed = run_apart([fn.__name__ for fn, alone, _ in chosen if not alone or jobs == 1],
+                           [fn.__name__ for fn, alone, _ in chosen if alone and jobs > 1], jobs, args.q, args.keep_log)
+    else:
+        failed = [fn.__name__ for fn, _, sargs in chosen if not run_one(fn, sargs, args.keep_log)]
+
+    still = (before - {fn.__name__ for fn, _, _ in chosen}) | set(failed)
+    try:
+        if still:
+            with open(failed_file, "w") as f:
+                f.write("\n".join(sorted(still)) + "\n")
+        elif os.path.exists(failed_file):
+            os.unlink(failed_file)
+    except OSError:  # (a binary somewhere that cannot be written to: there is no "last time" for it)
+        pass
+    if failed:
+        print(f"FAILED: {len(failed)} failed of {len(chosen)} in {time.time() - t0:.0f}s: {' '.join(sorted(failed))}")
+    else:
+        print(f"OK: 0 failed of {len(chosen)} in {time.time() - t0:.0f}s")
     return 1 if failed else 0
 
 

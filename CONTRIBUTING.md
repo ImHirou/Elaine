@@ -55,18 +55,20 @@ Day to day:
 cmake --build --preset release --target server_exe      # only what you are about to run
 build/release/unit_tests --gtest_filter='Cfb8*'         # one unit suite
 python3 tests/integration/run.py build/release/elaine -k join    # one scenario
+tools/check.py -k join --unit 'Cfb8*'                   # the three lines above in one, saying only what failed
 ```
 
 The full list of commands is in AGENTS.md ("Commands").
 
 ## Done means
 
-- `ctest --preset release` passes: the unit tests and the integration scenarios (about four minutes).
+- `ctest --preset release` passes: the unit tests and the integration scenarios.
 - The integration suite is clean under sanitizers:
   ```sh
   cmake --preset dev && cmake --build --preset dev --target server_exe
-  ASAN_OPTIONS=detect_leaks=1 python3 tests/integration/run.py build/dev/elaine
+  ASAN_OPTIONS=detect_leaks=1 python3 tests/integration/run.py build/dev/elaine -j 0
   ```
+  `tools/check.py full` does both of these.
 - New behaviour has its test: a packet layout a unit test that decodes it field by field, a flow an
   integration scenario, physics a recording (AGENTS.md, "Testing rules" and "Conventions").
 - What a client can observe was compared with vanilla, and the pull request says how: *verified
