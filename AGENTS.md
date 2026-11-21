@@ -1,7 +1,7 @@
 # AGENTS.md
 
-A Minecraft: Java Edition server core written from scratch in C++ (code name **CraftC** — a
-placeholder, see "Naming"). The goal is **500 concurrent players on one machine**. Performance is
+**Elaine**: a Minecraft: Java Edition server core written from scratch in C++ (the name stays out of
+the code, see "Naming"). The goal is **500 concurrent players on one machine**. Performance is
 the product: when speed and elegance disagree, speed wins, and a claim of speed needs a number.
 
 Talk to the user in Russian (their language). Code, comments, commit messages and docs are English.
@@ -27,25 +27,25 @@ Talk to the user in Russian (their language). Code, comments, commit messages an
 ## Commands
 
 ```sh
-cmake --preset release && cmake --build --preset release   # -O3, x86-64-v3, LTO  -> build/release/craftc
+cmake --preset release && cmake --build --preset release   # -O3, x86-64-v3, LTO  -> build/release/elaine
 cmake --build --preset release --target server_exe         # while iterating: only what is about to be run - server_exe
-                                                           # (craftc), unit_tests or bench, several may be named. Each is
+                                                           # (elaine), unit_tests or bench, several may be named. Each is
                                                            # an LTO link of the whole program: 10 s alone, 40 s when all
                                                            # three run at once, which is what a build without --target does
 ctest --preset release                                     # unit tests + integration tests (~4 min); wants server_exe and unit_tests
 cmake --preset dev && cmake --build --preset dev           # Debug + ASan/UBSan + DCHECKs; --target server_exe is all the
                                                            # line below needs: no tests, no benchmarks, a third fewer files
-ASAN_OPTIONS=detect_leaks=1 python3 tests/integration/run.py build/dev/craftc   # must be clean before "done"
+ASAN_OPTIONS=detect_leaks=1 python3 tests/integration/run.py build/dev/elaine   # must be clean before "done"
 
 build/release/unit_tests --gtest_filter='Cfb8*'            # one unit suite
-python3 tests/integration/run.py build/release/craftc -k join   # one scenario; --slow adds the timer tests (15 s .. 5 min)
-python3 tests/integration/run.py build/release/craftc -k crowd_500 --slow   # 500 bots in sight of each other: tick time, bytes
+python3 tests/integration/run.py build/release/elaine -k join   # one scenario; --slow adds the timer tests (15 s .. 5 min)
+python3 tests/integration/run.py build/release/elaine -k crowd_500 --slow   # 500 bots in sight of each other: tick time, bytes
 build/release/bench [filter]                               # micro-benchmarks (release/native builds only); `bench tracker` = entities,
                                                            # `bench item` / `bench menu` / `bench pickup` = items, `bench nbt` / `bench text`,
                                                            # `bench craft` / `bench furnace` / `bench collide` / `bench clip` / `bench blast` = blocks,
                                                            # `bench physics` = an entity's tick, by what it is doing (ns per entity),
                                                            # `bench command` = reading a command line, encoding its answer
-build/release/craftc --online-mode=false --server-port=25565   # run; any server.properties key works as --key=value
+build/release/elaine --online-mode=false --server-port=25565   # run; any server.properties key works as --key=value
                                                            # (and `random-tick-speed`, a game rule in vanilla: 3)
                                                            # its stdin is the console: `op <name>` there makes the first operator
                                                            # the world is kept in ./world (--level-name=<dir>; --level-name= keeps
@@ -246,7 +246,7 @@ upgrade old worlds before importing them. Rules:
   ours, then `diff`. `world_probe.py` starts the servers itself: `build <name>` has vanilla make a world of that name
   (`--world <name>`: beside the other probes' world, `server.properties` untouched) and build a fixture in it, `vanilla` and
   `ours` record how each server sends that world once it is read from disk - ours from a copy, which it imports.
-  `block_probe.py` starts them too (`vanilla <out>`, `ours <craftc> <out>`, then `diff`): vanilla in a world of the probe's
+  `block_probe.py` starts them too (`vanilla <out>`, `ours <elaine> <out>`, then `diff`): vanilla in a world of the probe's
   own (`--world block-probe`), which it removes and makes anew every time. `physics_probe.py` starts the vanilla server itself: `record` steps it tick by tick and writes down
   what every entity of its scenarios is (the unit test's vectors), `perf` times its ticks with and without entities. Use player names vanilla has not seen: it saves players, what they dropped and what
   they blew up. Start ours on a port nothing else listens on, and stop it by pid: reactors bind with
@@ -311,9 +311,9 @@ Java plugin (Bukkit/Paper) compatibility is explicitly out of scope for now.
 
 ## Conventions
 
-- **Naming**: the code name appears only in `CMakeLists.txt` (`project`, `MC_EXE`) and docs. Namespaces are
+- **Naming**: the project's name appears only in `CMakeLists.txt` (`project`, `MC_EXE`) and docs. Namespaces are
   layers (`base`, `proto`, `nbt`, `text`, `crypto`, `net`, `item`, `phys`, `entity`, `world`, `server`), macros are unprefixed or `MC_`/`PROTO_`. Do not
-  introduce the code name into identifiers.
+  introduce the project's name into identifiers.
 - Types `snake_case` for functions/variables, `PascalCase` for types, `kConstant`, members end in `_`.
   Fixed-width ints are `u8…u64`, `i8…i64`, `usize`.
 - Comments explain *why* (the constraint, the vanilla behaviour being matched, the measured reason for an

@@ -19,7 +19,7 @@ level-type=flat, spawn-protection=0):
 
     cd .cache/vanilla-server && /usr/lib/jvm/java-25-openjdk/bin/java -jar ../mc/26.3/server.jar --nogui
     tools/vanilla/command_probe.py record 25577 /tmp/vanilla.json Eve Fay       # `op Eve` when asked; then stop the server
-    build/release/craftc --server-ip=127.0.0.1 --server-port=25580 --online-mode=false --view-distance=2 --max-players=20 --ops-file=/tmp/ops.json
+    build/release/elaine --server-ip=127.0.0.1 --server-port=25580 --online-mode=false --view-distance=2 --max-players=20 --ops-file=/tmp/ops.json
     tools/vanilla/command_probe.py record 25580 /tmp/ours.json Eve Fay          # `op Eve` when asked
     tools/vanilla/command_probe.py diff /tmp/vanilla.json /tmp/ours.json
 

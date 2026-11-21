@@ -21,7 +21,7 @@ the properties it needs; gamemode=creative and spawn-protection=0 matter here):
 
     cd .cache/vanilla-server && /usr/lib/jvm/java-25-openjdk/bin/java -jar ../mc/26.3/server.jar --nogui
     tools/vanilla/swing_probe.py record 25577 /tmp/vanilla.json Ann Ben     # then stop the server
-    build/release/craftc --server-ip=127.0.0.1 --server-port=25580 --online-mode=false --view-distance=2 &
+    build/release/elaine --server-ip=127.0.0.1 --server-port=25580 --online-mode=false --view-distance=2 &
     tools/vanilla/swing_probe.py record 25580 /tmp/ours.json Ann Ben
     tools/vanilla/swing_probe.py diff /tmp/vanilla.json /tmp/ours.json
 

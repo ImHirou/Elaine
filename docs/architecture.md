@@ -768,7 +768,7 @@ grass, and they go dormant again.
 This is a shortcut, and it is held to the long way like the others: in a build with DCHECKs
 (`dev`) dormant sections are ticked all the same, and a random tick in one that changes a block
 stops the server (`kCheckDormantSections`, `Game::expect_no_change_`) - the suite's
-`random_ticks` scenario and `block_probe.py ours build/dev/craftc` run that way, at 4096 ticks
+`random_ticks` scenario and `block_probe.py ours build/dev/elaine` run that way, at 4096 ticks
 a section. The unit test counts every section of a chunk by brute force after each of some
 thousand changes and compares.
 

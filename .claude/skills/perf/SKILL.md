@@ -15,12 +15,12 @@ a release build, never by how the code looks.
    ```sh
    cmake --preset profile && cmake --build --preset profile          # release flags + frame pointers + -g
    # The load test starts its own server, joins 200 players, moves them, and prints the server's CPU share:
-   python3 tests/integration/run.py build/profile/craftc -k many_players
+   python3 tests/integration/run.py build/profile/elaine -k many_players
    # Same run under perf; the server's threads are named `tick` and `net-N`, which filters out the Python client:
-   perf record -g -o /tmp/perf.data -- python3 tests/integration/run.py build/profile/craftc -k many_players
+   perf record -g -o /tmp/perf.data -- python3 tests/integration/run.py build/profile/elaine -k many_players
    perf report -i /tmp/perf.data --comm tick,net-0 --percentage relative --no-children --sort symbol
-   # A long-running server:  perf record -g -p $(pidof craftc) -- sleep 10
-   #                         perf stat -e cycles,instructions,cache-misses,branch-misses -p $(pidof craftc) -- sleep 10
+   # A long-running server:  perf record -g -p $(pidof elaine) -- sleep 10
+   #                         perf stat -e cycles,instructions,cache-misses,branch-misses -p $(pidof elaine) -- sleep 10
    ```
    The Python client cannot push the server hard (it is the bottleneck); for anything beyond a smoke profile,
    write the load in C++ under `bench/`. For entities both exist: `bench tracker` runs the real tracker for
@@ -66,7 +66,7 @@ branch predictors and palettes.
   10-round AES. `perf stat` IPC and https://uops.info tell you whether you are at the limit.
 - `pdep`/`pext` are fast on Intel since Haswell and AMD since Zen 3, microcoded (slow) on Zen 1/2. If Zen 2 ever
   matters, measure the scalar fallbacks in `proto/varint.hpp`.
-- Check the generated code when it matters: `objdump -d --no-show-raw-insn build/release/craftc | less` (search the
+- Check the generated code when it matters: `objdump -d --no-show-raw-insn build/release/elaine | less` (search the
   symbol), or compile one file with `-S -fverbose-asm`. Look for spills (`vmovdqa … (%rsp)`) inside the loop.
 
 **Bits**

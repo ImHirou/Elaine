@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """End-to-end tests: start the real server binary and talk to it with mcproto.Client.
 
-    python3 tests/integration/run.py build/release/craftc [-k substring] [--slow] [--keep-log]
+    python3 tests/integration/run.py build/release/elaine [-k substring] [--slow] [--keep-log]
 
 Each scenario gets a fresh server on a free port. --slow adds the tests that wait on real timers
 (keep-alive every 15 s).

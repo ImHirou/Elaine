@@ -69,7 +69,7 @@ diff src/proto/gen/vOLD/registries.hpp src/proto/gen/vNEW/registries.hpp | grep 
 ```sh
 python3 tools/mcgen/mcgen.py check
 cmake --build --preset release && ctest --preset release
-cmake --build --preset dev && ASAN_OPTIONS=detect_leaks=1 python3 tests/integration/run.py build/dev/craftc
+cmake --build --preset dev && ASAN_OPTIONS=detect_leaks=1 python3 tests/integration/run.py build/dev/elaine
 ```
 The integration client reads ids and the protocol number from the generated headers, so it follows the bump; its
 parsers do not — a layout you changed in C++ must be changed there too.

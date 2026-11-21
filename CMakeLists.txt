@@ -1,10 +1,10 @@
 cmake_minimum_required(VERSION 3.25)
-project(craftc VERSION 0.1.0 LANGUAGES CXX)
+project(elaine VERSION 0.1.0 LANGUAGES CXX)
 
 # ---------------------------------------------------------------------------- options
-# The code name appears here (and in docs) only; sources use layer namespaces, so renaming the
+# The project's name appears here (and in docs) only; sources use layer namespaces, so renaming the
 # project is a one-line change.
-set(MC_EXE "craftc" CACHE STRING "Name of the server binary")
+set(MC_EXE "elaine" CACHE STRING "Name of the server binary")
 set(MC_ARCH "x86-64-v3" CACHE STRING
     "-march baseline. x86-64-v3 = AVX2+BMI2+FMA (Haswell/Zen1 and newer). 'native' = this machine only")
 option(MC_LTO "Link-time optimization in optimized builds" ON)

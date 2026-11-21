@@ -15,7 +15,7 @@ The reference is the vanilla server, run under the rules in AGENTS.md:
     # server.properties: server-ip=127.0.0.1, online-mode=false, white-list=false, gamemode=creative,
     #                    level-type=minecraft\\:flat, view-distance=2, a port of its own
     tools/vanilla/entity_probe.py record 25577 /tmp/vanilla.json Ann Ben      # then stop the server
-    build/release/craftc --server-ip=127.0.0.1 --server-port=25580 --online-mode=false --view-distance=2 &
+    build/release/elaine --server-ip=127.0.0.1 --server-port=25580 --online-mode=false --view-distance=2 &
     tools/vanilla/entity_probe.py record 25580 /tmp/ours.json Ann Ben
     tools/vanilla/entity_probe.py diff /tmp/vanilla.json /tmp/ours.json
 

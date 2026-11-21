@@ -57,7 +57,7 @@ the jar, not memory, the source of every byte.
 6. **Run**
    ```sh
    cmake --build --preset release && ctest --preset release
-   cmake --build --preset dev && ASAN_OPTIONS=detect_leaks=1 python3 tests/integration/run.py build/dev/craftc
+   cmake --build --preset dev && ASAN_OPTIONS=detect_leaks=1 python3 tests/integration/run.py build/dev/elaine
    ```
 
 7. **Report honestly**: say which class(es) you read the layout from, and that it has not been checked against a

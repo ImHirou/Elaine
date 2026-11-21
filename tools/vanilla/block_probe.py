@@ -3,7 +3,7 @@
 when a random tick falls? Record it, on vanilla and on ours, and diff.
 
     block_probe.py vanilla <out.json> [nameA nameB]         # runs the vanilla server itself
-    block_probe.py ours <craftc> <out.json> [nameA nameB]   # runs ours
+    block_probe.py ours <elaine> <out.json> [nameA nameB]   # runs ours
     block_probe.py record <port> <out.json> [nameA nameB [random]]   # a server that runs already
     block_probe.py diff <vanilla.json> <ours.json> [-v]
 
