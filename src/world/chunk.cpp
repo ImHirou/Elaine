@@ -115,9 +115,53 @@ void fill_sky_sources(Chunk& c, const Layout& l) {
             c.sky_sources.set(x + z * 16, static_cast<u32>(std::max(find_lowest_source(c, l, top, x, z), base) - base));
 }
 
+void count_random_ticks(Chunk& c) {
+    constexpr u32 kCounted = state::kRandomAlways | state::kSpreader | state::kNylium | state::kSoil;
+    c.ticking_sections = c.always_sections = c.dying_sections = c.target_sections = 0;
+    BlockState states[Section::kVolume];
+    for (u32 si = 0; si < c.sections_count; ++si) {
+        const Section& s = c.sections[si];
+        RandomCounts& rc = c.random[si];
+        rc = {};
+        if (s.ticking) c.ticking_sections |= 1u << si;
+        // Most sections hold no state that counts: their palette says so.
+        u32 any = 0;
+        if (s.bits == 0) {
+            any = state::kRandom[s.single];
+        } else if (s.bits == Section::kDirectBits) {
+            any = kCounted;
+        } else {
+            const u16* refs = s.refs();
+            for (u32 i = 0; i < s.palette_len; ++i)
+                if (refs[i]) any |= state::kRandom[s.palette[i]];
+        }
+        if (!(any & kCounted)) continue;
+        s.unpack(states);
+        // What lies on the section's top layer: the bottom layer of the next one, air above the world.
+        const Section* over = si + 1 < c.sections_count ? &c.sections[si + 1] : nullptr;
+        u32 always = 0, dying = 0, targets = 0;
+        for (u32 i = 0; i < Section::kVolume; ++i) {
+            const u32 r = state::kRandom[states[i]];
+            if (!(r & kCounted)) continue;
+            always += (r & state::kRandomAlways) != 0;
+            const BlockState above = i < Section::kVolume - 256 ? states[i + 256]
+                                     : over                     ? over->get(i - (Section::kVolume - 256))
+                                                                : kAir;
+            const u32 ra = state::kRandom[above];
+            dying += random_dies(r, ra);
+            targets += random_target(r, ra);
+        }
+        rc = {static_cast<u16>(always), static_cast<u16>(dying), static_cast<u16>(targets)};
+        if (always) c.always_sections |= 1u << si;
+        if (dying) c.dying_sections |= 1u << si;
+        if (targets) c.target_sections |= 1u << si;
+    }
+}
+
 u32 derive(Chunk& c, const Layout& l) {
     c.sections_count = static_cast<u8>(l.sections);
     c.light_count = static_cast<u8>(l.sections + 2);
+    count_random_ticks(c);
     const u32 any = fill_section_masks(c);
     prime_heightmaps(c);
     if (l.has_skylight) fill_sky_sources(c, l);

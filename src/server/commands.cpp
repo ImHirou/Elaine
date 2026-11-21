@@ -531,6 +531,9 @@ bool Game::teleport(u32 row, double x, double y, double z, u32 relatives, float 
 u32 Game::summon(u32 type, double x, double y, double z) {
     namespace gp = proto::gen::physics;
     const Uuid uuid{(random() & ~0xF000ull) | 0x4000ull, (random() & 0x3FFFFFFFFFFFFFFFull) | 0x8000000000000000ull};
+    // FallingBlockEntity.DEFAULT_BLOCK_STATE: without a tag to say otherwise it is sand.
+    if (type == entity_type::kFallingBlock)
+        return add_falling(uuid, static_cast<BlockState>(gen::block::kSand), x, y, z, 0, false);
     entity::Store::Moves moved;
     const u32 row = tracker_.spawn(type, false, uuid, x, y, z, 0, 0, moved);
     const u32 slot = ents_.slot[row];
@@ -555,6 +558,10 @@ u32 Game::summon(u32 type, double x, double y, double z) {
 void Game::remove_entity(u32 slot) {
     if (slot < item_of_slot_.size() && item_of_slot_[slot] != kNone) return remove_item(slot);
     std::erase(tnt_, slot);
+    if (slot < falling_.size() && falling_[slot].alive) {
+        falling_[slot] = {};
+        std::erase(falling_slots_, slot);
+    }
     stop_ticking(slot);
     leave_push_grid(slot);
     entity::Store::Moves moved;
@@ -563,21 +570,7 @@ void Game::remove_entity(u32 slot) {
 
 // Level.destroyBlock(pos, true): the block breaks as if mined with an empty hand - it drops
 // what its loot table gives, a container spills - and leaves air. False for air.
-bool Game::destroy_block_with_drops(BlockPos pos) {
-    const BlockState state = world_.block(pos.x, pos.y, pos.z);
-    if (world::is_air(state)) return false;
-    const world::BlockInfo& info = world::block_info_of(state);
-    // Block.dropResources -> popResource: near the middle of the block.
-    const world::BlockInfo::Drop& drop =
-        info.drop_chance >= 1.0f || random_float() < info.drop_chance ? info.drop[0] : info.drop[1];
-    if (drop.item) {
-        const double px = pos.x + 0.5 + (random_double() * 0.5 - 0.25);
-        const double py = pos.y + 0.5 + (random_double() * 0.5 - 0.25) - 0.125;
-        const double pz = pos.z + 0.5 + (random_double() * 0.5 - 0.25);
-        spawn_item(ItemStack(drop.item, drop.min + random_int(static_cast<u32>(drop.max - drop.min) + 1u)), px, py, pz, 10);
-    }
-    return set_block(pos, static_cast<BlockState>(world::state::fluid_legacy_of(state)));
-}
+bool Game::destroy_block_with_drops(BlockPos pos) { return break_block(pos, true); }
 
 // BlockInput.place: the state takes the shape its neighbours give it (unless the change says
 // the shape is known), keeps the properties that were spelled out, and is set.
@@ -703,7 +696,8 @@ struct Game::Commands {
         // 2 | 256, or 2 | 816 for `strict`: clients, and never what the old block held.
         const u32 flags = kUpdateClients | kUpdateSkipContainer | (strict ? kUpdateKnownShape | kUpdateSkipOnPlace : 0u);
         if (place && !g.place_block_input(pos, block, flags)) return in.fail(tr("commands.setblock.failed"));
-        if (!strict) g.update_neighbors_at(pos);  // Level.updateNeighboursOnBlockSet
+        // ServerLevel.updateNeighboursOnBlockSet: the neighbours hear of the block that is there now.
+        if (!strict) g.update_neighbors_at(pos, world::block_of(g.world_.block(pos.x, pos.y, pos.z)));
         in.success(tr("commands.setblock.success").arg(pos.x).arg(pos.y).arg(pos.z));
         return 1;
     }
@@ -749,7 +743,7 @@ struct Game::Commands {
                 }
             }
         }
-        for (const BlockPos pos : placed) g.update_neighbors_at(pos);
+        for (const BlockPos pos : placed) g.update_neighbors_at(pos, world::block_of(g.world_.block(pos.x, pos.y, pos.z)));
         if (count == 0) return in.fail(tr("commands.fill.failed"));
         in.success(tr("commands.fill.success").arg(count));
         return count;

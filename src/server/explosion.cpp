@@ -204,6 +204,17 @@ void Game::explode(double x, double y, double z, float radius) {
         const Hit h = hit(tnt_box(ents_, row), ents_.x[row], ents_.y[row], ents_.z[row], ents_.y[row]);
         if (h.in_reach) push(row, h.dir[0] * h.power, h.dir[1] * h.power, h.dir[2] * h.power);
     }
+    // Falling blocks: thrown from where their eyes are, and their viewers hear of it at once
+    // (FallingBlockEntity.hurtServer: markHurt, no more).
+    for (const u32 slot : falling_slots_) {
+        const u32 row = ents_.by_slot(slot);
+        const entity_type::Info& info = entity_type::kInfo[entity_type::kFallingBlock];
+        const Hit h = hit(entity_box(ents_.x[row], ents_.y[row], ents_.z[row], info.width, info.height), ents_.x[row],
+                          ents_.y[row], ents_.z[row], ents_.y[row] + static_cast<double>(info.eye_height));
+        if (!h.in_reach) continue;
+        push(row, h.dir[0] * h.power, h.dir[1] * h.power, h.dir[2] * h.power);
+        ents_.flags[row] |= entity::flag::kSyncVelocity;
+    }
     // Items: ItemEntity.hurtServer - five points of health, and an explosion this close takes
     // more (what resists explosions stays: the nether star) - and what is left is thrown.
     if (!item_slot_.empty()) {

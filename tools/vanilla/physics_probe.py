@@ -83,7 +83,7 @@ def fixed(v: float) -> str:
 @dataclass
 class Sc:
     name: str
-    kind: str                       # item | tnt | armor_stand | pig
+    kind: str                       # item | tnt | armor_stand | pig | falling_block
     pos: tuple                      # relative to the plot's origin: the block above the middle of its floor
     motion: tuple = (0.0, 0.0, 0.0)
     blocks: tuple = ()              # (dx, dy, dz, "minecraft:ice[...]"), relative likewise
@@ -327,6 +327,27 @@ def scenarios() -> list[Sc]:
     # ------------------------------------------------------------------ an obstacle course, and things thrown about in it
     import random
     rng = random.Random(26_3)
+    # ------------------------------------------------------------------ falling blocks
+    # A FallingBlockEntity is gone the tick it touches the ground - a block again, or broken on what
+    # does not give way: what is recorded is its fall, and the tick it ends in.
+    fb = "falling_block"
+    S.append(Sc("falling_drop", fb, (0.5, 3.0, 0.5), ticks=40))
+    S.append(Sc("falling_drop_from_rest_height", fb, (0.5, 1.0, 0.5), ticks=20))
+    S.append(Sc("falling_offcentre", fb, (0.31, 4.7, 0.83), ticks=40))
+    S.append(Sc("falling_thrown", fb, (-2.0, 1.5, 0.3), (0.21, 0.35, 0.08), ticks=60))
+    S.append(Sc("falling_thrown_negative", fb, (2.1, 2.25, 0.6), (-0.17, 0.2, -0.13), ticks=60))
+    S.append(Sc("falling_fast", fb, (0.5, 9.0, 0.5), (0.0, -1.3, 0.0), ticks=30))
+    S.append(Sc("falling_wall", fb, (-1.5, 2.0, 0.5), (0.4, 0.3, 0.0), blocks=column(2, 0, 0, 3, stone), ticks=60))
+    S.append(Sc("falling_ceiling", fb, (0.5, 0.5, 0.5), (0.01, 0.7, 0.0), blocks=((0, 3, 0, stone),), ticks=60))
+    S.append(Sc("falling_cobweb", fb, (0.5, 4.0, 0.5), (0.03, 0.0, 0.01), blocks=((0, 2, 0, "minecraft:cobweb"),), ticks=160))
+    S.append(Sc("falling_slime", fb, (0.5, 4.0, 0.5), floor="minecraft:slime_block", ticks=50))
+    S.append(Sc("falling_honey_side", fb, (1.48, 3.5, 0.5), blocks=column(0, 0, 0, 2, "minecraft:honey_block"), ticks=70))
+    S.append(Sc("falling_onto_slab", fb, (0.5, 3.0, 0.5), blocks=((0, 0, 0, "minecraft:stone_slab[type=bottom]"),), ticks=40))
+    S.append(Sc("falling_onto_fence", fb, (0.5, 4.0, 0.5), blocks=((0, 0, 0, "minecraft:oak_fence"),), ticks=40))
+    S.append(Sc("falling_past_edge", fb, (1.3, 3.0, 0.5), blocks=((0, 0, 0, stone), (0, 1, 0, stone)), ticks=50))
+    S.append(Sc("falling_ice_slide", fb, (-2.0, 0.6, 0.5), (0.3, 0.0, 0.05), floor=ice, ticks=40))
+    S.append(Sc("falling_origin", fb, (0.5, 3.0, 0.5), at=(0, 0, 8), ticks=40))
+
     floors = [stone, stone, ice, "minecraft:soul_sand", "minecraft:slime_block", "minecraft:honey_block", "minecraft:packed_ice", "minecraft:mud"]
     obstacles = ["minecraft:stone_slab[type=bottom]", "minecraft:oak_stairs[facing=east,half=bottom]", "minecraft:oak_fence",
                  "minecraft:cobblestone_wall", "minecraft:chest[facing=north]", "minecraft:cobweb", "minecraft:white_carpet",
@@ -494,7 +515,8 @@ GROUND = re.compile(r"\bOnGround: (\d)b")
 FALL = re.compile(r"\bfall_distance: " + NUM + "d")
 FUSE = re.compile(r"\bfuse: (-?\d+)s")
 DUMP = re.compile(r"^(e\d+) has the following entity data: (.*)$")
-KIND_ID = {"item": "minecraft:item", "tnt": "minecraft:tnt", "armor_stand": "minecraft:armor_stand", "pig": "minecraft:pig"}
+KIND_ID = {"item": "minecraft:item", "tnt": "minecraft:tnt", "armor_stand": "minecraft:armor_stand", "pig": "minecraft:pig",
+           "falling_block": "minecraft:falling_block"}
 
 
 RUN = int(time.time()) & 0x7FFFFFFF      # in every UUID: vanilla refuses one it has seen, even on a dead entity
@@ -562,6 +584,10 @@ def record(out_path: str, only: str | None) -> None:
                        "Motion:[" + ",".join(fixed(m) + "d" for m in motion) + "]"]
                 if sc.kind == "item":
                     nbt += ['Item:{id:"minecraft:stone",count:1}', "PickupDelay:32767s"]
+                if sc.kind == "falling_block":
+                    # Sand, which leaves no item where it cannot become a block again (26.x: a default
+                    # state is its block's name alone).
+                    nbt += ['BlockState:"minecraft:sand"', "DropItem:0b"]
                 if sc.on_ground:
                     nbt.append("OnGround:1b")
                 attrs = []
@@ -683,13 +709,16 @@ def record(out_path: str, only: str | None) -> None:
 
 # ----------------------------------------------------------------------------- emit
 
-KINDS = ["item", "tnt", "armor_stand", "pig"]
+KINDS = ["item", "tnt", "armor_stand", "pig", "falling_block"]
 
 
 def emit(in_path: str, out_path: str) -> None:
     """The recording as tests/unit/data/physics_vectors.bin, which physics_test.cpp embeds and
     reads (the layout is written out there). An entity's states are cut 26 ticks after it last
-    moved: that is six rounds of an item's four-tick rest, and the file is a third smaller."""
+    moved: that is six rounds of an item's four-tick rest, and the file is a third smaller.
+
+    A recording need not be of everything: `record --only '^falling_'` and `emit` into
+    tests/unit/data/physics_falling.bin is how the falling blocks were added beside the rest."""
     rec = json.load(open(in_path))
 
     def text(v: str) -> bytes:

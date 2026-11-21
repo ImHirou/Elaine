@@ -623,6 +623,12 @@ ALWAYS_INLINE u8* put_entity_bool(u8* p, u32 accessor, bool v) {
     p[2] = v;
     return p + 3;
 }
+// BLOCK_POS: `packed` is the position as pack_block_pos has it.
+ALWAYS_INLINE u8* put_entity_block_pos(u8* p, u32 accessor, u64 packed) {
+    p[0] = static_cast<u8>(accessor);
+    p[1] = static_cast<u8>(entity_data::serializer::kBlockPos);
+    return put_be64(p + 2, packed);
+}
 // ITEM_STACK: the one value here without a fixed size - 2 + item_bound() bytes.
 ALWAYS_INLINE u8* put_entity_item(u8* p, u32 accessor, const ItemView& v) {
     p[0] = static_cast<u8>(accessor);
@@ -852,6 +858,30 @@ struct BlockEvent {
     u32 block;
     usize bound() const { return 8 + 2 + 5; }
     u8* encode(u8* p) const { return put_varint(put_u8(put_u8(put_be64(p, pack_block_pos(x, y, z)), b0), b1), block); }
+};
+
+// Level.levelEvent: something to see or hear at a block (LevelEvent: 2001 is a block breaking -
+// its particles and its sound, `data` the state that broke). ClientboundLevelEventPacket: an int,
+// the position, an int, and whether it is heard everywhere (globalEvent).
+struct LevelEvent {
+    static constexpr u32 kId = ids::play::cb::kLevelEvent;
+    u32 type;
+    i32 x, y, z;
+    i32 data;
+    bool global;
+    usize bound() const { return 4 + 8 + 4 + 1; }
+    u8* encode(u8* p) const {
+        return put_bool(put_be32(put_be64(put_be32(p, type), pack_block_pos(x, y, z)), static_cast<u32>(data)), global);
+    }
+};
+// What a falling block sends to those who see it when it lands (26.x): the block it became,
+// ahead of the chunk's own block update. The layout of block_update.
+struct AddTransientBlock {
+    static constexpr u32 kId = ids::play::cb::kAddTransientBlock;
+    i32 x, y, z;
+    u32 state;
+    usize bound() const { return 8 + 5; }
+    u8* encode(u8* p) const { return put_varint(put_be64(p, pack_block_pos(x, y, z)), state); }
 };
 
 // An explosion as a client shows it: the flash, the sound, the smoke - and what it does to the

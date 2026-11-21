@@ -13,6 +13,7 @@
 #include <cmath>
 
 #include "base/log.hpp"
+#include "phys/mth.hpp"
 #include "server/game.hpp"
 #include "server/viewers.hpp"
 #include "world/chunk_codec.hpp"
@@ -101,6 +102,16 @@ bool Game::obstructed(BlockState s, BlockPos pos) const {
         const double hi[3] = {ents_.x[row] + tw, ents_.y[row] + th, ents_.z[row] + tw};
         if (overlaps(lo, hi)) return true;
     }
+    // ...and a block that is falling (FallingBlockEntity: the same size as a primed TNT).
+    static_assert(entity_type::kInfo[entity_type::kFallingBlock].width == entity_type::kInfo[entity_type::kTnt].width &&
+                  entity_type::kInfo[entity_type::kFallingBlock].height == entity_type::kInfo[entity_type::kTnt].height);
+    for (const u32 slot : falling_slots_) {
+        if (!falling_[slot].blocks_building) continue;
+        const u32 row = ents_.by_slot(slot);
+        const double lo[3] = {ents_.x[row] - tw, ents_.y[row], ents_.z[row] - tw};
+        const double hi[3] = {ents_.x[row] + tw, ents_.y[row] + th, ents_.z[row] + tw};
+        if (overlaps(lo, hi)) return true;
+    }
     return false;
 }
 
@@ -164,9 +175,12 @@ bool Game::destroy_block(u32 pi, BlockPos pos) {
     if (!hand.empty() && !(hand.info().flags & item_flag::kDestroysInCreative)) return false;
     // Command blocks and the like need operator rights; nobody is an operator yet.
     if (world::block_info_of(state).flags & block_flag::kGameMaster) return false;
-    // Level.removeBlock: what stays is the block of the fluid the state held (air for a dry one).
+    // Block.playerWillDestroy -> spawnDestroyByEntityParticles: the others see and hear it break
+    // (its own client did that by itself). Of air too, as vanilla sends it.
     // (TntBlock.playerWillDestroy primes an `unstable` TNT - but not for a creative player.)
-    set_block(pos, static_cast<BlockState>(world::state::fluid_legacy_of(state)));
+    level_event(kLevelEventDestroyBlock, pos, static_cast<i32>(state), pi);
+    // Level.removeBlock: what stays is the block of the fluid the state held (air for a dry one).
+    remove_block(pos);
     return true;
 }
 
@@ -229,7 +243,8 @@ bool Game::place_block(u32 pi, const sb::UseItemOn& u, const ItemStack& held) {
     const u32 kind = block.flags & block_flag::kPlaceMask;
     // A stack with components may ask for more than the block's default state (block_state,
     // block_entity_data): BlockItem.updateBlockStateFromTag and friends are not implemented.
-    if (kind == block_flag::kPlaceNone || !(item.flags & item_flag::kPlainBlockItem) || held.has_patch()) {
+    if (kind == block_flag::kPlaceNone || !(item.flags & (item_flag::kPlainBlockItem | item_flag::kStandingAndWall)) ||
+        held.has_patch()) {
         LOG_DEBUG("%s: placing %.*s is not implemented yet", players_[pi].name.c_str(),
                   static_cast<int>(world::block_name(item.block).size()), world::block_name(item.block).data());
         return false;
@@ -241,27 +256,107 @@ bool Game::place_block(u32 pi, const sb::UseItemOn& u, const ItemStack& held) {
     };
     // BlockPlaceContext: into the clicked block if that can be replaced, otherwise against its face.
     BlockPos at = u.pos;
-    if (!replaceable(world_.block(at.x, at.y, at.z))) {
+    const bool replacing = replaceable(world_.block(at.x, at.y, at.z));
+    if (!replacing) {
         at = {at.x + world::kStepX[u.direction], at.y + world::kStepY[u.direction], at.z + world::kStepZ[u.direction]};
         if (!replaceable(state_for_client(at))) return false;
     }
-    BlockState state = block.default_state;  // Block.getStateForPlacement
-    if (kind == block_flag::kPlaceAxis) {    // RotatedPillarBlock
-        state = block.alt[kAxisOf[u.direction]];
-    } else if (kind == block_flag::kPlaceSnowy) {  // SnowyBlock
-        const BlockState above = state_for_client({at.x, at.y + 1, at.z});
-        state = block.alt[(world::block_info_of(above).flags & block_flag::kSnowTag) ? 1 : 0];
-    } else if (kind == block_flag::kPlaceFacing) {  // AbstractFurnaceBlock: facing the one who places it, unlit
-        const u32 facing = world::opposite(horizontal_direction(ents_.yaw[pi]));
-        state = static_cast<BlockState>(gen::props::furnace::kFirst +
-                                        (facing - world::kNorth) * gen::props::furnace::kFacingStride + 1);
-    } else if (kind == block_flag::kPlaceChest) {
-        state = chest_for_placement(pi, at, u.direction);
-    }
-    // BlockItem.canPlace: canSurvive() is the default for every placeable block; what is left is
-    // "nobody stands there".
-    if (obstructed(state, at)) return false;
+    const BlockState state = state_for_placement(pi, u, block, kind, at, replacing);
+    if (state == world::Section::kNoState) return false;  // getPlacementState: null
+    // BlockItem.canPlace: the block can be there (canSurvive), and nobody stands there.
+    if (!can_survive(state, at) || obstructed(state, at)) return false;
     return set_block(at, state);  // false above/below the build height
+}
+
+// Direction.orderedByNearest(player): the six directions, the one it looks along most first.
+void Game::nearest_looking_directions(u32 pi, u32 out[6]) const {
+    const float pitch = ents_.pitch[pi] * 0.017453292f, yaw = -ents_.yaw[pi] * 0.017453292f;
+    const float pitch_sin = phys::mth_sin(static_cast<double>(pitch)), pitch_cos = phys::mth_cos(static_cast<double>(pitch));
+    const float yaw_sin = phys::mth_sin(static_cast<double>(yaw)), yaw_cos = phys::mth_cos(static_cast<double>(yaw));
+    const bool x_pos = yaw_sin > 0.0f, y_pos = pitch_sin < 0.0f, z_pos = yaw_cos > 0.0f;
+    const float x_yaw = x_pos ? yaw_sin : -yaw_sin, y_mag = y_pos ? -pitch_sin : pitch_sin, z_yaw = z_pos ? yaw_cos : -yaw_cos;
+    const float x_mag = x_yaw * pitch_cos, z_mag = z_yaw * pitch_cos;
+    const u32 ax = x_pos ? world::kEast : world::kWest, ay = y_pos ? world::kUp : world::kDown,
+              az = z_pos ? world::kSouth : world::kNorth;
+    const auto make = [&](u32 a, u32 b, u32 c) {  // makeDirectionArray
+        out[0] = a, out[1] = b, out[2] = c, out[3] = world::opposite(c), out[4] = world::opposite(b), out[5] = world::opposite(a);
+    };
+    if (x_yaw > z_yaw) {
+        if (y_mag > x_mag)
+            make(ay, ax, az);
+        else if (z_mag > y_mag)
+            make(ax, az, ay);
+        else
+            make(ax, ay, az);
+    } else if (y_mag > z_mag) {
+        make(ay, az, ax);
+    } else if (x_mag > y_mag) {
+        make(az, ax, ay);
+    } else {
+        make(az, ay, ax);
+    }
+}
+
+// Block.getStateForPlacement (and, for a torch, StandingAndWallBlockItem.getPlacementState): the
+// state a block of this placement kind is placed as at `at`; Section::kNoState: it cannot be.
+BlockState Game::state_for_placement(u32 pi, const sb::UseItemOn& u, const world::BlockInfo& block, u32 kind, BlockPos at,
+                                     bool replacing_clicked) {
+    switch (kind) {
+        case block_flag::kPlaceAxis: return block.alt[kAxisOf[u.direction]];  // RotatedPillarBlock
+        case block_flag::kPlaceSnowy: {                                       // SnowyBlock
+            const BlockState above = state_for_client({at.x, at.y + 1, at.z});
+            return block.alt[(world::block_info_of(above).flags & block_flag::kSnowTag) ? 1 : 0];
+        }
+        case block_flag::kPlaceFacing: {  // AbstractFurnaceBlock: facing the one who places it, unlit
+            const u32 facing = world::opposite(horizontal_direction(ents_.yaw[pi]));
+            return static_cast<BlockState>(gen::props::furnace::kFirst +
+                                           (facing - world::kNorth) * gen::props::furnace::kFacingStride + 1);
+        }
+        case block_flag::kPlaceChest: return chest_for_placement(pi, at, u.direction);
+        case block_flag::kPlaceTorch: {
+            // BlockPlaceContext.getNearestLookingDirections: against a face, that face's direction comes first.
+            u32 dirs[6];
+            nearest_looking_directions(pi, dirs);
+            if (!replacing_clicked) {
+                const u32 into = world::opposite(u.direction);
+                u32 index = 0;
+                while (index < 6 && dirs[index] != into) ++index;
+                if (index > 0 && index < 6) {
+                    for (u32 i = index; i > 0; --i) dirs[i] = dirs[i - 1];
+                    dirs[0] = into;
+                }
+            }
+            // WallTorchBlock.getStateForPlacement: on the first wall it looks at that holds it.
+            BlockState wall = world::Section::kNoState;
+            for (const u32 dir : dirs) {
+                if (dir < world::kNorth) continue;
+                const BlockState s = static_cast<BlockState>(block.alt[1] + (world::opposite(dir) - world::kNorth));
+                if (can_survive(s, at)) {
+                    wall = s;
+                    break;
+                }
+            }
+            // StandingAndWallBlockItem.getPlacementState: looking down first it stands, else it hangs
+            // on that wall; never from above (attachmentDirection DOWN).
+            for (const u32 dir : dirs) {
+                if (dir == world::kUp) continue;
+                const BlockState possible = dir == world::kDown ? block.alt[0] : wall;
+                if (possible != world::Section::kNoState && can_survive(possible, at)) return possible;
+            }
+            return world::Section::kNoState;
+        }
+        case block_flag::kPlaceCluster: {  // AmethystClusterBlock: on the clicked face, wet in a source of water
+            static constexpr u8 kIndex[6] = {5, 4, 0, 2, 3, 1};  // facing: north, east, south, west, up, down
+            const bool wet = world::holds_water_source(state_for_client(at));
+            return static_cast<BlockState>(block.first_state + kIndex[u.direction] * gen::props::amethyst_cluster::kFacingStride +
+                                           (wet ? 0 : 1));
+        }
+        case block_flag::kPlaceLamp:  // RedstoneLampBlock: lit if a signal arrives
+            return static_cast<BlockState>(gen::props::redstone_lamp::kFirst + (has_neighbour_signal(at) ? 0 : 1));
+        case block_flag::kPlaceConcretePowder:  // ConcretePowderBlock.shouldSolidify: concrete in water, or beside it
+            return world::holds_water(state_for_client(at)) || touches_water(at) ? block.alt[0] : block.default_state;
+        default: return block.default_state;  // Block.getStateForPlacement
+    }
 }
 
 // ---------------------------------------------------------------------------- picking

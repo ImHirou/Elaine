@@ -7,6 +7,7 @@
 //   makeStuckInBlock, moveTowardsClosestSpace, push                      ->  move(), effects, push_impulse()
 //   ItemEntity.tick                                                      ->  item_tick()
 //   PrimedTnt.tick                                                       ->  tnt_tick()
+//   FallingBlockEntity.tick (how it moves)                               ->  falling_move()
 //   LivingEntity.aiStep / travel / travelInAir, with nobody steering     ->  living_tick()
 //   WebBlock / HoneyBlock.entityInside, SlimeBlock.stepOn                ->  inside the effects
 //
@@ -41,8 +42,9 @@ struct Kind {
     float below_offset;   // getBlockPosBelowThatAffectsMyMovement: 0.500001 below the feet, an item 0.999999
     bool living;          // a LivingEntity
 };
-inline constexpr Kind kItem{0.25f, 0.25f, 0.0f, 0.04, 0.999999f, false};  // EntityTypes.ITEM, ItemEntity
-inline constexpr Kind kTnt{0.98f, 0.98f, 0.0f, 0.04, 0.500001f, false};   // EntityTypes.TNT, PrimedTnt
+inline constexpr Kind kItem{0.25f, 0.25f, 0.0f, 0.04, 0.999999f, false};          // EntityTypes.ITEM, ItemEntity
+inline constexpr Kind kTnt{0.98f, 0.98f, 0.0f, 0.04, 0.500001f, false};           // EntityTypes.TNT, PrimedTnt
+inline constexpr Kind kFallingBlock{0.98f, 0.98f, 0.0f, 0.04, 0.500001f, false};  // EntityTypes.FALLING_BLOCK, FallingBlockEntity
 // A living entity of some size (EntityType) with the default attributes of its type.
 constexpr Kind living_kind(float width, float height, float step_height, double gravity) {
     return {width, height, step_height, gravity, 0.500001f, true};
@@ -119,6 +121,10 @@ enum class Fate : u8 { kStays, kGone };  // kGone: discarded (it fell out of the
 Fate item_tick(World& w, Motion& m, Body& b, u32 tick_count, i32 id, float (*random_float)(void*), void* rng);
 // PrimedTnt.tick: gravity, the move, drag, the hop off the ground. Not the fuse.
 void tnt_tick(World& w, Motion& m, Body& b);
+// FallingBlockEntity.tick, the part before it looks where it is: gravity, the move, and what the
+// blocks it passed do to it. What follows - landing, or the drag of the air - is the caller's
+// (server/falling.cpp): it depends on the block the entity is.
+void falling_move(World& w, Motion& m, Body& b);
 // LivingEntity.tick for a living entity nobody steers: aiStep with no input - the velocity cut
 // off below 0.003, travelInAir (move, then gravity and friction) - and the blocks' effects.
 // Not pushEntities: that takes the others (push_impulse below).

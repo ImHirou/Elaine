@@ -117,6 +117,16 @@ struct BlockEntityRef {
 };
 static_assert(sizeof(BlockEntityRef) == 8);
 
+// The scheduled ticks of a chunk (world/ticks.hpp).
+struct ChunkTicks;
+
+// What the random ticks of one section have to do (see Dimension, "random ticks"): of its cells
+// that tick at random, how many may act whatever is around them, how many are about to die of
+// what stands on them - and how many of its cells are soil something could spread to.
+struct RandomCounts {
+    u16 always = 0, dying = 0, targets = 0;
+};
+
 // Chunk::keep: what came with an imported chunk and nobody here reads - the rest of its NBT, its
 // entities - kept as bytes so that nothing of a world is lost on the way in (world/anvil.hpp).
 struct KeptData {
@@ -173,6 +183,20 @@ struct Chunk {
     // its cell, one that acts on an entity in it or on it, one that breaks a fall.
     // (Dimension::holds: what collision queries and entity physics ask before reading blocks.)
     u32 filled_sections = 0, large_sections = 0, entity_sections = 0, fall_sections = 0;
+    // ---- block ticks. Which chunks are simulated is the game's to say, by the players' simulation
+    // distance: how many of them have this chunk within it (random ticks: ChunkLevel.isEntityTicking),
+    // and how many within one chunk more (scheduled ticks: isBlockTicking).
+    u16 sim_refs = 0, block_refs = 0;
+    bool block_ticking() const { return ticking && block_refs != 0; }
+    ChunkTicks* block_ticks = nullptr;  // its scheduled ticks; null while it never had one
+    // A bit per section: it holds cells that tick at random (Section::ticking); cells of them that
+    // may always act; cells that are dying; soil that can be spread to - and, worked out from
+    // those of this chunk and the eight around it, the sections whose random ticks can do
+    // anything at all. Only those are ticked (Dimension::random_chunks).
+    u32 ticking_sections = 0, always_sections = 0, dying_sections = 0, target_sections = 0, active_sections = 0;
+    static constexpr u32 kUnlisted = ~0u;
+    u32 random_slot = kUnlisted;  // its place among the chunks with random ticks to run
+    RandomCounts random[kMaxSections];
     // Vanilla SkyLightSectionStorage.topSections for this column: highest light-storing section
     // y + 1, or kNoSkyTop.
     i32 sky_top = kNoSkyTop;
@@ -218,6 +242,9 @@ void prime_heightmaps(Chunk& c);
 u32 fill_section_masks(Chunk& c);
 // ChunkSkyLightSources.fillFrom.
 void fill_sky_sources(Chunk& c, const Layout& l);
+// Chunk::random and the four masks that say which of its counts are not zero (not
+// active_sections: that takes the chunks around it, and is the dimension's to work out).
+void count_random_ticks(Chunk& c);
 // All of the above, and the non-air counts are the sections' own: after this a chunk whose
 // sections, biomes and light are in place is ready to be adopted.
 u32 derive(Chunk& c, const Layout& l);

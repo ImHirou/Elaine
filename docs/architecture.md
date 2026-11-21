@@ -3,9 +3,10 @@
 What exists today is the network stack, a world that can be built in - kept on disk, loaded and
 unloaded around the players, or imported from vanilla - the entity layer that lets players see
 each other, items - stacks, the player's inventory, what is held and worn, what lies on the
-ground - and the first blocks that do something: a chest, a furnace, a crafting table, TNT. This
-document explains how the pieces fit and why; `AGENTS.md` has the rules in short form,
-`docs/blocks-roadmap.md` the blocks that are still to come.
+ground - the first blocks that do something: a chest, a furnace, a crafting table, TNT - and
+what makes blocks act on each other and by themselves: neighbour updates, scheduled ticks,
+random ticks. This document explains how the pieces fit and why; `AGENTS.md` has the rules in
+short form, `docs/blocks-roadmap.md` the blocks that are still to come.
 
 ## Threads and the data between them
 
@@ -77,10 +78,10 @@ new connection.
 One tick, in vanilla's order (`MinecraftServer.tickChildren`):
 
 ```
-chunks in ─▶ drain packets ─▶ block ticks ─▶ block + light changes ─▶ chunks out ─▶ entity tracker ─▶ block events ─▶ entity ticks ─▶ block entities ─▶ per-player tick ─▶ send chunks ─▶ flush
-(what the    (move, click…)   (a chest's     (ChunkHolder             (saved,        (ChunkMap.tick)   (a chest's      (items, primed   (furnaces)       (ack, equipment,     (PlayerChunk
- workers                       recount)        .broadcastChanges)       unloaded)                        lid)            TNT; menus)                       head, pickup, pose)  Sender)
- finished)
+chunks in ─▶ drain packets ─▶ block ticks ──▶ block + light changes ─▶ chunks out ─▶ entity tracker ─▶ block events ─▶ entity ticks ─▶ block entities ─▶ per-player tick ─▶ send chunks ─▶ flush
+(what the    (move, click…)   (the clock;     (ChunkHolder             (saved,        (ChunkMap.tick)   (a chest's      (items, TNT,     (furnaces)       (ack, equipment,     (PlayerChunk
+ workers                       scheduled,      .broadcastChanges)       unloaded)                        lid)            falling blocks;                   head, pickup, pose)  Sender)
+ finished)                     then random)                                                                              menus)
 ```
 
 The order is observable, so it is copied: a block change reaches a client before the entity
@@ -480,7 +481,8 @@ adds a hook to `ChestBlock` stops the generator until someone has read it.
 what `LevelChunk.setBlockState` and `Level.setBlock` do around a change: the old block's block
 entity goes and spills what it held, the new block's comes, the block is told it was placed
 (TNT beside a block of redstone goes off), and the six neighbours hear of it (a chest joins or
-leaves its other half, TNT looks for a signal).
+leaves its other half, TNT looks for a signal) - in the order and by the rules of "Block
+updates", below.
 
 ### One player, two menus (`server::Menu`)
 
@@ -508,8 +510,10 @@ than that: both menus point at the same 27 stacks.
 A chest counts who has it open (`ContainerOpenersCounter`): the first opener is heard, every
 change moves the lid (a block event to everyone within 64 blocks), and while it is open the
 chest counts again every five ticks - which is how a player who comes into view later sees the
-lid up. That recount is vanilla's scheduled block tick; until there is a tick queue for blocks
-in general it has a queue of its own.
+lid up. That recount is vanilla's scheduled block tick (`ChestBlock.tick`), and runs as one:
+see "Block updates". A tick's block events are a set in vanilla (`ServerLevel.blockEvents`), so
+a lid that is closed in the very tick of its recount is told to fall once; `Game::block_event`
+drops the second likewise.
 
 ### Recipes are tables (`src/item/recipes.*`)
 
@@ -584,7 +588,8 @@ diffs what the two bots are sent. Every menu packet - `open_screen` with its tit
 slot and cursor updates with their state ids, the furnace's four numbers, `container_close` -
 comes out the same byte for byte, in the same order; so do the block states (which way a chest
 faces, which half it is), the lid's block events and their five-tick rhythm, the chest sounds
-and where they come from, the items a broken chest spills. Of a primed TNT: the fuse counting
+and where they come from, the items a broken chest spills, the level event that shows the other
+player a chest, a table or a furnace breaking. Of a primed TNT: the fuse counting
 down in its entity data every tick, the height of its hop tick by tick, the switch to exact
 positions when it lands, the `explode` packet (its tail of particles and sound byte for byte,
 the push it gives a player four blocks away within a few percent - it depends on which blocks
@@ -608,13 +613,284 @@ differs:
 - `update_recipes` at join carries the same nine property sets (which items a furnace takes...);
   vanilla also lists the stonecutter's recipes there, which no block here can use yet;
 - not sent at all, each a known gap rather than a difference in what is sent: the sound of a
-  block being placed and the particles of one being broken (to others), a player's footsteps;
+  block being placed, a player's footsteps. (A block breaking is seen and heard by the others
+  now: level event 2001.)
 - a furnace gives no experience when it is emptied, ores blown up by a player's TNT none
   either: there are no experience orbs;
 - an explosion hurts nothing but items (nothing else has health): a mob is thrown and lives,
   an armor stand breaks with its sound but without its particles;
 - a player's inventory is not kept when it leaves, so what it had on a menu's cursor or in a
   crafting grid is not dropped at its feet.
+
+## Block updates (src/server/block_updates.cpp, falling.cpp, src/world/ticks.*, dimension.*)
+
+A block that is set is the beginning of something. The blocks around it hear of it, and some
+change: a torch whose wall is gone breaks; sand with nothing under it asks to be looked at two
+ticks from now; a lamp that lost its signal goes out four ticks later; and the dirt beside
+grass is grass too, whenever chance has it. Those are the three mechanisms every block with a
+behaviour is made of - neighbour updates, scheduled ticks, random ticks - and with them came
+the first blocks that need them: torches, the redstone lamp, amethyst, grass and mycelium that
+spread and die, nylium, copper that weathers, and what falls - sand, gravel, concrete powder.
+
+One thing holds for all three: **the order is the behaviour**. Which of two blocks hears of a
+change first, which of two ticks that are due in the same game tick runs first - whatever
+players build out of blocks that react to each other is built on the answer. So nothing here
+is designed. It is vanilla's, read from the jar and kept in its order; what is ours is how it
+is stored.
+
+### A change, and who hears of it (`Game::set_block`)
+
+`Game::set_block(pos, state, flags, limit)` is `Level.setBlock` with `LevelChunk.setBlockState`
+inside it, step for step:
+
+1. the state is stored (`world::Dimension::set_block`: heightmaps, light, the change for the
+   clients, the counts of "Random ticks" below);
+2. the block entity of the block that went goes, and spills what it held;
+3. the new block is told it was placed (`onPlace`: TNT beside a signal goes off, sand asks for
+   a tick), and gets its block entity;
+4. if the block is still the one that was set - `onPlace` may have made it another - the six
+   around it hear that a block changed beside them (`neighborChanged`: a lamp looks for its
+   signal), and then each of the six takes the shape it has beside the new block
+   (`updateShape`: a chest joins its other half, grass under snow is snowy, a torch looks for
+   what holds it). A shape that is no shape at all is the end of the block:
+   `Block.updateOrDestroy` breaks it, with the particles and the sound of a breaking block
+   (level event 2001, to everyone within 64 blocks) and what its loot table drops.
+
+`flags` are vanilla's bits and mean what they mean there: 1 tells the neighbours, 2 the clients,
+16 says the shape is known and nobody need be asked, 32 that what breaks drops nothing, 256
+that a container goes without spilling, 512 that `onPlace` is skipped. A player's hand passes
+1 | 2 (vanilla's 11 has an 8 in it, which is a client's business), `/setblock` what
+`SetBlockCommand` passes.
+
+None of step 4 runs where it is made. `CollectingNeighborUpdater` is a stack: the first update
+of a chain runs at once, and what an update makes while it runs is put on top of what was
+waiting, the first of it uppermost - depth first, in the order made. Here an update is a
+record of 40 bytes on a `std::vector` that keeps its capacity (`Game::NeighborUpdate`,
+`add_update`, `run_updates`, `run_next`), of vanilla's four kinds: one block's shape, one
+block told, one block told with the state it had, and "the six around this one", which hands
+out its six one at a time so that what the first sets off is done before the second is told.
+The two orders are not the same, and both are kept: neighbours are told west, east, down, up,
+north, south (`NeighborUpdater.UPDATE_ORDER`), shapes are asked west, east, north, south, down,
+up (`BlockBehaviour.UPDATE_SHAPE_ORDER`). A chain of shape updates ends 512 deep (`limit`,
+vanilla's `updateLimit`), and all of a chain after `max-chained-neighbor-updates` (a setting,
+1 000 000 as in vanilla) is dropped with vanilla's line in the log.
+
+What a block does when it is told is a `switch` over its kind in five functions
+(`neighbor_changed`, `update_shape`, `on_place`, `tick_block`, `random_tick`; `can_survive` for
+what has to stand on something) - one per hook of `BlockBehaviour`, each case the method of the
+class it names. Whether a state has a hook at all is one byte per state, generated
+(`state::kHooks`, from the hooks its class chain overrides in the jar): of the twelve updates a
+change makes, those that reach stone - nearly all - are a load and a branch. A block of a class
+that is not ported has no bits there: an imported world's lever is told of a change and does
+nothing, as it does nothing else.
+
+### Scheduled ticks (`world::LevelTicks`, src/world/ticks.*)
+
+"Tick the block at this position, so many game ticks from now." A port of `LevelTicks`,
+`LevelChunkTicks` and `ScheduledTick`, and what it has to get right is again an order:
+
+- a chunk holds its own ticks, by game time due, then priority, then the order they were
+  scheduled in (a counter of the level, `subTickOrder`);
+- one tick per position and block at a time: a second is dropped (`ticksPerPosition`) - which
+  is what makes "schedule a tick" something a block may do on every update it hears of;
+- each game tick the due ticks of the chunks that tick are merged, chunk against chunk, by
+  priority and order of scheduling of what each has next. Ticks that are overdue - their chunk
+  did not tick for a while - come out of that in an order no single sort gives, so
+  `LevelTicks::collect` is `drainContainers` step for step, and the unit test holds it to a
+  model of vanilla's queues written from the jar;
+- at most 65 536 a game tick; a tick that is scheduled while the collected ones run waits for
+  the next game tick, however soon it is due;
+- a tick is run only if the block at its position is still the one that asked
+  (`ServerLevel.tickBlock`).
+
+What is ours is the storage. Vanilla keeps a `PriorityQueue` of objects and a hash set of
+objects per chunk, and walks a hash map of every chunk that holds a tick once a game tick.
+Here a tick is 24 bytes in a flat binary heap, with priority and order packed into one 64-bit
+key so that vanilla's two comparators are `<` on integers; the one-per-position set is a flat
+open-addressing table of 32-bit keys (block, y, z, x); and the chunks that hold ticks are two
+parallel arrays - when each is next due, which chunk it is - so that the pass over them reads
+eight bytes a chunk and touches a chunk only when something in it is due. A chunk without
+ticks has none of this: its `ChunkTicks` is made with its first tick.
+
+Ticks belong to their chunk and are saved with it (`world/chunk_io.*`, version 2 of a chunk's
+bytes: a fourth part after block entities and entities; a chunk written before there were
+ticks is still read) - as vanilla saves them: the game ticks left until each is due, in the
+order they were scheduled in. A chunk that comes back counts them again from the moment it
+first ticks blocks (`LevelChunk.unpackTicks`), before everything scheduled since. So a lamp
+that was about to go out when its chunk was unloaded goes out when somebody returns, and sand
+that hung over a hole falls. The game time itself (`Game::time_`, `Level.getGameTime`) is not
+saved yet: it starts at zero with the server, which is all a delay needs - a tick that was long
+overdue when its chunk was saved is due at a time before that zero (times are signed, as
+vanilla's are) and runs at once.
+
+The chest's lid, which had a queue of its own for `ChestBlock.tick`'s recount, is a scheduled
+tick now like every other.
+
+### Random ticks, and the sections that have none to run
+
+`ServerLevel.tickChunk`: every game tick, in every section of every simulated chunk that holds
+a block which ticks at random, `random-tick-speed` cells (3) are picked - by vanilla's
+generator, `randValue * 3 + 1013904223` and its bits - and a picked cell whose block is one of
+those gets its `randomTick`. Ported so far: grass and mycelium spread to dirt within reach
+(one to each side, three down, one up) where there is light and room above, and turn to dirt
+under what shuts the light out; nylium turns to netherrack; copper weathers, slower among
+copper that is behind it; budding amethyst grows buds on its sides.
+
+On a server of 500 players that is some hundreds of thousands of sections asked three times a
+tick, and nearly every answer is "nothing": the cell is stone, or it is grass that is neither
+smothered nor has any dirt to take. A world of grass ticks all day and nothing ever happens.
+So the question is answered ahead of time, per section, by counting:
+
+- `Section::ticking` - cells whose state ticks at random at all;
+- `RandomCounts::always` - of those, cells that may act whatever is around them (copper,
+  budding amethyst);
+- `RandomCounts::dying` - grass, mycelium or nylium under a block that kills it;
+- `RandomCounts::targets` - dirt with room above: what a spreader could take.
+
+Each is kept by `Dimension::set_block` as the cell and the cell above or below it change (two
+table lookups per changed block: `state::kRandom`, a byte per state that says what a state is
+to a random tick and what it is to the block under it - generated from the jar's occlusion
+shapes, light dampening and fluids, so that "does this kill grass" is not computed at
+runtime), and counted in full when a chunk is loaded, on the worker. Per chunk the counts fold
+into bit masks over its sections, and
+
+    active = ticking & (always | dying | near)
+
+where `near` is the targets of the chunk and of the eight around it, widened by a section up
+and down - a spreader reaches one block sideways and from three below to one above, never
+further than the sections next to its own. A section that is not active is **dormant**: no
+random tick in it can change anything, so it is not ticked. Only chunks that tick, are
+simulated and have an active section are in the list the tick walks
+(`Dimension::random_chunks`), and it walks their active sections alone. A flat world of grass
+has an empty list; a hole dug into it wakes the sections around the hole until the dirt is
+grass, and they go dormant again.
+
+This is a shortcut, and it is held to the long way like the others: in a build with DCHECKs
+(`dev`) dormant sections are ticked all the same, and a random tick in one that changes a block
+stops the server (`kCheckDormantSections`, `Game::expect_no_change_`) - the suite's
+`random_ticks` scenario and `block_probe.py ours build/dev/craftc` run that way, at 4096 ticks
+a section. The unit test counts every section of a chunk by brute force after each of some
+thousand changes and compares.
+
+Two things differ from vanilla, neither visible: the generator's values go to other cells (it
+is seeded from the clock there too), and a section that a tick wakes is ticked from the next
+game tick on, where vanilla - which walks its chunks in the order of a hash map - would get to
+it in the same tick if its chunk happened to come later.
+
+### Who is simulated
+
+A player's simulation ticket is at the chunk it is in (`DistanceManager.addPlayer`). Chunks
+within `simulation-distance` of a player - a square - have random ticks; those one chunk
+further still run their scheduled ticks (vanilla's entity-ticking and block-ticking levels:
+`ServerChunkCache.tickChunks` walks the first, `LevelTicks` asks for the second). A tick in a
+chunk beyond that waits, saved and loaded with its chunk if need be, until a player comes.
+`Chunk::sim_refs` and `block_refs` count the players that cover a chunk, and are changed when
+a player crosses into another chunk, joins or leaves, and when a chunk is adopted
+(`Game::move_simulation`, `simulate_adopted`) - nothing is worked out per tick. Entities do not
+follow it yet: they tick wherever their chunk ticks (see "Physics"), where vanilla's stop a
+chunk short of the scheduled ticks - `Chunk::sim_refs` is what its `inEntityTickingRange` would
+read here.
+
+### What falls (`server/falling.cpp`)
+
+Sand, red sand, gravel and the sixteen concrete powders (`FallingBlock`, `ColoredFallingBlock`,
+`ConcretePowderBlock`) ask, when they are placed or hear of a change, for a tick two game ticks
+later, and if what is under them then gives way - air, fire, a liquid, anything replaceable
+(`state::kFallThrough`) - the block becomes an entity in its place: a `FallingBlockEntity`,
+which is a row of the entity table like an item or a primed TNT (`entity::Store::block_state`,
+`start_pos`), moved by `phys::falling_move` and held to vanilla's bits by a recording of its
+own (16 scenarios of `physics_probe.py`, `Physics.ReplaysTheFallingBlocksAVanillaServerRecorded`).
+Where it comes down it is a block again if the block there gives way and it could stand; on a
+torch or a slab it breaks and lies there as an item. Concrete powder that lands in water, or
+beside it, is concrete, and so is powder that water is poured beside - or would be: nothing
+here places water yet, an imported world has it.
+
+A client moves a falling block by itself and takes it away when told; the block it becomes is
+sent twice, as in vanilla - at once to those who see the entity (`block_update`, and
+`add_transient_block`: the client draws that block by itself for up to a second, a
+`TransientBlock`, whatever its chunk shows meanwhile), and with the chunk's changes to everyone. A falling block is saved with its chunk (`server/persist.cpp`,
+entity records version 2), and nothing can be built where one is.
+
+### Compared with vanilla
+
+`tools/vanilla/block_probe.py` runs both servers through the same 55 steps - two bots, one
+building, one watching from three blocks off, and the console - and compares what each bot is
+told: every block change, level event, falling block, primed TNT and dropped item, in the
+order it came and by the tick it came in. It starts the servers itself; vanilla gets a new flat world every time.
+In the last recordings nothing differs, in any step, for either bot. What that covers:
+
+- **torches**: which form a torch takes by the face that is clicked and where its player looks
+  (standing; on a wall; under a block, looking level and looking down), a torch on a torch
+  refused; five torches of three kinds around one stone breaking in the order west, east,
+  north, south, up when the stone goes, each with its level event and its item;
+- **the lamp**: lit in the tick its signal comes, out four game ticks after it went, and not
+  out if the signal is back by then - at once, or two ticks later;
+- **amethyst**: a cluster and a bud go with the stone they are on; the cluster leaves two
+  shards, the bud nothing;
+- **commands**: `/setblock ... destroy` and `/fill ... destroy` break like a hand does and take
+  the torch on top along; sand set into the air falls; a torch set into the air stays, and
+  goes when the block under it is replaced by air; a lamp set beside a block of redstone stays
+  dark - the command tells the neighbours, not the block - until something beside it changes;
+- **what falls**: the tick the entity appears in and what it says of itself (where it began,
+  twice), the tick it lands in - seven after the block under it went for one block's fall, ten
+  for two - the block, the transient block, the entity's removal, the block once more a tick
+  later; gravel that lands on a torch lying there as an item; two blocks of sand falling as
+  two entities and standing as two blocks again; and of a fall of forty blocks what its
+  viewers are told on the way: a step every twentieth tick, the velocity with it, a whole
+  position once the step no longer fits a packet's sixteen bits;
+- **random ticks** (4096 a section, to have them soon): a hole dug into grass is grass at its
+  bottom; grass under a stone is dirt; dirt put on grass is grass, and the grass under it
+  dirt; copper goes all the way to oxidized; budding amethyst has a full cluster on each of
+  five sides, each facing away from it; nylium under a stone is netherrack; and where nothing
+  was done nothing happens;
+- **TNT** on five sides of a block of redstone is primed west, east, up, north, south.
+
+What a recording cannot say is said by the unit tests: the tick queue's order against a model
+of vanilla's queues, the falling block's path against a recording of vanilla's doubles.
+
+Differences that remain, by decision:
+
+- an entity that a tick makes - a falling block, a primed TNT - is shown by vanilla the moment
+  it is made and here with the tick's other entities: after that tick's block changes instead
+  of before them, in the same flush;
+- level events and sounds leave vanilla when they happen - between two ticks if a packet was
+  the cause - and this server at the end of the tick, with everything else;
+- the entities of a tick are told about in the order they were made; vanilla walks a hash map
+  of them;
+- which cells the random ticks fall on (see above);
+- entities - falling blocks too - tick wherever their chunk ticks, not within the simulation
+  distance (see "Physics").
+
+### What it costs
+
+Not measured: no benchmark was written for any of this, by request, so no number is claimed
+here. What the layouts are meant to avoid is said where they are described - a hook that is
+absent costs a table byte, a chunk with no tick due costs eight bytes of a pass, a section
+with nothing to do costs nothing - and `bench` cases for a chain of neighbour updates, the
+tick queue under load and the random pass belong with the first claim that any of it is fast.
+
+### What is not there
+
+- **Fluids.** No fluid ticks (vanilla's second `LevelTicks`, run after the blocks'): a
+  waterlogged block that would ask for one on an update does not. Ice does not melt - it
+  would leave water - and lava sets nothing alight (a fluid's random tick). Concrete powder
+  hardens beside water, which only an imported world has, and that water does not flow.
+- **The time of day and the weather.** `raw_brightness` reads the sky's light as at noon: grass
+  spreads by night as by day, where vanilla's would wait for a torch. Nothing rains or snows
+  on a block (`tickPrecipitation`), no lightning.
+- **Game rules.** `random-tick-speed` is a setting of the server; blocks and entities always
+  drop.
+- **Comparators** (`updateNeighbourForOutputSignal`) and redstone wire's shape updates at a
+  distance (`updateIndirectNeighbourShapes`): neither block exists. A signal is still "a block
+  of redstone beside me".
+- **The scheduled ticks of an imported world.** A vanilla chunk's `block_ticks` are kept with
+  the rest of its tags, unread: sand that vanilla had saved in the middle of its two ticks
+  waits for the next change beside it.
+- **The game time across a restart**: it starts at zero. Delays do not mind; the day will.
+- Falling: anvils and pointed dripstone, which hurt what they land on; a falling block's own
+  tag from `/summon` (it is sand); concrete powder that falls faster than a block a tick is
+  looked for water along its way only when it falls straight down.
+- The sound of a block being placed.
 
 ## Physics (src/phys/, src/world/collide.*, src/server/physics.cpp)
 
@@ -1323,8 +1599,6 @@ None of it is touched unless a command runs.
   profile); in online mode Mojang would have to be asked.
 - Suggestions the server would have to compute (`ask_server`): `/op` and `/deop` leave their
   argument to the client's own completion of player names.
-- `/setblock ... destroy` breaks the block without the particles and sound of a broken block
-  (`level_event` 2001), which nothing here sends yet.
 - Every command about something that does not exist: chat (`say`, `msg`, `me`, `tellraw`),
   time and weather, game modes, effects, experience, scoreboards and teams, `execute`, `data`,
   `clear` (the inventory can do it; its item predicates are the work), bans and the whitelist.
@@ -1404,9 +1678,11 @@ Roughly in dependency order:
    needs none of that first, only a game mode.
    Text: selectors and the other contents that are not read. (The server's own components are
    built with `text::Text`.)
-8. **Blocks**: `docs/blocks-roadmap.md` - shapes that follow their neighbours, scheduled and
-   random ticks, fluids, redstone, the other block entities. And what the first four still
-   lack: experience orbs.
+8. **Blocks**: `docs/blocks-roadmap.md`. Neighbour updates, scheduled ticks and random ticks
+   are there (see "Block updates"), so a block class is its own hooks now and no longer a
+   missing system: slabs, stairs, fences and the other shapes, plants and what else needs
+   something to stand on. Then fluids - with them fluid ticks, ice, waterlogging - redstone,
+   the other block entities. And what the first four still lack: experience orbs.
 9. **Commands**: an SNBT reader (block entity data, item components, `/summon`'s tag, `nbt=`),
    `facing`, then the commands that wait for their subject - chat first.
 10. Lua plugin host.

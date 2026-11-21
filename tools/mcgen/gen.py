@@ -370,19 +370,46 @@ STATE_FLAGS = [
 # placement kind only when every hook vanilla runs for it is one the server implements (see
 # placement_kind below) - everything else stays kPlaceNone until its behaviour is written.
 BLOCK_FLAGS = [
-    ("kPlaceMask", 0x7, "placement kind, one of:"),
+    ("kPlaceMask", 0xF, "placement kind, one of:"),
     ("kPlaceNone", 0, "not placeable yet: the block or its item has behaviour that is not implemented"),
     ("kPlaceDefault", 1, "Block.getStateForPlacement(): the default state"),
     ("kPlaceAxis", 2, "RotatedPillarBlock: axis = clicked face's axis; alt = states for x, y, z"),
     ("kPlaceSnowy", 3, "SnowyBlock: snowy = block above is in #snow; alt = states for false, true"),
     ("kPlaceChest", 4, "ChestBlock: faces the player, joins a single chest beside it (props::chest)"),
     ("kPlaceFacing", 5, "AbstractFurnaceBlock: `facing` = opposite of the player's horizontal direction (props::furnace)"),
-    ("kSnowTag", 0x8, "member of #minecraft:snow (makes the SnowyBlock below it snowy)"),
-    ("kSnowyBelow", 0x10, "SnowyBlock.updateShape(): re-evaluates `snowy` when the block above changes"),
+    ("kPlaceTorch", 6, "StandingAndWallBlockItem: standing, or on the first wall the player looks at that holds it; "
+                       "alt = the standing block's state, the wall block's first state (facing north, south, west, east)"),
+    ("kPlaceCluster", 7, "AmethystClusterBlock: `facing` = the clicked face, waterlogged in water (props::amethyst_cluster)"),
+    ("kPlaceLamp", 8, "RedstoneLampBlock: lit while a signal arrives (props::redstone_lamp)"),
+    ("kPlaceConcretePowder", 9, "ConcretePowderBlock: its concrete (alt[0]) when it is placed in or against water"),
+    ("kSnowTag", 0x10, "member of #minecraft:snow (makes the SnowyBlock below it snowy)"),
     ("kInteractive", 0x20, "overrides useItemOn/useWithoutItem: a click may be consumed by the block"),
     ("kGameMaster", 0x40, "GameMasterBlock: only operators may break it"),
     ("kCustomReplace", 0x80, "overrides canBeReplaced(state, context): kReplaceable alone does not decide"),
     ("kCustomClone", 0x100, "overrides getCloneItemStack: \"pick block\" gives something other than a plain stack of its item"),
+]
+
+# proto::gen::state::kHooks: which of the hooks a block change runs the state's block has - of a
+# ported class; the others have none here, and a block of theirs that an imported world holds
+# does nothing. One byte a state: what Level.setBlock asks of each of the twelve neighbours.
+HOOK_FLAGS = [
+    ("kHookShape", "updateShape", "BlockBehaviour.updateShape is its class's own"),
+    ("kHookNeighbor", "neighborChanged", "...neighborChanged"),
+    ("kHookPlace", "onPlace", "...onPlace"),
+    ("kHookTick", "tick", "...tick: what a scheduled tick of it runs"),
+    ("kFallThrough", None, "FallingBlock.isFree(): air, fire, a liquid, or replaceable - what stands on it falls"),
+]
+# proto::gen::state::kRandom: what a random tick does with the state, and what the state is to
+# the random ticks of the blocks under it.
+RANDOM_FLAGS = [
+    ("kRandomTick", "isRandomlyTicking(), and the block's randomTick is ported"),
+    ("kRandomAlways", "...and may act whatever stands around the block (copper weathers, amethyst buds)"),
+    ("kSpreader", "SpreadingSnowyBlock (grass, mycelium): dies under what smothers it, spreads to soil"),
+    ("kSoil", "the block a spreader spreads to and dies into (dirt)"),
+    ("kSmothers", "as the block above a spreader: SpreadingSnowyBlock.canStayAlive is false"),
+    ("kNoSpread", "as the block above soil: nothing spreads there (canPropagate: it smothers, or is water)"),
+    ("kNylium", "NyliumBlock: turns into netherrack under what smothers it"),
+    ("kSmothersNylium", "as the block above nylium: NyliumBlock.canBeNylium is false"),
 ]
 
 ITEM_FLAGS = [
@@ -392,6 +419,7 @@ ITEM_FLAGS = [
     ("kHasDamage", 0x8, "default components hold DAMAGE (always 0 there)"),
     ("kEquipRestricted", 0x10, "its EQUIPPABLE lists allowed_entities, and players are not among them"),
     ("kExplosionProof", 0x20, "its DAMAGE_RESISTANT covers explosions: as an item entity it survives them (the nether star)"),
+    ("kStandingAndWall", 0x40, "StandingAndWallBlockItem: places its block standing, or the block's wall variant (a torch)"),
 ]
 
 # net.minecraft.world.entity.EquipmentSlot, by serialized name -> ordinal. The ordinal is what
@@ -411,25 +439,30 @@ def hook_default(block: dict, hook: str) -> bool:
 
 
 def placement_kind(block: dict, item: dict | None, ported: tuple | None = None) -> int:
-    """`ported`: (kind, placement) from gen_game.PORTED_BLOCKS when the block's own class is one the
-    server implements in full - then its hooks are simulated, whatever they are."""
-    if item is None or item["class"] != "BlockItem" or block["game_master"]:
+    """`ported`: (kind, placement, item class) from gen_game.PORTED_BLOCKS when the block's own class is one
+    the server implements in full - then its hooks are simulated, whatever they are."""
+    if item is None or block["game_master"]:
         return 0
     if ported and ported[1]:
+        if item["class"] != ported[2]:
+            die(f"{block['name']}: its item is a {item['class']}, the port of its class places it with a {ported[2]}")
         return next(value for name, value, _ in BLOCK_FLAGS if name == ported[1])
-    if block["entity_block"]:
+    if item["class"] != "BlockItem" or block["entity_block"]:
         return 0
     if not all(hook_default(block, h) for h in UNSIMULATED_HOOKS + ("canSurvive", "setPlacedBy", "playerWillDestroy")):
         return 0
     how = block["hooks"]["getStateForPlacement"]
     shape = block["hooks"]["updateShape"]
+    kind = 0
     if how == "Block" and shape == "BlockBehaviour":
-        return 1
-    if how == "RotatedPillarBlock" and shape == "BlockBehaviour" and "axis_states" in block:
-        return 2
-    if how == "SnowyBlock" and shape == "SnowyBlock":
-        return 3
-    return 0
+        kind = 1
+    elif how == "RotatedPillarBlock" and shape == "BlockBehaviour" and "axis_states" in block:
+        kind = 2
+    # A random tick nobody ported is a gap that has a name, never a silent one.
+    if kind and not ported and not hook_default(block, "randomTick") and block["class"] not in gen_game.RANDOM_TICK_GAPS:
+        die(f"{block['name']}: placeable by the general rule, but {block['hooks']['randomTick']}.randomTick is neither "
+            "ported (gen_game.PORTED_BLOCKS) nor a known gap (RANDOM_TICK_GAPS)")
+    return kind
 
 
 def classes_declaring(version: str, classes: set[str], method: str) -> set[str]:
@@ -597,6 +630,76 @@ def build_block_tables(v: dict, blocks: dict, data: dict, static_regs: dict, van
     matrix = [[sum(1 << b for b in range(len(tuples)) if occ[tuples[a][d]][tuples[b][opposite[d]]] == "1")
                for d in range(6)] for a in range(len(tuples))]
 
+    # ---- what a block change, a scheduled tick and a random tick ask of a state
+    ported_of = {}
+    for b in ext_blocks:
+        gb = game["blocks"].get(b["name"])
+        if gb is None or gb["id"] != b["id"]:
+            die(f"{b['name']}: gamedata/blocks.json is from another version - run: mcgen.py gamedata")
+        ported_of[b["name"]] = gen_game.ported_block(gb)
+    hbit = {name: 1 << i for i, (name, _, _) in enumerate(HOOK_FLAGS)}
+    rbit = {name: 1 << i for i, (name, _) in enumerate(RANDOM_FLAGS)}
+    if len(HOOK_FLAGS) > 8 or len(RANDOM_FLAGS) > 8:
+        die("kHooks and kRandom are one byte per state")
+    cols = game["states"]["columns"]
+    fire = tagged("fire")
+    fluid_tags = flatten_tags(vanilla.tags("fluid"), fluid_ids, "minecraft:fluid")
+    if "minecraft:water" not in fluid_tags:
+        die("fluid tag #water is missing: SpreadingSnowyBlock.canPropagate asks it")
+    water = set(fluid_tags["minecraft:water"])
+    fluid_states = game["fluids"]["states"]
+    if [f["id"] for f in fluid_states] != list(range(len(fluid_states))) or len(cols["fluid_state"]) != n:
+        die("gamedata/fluids.json: fluid states are not listed by id")
+    snow_one = next(s["id"] for s in blocks["minecraft:snow"]["states"] if s["properties"] == {"layers": "1"})
+    soil: set[int] = set()
+    for b in ext_blocks:
+        gb = game["blocks"][b["name"]]
+        if (ported_of[b["name"]] or (None,))[0] == "kSpreading":
+            base = gb["fields"].get("baseBlock")
+            if base != "minecraft:dirt":
+                die(f"{b['name']}: spreads to {base}; the port and its tables take one soil for every spreader")
+            soil.add(block_ids[base])
+    up = 1  # Direction.UP
+    hooks = bytearray(n)
+    random_ticks = bytearray(n)
+    for i in range(n):
+        b = ext_blocks[st["block"][i]]
+        ported = ported_of[b["name"]]
+        kind = ported[0] if ported else "kPlain"
+        gh = game["blocks"][b["name"]]["hooks"]
+        h = 0
+        if ported:
+            for name, hook, _ in HOOK_FLAGS:
+                h |= hbit[name] if hook and hook in gh else 0
+        # FallingBlock.isFree
+        h |= hbit["kFallThrough"] if (st["air"][i] or b["id"] in fire or cols["liquid"][i] or st["replaceable"][i]) else 0
+        hooks[i] = h
+        r = 0
+        if st["randomly_ticking"][i] and kind in gen_game.RANDOM_TICK_KINDS:
+            r |= rbit["kRandomTick"] | (rbit["kRandomAlways"] if kind in gen_game.RANDOM_TICK_ALWAYS else 0)
+        if kind in ("kSpreading", "kNylium"):
+            # LightEngine.getLightDampeningInto(this, above, UP, ...) is read below with an empty shape for `this`.
+            if st["occlusion_tuple"][i] != 0 or not st["randomly_ticking"][i]:
+                die(f"{b['name']}: a spreading block that uses its shape for light occlusion, or does not tick")
+            r |= rbit["kSpreader"] if kind == "kSpreading" else rbit["kNylium"]
+        r |= rbit["kSoil"] if b["id"] in soil else 0
+        # As the block above: LightEngine.getLightDampeningInto(below, this, UP, this.getLightDampening()) -
+        # 16 when the two faces together shut the light out, else its dampening - is 15 or more.
+        dark = ((matrix[0][up] >> st["occlusion_tuple"][i]) & 1) or st["dampening"][i] >= 15
+        fluid = fluid_states[cols["fluid_state"][i]]
+        if fluid_ids[fluid["fluid"]] != st["fluid"][i]:
+            die(f"state {i}: gamedata and blockdata disagree on its fluid")
+        smothers = i != snow_one and (fluid["amount"] == 8 or dark)  # SpreadingSnowyBlock.canStayAlive, negated
+        r |= rbit["kSmothers"] if smothers else 0
+        r |= rbit["kNoSpread"] if (smothers or st["fluid"][i] in water) else 0  # canPropagate, negated
+        r |= rbit["kSmothersNylium"] if dark else 0                              # NyliumBlock.canBeNylium, negated
+        random_ticks[i] = r
+    for col in ("sturdy_full", "sturdy_center"):
+        if len(cols[col]) != n or any(not 0 <= v < 64 for v in cols[col]):
+            die(f"gamedata/states.json: column {col} is not six bits a state")
+    if game["states"]["legend"]["directions"] != ["DOWN", "UP", "NORTH", "SOUTH", "WEST", "EAST"]:
+        die("gamedata/states.json: the sturdy columns are not in Direction order")
+
     shapes = data["collision_shapes"]
     coll = [0xFFFF if c < 0 else c for c in st["collision_shape"]]
     if len(shapes) >= 0xFFFF:
@@ -609,6 +712,10 @@ def build_block_tables(v: dict, blocks: dict, data: dict, static_regs: dict, van
         "state_block.bin": u16s(st["block"]),
         "state_collision.bin": u16s(coll),
         "state_fluid_legacy.bin": u16s(st["fluid_legacy_block"]),
+        "state_hooks.bin": bytes(hooks),
+        "state_random.bin": bytes(random_ticks),
+        "state_sturdy_full.bin": bytes(cols["sturdy_full"]),
+        "state_sturdy_center.bin": bytes(cols["sturdy_center"]),
     }
 
     hdr = HEADER.format(id=v["id"], proto=v["protocol_version"])
@@ -628,9 +735,29 @@ namespace proto::gen::state {
     o.append("// kFlags[state]\n")
     for name, why in STATE_FLAGS:
         o.append(f"inline constexpr unsigned char {name} = 0x{bit[name]:02X};  // {why}\n")
+    o.append("\n// kHooks[state]\n")
+    for name, _, why in HOOK_FLAGS:
+        o.append(f"inline constexpr unsigned char {name} = 0x{hbit[name]:02X};  // {why}\n")
+    o.append("\n// kRandom[state]\n")
+    for name, why in RANDOM_FLAGS:
+        o.append(f"inline constexpr unsigned char {name} = 0x{rbit[name]:02X};  // {why}\n")
     o.append("""
 inline constexpr unsigned char kFlags[] = {
 #embed "state_flags.bin"
+};
+inline constexpr unsigned char kHooks[] = {
+#embed "state_hooks.bin"
+};
+inline constexpr unsigned char kRandom[] = {
+#embed "state_random.bin"
+};
+// BlockState.isFaceSturdy(level, pos, direction, SupportType.FULL / CENTER): bit = direction. Asked
+// of the state alone: a block whose support shape depends on where it is answers for nowhere.
+inline constexpr unsigned char kSturdyFull[] = {
+#embed "state_sturdy_full.bin"
+};
+inline constexpr unsigned char kSturdyCenter[] = {
+#embed "state_sturdy_center.bin"
 };
 // emission << 4 | dampening  (BlockState.getLightEmission() / getLightDampening())
 inline constexpr unsigned char kLight[] = {
@@ -651,6 +778,7 @@ inline constexpr unsigned char kFluidLegacyBytes[] = {
 #embed "state_fluid_legacy.bin"
 };
 static_assert(sizeof kFlags == kCount && sizeof kLight == kCount && sizeof kOcclusion == kCount);
+static_assert(sizeof kHooks == kCount && sizeof kRandom == kCount && sizeof kSturdyFull == kCount && sizeof kSturdyCenter == kCount);
 static_assert(sizeof kBlockBytes == 2 * kCount && sizeof kCollisionBytes == 2 * kCount && sizeof kFluidLegacyBytes == 2 * kCount);
 
 constexpr unsigned u16_at(const unsigned char* t, unsigned i) { return t[2 * i] | static_cast<unsigned>(t[2 * i + 1]) << 8; }
@@ -705,7 +833,8 @@ struct BlockInfo {
     unsigned short first_state, state_count, default_state;
     unsigned short item;        // item that places it, 0 (minecraft:air) = none
     unsigned short flags;       // kPlace* kind in the low bits, then the k* bits below
-    unsigned short alt[3];      // states the placement kind chooses between (see kPlace*)
+    unsigned short alt[3];      // states its placement kind chooses between (see kPlace*) - and then, by kind:
+                                // kSpreading: [2] the soil it dies into; kWeathering: [0] its next stage, 0 for none
     unsigned short place_sound, break_sound;  // sound_event registry ids
     float sound_volume, sound_pitch;
     float explosion_resistance; // Block.getExplosionResistance()
@@ -721,6 +850,7 @@ struct BlockInfo {
     float drop_chance;
     unsigned char kind;         // block_kind::*: the behaviour the server implements for its class
     unsigned char block_entity; // block_entity_type id of its block entity, kNoBlockEntity without one
+    unsigned char weather;      // ChangeOverTimeBlock.getAge() of a WeatheringCopper block, ordinal + 1; 0: it is none
 };
 struct ItemInfo {
     unsigned short block;       // block a BlockItem places, kNoBlock = not a block item
@@ -779,21 +909,38 @@ namespace proto::gen {
 
     bf = {name: value for name, value, _ in BLOCK_FLAGS}
     custom_clone = blocks_with_custom_clone(v["id"], {b["class"] for b in ext_blocks})
-    kinds = [0] * 8
+    kinds = [0] * 16
     placeable_names: set[str] = set()
     loot = gen_game.Loot(vanilla, item_ids)
     be_ids = {n: e["protocol_id"] for n, e in static_regs["minecraft:block_entity_type"]["entries"].items()}
     signal_hooks = ("isSignalSource", "ownSignal", "getSignal", "getDirectSignal")
     drop_hooks = ("dropFromExplosion", "onExplosionHit", "getExplosionResistance", "getDrops", "getSpeedFactor",
                   "getBounceRestitution")
+    default_states = {b["name"]: b["default_state"] for b in ext_blocks}
+
+    def default_of(block_name: str) -> int:
+        if block_name not in default_states:
+            die(f"a block's fields name {block_name}, which is no block")
+        return default_states[block_name]
+
+    # StandingAndWallBlockItem: the standing block and the wall block of one item, by either's name.
+    torch_pairs: dict[str, tuple[str, str]] = {}
+    for it in game["items"].values():
+        if it["class"][0] == "StandingAndWallBlockItem":
+            standing, wall = it["fields"]["block"], it["fields"]["wallBlock"]
+            if (ported_of.get(standing) or (None,))[0] != "kTorch":
+                continue
+            if it["fields"]["attachmentDirection"] != "DOWN" or (ported_of.get(wall) or (None,))[0] != "kWallTorch":
+                die(f"{it['name']}: a torch item that hangs, or whose wall block is not a ported WallTorchBlock")
+            torch_pairs[standing] = torch_pairs[wall] = (standing, wall)
+    weather_states = [c["name"] for c in game["enums"]["net.minecraft.world.level.block.WeatheringCopper$WeatherState"]]
+    weathering_next = game["statics"]["net.minecraft.world.level.block.WeatheringCopper"]["NEXT_BY_BLOCK"]
     t.append(f"inline constexpr BlockInfo kBlocks[{len(ext_blocks)}] = {{\n")
     for b in ext_blocks:
         name = b["name"]
         item = ext_items.get(b["item"])
-        gb = game["blocks"].get(name)
-        if gb is None or gb["id"] != b["id"]:
-            die(f"{name}: gamedata/blocks.json is from another version - run: mcgen.py gamedata")
-        ported = gen_game.ported_block(gb)
+        gb = game["blocks"][name]
+        ported = ported_of[name]
         kind = placement_kind(b, item if b["item"] != "minecraft:air" else None, ported)
         kinds[kind] += 1
         if kind:
@@ -817,16 +964,37 @@ namespace proto::gen {
         if settings["explosionResistance"] != b["explosion_resistance"]:
             die(f"{name}: blockdata.json and gamedata disagree on its explosion resistance")
         alt = [0, 0, 0]
+        own_kind = ported[0] if ported else "kPlain"
         if kind == 2:
             alt = list(b["axis_states"])
-        elif kind == 3:
+        elif kind == bf["kPlaceSnowy"]:
             snowy = {s["properties"]["snowy"]: s["id"] for s in blocks[name]["states"]}
             if set(blocks[name]["properties"]) != {"snowy"}:
                 die(f"{name}: a SnowyBlock with more properties than `snowy`")
-            alt = [snowy["false"], snowy["true"], 0]
+            alt = [snowy["false"], snowy["true"], default_of(gb["fields"]["baseBlock"]) if own_kind == "kSpreading" else 0]
+        elif kind == bf["kPlaceTorch"]:
+            pair = torch_pairs.get(name)
+            if pair is None:
+                die(f"{name}: a torch that no StandingAndWallBlockItem places")
+            alt = [default_of(pair[0]), first[pair[1]], 0]
+        elif kind == bf["kPlaceConcretePowder"]:
+            alt = [default_of(gb["fields"]["concrete"]), 0, 0]
+        # ChangeOverTimeBlock: every block of the family counts when one of them weathers, ported or not.
+        weather = 0
+        if "WeatheringCopper" in gb["interfaces"]:
+            age = gb["fields"].get("weatherState", gb["fields"].get("weatheringState"))  # (the golem statue's is its parent's)
+            if age not in weather_states:
+                die(f"{name}: a WeatheringCopper block without a weatherState of {weather_states}")
+            weather = weather_states.index(age) + 1
+        if own_kind == "kWeathering":
+            if not weather or blocks[name].get("properties"):
+                die(f"{name}: a weathering full block without an age, or with properties (getNext copies them)")
+            nxt = weathering_next.get(name)
+            alt = [default_of(nxt) if nxt else 0, 0, 0]
+            if any(st["randomly_ticking"][s["id"]] != (nxt is not None) for s in blocks[name]["states"]):
+                die(f"{name}: isRandomlyTicking is not 'it has a next stage'")
         f = kind
         f |= bf["kSnowTag"] if b["id"] in snow else 0
-        f |= bf["kSnowyBelow"] if b["hooks"]["updateShape"] == "SnowyBlock" else 0
         f |= bf["kInteractive"] if not (hook_default(b, "useItemOn") and hook_default(b, "useWithoutItem")) else 0
         f |= bf["kGameMaster"] if b["game_master"] else 0
         f |= bf["kCustomReplace"] if not hook_default(b, "canBeReplaced") else 0
@@ -837,8 +1005,8 @@ namespace proto::gen {
                  f"{cfloat(snd['volume'])}f, {cfloat(snd['pitch'])}f, {cfloat(settings['explosionResistance'])}f, "
                  f"{cfloat(settings['speedFactor'])}f, {cfloat(settings['bounceRestitution'])}f, "
                  f"{{{{{drops[0][1]}, {drops[0][2]}, {drops[0][3]}}}, {{{drops[1][1]}, {drops[1][2]}, {drops[1][3]}}}}}, "
-                 f"{cfloat(drops[0][0])}f, block_kind::{ported[0] if ported else 'kPlain'}, "
-                 f"{be_ids[be] if be is not None else 'kNoBlockEntity'}}},  // {name.split(':', 1)[1]}\n")
+                 f"{cfloat(drops[0][0])}f, block_kind::{own_kind}, "
+                 f"{be_ids[be] if be is not None else 'kNoBlockEntity'}, {weather}}},  // {name.split(':', 1)[1]}\n")
     t.append("};\n\n")
 
     itf = {name: value for name, value, _ in ITEM_FLAGS}
@@ -850,6 +1018,7 @@ namespace proto::gen {
         comps = item_default_components(name)
         tool = comps.get("minecraft:tool")
         f = itf["kPlainBlockItem"] if it["class"] == "BlockItem" else 0
+        f |= itf["kStandingAndWall"] if it["class"] == "StandingAndWallBlockItem" else 0
         f |= itf["kDestroysInCreative"] if (tool is None or tool.get("can_destroy_blocks_in_creative", True)) else 0
         blk = block_ids[it["block"]] if "block" in it else 0xFFFF
         stack = comps.get("minecraft:max_stack_size", 1)
@@ -1035,6 +1204,7 @@ ENTITY_DATA_CLASSES = [
     ("player", "net.minecraft.world.entity.player.Player", "avatar"),
     ("item_entity", "net.minecraft.world.entity.item.ItemEntity", "entity"),
     ("primed_tnt", "net.minecraft.world.entity.item.PrimedTnt", "entity"),
+    ("falling_block", "net.minecraft.world.entity.item.FallingBlockEntity", "entity"),
 ]
 LIVING = "net.minecraft.world.entity.LivingEntity"
 

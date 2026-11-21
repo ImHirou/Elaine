@@ -68,12 +68,16 @@ class Game {
     static constexpr u8 kEquipDirty = 2;  // hands or armour may differ from what viewers were told
 
     // How a block is set: the flags of Level.setBlock that mean something here (Block.UPDATE_*).
-    static constexpr u32 kUpdateNeighbors = 1;        // the six neighbours hear neighborChanged
-    static constexpr u32 kUpdateClients = 2;          // (always: every change is broadcast)
-    static constexpr u32 kUpdateKnownShape = 16;      // the neighbours' shapes are left alone
+    static constexpr u32 kUpdateNeighbors = 1;       // the six neighbours hear neighborChanged
+    static constexpr u32 kUpdateClients = 2;         // (always: every change is broadcast)
+    static constexpr u32 kUpdateKnownShape = 16;     // the neighbours' shapes are left alone
+    static constexpr u32 kUpdateSuppressDrops = 32;  // a neighbour that breaks of it drops nothing
+    static constexpr u32 kUpdateMoveByPiston = 64;
     static constexpr u32 kUpdateSkipContainer = 256;  // SKIP_BLOCK_ENTITY_SIDEEFFECTS: what a container held is not spilled
     static constexpr u32 kUpdateSkipOnPlace = 512;    // the new block is not told it was placed
     static constexpr u32 kUpdateAll = kUpdateNeighbors | kUpdateClients;
+    static constexpr i32 kUpdateLimit = 512;              // Block.UPDATE_LIMIT: how deep one change's shape updates may nest
+    static constexpr u32 kLevelEventDestroyBlock = 2001;  // LevelEvent.PARTICLES_AND_SOUND_DESTROY_BLOCK: `data` is the state
 
     struct Player {
         u32 reactor = 0, slot = 0, gen = 0;
@@ -119,10 +123,22 @@ class Game {
         i32 x, y, z;
         u8 b0, b1;
     };
-    struct Recheck {  // a scheduled ChestBlock.tick
-        u64 tick;
-        i32 x, y, z;
+    // CollectingNeighborUpdater.NeighborUpdates: one of the things a block change makes its
+    // neighbours do, waiting for its turn (server/block_updates.cpp).
+    struct NeighborUpdate {
+        enum Kind : u8 { kShape, kSimple, kFull, kMulti };
+        u8 kind;
+        u8 dir;                // kShape: where the block that changed lies from `pos`; kMulti: the side that is skipped, kNoSide
+        u8 next;               // kMulti: how many of NeighborUpdater.UPDATE_ORDER are done
+        bool moved;            // kFull: movedByPiston
+        u16 state;             // kShape: the neighbour's state; kFull: the state that is told
+        u16 block;             // the block that changed (kSimple, kFull, kMulti)
+        proto::BlockPos pos;   // who is told (kMulti: around which the six are)
+        proto::BlockPos from;  // kShape: where the neighbour is
+        u32 flags;
+        i32 limit;
     };
+    static constexpr u8 kNoSide = 0xFF;
 
     // PlayerChunkSender: the chunks of a player's view that are ready and have not gone out yet,
     // and how fast its client takes them. `bits` is a window over the view: a bit per chunk of
@@ -310,12 +326,55 @@ class Game {
     void save_ops() const;
     u32 find_op(Uuid uuid) const;
 
+    // ---- a block changes, and what follows from it (server/block_updates.cpp)
+    bool set_block(proto::BlockPos pos, world::BlockState state, u32 flags = kUpdateAll, i32 limit = kUpdateLimit);
+    bool remove_block(proto::BlockPos pos);
+    bool break_block(proto::BlockPos pos, bool drop, i32 limit = kUpdateLimit);
+    void drop_resources(world::BlockState state, proto::BlockPos pos);
+    void pop_resource(proto::BlockPos pos, ItemStack stack);
+    void level_event(u32 type, proto::BlockPos pos, i32 data, u32 except = kNone);
+    void update_neighbors_at(proto::BlockPos pos, u32 source_block);
+    void update_neighbour_shapes(world::BlockState state, proto::BlockPos pos, u32 flags, i32 limit);
+    void add_update(const NeighborUpdate& update);
+    void run_updates();
+    bool run_next(usize at);
+    void neighbor_changed(world::BlockState state, proto::BlockPos pos, u32 source_block);
+    world::BlockState update_shape(world::BlockState state, proto::BlockPos pos, u32 direction, proto::BlockPos neighbour_pos,
+                                   world::BlockState neighbour);
+    world::BlockState update_from_neighbour_shapes(world::BlockState state, proto::BlockPos pos);
+    void on_place(world::BlockState state, proto::BlockPos pos, world::BlockState old);
+    bool can_survive(world::BlockState state, proto::BlockPos pos) const;
+    bool touches_water(proto::BlockPos pos) const;
+    void schedule_tick(proto::BlockPos pos, world::BlockState state, i32 delay) {
+        world_.schedule_tick(pos.x, pos.y, pos.z, world::block_of(state), delay);
+    }
+    void run_block_ticks();
+    void tick_block(world::BlockState state, proto::BlockPos pos);
+    void run_random_ticks();
+    void random_tick(world::BlockState state, proto::BlockPos pos);
+    void tick_spreading(world::BlockState state, proto::BlockPos pos);
+    void tick_weathering(world::BlockState state, proto::BlockPos pos);
+    void tick_budding_amethyst(proto::BlockPos pos);
+    u32 raw_brightness(proto::BlockPos pos) const;
+    void recheck_chest(proto::BlockPos pos);
+    world::BlockState chest_update_shape(world::BlockState state, u32 dir, world::BlockState neighbour) const;
+    // Which chunks are simulated (server/chunks.cpp).
+    void move_simulation(bool had, i32 old_cx, i32 old_cz, bool has, i32 cx, i32 cz);
+    void simulate_adopted(world::Chunk& c);
+
+    // ---- falling blocks (server/falling.cpp)
+    struct Falling {                   // what a FallingBlockEntity has beyond its row of the entity table: by entity slot
+        i32 time = 0;                  // FallingBlockEntity.time
+        bool drop_item = true;         // dropItem
+        bool cancel_drop = false;      // cancelDrop
+        bool blocks_building = false;  // Entity.blocksBuilding: set for a block that fell, not for one that was summoned
+        bool alive = false;
+    };
+    u32 fall(proto::BlockPos pos, world::BlockState state);
+    u32 add_falling(Uuid uuid, world::BlockState state, double x, double y, double z, i32 time, bool fell);
+    void tick_falling(u32 slot, u32 row);
+
     // ---- block entities and the menus on them (server/block_entities.cpp)
-    bool set_block(proto::BlockPos pos, world::BlockState state, u32 flags = kUpdateAll);
-    void update_neighbors_at(proto::BlockPos pos);
-    void neighbor_changed(proto::BlockPos pos);
-    world::BlockState update_shape(world::BlockState state, u32 direction, world::BlockState neighbour) const;
-    world::BlockState update_from_neighbour_shapes(world::BlockState state, proto::BlockPos pos) const;
     bool use_block(u32 pi, proto::BlockPos pos, world::BlockState state, const ItemStack& held, u32 hand);
     world::BlockState chest_for_placement(u32 pi, proto::BlockPos at, u32 face) const;
     void open_menu(u32 pi, Menu::Kind kind, u32 menu_type, std::span<const u8> title, u32 rows);
@@ -325,7 +384,7 @@ class Game {
     void chest_opened(u32 chest);
     void chest_closed(u32 chest);
     void chest_sound(const Chest& c, u32 sound);
-    void recheck_chests();
+    void block_event(i32 x, i32 y, i32 z, u8 b0, u8 b1);
     void run_block_events();
     void tick_furnaces();
     void drop_contents(proto::BlockPos pos, ItemStack* items, u32 n);
@@ -351,6 +410,9 @@ class Game {
     static u32 horizontal_direction(float yaw);
     bool destroy_block(u32 pi, proto::BlockPos pos);
     bool place_block(u32 pi, const proto::sb::UseItemOn& u, const ItemStack& held);
+    world::BlockState state_for_placement(u32 pi, const proto::sb::UseItemOn& u, const world::BlockInfo& block, u32 kind,
+                                          proto::BlockPos at, bool replacing_clicked);
+    void nearest_looking_directions(u32 pi, u32 out[6]) const;
     bool obstructed(world::BlockState s, proto::BlockPos pos) const;
     world::BlockState state_for_client(proto::BlockPos pos) const;
     void ack(u32 pi, i32 sequence) { ack_[pi] = std::max(ack_[pi], sequence); }
@@ -455,8 +517,17 @@ class Game {
     std::vector<Furnace> furnaces_;
     std::vector<u32> chest_free_, furnace_free_;
     std::vector<BlockEventData> block_events_;
-    std::vector<Recheck> rechecks_;  // in the order they are due: the delay is always the same
-    usize recheck_head_ = 0;
+    // CollectingNeighborUpdater: the updates that wait (a stack), those the one that runs has
+    // made, how many there have been since the first of this chain, and how many there may be.
+    std::vector<NeighborUpdate> update_stack_, update_added_;
+    u32 update_count_ = 0;
+    u64 time_ = 0;          // Level.getGameTime: what scheduled ticks are due by
+    u32 random_value_ = 0;  // Level.randValue: where the random ticks fall
+    // A random tick that is run only to be seen doing nothing (world::kCheckDormantSections).
+    bool expect_no_change_ = false;
+    std::vector<world::Chunk*> random_scratch_;
+    std::vector<Falling> falling_;    // by entity slot
+    std::vector<u32> falling_slots_;  // the falling blocks there are: what a block being placed, or an explosion, looks through
     // Menu titles, as the text components vanilla sends (text::transcode), and update_recipes.
     std::vector<u8> title_chest_, title_double_chest_, title_furnace_, title_crafting_;
     base::ByteBuf recipes_frame_;

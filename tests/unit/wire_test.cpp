@@ -529,6 +529,43 @@ TEST(Packets, ContainerAndExplosionLayoutsAreWhatVanillaSent) {
 }
 
 // ServerboundChunkBatchReceivedPacket: one float, how many chunks a tick the client would like.
+TEST(Packets, BlockUpdateLayoutsAreTheJars) {
+    // ClientboundLevelEventPacket.write: writeInt(type), writeBlockPos, writeInt(data), writeBoolean(global).
+    // A torch (state 4926) breaking at (4, -60, -13): event 2001.
+    const std::string event = body_hex(cb::LevelEvent{2001, 4, -60, -13, 4926, false});
+    EXPECT_EQ(event,
+              "000007d1"
+              "0000013fffff3fc4"
+              "0000133e"
+              "00");
+    std::vector<u8> raw;
+    for (usize i = 0; i < event.size(); i += 2) raw.push_back(static_cast<u8>(std::stoi(event.substr(i, 2), nullptr, 16)));
+    Reader r(raw.data(), raw.size());
+    EXPECT_EQ(r.be32(), 2001u);
+    const BlockPos pos = unpack_block_pos(r.be64());
+    EXPECT_EQ(pos.x, 4);
+    EXPECT_EQ(pos.y, -60);
+    EXPECT_EQ(pos.z, -13);
+    EXPECT_EQ(r.be32(), 4926u);
+    EXPECT_FALSE(r.boolean());
+    EXPECT_TRUE(r.done());
+    // ClientboundAddTransientBlockPacket: BlockPos, then the state as a VarInt - block_update's layout.
+    EXPECT_EQ(body_hex(cb::AddTransientBlock{4, -60, -13, 121}), body_hex(cb::BlockUpdate{4, -60, -13, 121}));
+    EXPECT_EQ(body_hex(cb::AddTransientBlock{4, -60, -13, 4926}),
+              "0000013fffff3fc4"
+              "be26");
+    // FallingBlockEntity.DATA_START_POS: accessor 8, serializer 10 (BLOCK_POS), the position as a long.
+    u8 entry[16];
+    const u8* end = cb::put_entity_block_pos(entry, entity_data::falling_block::kStartPos, pack_block_pos(4, -60, -13));
+    ASSERT_EQ(end - entry, 10);
+    EXPECT_EQ(entry[0], 8);
+    EXPECT_EQ(entry[1], 10);
+    EXPECT_EQ(load_be64(entry + 2), 0x0000013fffff3fc4ull);
+    // A falling block's add_entity carries its block state where other entities carry 0.
+    const std::string add = body_hex(cb::AddEntity{7, {1, 2}, entity_type::kFallingBlock, 0.5, 70.0, 0.5, 0, 0, 0, 0, 0, 0, 121});
+    EXPECT_EQ(add.substr(add.size() - 2), "79");
+}
+
 TEST(Packets, ChunkBatchReceivedLayout) {
     const u8 body[] = {0x41, 0x48, 0x00, 0x00};  // 12.5f
     Reader r(body, sizeof body);

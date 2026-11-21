@@ -12,10 +12,12 @@ namespace server::record {
 inline constexpr u8 kVersion = 1;
 // block entities
 enum : u8 { kKept = 0, kChest = 1, kFurnace = 2 };
-// entities
-enum : u8 { kItem = 1, kTnt = 2, kOther = 3 };
+// entities. Version 2 knows one kind more than version 1 (a falling block), and is otherwise the same.
+inline constexpr u8 kEntitiesVersion = 2;
+enum : u8 { kItem = 1, kTnt = 2, kOther = 3, kFalling = 4 };
 inline constexpr u8 kOnGround = 1, kNoGravity = 2;
-inline constexpr u16 kNeverPickUp = 32767;  // ItemEntity.INFINITE_PICKUP_DELAY
+inline constexpr u8 kDropItem = 1, kCancelDrop = 2;  // a falling block's flags
+inline constexpr u16 kNeverPickUp = 32767;           // ItemEntity.INFINITE_PICKUP_DELAY
 
 inline void put_counted(base::ByteBuf& out, std::span<const u8> bytes) {
     u8* p = out.reserve(proto::kVarIntMaxBytes + bytes.size());

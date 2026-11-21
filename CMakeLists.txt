@@ -119,6 +119,7 @@ add_library(core STATIC
   src/world/chunk_io.cpp
   src/world/region.cpp
   src/world/store.cpp
+  src/world/ticks.cpp
   src/world/generator.cpp
   src/world/dimension.cpp
   src/world/collide.cpp
@@ -139,6 +140,8 @@ add_library(core STATIC
   src/server/item_entities.cpp
   src/server/block_actions.cpp
   src/server/block_entities.cpp
+  src/server/block_updates.cpp
+  src/server/falling.cpp
   src/server/explosion.cpp
   src/server/physics.cpp
   src/server/players.cpp
@@ -171,6 +174,7 @@ if(MC_TESTS)
       tests/unit/spsc_test.cpp
       tests/unit/world_test.cpp
       tests/unit/store_test.cpp
+      tests/unit/ticks_test.cpp
       tests/unit/physics_test.cpp
       tests/unit/light_test.cpp
       tests/unit/entity_test.cpp

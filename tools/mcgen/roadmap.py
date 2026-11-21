@@ -33,35 +33,38 @@ OUT = ROOT / "docs" / "blocks-roadmap.md"
 MILESTONES = [
     ("Plain blocks", "Nothing: a state that is stored, lit and sent. Done since the first world.",
      r"^(Block|RotatedPillarBlock|DropExperienceBlock|StainedGlassBlock|TransparentBlock|HalfTransparentBlock|TintedGlassBlock|"
-     r"InfestedBlock|InfestedRotatedPillarBlock|NetherrackBlock|NyliumBlock|GrassBlock|SnowyBlock|MyceliumBlock|"
-     r"BonemealableFeaturePlacerBlock|WeatheringCopperFullBlock|IceBlock|SoulSandBlock|SlimeBlock|HoneyBlock|HayBlock|MagmaBlock|"
-     r"WebBlock|StructureVoidBlock|MudBlock|RootedDirtBlock|BuddingAmethystBlock|AmethystBlock|CryingObsidianBlock|PoweredBlock|"
+     r"InfestedBlock|InfestedRotatedPillarBlock|NetherrackBlock|"
+     r"BonemealableFeaturePlacerBlock|IceBlock|SoulSandBlock|SlimeBlock|HoneyBlock|HayBlock|MagmaBlock|"
+     r"WebBlock|StructureVoidBlock|MudBlock|RootedDirtBlock|AmethystBlock|CryingObsidianBlock|PoweredBlock|"
      r"AirBlock)$"),
     ("Block entities and menus: the first four", "Menus over containers, recipes, a furnace's tick, primed TNT and explosions.",
      r"^(ChestBlock|FurnaceBlock|CraftingTableBlock|TntBlock)$"),
     ("Shapes: a state from how the block is placed and what stands beside it",
-     "BlockPlaceContext in full (the clicked face and where on it, the player's look, replacing a block with more of itself) "
-     "and `updateShape` for every neighbour change. No ticking.",
-     r"^(SlabBlock|StairBlock|WallBlock|FenceBlock|IronBarsBlock|StainedGlassPaneBlock|GlazedTerracottaBlock|ChainBlock|"
+     "BlockPlaceContext in full (the clicked face and where on it, the player's look, replacing a block with more of itself). "
+     "`updateShape` for every neighbour change is there (`Game::update_shape`; podzol under snow is the first). No ticking.",
+     r"^(SnowyBlock|SlabBlock|StairBlock|WallBlock|FenceBlock|IronBarsBlock|StainedGlassPaneBlock|GlazedTerracottaBlock|ChainBlock|"
      r"LanternBlock|EndRodBlock|HugeMushroomBlock|CarvedPumpkinBlock|EquipableCarvedPumpkinBlock|BarrierBlock|LightBlock|PathBlock|"
      r"MangroveRootsBlock|WaterloggedTransparentBlock|HeavyCoreBlock|PointedDripstoneBlock|RodBlock|DirectionalBlock|"
      r"MultifaceBlock|GlowLichenBlock|SculkVeinBlock|MossyCarpetBlock|HangingMossBlock|CopperGrateBlock)$"),
     ("Support: blocks that need something to stand on or hang from",
-     "`canSurvive`, and the break-and-drop when the support goes (a scheduled tick). Survival drops need loot tables with a tool.",
+     "`canSurvive` and the break-and-drop when the support goes are there (`Game::can_survive`, `break_block`: torches, amethyst); "
+     "each class is its own rule of placement and its own drops. Survival drops need loot tables with a tool.",
      r"^(TorchBlock|WallTorchBlock|LadderBlock|.*CarpetBlock|FlowerBlock|TallFlowerBlock|DoublePlantBlock|TallGrassBlock|BushBlock|"
      r"DryVegetationBlock|ShortDryGrassBlock|TallDryGrassBlock|MushroomBlock|ShelfMushroomBlock|WitherRoseBlock|EyeblossomBlock|"
      r"FlowerBedBlock|LeafLitterBlock|FireflyBushBlock|NetherRootsBlock|NetherSproutsBlock|RootsBlock|AzaleaBlock|"
      r"AmethystClusterBlock|SnowLayerBlock|LilyPadBlock|SporeBlossomBlock|HangingRootsBlock|PinkPetalsBlock|CactusFlowerBlock|"
      r"SmallDripleafBlock|BigDripleafBlock|BigDripleafStemBlock|FrogspawnBlock|DecoratedPotBlock)$"),
-    ("Scheduled ticks and falling blocks", "A tick queue per level (`LevelTicks`), and `FallingBlockEntity` on the entity physics TNT now has.",
+    ("Scheduled ticks and falling blocks", "The tick queue (`world::LevelTicks`) and `FallingBlockEntity` are there: sand, gravel, "
+     "concrete powder. What is left hurts what it lands on (anvils: damage), teleports (the dragon egg) or has a block entity.",
      r"^(SandBlock|ColoredFallingBlock|ConcretePowderBlock|AnvilBlock|DragonEggBlock|ScaffoldingBlock|FallingBlock|"
      r"BrushableBlock)$"),
     ("Fluids", "Water and lava: flowing (`FlowingFluid.tick`), waterlogging (`getFluidState`, `SimpleWaterloggedBlock`), buckets.",
      r"^(LiquidBlock|SpongeBlock|WetSpongeBlock|KelpBlock|KelpPlantBlock|SeagrassBlock|TallSeagrassBlock|SeaPickleBlock|.*Coral.*|"
      r"BubbleColumnBlock|FrostedIceBlock|ConduitBlock|.*CauldronBlock|PowderSnowBlock|MangrovePropaguleBlock)$"),
-    ("Random ticks: growth, spread and decay", "Random block ticks per chunk section (the `kRandomTicks` state flag is there), bone meal, "
-     "tree and mushroom features for what grows into a structure.",
-     r"^(CropBlock|CarrotBlock|PotatoBlock|BeetrootBlock|TorchflowerCropBlock|PitcherCropBlock|StemBlock|AttachedStemBlock|"
+    ("Random ticks: growth, spread and decay", "Random block ticks are there, and sections whose ticks could do nothing are passed by: "
+     "a class that is ported says in `state::kRandom` when its tick can act (`RANDOM_TICK_KINDS` in gen_game.py; docs/architecture.md, "
+     "\"Block updates\"). Still needed: bone meal, tree and mushroom features for what grows into a structure, fire's spread.",
+     r"^(GrassBlock|MyceliumBlock|NyliumBlock|BuddingAmethystBlock|CropBlock|CarrotBlock|PotatoBlock|BeetrootBlock|TorchflowerCropBlock|PitcherCropBlock|StemBlock|AttachedStemBlock|"
      r"PumpkinBlock|FarmlandBlock|SaplingBlock|.*LeavesBlock|VineBlock|CactusBlock|SugarCaneBlock|BambooSaplingBlock|"
      r"BambooStalkBlock|CocoaBlock|NetherWartBlock|SweetBerryBushBlock|.*VinesBlock|.*VinesPlantBlock|CaveVines.*|"
      r"ChorusPlantBlock|ChorusFlowerBlock|NetherFungusBlock|FireBlock|SoulFireBlock|Weathering.*|TurtleEggBlock|SnifferEggBlock|"
@@ -85,8 +88,8 @@ MILESTONES = [
      r".*SkullBlock|.*HeadBlock|BeaconBlock|BellBlock|EnchantingTableBlock|BeehiveBlock|.*CopperGolemStatueBlock|"
      r"CreakingHeartBlock|SculkSensorBlock|CalibratedSculkSensorBlock|SculkShriekerBlock|VaultBlock|TrialSpawnerBlock|SpawnerBlock|"
      r"PotentSulfurBlock)$"),
-    ("Redstone", "Signals (`SignalGetter`), neighbour updates in vanilla's order, the scheduled ticks above. TNT already asks for "
-     "a neighbour signal; a block of redstone is the one source so far.",
+    ("Redstone", "Signals (`SignalGetter`) beyond \"is there a block of redstone beside me\". Neighbour updates in vanilla's order and "
+     "scheduled ticks are there; TNT and the lamp ask for a neighbour signal, a block of redstone is the one source so far.",
      r"^(RedstoneWireBlock|RedstoneTorchBlock|RedstoneWallTorchBlock|RepeaterBlock|ComparatorBlock|LeverBlock|ButtonBlock|"
      r"PressurePlateBlock|WeightedPressurePlateBlock|ObserverBlock|PistonBaseBlock|PistonHeadBlock|MovingPistonBlock|NoteBlock|"
      r"TargetBlock|RedstoneLampBlock|TripWireHookBlock|TripWireBlock|DaylightDetectorBlock|RailBlock|PoweredRailBlock|"
@@ -103,20 +106,25 @@ SYSTEMS = [
     ("x", "Entity physics for one kind (primed TNT): gravity, collision with blocks, bounce, speed factor"),
     ("x", "Explosions: rays, exposure, block drops without a tool, chain reactions"),
     (" ", "Survival: mining over time, tools, block drops through loot tables with a tool and enchantments"),
-    (" ", "Sounds and particles of placing and breaking, heard by others (`sound`, level event 2001)"),
-    (" ", "Scheduled block ticks (`LevelTicks`) - a chest's recount of its openers has a queue of its own"),
-    (" ", "Random block ticks"),
-    (" ", "Fluids"),
+    ("x", "Neighbour updates: `neighborChanged` and `updateShape` in vanilla's order (`CollectingNeighborUpdater`), blocks that "
+          "break when what holds them goes"),
+    ("x", "Scheduled block ticks (`LevelTicks`), saved with their chunk"),
+    ("x", "Random block ticks, at the simulation distance"),
+    ("x", "Falling blocks (`FallingBlockEntity`)"),
+    ("x", "The particles and the sound of a block breaking, for the others (level event 2001)"),
+    (" ", "The sound of a block being placed (`sound`)"),
+    (" ", "Fluids: water and lava that flow, fluid ticks, waterlogged blocks that ask for them"),
     (" ", "Redstone signals beyond the block of redstone"),
+    (" ", "The time of day and the weather: light that changes with them, rain and snow on blocks (`tickPrecipitation`)"),
     (" ", "Experience orbs: a furnace's stored experience, ores blown up by a player's TNT"),
-    (" ", "Item physics: dropped and spilled items fall, are pushed by explosions and carried by water"),
+    ("x", "Item physics: dropped and spilled items fall and are pushed by explosions"),
     (" ", "What blocks do to entities inside them (`entityInside`): cobweb, honey, bubble columns, portals, pressure plates"),
     (" ", "The recipe book (`recipe_book_add`, `place_recipe`) and recipe unlocking"),
     (" ", "Special crafting recipes: dyed armour, banner and book copies, fireworks, map extending, repairing, shield "
           "decoration, tipped arrows, decorated pots"),
     (" ", "Block entity names and locks (a chest named on an anvil), saved block entity data on placed items (ctrl + pick block)"),
     (" ", "Comparator output of containers (`getAnalogOutputSignal`)"),
-    (" ", "Persistence of block entities with their chunk"),
+    ("x", "Persistence of block entities with their chunk"),
 ]
 
 
@@ -171,8 +179,8 @@ A box is ticked when every block of the class can be placed; `(n of m)` says how
 
 Some blocks that are ticked still do less than in vanilla, because a system around them is
 missing; those gaps are listed under "Systems" below and in docs/architecture.md, never
-silently: ice does not melt and copper does not weather (random ticks), grass does not spread,
-ores give no experience, an amethyst block does not chime.
+silently: ice does not melt (it would leave water), concrete powder meets no water that
+flows, ores give no experience, an amethyst block does not chime.
 
 ## Systems
 

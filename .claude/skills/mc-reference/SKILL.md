@@ -128,6 +128,16 @@ if its arguments were swapped). When the order matters, look at the `aload` orde
   (`unzip -l .cache/mc/26.3/server-inner.jar | grep data/minecraft/tags/block/`).
 - **Constants / enum ordinals**: `javap --full <Enum> --method 'static \{\}'` shows `ldc "NAME"` with the ordinal
   and constructor arguments after it.
+- **What a block does, and in which order**: the hooks are methods of `net.minecraft.world.level.block.<Class>`
+  (`mcgen.py data blocks <name> --field hooks` lists the ones its class chain overrides); what calls them is
+  `Level.setBlock` / `LevelChunk.setBlockState`, `net.minecraft.world.level.redstone.CollectingNeighborUpdater`
+  (and `NeighborUpdater.UPDATE_ORDER`, which is not `BlockBehaviour.UPDATE_SHAPE_ORDER`),
+  `net.minecraft.world.ticks.LevelTicks` / `LevelChunkTicks` / `ScheduledTick` (three comparators: read all three),
+  `ServerLevel.tickChunk` (random ticks) and `ServerChunkCache.tickChunks` (which chunks: 26.3 walks
+  `DistanceManager.forEachEntityTickingChunk`, though the method is called `forEachBlockTickingChunk`).
+  Read this version's code, not what is remembered of another's: in 26.3 `LevelChunkTicks.pack` sorts what it
+  saves (`SUB_TICK_ORDERING`), the game rules are a registry (`gamerule minecraft:random_tick_speed`), and a
+  falling block that lands sends `add_transient_block` beside its `block_update`.
 
 ## What only exists once the game has loaded: `mcgen.py data`
 

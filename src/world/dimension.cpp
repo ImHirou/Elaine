@@ -79,12 +79,14 @@ Dimension::Dimension(u32 type_id, std::string name, ChunkGenerator& gen, i32 com
       layout_{min_y_, min_y_ >> 4, sections_, has_sky_},
       light_(map_, layout_),
       workers_(workers ? *workers : own_workers_),
-      store_(workers_, layout_, gen_, std::move(dir), sync) {}
+      store_(workers_, layout_, gen_, std::move(dir), sync),
+      ticks_(state::kBlockCount, min_y_, sections_ * 16) {}
 
 Dimension::~Dimension() {
     store_.finish();  // what waits to be written is written; nothing of ours is out with a worker after this
     release_adopted();
     map_.for_each([this](Chunk& c) {
+        ticks_.release(c);
         std::free(c.frame);
         std::free(c.block_entities);
         std::free(c.biomes);
@@ -125,10 +127,76 @@ Chunk& Dimension::adopt(LoadedChunk& lc) {
     c->saved_tick = tick_;
     large_shapes_ |= (lc.traits & 1) != 0;
     entity_blocks_ |= (lc.traits & 2) != 0;
+    c->sim_refs = c->block_refs = 0;  // whoever simulates says so again (Dimension::simulate)
+    c->active_sections = 0;
+    c->random_slot = Chunk::kUnlisted;
+    c->block_ticks = nullptr;
+    ticks_.read(*c, lc.parts.ticks);
     map_.set_loading(c->x, c->z, false);
     map_.insert(c);
     light_.init_chunk(*c);
     return *c;
+}
+
+// ---------------------------------------------------------------------------- ticking
+
+// Which of a chunk's sections have a random tick that could do something: those with a cell
+// that may always act, or one that is dying - or one that may spread, with soil to take within
+// its reach. A spreader reaches one cell sideways and from three below to one above
+// (SpreadingSnowyBlock.randomTick): not beyond the sections around its own.
+u32 Dimension::active_mask(const Chunk& c) const {
+    u32 targets = 0;
+    for (i32 dz = -1; dz <= 1; ++dz) {
+        for (i32 dx = -1; dx <= 1; ++dx) {
+            const Chunk* n = dx || dz ? map_.find(c.x + dx, c.z + dz) : &c;
+            if (n) targets |= n->target_sections;
+        }
+    }
+    const u32 near = targets | targets << 1 | targets >> 1;
+    return c.ticking_sections & (c.always_sections | c.dying_sections | near);
+}
+
+void Dimension::refresh_active(Chunk& c) {
+    const u32 active = active_mask(c);
+    if (active == c.active_sections) return;
+    c.active_sections = active;
+    status_changed(c);
+}
+
+// Something that decides what ticks in the chunk changed: whether it ticks at all, who simulates
+// it, which of its sections have random ticks to run.
+void Dimension::status_changed(Chunk& c) {
+    // ServerLevel.startTickingChunk: the ticks it was loaded with count from now.
+    if (c.block_ticking() && c.block_ticks && c.block_ticks->saved_n) ticks_.unpack(c, static_cast<i64>(time_));
+    const u32 sections = kCheckDormantSections ? c.ticking_sections : c.active_sections;
+    const bool want = c.ticking && c.sim_refs != 0 && sections != 0;
+    if (want == (c.random_slot != Chunk::kUnlisted)) return;
+    if (want) {
+        c.random_slot = static_cast<u32>(random_.size());
+        random_.push_back(&c);
+    } else {
+        random_[c.random_slot] = random_.back();
+        random_[c.random_slot]->random_slot = c.random_slot;
+        random_.pop_back();
+        c.random_slot = Chunk::kUnlisted;
+    }
+}
+
+void Dimension::simulate(Chunk& c, i32 sim_delta, i32 block_delta) {
+    c.sim_refs = static_cast<u16>(c.sim_refs + sim_delta);
+    c.block_refs = static_cast<u16>(c.block_refs + block_delta);
+    status_changed(c);
+}
+
+void Dimension::start_ticking(Chunk& c) {
+    c.ticking = true;
+    c.active_sections = active_mask(c);
+    status_changed(c);
+}
+
+void Dimension::stop_ticking(Chunk& c) {
+    c.ticking = false;
+    status_changed(c);
 }
 
 // Around a chunk that has just come: what can be lit now is lit, what can tick now ticks.
@@ -153,7 +221,7 @@ void Dimension::promote_around(i32 cx, i32 cz) {
         for (i32 dx = -2; dx <= 2; ++dx) {
             Chunk* c = map_.find(cx + dx, cz + dz);
             if (!c || c->ticking || c->status != ChunkStatus::Lit || !all_around(c->x, c->z, ChunkStatus::Lit)) continue;
-            c->ticking = true;
+            start_ticking(*c);
             ready_.push_back(c);
         }
     }
@@ -224,7 +292,7 @@ Chunk& Dimension::ticking(i32 cx, i32 cz) {
     for (i32 dz = -1; dz <= 1; ++dz)
         for (i32 dx = -1; dx <= 1; ++dx) lit(cx + dx, cz + dz);
     c = map_.find(cx, cz);
-    c->ticking = true;
+    start_ticking(*c);
     return *c;
 }
 
@@ -233,7 +301,9 @@ Chunk& Dimension::ticking(i32 cx, i32 cz) {
 void Dimension::save(Chunk& c, const ChunkParts& parts) {
     light_.fold_layers(c);
     scratch_.clear();
-    encode_chunk(c, parts, scratch_);
+    tick_scratch_.clear();
+    LevelTicks::write(c.block_ticks, static_cast<i64>(time_), tick_scratch_);
+    encode_chunk(c, {parts.block_entities, parts.entities, {tick_scratch_.data, tick_scratch_.len}}, scratch_);
     store_.save(c.x, c.z, {scratch_.data, scratch_.len});
     c.dirty = false;
     c.saved_tick = tick_;
@@ -246,11 +316,14 @@ void Dimension::unload(Chunk& c) {
         for (i32 dx = -1; dx <= 1; ++dx) {
             Chunk* n = map_.find(c.x + dx, c.z + dz);
             if (!n || !n->ticking) continue;
-            n->ticking = false;
+            stop_ticking(*n);
             invalidate(*n);
             if (n != &c) stopped_.push_back(n);
         }
     }
+    status_changed(c);  // (out of the list of chunks with random ticks, whether or not it ticked)
+    DCHECK(c.random_slot == Chunk::kUnlisted);
+    ticks_.release(c);
     std::erase(ready_, &c);
     std::erase(stopped_, &c);
     DCHECK(std::none_of(changes_.begin(), changes_.end(), [&](const BlockChange& b) { return b.chunk == &c; }));
@@ -360,6 +433,7 @@ bool Dimension::set_block_raw(Chunk& c, i32 x, i32 y, i32 z, BlockState s) {
     if (was_empty && is_air(s)) return false;
     const BlockState old = sec.set(alloc_, Section::index(lx, ly, lz), s);
     if (old == s) return false;
+    if (UNLIKELY(state::kRandom[old] != state::kRandom[s])) recount_random(c, si, lx, y, lz, old, s);
     if (const u32 traits = section_traits(s); UNLIKELY(traits)) {
         large_shapes_ |= (traits & 1) != 0;
         entity_blocks_ |= (traits & 2) != 0;
@@ -385,24 +459,61 @@ bool Dimension::set_block_raw(Chunk& c, i32 x, i32 y, i32 z, BlockState s) {
     return true;
 }
 
+// What one changed cell does to the counts behind the random ticks (Chunk::random): its own
+// part in them, under whatever stands on it, and the part of the cell below, on which it stands.
+void Dimension::recount_random(Chunk& c, u32 si, u32 lx, i32 y, u32 lz, BlockState old, BlockState s) {
+    constexpr u32 kUnder = state::kSpreader | state::kNylium | state::kSoil;
+    constexpr u32 kOver = state::kSmothers | state::kNoSpread | state::kSmothersNylium;
+    const u32 ro = state::kRandom[old], rs = state::kRandom[s];
+    u32 changed = 0;  // 1: a mask of this chunk's own business; 2: where its soil is, which the chunks around read too
+    const auto sync = [&](u32& mask, bool on, u32 bit, u32 kind) {
+        if (((mask & bit) != 0) == on) return;
+        mask ^= bit;
+        changed |= kind;
+    };
+    const auto add = [](u16& count, bool now, bool before) { count = static_cast<u16>(count + now - before); };
+    const u32 bit = 1u << si;
+    RandomCounts& here = c.random[si];
+    sync(c.ticking_sections, c.sections[si].ticking != 0, bit, 1);
+    if ((ro ^ rs) & state::kRandomAlways) {
+        add(here.always, (rs & state::kRandomAlways) != 0, (ro & state::kRandomAlways) != 0);
+        sync(c.always_sections, here.always != 0, bit, 1);
+    }
+    if ((ro | rs) & kUnder) {
+        const u32 above =
+            y < max_y_
+                ? state::kRandom[c.sections[static_cast<u32>((y + 1 - min_y_) >> 4)].get(lx, static_cast<u32>((y + 1) & 15), lz)]
+                : 0u;
+        add(here.dying, random_dies(rs, above), random_dies(ro, above));
+        add(here.targets, random_target(rs, above), random_target(ro, above));
+        sync(c.dying_sections, here.dying != 0, bit, 1);
+        sync(c.target_sections, here.targets != 0, bit, 2);
+    }
+    if (((ro ^ rs) & kOver) && y > min_y_) {
+        const u32 sb = static_cast<u32>((y - 1 - min_y_) >> 4);
+        const u32 below = state::kRandom[c.sections[sb].get(lx, static_cast<u32>((y - 1) & 15), lz)];
+        if (below & kUnder) {
+            RandomCounts& under = c.random[sb];
+            add(under.dying, random_dies(below, rs), random_dies(below, ro));
+            add(under.targets, random_target(below, rs), random_target(below, ro));
+            sync(c.dying_sections, under.dying != 0, 1u << sb, 1);
+            sync(c.target_sections, under.targets != 0, 1u << sb, 2);
+        }
+    }
+    if (changed & 2) {
+        for (i32 dz = -1; dz <= 1; ++dz)
+            for (i32 dx = -1; dx <= 1; ++dx)
+                if (Chunk* n = map_.find(c.x + dx, c.z + dz)) refresh_active(*n);
+    } else if (changed) {
+        refresh_active(c);
+    }
+}
+
 bool Dimension::set_block(i32 x, i32 y, i32 z, BlockState s) {
     if (y < min_y_ || y > max_y_) return false;
     Chunk* c = map_.find(x >> 4, z >> 4);
     if (!c || !c->ticking) return false;
-    if (!set_block_raw(*c, x, y, z, s)) return false;
-    // BlockState.updateNeighbourShapes: of all updateShape() overrides, the only one a block this
-    // server can hold has is SnowyBlock's - the block below re-evaluates `snowy` from what is now on
-    // top of it. (Blocks with other overrides are not placeable yet; see mcgen's placement_kind.)
-    if (y > min_y_) {
-        const BlockState below = c->sections[static_cast<u32>((y - 1 - min_y_) >> 4)].get(
-            static_cast<u32>(x & 15), static_cast<u32>((y - 1) & 15), static_cast<u32>(z & 15));
-        const BlockInfo& info = block_info_of(below);
-        if (info.flags & block_flag::kSnowyBelow) {
-            const BlockState want = info.alt[(block_info_of(s).flags & block_flag::kSnowTag) ? 1 : 0];
-            if (want != below) set_block_raw(*c, x, y - 1, z, want);
-        }
-    }
-    return true;
+    return set_block_raw(*c, x, y, z, s);
 }
 
 // ---------------------------------------------------------------------------- block entities

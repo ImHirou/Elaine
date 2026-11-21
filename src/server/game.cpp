@@ -45,6 +45,7 @@ Game::Game(const Settings& s, std::vector<std::unique_ptr<net::Reactor>>& reacto
       tracker_(ents_, s.compression_threshold, s.entity_broadcast_range),
       rng_(base::now_ns() | 1),
       console_(console) {
+    random_value_ = static_cast<u32>(random());  // Level.randValue: RandomSource.create().nextInt()
     world_.keep_adopted(true);
     // Where players appear: on top of what stands at the world's spawn (the chunk is read for
     // it, once, here), or where the world says when nothing stands there.
@@ -91,20 +92,26 @@ void Game::post(u32 ri, const OutMsg& m) {
 void Game::run(const std::atomic<bool>& stop) {
     constexpr u64 kStatsEvery = 100;  // ticks: 5 s
     u64 next = base::now_ns();
-    u64 busy_ns = 0, worst_ns = 0, track_ns = 0, move_ns = 0, flush_ns = 0, sent_bytes = 0;
+    u64 busy_ns = 0, worst_ns = 0, track_ns = 0, move_ns = 0, flush_ns = 0, block_ns = 0, sent_bytes = 0;
     while (!stop.load(std::memory_order_relaxed) && !stop_requested_) {
         const u64 t0 = base::now_ns();
-        // Same order as MinecraftServer.tickChildren: packets, then the level - scheduled block
-        // ticks, block and light changes go out to whoever sees them
-        // (ServerChunkCache.broadcastChangedChunks), the entities are shown (ChunkMap.tick),
+        // Same order as MinecraftServer.tickChildren: packets, then the level - its clock, the
+        // scheduled block ticks, the chunks' random ticks, block and light changes go out to
+        // whoever sees them (ServerChunkCache.broadcastChangedChunks), the entities are shown (ChunkMap.tick),
         // block events are sent, the entities tick (items, primed TNT; ServerPlayer.tick, which
         // is the menu), then the block entities (furnaces) - then the per-connection tick (block
         // change acks, the player's own tick), and one flush per player at the end.
         entities_ticked_ = false;
         pump_chunks(t0);  // the chunks the workers have ready enter the world
         for (u32 ri = 0; ri < reactors_.size(); ++ri) drain(ri);
-        run_console();     // DedicatedServer.tickConnection: the console's lines after the players' packets
-        recheck_chests();  // ServerLevel.tick: scheduled block ticks come first
+        run_console();  // DedicatedServer.tickConnection: the console's lines after the players' packets
+        // ServerLevel.tick: tickTime - what packets scheduled was scheduled by the tick before -
+        // then the block ticks that are due, then (ServerChunkCache.tickChunks) the random ticks.
+        world_.set_time(++time_);
+        const u64 t_blocks = base::now_ns();
+        run_block_ticks();
+        run_random_ticks();
+        block_ns += base::now_ns() - t_blocks;
         broadcast_changes();
         tend_chunks();  // ChunkMap.tick: what nobody needs is saved and leaves (the change lists are empty here)
         const u64 t1 = base::now_ns();
@@ -142,15 +149,17 @@ void Game::run(const std::atomic<bool>& stop) {
         if (tick_ % kStatsEvery == 0) {
             LOG_DEBUG(
                 "tick: %.3f ms avg, %.3f ms worst, %.3f ms of it the entity tracker, %.3f ms the entities' own ticks, %.3f ms "
-                "flush; "
-                "%.1f KiB/tick sent; %zu players, %u entities (%u at rest), %zu chunks (%zu on their way, %zu to be written), "
-                "%.1f MiB of world",
+                "flush, %.3f ms block ticks; "
+                "%.1f KiB/tick sent; %zu players, %u entities (%u at rest), %zu chunks (%zu on their way, %zu to be written, "
+                "%zu with random ticks to run), %llu scheduled ticks, %.1f MiB of world",
                 static_cast<double>(busy_ns) / kStatsEvery / 1e6, static_cast<double>(worst_ns) / 1e6,
                 static_cast<double>(track_ns) / kStatsEvery / 1e6, static_cast<double>(move_ns) / kStatsEvery / 1e6,
-                static_cast<double>(flush_ns) / kStatsEvery / 1e6, static_cast<double>(sent_bytes) / kStatsEvery / 1024.0,
-                players_.size(), ents_.size(), asleep_, world_.chunk_count(), world_.loading_count(), world_.store().waiting(),
+                static_cast<double>(flush_ns) / kStatsEvery / 1e6, static_cast<double>(block_ns) / kStatsEvery / 1e6,
+                static_cast<double>(sent_bytes) / kStatsEvery / 1024.0, players_.size(), ents_.size(), asleep_,
+                world_.chunk_count(), world_.loading_count(), world_.store().waiting(), world_.random_chunks().size(),
+                static_cast<unsigned long long>(world_.block_ticks().count()),
                 static_cast<double>(world_.memory_bytes()) / (1024.0 * 1024.0));
-            busy_ns = worst_ns = track_ns = move_ns = flush_ns = sent_bytes = 0;
+            busy_ns = worst_ns = track_ns = move_ns = flush_ns = block_ns = sent_bytes = 0;
         }
 
         next += kTickNs;
@@ -381,6 +390,8 @@ void Game::remove_player(u32 pi) {
         for (const u32 chest : p.open_data)
             if (chest != kNone && chests_[chest].alive) chest_closed(chest);
     }
+
+    if (senders_[pi].has_view) move_simulation(true, pcx_[pi], pcz_[pi], false, 0, 0);  // DistanceManager.removePlayer
 
     // PlayerList.remove: the entity goes first - whoever saw it gets remove_entities - then the
     // tab-list entry. The store fills the row with its last player, as we do with ours below.

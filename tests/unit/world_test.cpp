@@ -648,26 +648,82 @@ TEST(Dimension, BlockChangesAreSortedGroupedAndDeduplicated) {
     EXPECT_TRUE(dim.find(0, 0)->modified);
 }
 
-TEST(Dimension, SnowOnGrassMakesItSnowy) {
-    // SnowyBlock.updateShape: the one neighbour reaction among the blocks a player can place.
-    FlatGenerator gen(-64, 24, FlatGenerator::default_layers(), 39);
-    Dimension dim(proto::reg::dimension_type::kOverworld, "minecraft:overworld", gen, proto::kNoCompression);
-    dim.frame(0, 0);
+TEST(Blocks, WhatAChangeAndATickAskOfAState) {
+    namespace st = state;
+    const auto hooks = [](u32 s) { return st::kHooks[s] & ~st::kFallThrough; };
+    // Plain blocks have no hook; the ported classes have exactly theirs.
+    EXPECT_EQ(hooks(blk::kStone), 0);
+    EXPECT_EQ(hooks(kAir), 0);
+    EXPECT_EQ(hooks(blk::kSand), st::kHookShape | st::kHookPlace | st::kHookTick);
+    EXPECT_EQ(hooks(blk::kWhiteConcretePowder), st::kHookShape | st::kHookPlace | st::kHookTick);
+    EXPECT_EQ(hooks(blk::kTorch), st::kHookShape);
+    EXPECT_EQ(hooks(blk::kWallTorch), st::kHookShape);
+    EXPECT_EQ(hooks(blk::kRedstoneLamp), st::kHookNeighbor | st::kHookTick);
+    EXPECT_EQ(hooks(blk::kTnt), st::kHookNeighbor | st::kHookPlace);
+    EXPECT_EQ(hooks(blk::kChest), st::kHookShape | st::kHookTick);
+    EXPECT_EQ(hooks(blk::kGrassBlock), st::kHookShape);
+    EXPECT_EQ(hooks(blk::kPodzol), st::kHookShape);
+    EXPECT_EQ(hooks(blk::kAmethystCluster), st::kHookShape);
+    // A class that is not ported has none, whatever vanilla's does (water, a lever).
+    EXPECT_EQ(hooks(blk::kWater), 0);
+    EXPECT_EQ(hooks(blk::kLever), 0);
+    // FallingBlock.isFree: air, a liquid, fire, what can be replaced.
+    EXPECT_TRUE(st::kHooks[kAir] & st::kFallThrough);
+    EXPECT_TRUE(st::kHooks[blk::kWater] & st::kFallThrough);
+    EXPECT_TRUE(st::kHooks[blk::kFire] & st::kFallThrough);
+    EXPECT_TRUE(st::kHooks[blk::kShortGrass] & st::kFallThrough);
+    EXPECT_FALSE(st::kHooks[blk::kStone] & st::kFallThrough);
+    EXPECT_FALSE(st::kHooks[blk::kTorch] & st::kFallThrough);
+
+    // Random ticks: who ticks, and what each state is to the grass under it.
     const BlockInfo& grass = block_info_of(blk::kGrassBlock);
-    ASSERT_EQ(grass.flags & block_flag::kPlaceMask, block_flag::kPlaceSnowy);
-    const BlockState plain = grass.alt[0], snowy = grass.alt[1];
-    ASSERT_EQ(plain, blk::kGrassBlock);
-    ASSERT_NE(snowy, plain);
-    EXPECT_TRUE(dim.set_block(4, -60, 4, blk::kSnowBlock));
-    EXPECT_EQ(dim.block(4, -61, 4), snowy);
-    EXPECT_EQ(dim.block_changes().size(), 2u);  // both go to the viewers
-    EXPECT_TRUE(dim.set_block(4, -60, 4, blk::kStone));
-    EXPECT_EQ(dim.block(4, -61, 4), plain);
-    EXPECT_TRUE(dim.set_block(4, -60, 4, blk::kSnowBlock));
-    EXPECT_TRUE(dim.set_block(4, -60, 4, kAir));
-    EXPECT_EQ(dim.block(4, -61, 4), plain);
-    EXPECT_TRUE(dim.set_block(5, -60, 4, blk::kStone));  // nothing snowy about stone
-    EXPECT_EQ(dim.block(5, -61, 4), plain);
+    EXPECT_EQ(st::kRandom[grass.alt[0]] & (st::kRandomTick | st::kRandomAlways | st::kSpreader), st::kRandomTick | st::kSpreader);
+    EXPECT_EQ(st::kRandom[grass.alt[1]] & (st::kRandomTick | st::kSpreader), st::kRandomTick | st::kSpreader);
+    EXPECT_EQ(grass.alt[2], blk::kDirt);
+    EXPECT_TRUE(st::kRandom[blk::kDirt] & st::kSoil);
+    EXPECT_FALSE(st::kRandom[blk::kCoarseDirt] & st::kSoil);
+    EXPECT_EQ(st::kRandom[blk::kWarpedNylium] & (st::kRandomTick | st::kNylium), st::kRandomTick | st::kNylium);
+    EXPECT_EQ(st::kRandom[blk::kCopperBlock] & (st::kRandomTick | st::kRandomAlways), st::kRandomTick | st::kRandomAlways);
+    EXPECT_EQ(st::kRandom[blk::kOxidizedCopper] & st::kRandomTick, 0);  // nothing comes after it
+    EXPECT_EQ(st::kRandom[blk::kWaxedCopperBlock] & st::kRandomTick, 0);
+    EXPECT_TRUE(st::kRandom[blk::kBuddingAmethyst] & st::kRandomAlways);
+    EXPECT_EQ(st::kRandom[blk::kIce] & st::kRandomTick, 0);  // ticks at random in vanilla; its tick is not ported
+    EXPECT_TRUE(flags_of(blk::kIce) & st::kRandomTicks);
+    const u32 over = st::kSmothers | st::kNoSpread | st::kSmothersNylium;
+    EXPECT_EQ(st::kRandom[kAir] & over, 0);
+    EXPECT_EQ(st::kRandom[blk::kGlass] & over, 0);
+    EXPECT_EQ(st::kRandom[blk::kTorch] & over, 0);
+    EXPECT_EQ(st::kRandom[blk::kStone] & over, over);
+    // A source of water drowns grass and keeps it from spreading there; nylium does not mind.
+    EXPECT_EQ(st::kRandom[blk::kWater] & over, st::kSmothers | st::kNoSpread);
+    EXPECT_EQ(st::kRandom[blk::kWater + 3] & over, st::kNoSpread);  // flowing, not full: grass lives, nothing spreads
+    // One layer of snow keeps grass alive; more does not. (Nylium dies under either.)
+    const u32 snow = block_info_of(blk::kSnow).first_state;
+    EXPECT_EQ(st::kRandom[snow] & over, st::kSmothersNylium);
+    EXPECT_EQ(st::kRandom[snow + 1] & over, over);
+    // Whole faces: what a torch stands on and hangs from.
+    EXPECT_EQ(st::kSturdyFull[blk::kStone], 63);
+    EXPECT_EQ(st::kSturdyFull[kAir], 0);
+    EXPECT_TRUE(face_sturdy_center(blk::kStone, kUp));
+    EXPECT_TRUE(face_sturdy_center(blk::kOakFence, kUp));  // a post holds a torch...
+    EXPECT_FALSE(face_sturdy(blk::kOakFence, kUp));        // ...without having a whole face
+    EXPECT_FALSE(face_sturdy(blk::kOakFence, kNorth));
+    EXPECT_TRUE(face_sturdy(blk::kOakSlab, kDown));  // a bottom slab: its underside only
+    EXPECT_FALSE(face_sturdy(blk::kOakSlab, kUp));
+    EXPECT_FALSE(face_sturdy(blk::kOakSlab, kEast));
+    // Copper's ages, of the whole family: what one that weathers looks at.
+    EXPECT_EQ(block_info_of(blk::kCopperBlock).weather, 1);
+    EXPECT_EQ(block_info_of(blk::kOxidizedCopper).weather, 4);
+    EXPECT_EQ(block_info_of(blk::kWeatheredCutCopperStairs).weather, 3);
+    EXPECT_EQ(block_info_of(blk::kWaxedCopperBlock).weather, 0);
+    EXPECT_EQ(block_info_of(blk::kCopperBlock).alt[0], blk::kExposedCopper);
+    EXPECT_EQ(block_info_of(blk::kOxidizedCopper).alt[0], 0);
+    EXPECT_TRUE(holds_water(blk::kWater));
+    EXPECT_TRUE(holds_water_source(blk::kWater));
+    EXPECT_TRUE(holds_water(blk::kWater + 3));
+    EXPECT_FALSE(holds_water_source(blk::kWater + 3));
+    EXPECT_FALSE(holds_water(blk::kLava));
+    EXPECT_FALSE(holds_water(kAir));
 }
 
 TEST(Blocks, GeneratedTablesAgreeWithEachOther) {
@@ -697,9 +753,18 @@ TEST(Blocks, GeneratedTablesAgreeWithEachOther) {
         ASSERT_LT(info.item, item_count());
         const u32 kind = info.flags & block_flag::kPlaceMask;
         if (kind == block_flag::kPlaceNone) continue;
-        // Placeable: its item is a plain block item that places exactly this block.
-        ASSERT_EQ(item_info(info.item).block, b) << block_name(b);
-        ASSERT_TRUE(item_info(info.item).flags & item_flag::kPlainBlockItem) << block_name(b);
+        if (kind == block_flag::kPlaceTorch) {
+            // A torch and its wall block share an item, which places either (StandingAndWallBlockItem).
+            const ItemInfo& item = item_info(info.item);
+            ASSERT_TRUE(item.flags & item_flag::kStandingAndWall) << block_name(b);
+            ASSERT_EQ(info.alt[0], block_info(item.block).default_state) << block_name(b);
+            ASSERT_TRUE(block_of(info.alt[0]) == b || block_of(info.alt[1]) == b) << block_name(b);
+            ASSERT_EQ(block_info_of(info.alt[1]).state_count, 4u) << block_name(b);  // facing: four walls
+        } else {
+            // Placeable: its item is a plain block item that places exactly this block.
+            ASSERT_EQ(item_info(info.item).block, b) << block_name(b);
+            ASSERT_TRUE(item_info(info.item).flags & item_flag::kPlainBlockItem) << block_name(b);
+        }
         ASSERT_FALSE(info.flags & (block_flag::kGameMaster | block_flag::kCustomReplace)) << block_name(b);
         // A block that answers a click, or keeps a block entity, is placeable only as a ported class.
         if ((info.flags & block_flag::kInteractive) || info.block_entity != proto::gen::kNoBlockEntity) {

@@ -533,6 +533,14 @@ void tnt_tick(World& w, Motion& m, Body& b) {
     if (b.on_ground) m.vel[0] = m.vel[0] * 0.7, m.vel[1] = m.vel[1] * -0.5, m.vel[2] = m.vel[2] * 0.7;
 }
 
+void falling_move(World& w, Motion& m, Body& b) {
+    const double old_pos[3] = {m.pos[0], m.pos[1], m.pos[2]};
+    if (!b.no_gravity) m.vel[0] = m.vel[0] + 0.0, m.vel[1] = m.vel[1] + -kFallingBlock.gravity, m.vel[2] = m.vel[2] + 0.0;
+    look_around(w, kFallingBlock, m);
+    move(w, kFallingBlock, m, b, m.vel[0], m.vel[1], m.vel[2]);
+    apply_effects_from_blocks(w, kFallingBlock, m, b, old_pos);
+}
+
 Fate living_tick(World& w, const Kind& k, Motion& m, Body& b) {
     // Entity.baseTick: checkBelowWorld -> LivingEntity.onBelowWorld hurts it until it dies. Nothing has health: gone.
     if (UNLIKELY(m.pos[1] < static_cast<double>(w.blocks.min_y() - 64))) return Fate::kGone;

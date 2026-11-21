@@ -25,7 +25,9 @@ constexpr double kMotionTolerance = 1.0E-7;
 // default, while the synchronized default is 1: health is always among the values a viewer is
 // sent. Nothing damages a (creative) player yet, so it is a constant.
 constexpr float kPlayerHealth = 20.0f;
-constexpr usize kDataEntriesMax = 6 * cb::kEntityDataEntryMax;  // the fixed-size values; an item stack comes on top
+// The fixed-size values (the longest set is a player's six; a falling block's position fits in two of them); an
+// item stack comes on top.
+constexpr usize kDataEntriesMax = 6 * cb::kEntityDataEntryMax;
 constexpr i32 kDefaultFuse = 80;  // PrimedTnt.defineSynchedData: DATA_FUSE_ID starts at DEFAULT_FUSE_TIME
 
 constexpr u32 bit_of(u32 accessor) { return 1u << accessor; }
@@ -230,6 +232,8 @@ u32 Tracker::non_default(u32 e) const {
         if (!s_.item[e].empty()) mask |= bit_of(ed::item_entity::kItem);
     } else if (s_.type[e] == entity_type::kTnt) {
         if (s_.fuse[e] != kDefaultFuse) mask |= bit_of(ed::primed_tnt::kFuse);
+    } else if (s_.type[e] == entity_type::kFallingBlock) {
+        if (s_.start_pos[e] != 0) mask |= bit_of(ed::falling_block::kStartPos);
     }
     return mask;
 }
@@ -248,6 +252,11 @@ u8* Tracker::put_data(u8* p, u32 e, u32 mask) const {
     if (s_.type[e] == entity_type::kTnt) {  // its block state is always the default one, TNT: never sent
         if (mask & bit_of(ed::primed_tnt::kFuse))
             p = cb::put_entity_varint(p, ed::primed_tnt::kFuse, ed::serializer::kInt, static_cast<u32>(s_.fuse[e]));
+        return p;
+    }
+    if (s_.type[e] == entity_type::kFallingBlock) {
+        if (mask & bit_of(ed::falling_block::kStartPos))
+            p = cb::put_entity_block_pos(p, ed::falling_block::kStartPos, s_.start_pos[e]);
         return p;
     }
     if (mask & bit_of(ed::living_entity::kHealth)) p = cb::put_entity_float(p, ed::living_entity::kHealth, kPlayerHealth);
@@ -343,7 +352,8 @@ void Tracker::pair(u32 w, u32 e, base::ByteBuf& out) {
         write_packet(bundles_, threshold_, cb::BundleDelimiter{});
         write_packet(
             bundles_, threshold_,
-            cb::AddEntity{s_.net_id(e), s_.uuid[e], s_.type[e], t.bx, t.by, t.bz, t.mx, t.my, t.mz, t.pitch, t.yaw, t.head, 0});
+            cb::AddEntity{s_.net_id(e), s_.uuid[e], s_.type[e], t.bx, t.by, t.bz, t.mx, t.my, t.mz, t.pitch, t.yaw, t.head,
+                          s_.type[e] == entity_type::kFallingBlock ? s_.block_state[e] : 0u});  // Entity.getAddEntityPacket
         if (const u32 mask = non_default(e)) write_data(e, mask, bundles_);
         if (equip_[e] != kNone) {  // sendPairingData: every slot that holds something
             const item::ItemStack* shown = equipment_[equip_[e]].slot;

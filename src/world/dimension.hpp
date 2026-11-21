@@ -39,8 +39,17 @@
 #include "world/generator.hpp"
 #include "world/light.hpp"
 #include "world/store.hpp"
+#include "world/ticks.hpp"
 
 namespace world {
+
+// In a build with DCHECKs the random ticks of sections that are known to have nothing to do are
+// run all the same, to be caught doing something (Game::run_random_ticks).
+#ifdef NDEBUG
+inline constexpr bool kCheckDormantSections = false;
+#else
+inline constexpr bool kCheckDormantSections = true;
+#endif
 
 class Dimension {
   public:
@@ -161,10 +170,44 @@ class Dimension {
         if (UNLIKELY(!c || si >= sections_)) return kAir;
         return c->sections[si].get(Section::index(static_cast<u32>(x & 15), static_cast<u32>(y & 15), static_cast<u32>(z & 15)));
     }
-    // Level.setBlock(pos, state, UPDATE_ALL): store the state, keep heightmaps and light in step,
-    // run the neighbour shape updates we implement, and record everything for this tick's
+    // LevelChunk.setBlockState, the part that is about the block itself: store the state, keep
+    // heightmaps, light and the random-tick counts in step, and record the change for this tick's
     // broadcast. False when nothing changed (same state, outside the world, chunk not ticking).
+    // What the change means to the blocks around it is the game's (Game::set_block).
     bool set_block(i32 x, i32 y, i32 z, BlockState s);
+
+    // ---- scheduled ticks (world/ticks.hpp)
+    // The game time, as the level knows it (Level.getGameTime): told once a tick, before
+    // anything of that tick is scheduled or saved.
+    void set_time(u64 game_time) { time_ = game_time; }
+    u64 time() const { return time_; }
+    // LevelAccessor.scheduleTick(pos, block, delay, priority): nothing where no chunk is loaded.
+    void schedule_tick(i32 x, i32 y, i32 z, u32 block, i32 delay, i32 priority = kTickPriorityNormal) {
+        if (Chunk* c = map_.find(x >> 4, z >> 4)) {
+            ticks_.schedule(*c, x, y, z, block, static_cast<i64>(time_) + delay, priority);
+            c->dirty = true;
+        }
+    }
+    bool has_scheduled_tick(i32 x, i32 y, i32 z, u32 block) const {
+        const Chunk* c = map_.find(x >> 4, z >> 4);
+        return c && ticks_.has(*c, x, y, z, block);
+    }
+    LevelTicks& block_ticks() { return ticks_; }
+
+    // ---- random ticks
+    // A random tick is three cells picked in each section of each simulated chunk, every game
+    // tick (ServerLevel.tickChunk) - and nearly all of them find nothing to do: the cell is not
+    // one that ticks, or it is grass that is neither dying nor has anywhere to spread to. So the
+    // sections are counted instead of asked: how many of a section's cells tick at random
+    // (Section::ticking), how many of those may act whatever is around them, how many are dying
+    // under what stands on them, how many cells are soil a spreader could take (RandomCounts,
+    // kept by set_block cell by cell, counted in full when a chunk is loaded). A section whose
+    // counts say that none of its random ticks can do anything - it is "dormant" - is not
+    // ticked, and costs nothing until a block changes within its reach. What remains is this
+    // list: the chunks that tick, are simulated, and hold a section with something to do.
+    const std::vector<Chunk*>& random_chunks() const { return random_; }
+    // A player's simulation distance came to cover the chunk, or ceased to (see Chunk::sim_refs).
+    void simulate(Chunk& c, i32 sim_delta, i32 block_delta);
 
     // ---- block entities (LevelChunk.blockEntities). The dimension keeps where they are and of
     // which type - what a chunk packet says; `data` belongs to the caller.
@@ -201,6 +244,12 @@ class Dimension {
     void encode(Chunk& c);
     void write_body(Chunk& c, base::ByteBuf& to);
     bool set_block_raw(Chunk& c, i32 x, i32 y, i32 z, BlockState s);
+    void recount_random(Chunk& c, u32 si, u32 lx, i32 y, u32 lz, BlockState old, BlockState s);
+    u32 active_mask(const Chunk& c) const;
+    void refresh_active(Chunk& c);
+    void status_changed(Chunk& c);
+    void start_ticking(Chunk& c);
+    void stop_ticking(Chunk& c);
     Chunk& adopt(LoadedChunk& lc);
     void promote_around(i32 cx, i32 cz);
     void invalidate(Chunk& c) {
@@ -228,6 +277,10 @@ class Dimension {
     base::Workers own_workers_{0};  // when none are given: everything on the calling thread
     base::Workers& workers_;
     ChunkStore store_;
+    LevelTicks ticks_;
+    u64 time_ = 0;
+    std::vector<Chunk*> random_;
+    base::ByteBuf tick_scratch_;
     std::vector<BlockChange> changes_;
     bool changes_sorted_ = true;
     base::ByteBuf scratch_;

@@ -62,6 +62,7 @@ struct Section {
     u16 fluids = 0;          // vanilla fluidCount
     u16 palette_len = 0;     // slots handed out, alive or dead
     u16 dead = 0;            // of those, how many have no blocks (reused before the palette grows)
+    u16 ticking = 0;         // blocks that tick at random here (state::kRandomTick): vanilla tickingBlockCount, of what is ported
     u8 bits = 0;
 
     ALWAYS_INLINE static constexpr u32 index(u32 x, u32 y, u32 z) { return (y << 8) | (z << 4) | x; }

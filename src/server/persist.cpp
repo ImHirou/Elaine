@@ -11,22 +11,24 @@
 //                      kind 1 chest:   27 stacks, then a kept tag (VarInt n + bytes, n = 0: none)
 //                      kind 2 furnace: 3 stacks, i32 lit remaining, lit total, cooking, cooking
 //                                      total, then a kept tag
-//   entities         u8 version (1), then until the end
+//   entities         u8 version (2; 1 is the same without kind 4), then until the end
 //                      u8 kind, VarInt entity type, uuid, 3 doubles position, 3 doubles velocity,
 //                      float yaw, pitch, head yaw, u8 flags (1 on the ground, 2 no gravity),
 //                      double fall distance
 //                      kind 1 item:    a stack, u16 age, u16 pickup delay (32767: never), i8 health
 //                      kind 2 tnt:     i16 fuse
 //                      kind 3 other:   nothing more
+//                      kind 4 falling: VarInt block state, i32 time, u8 flags (1 DropItem, 2 CancelDrop)
 //   a stack          as a client sends one (ItemStack.OPTIONAL_UNTRUSTED_STREAM_CODEC), and read
 //                    by the same reader: a file is trusted no further than a client.
 //
 // What is kept of an entity is what vanilla keeps (Entity.saveWithoutId, ItemEntity,
-// PrimedTnt.addAdditionalSaveData): where it is and how it moves, how far it has fallen, whether
-// it stands; an item's age, pickup delay and health; a fuse. What a tick works out again is not:
-// the block it stands on, what it ran into, its place in the round of an item at rest. An entity
-// comes back as vanilla's does - a new entity with its old state, ticked in full until it rests.
-// Ids of items, types and components are this version's (see chunk_io.hpp).
+// PrimedTnt / FallingBlockEntity.addAdditionalSaveData): where it is and how it moves, how far it
+// has fallen, whether it stands; an item's age, pickup delay and health; a fuse; the block that
+// is falling, for how long, and whether it drops (not where it began: vanilla does not either). What a tick works out again is
+// not: the block it stands on, what it ran into, its place in the round of an item at rest. An entity comes back as vanilla's
+// does - a new entity with its old state, ticked in full until it rests. Ids of items, types and components are this version's
+// (see chunk_io.hpp).
 #include <algorithm>
 #include <cmath>
 
@@ -227,14 +229,15 @@ void Game::write_entities(u64 chunk, base::ByteBuf& out) {
     const auto first = std::lower_bound(entities_at_.begin(), entities_at_.end(), chunk,
                                         [](const EntityAt& e, u64 key) { return e.chunk < key; });
     if (first == entities_at_.end() || first->chunk != chunk) return;
-    out.commit(put_u8(out.reserve(1), kVersion));
+    out.commit(put_u8(out.reserve(1), kEntitiesVersion));
     for (auto it = first; it != entities_at_.end() && it->chunk == chunk; ++it) {
         const u32 slot = it->slot, row = ents_.by_slot(slot);
         const u32 type = ents_.type[row];
         const bool is_item = slot < item_of_slot_.size() && item_of_slot_[slot] != kNone;
+        const bool is_falling = slot < falling_.size() && falling_[slot].alive;
         const phys::Body* body = slot < movers_.size() && movers_[slot].kind != gp::kMoverNone ? &movers_[slot].body : nullptr;
         u8* p = out.reserve(1 + kVarIntMaxBytes + 16 + 48 + 12 + 1 + 8);
-        p = put_u8(p, is_item ? kItem : type == entity_type::kTnt ? kTnt : kOther);
+        p = put_u8(p, is_item ? kItem : is_falling ? kFalling : type == entity_type::kTnt ? kTnt : kOther);
         p = put_varint(p, type);
         p = put_uuid(p, ents_.uuid[row]);
         p = put_f64(put_f64(put_f64(p, ents_.x[row]), ents_.y[row]), ents_.z[row]);
@@ -255,6 +258,12 @@ void Game::write_entities(u64 chunk, base::ByteBuf& out) {
             p = put_be16(p, static_cast<u16>(age));
             p = put_be16(p, static_cast<u16>(delay));
             out.commit(put_u8(p, static_cast<u8>(item_health_[k])));
+        } else if (is_falling) {
+            const Falling& f = falling_[slot];
+            p = out.reserve(kVarIntMaxBytes + 5);
+            p = put_varint(p, ents_.block_state[row]);
+            p = put_be32(p, static_cast<u32>(f.time));
+            out.commit(put_u8(p, static_cast<u8>((f.drop_item ? kDropItem : 0) | (f.cancel_drop ? kCancelDrop : 0))));
         } else if (type == entity_type::kTnt) {
             out.commit(put_be16(out.reserve(2), static_cast<u16>(ents_.fuse[row])));
         }
@@ -265,7 +274,7 @@ void Game::read_entities(world::Chunk& c, std::span<const u8> bytes) {
     c.saved_entities = !bytes.empty();
     if (bytes.empty()) return;
     Reader r(bytes.data(), bytes.size());
-    if (r.u8v() != kVersion) {
+    if (const u8 version = r.u8v(); version != kEntitiesVersion && version != 1) {
         LOG_ERROR("chunk %d, %d: its entities are of a version this server does not read", c.x, c.z);
         return;
     }
@@ -280,12 +289,18 @@ void Game::read_entities(world::Chunk& c, std::span<const u8> bytes) {
         ItemStack stack;
         u16 age = 0, delay = 0, fuse = 0;
         i8 health = 0;
+        u32 falling_state = 0, falling_flags = 0;
+        i32 falling_time = 0;
         if (record == kItem) {
             const item::Verdict v = item::read_untrusted(r, stack);
             age = r.be16(), delay = r.be16(), health = static_cast<i8>(r.u8v());
             if (v != item::Verdict::kOk) stack = {};
         } else if (record == kTnt) {
             fuse = r.be16();
+        } else if (record == kFalling) {
+            falling_state = r.varint();
+            falling_time = static_cast<i32>(r.be32());
+            falling_flags = r.u8v();
         } else if (record != kOther) {
             r.ok = false;
         }
@@ -300,6 +315,16 @@ void Game::read_entities(world::Chunk& c, std::span<const u8> bytes) {
             if (type != entity_type::kItem || stack.empty()) continue;
             slot =
                 add_item(uuid, yaw, std::move(stack), x, y, z, vx, vy, vz, delay == kNeverPickUp ? kNever : delay, age, health);
+        } else if (record == kFalling) {
+            // A state that is none falls as nothing, and is gone with its first tick (BlockState.CODEC's default
+            // would be sand: here a file is not trusted that far).
+            if (type != entity_type::kFallingBlock || falling_state >= world::state::kCount) continue;
+            slot = add_falling(uuid, static_cast<world::BlockState>(falling_state), x, y, z, falling_time, false);
+            const u32 row = ents_.by_slot(slot);
+            ents_.vx[row] = vx, ents_.vy[row] = vy, ents_.vz[row] = vz;
+            tracker_.created_with_velocity(row);
+            falling_[slot].drop_item = (falling_flags & kDropItem) != 0;
+            falling_[slot].cancel_drop = (falling_flags & kCancelDrop) != 0;
         } else {
             entity::Store::Moves moved;
             const u32 row = tracker_.spawn(type, false, uuid, x, y, z, yaw, pitch, moved);

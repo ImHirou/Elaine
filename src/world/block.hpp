@@ -58,6 +58,27 @@ ALWAYS_INLINE bool light_differs(BlockState a, BlockState b) {
 ALWAYS_INLINE bool sky_edge_occluded(BlockState top, BlockState bottom) {
     return dampening(bottom) != 0 || shape_occludes(top, bottom, kDown);
 }
+// ---- random ticks: what state::kRandom says of a cell and of the cell on top of it
+// (SpreadingSnowyBlock.canStayAlive / NyliumBlock.canBeNylium, negated; canPropagate onto soil).
+// `r`, `above`: kRandom of the two states.
+ALWAYS_INLINE bool random_dies(u32 r, u32 above) {
+    return ((r & state::kSpreader) && (above & state::kSmothers)) || ((r & state::kNylium) && (above & state::kSmothersNylium));
+}
+ALWAYS_INLINE bool random_target(u32 r, u32 above) { return (r & state::kSoil) && !(above & state::kNoSpread); }
+// BlockState.isFaceSturdy(level, pos, dir) - SupportType.FULL - and (..., SupportType.CENTER).
+ALWAYS_INLINE bool face_sturdy(BlockState s, u32 dir) { return (state::kSturdyFull[s] >> dir) & 1; }
+ALWAYS_INLINE bool face_sturdy_center(BlockState s, u32 dir) { return (state::kSturdyCenter[s] >> dir) & 1; }
+
+// FluidState.is(FluidTags.WATER): water, still or flowing, as the block or with it (waterlogged) -
+// and FluidState.is(Fluids.WATER): a source of it.
+ALWAYS_INLINE bool holds_water(BlockState s) {
+    return (state::kFlags[s] & state::kHasFluid) &&
+           state::block_of(state::fluid_legacy_of(s)) == state::block_of(proto::gen::block::kWater);
+}
+ALWAYS_INLINE bool holds_water_source(BlockState s) {
+    return (state::kFlags[s] & state::kHasFluid) && state::fluid_legacy_of(s) == proto::gen::block::kWater;
+}
+
 // What a state means to the queries that ask a chunk about its sections first (Chunk::large_sections
 // and the masks beside it): bit 0 a collision shape that reaches out of its cell, bit 1 it acts on
 // an entity in it or on it, bit 2 it breaks a fall. (world/chunk.cpp)

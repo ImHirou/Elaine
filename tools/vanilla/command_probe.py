@@ -33,12 +33,12 @@ Reading the diff:
     The command tree is compared command by command, for the commands ours has: every node of
     ours must be vanilla's (type, parser and its properties, runs or not, suggestions); what
     vanilla has more is listed, not counted (-v prints it).
-  * What this server does not do at all is left out: the particles and sound of a block that
-    /setblock destroy breaks (level_event), the death of what /kill kills (ours vanishes at
-    once; the messages are the same), "made the advancement" and "left the game" messages,
-    grass that turns to dirt under a block a command put on it (a random tick). An entity a
-    command made is listed at the end of its step: vanilla shows it at once, ours with the
-    tick's other entities.
+  * Left out: the death of what /kill kills (ours vanishes at once; the messages are the
+    same), "made the advancement" and "left the game" messages, grass that turns to dirt under
+    a block a command put on it (a random tick, whenever it falls), and the particles and sound
+    of a block that /setblock destroy breaks (level_event: block_probe.py records those). An
+    entity a command made is listed at the end of its step: vanilla shows it at once, ours with
+    the tick's other entities.
   * `list` names the most players a server takes: start ours with vanilla's max-players.
   * Known differences are listed in docs/architecture.md ("Commands").
 """

@@ -30,6 +30,7 @@ from mcgen import die
 #   hooks     every BlockBehaviour / Block method the class chain overrides, as gamedata lists
 #             them. The port was written against exactly this set: a hook that appears or
 #             disappears in a new version means the class has to be read again.
+#   item      (optional) the class of the item that places it, when that is not plain BlockItem
 PORTED_BLOCKS = {
     "ChestBlock": ("kChest", "kPlaceChest", {
         "affectNeighborsAfterRemoval", "getAnalogOutputSignal", "getFluidState", "getMenuProvider", "getShape",
@@ -45,16 +46,56 @@ PORTED_BLOCKS = {
     # A constant redstone signal on every side (redstone_block). Placeable by the general rule;
     # the kind is what TNT's "has a neighbour signal" looks for.
     "PoweredBlock": ("kPowered", None, {"isSignalSource", "ownSignal"}),
+    # `snowy` follows what lies on it (podzol); grass and mycelium also spread and die (randomTick).
+    "SnowyBlock": ("kSnowy", "kPlaceSnowy", {"updateShape", "createBlockStateDefinition", "getStateForPlacement"}),
+    "GrassBlock": ("kSpreading", "kPlaceSnowy", {"randomTick", "updateShape", "createBlockStateDefinition", "getStateForPlacement"}),
+    "MyceliumBlock": ("kSpreading", "kPlaceSnowy", {
+        "randomTick", "updateShape", "createBlockStateDefinition", "getStateForPlacement", "animateTick"}),
+    "NyliumBlock": ("kNylium", "kPlaceDefault", {"randomTick"}),
+    "WeatheringCopperFullBlock": ("kWeathering", "kPlaceDefault", {"isRandomlyTicking", "randomTick"}),
+    "BuddingAmethystBlock": ("kBuddingAmethyst", "kPlaceDefault", {"onProjectileHit", "randomTick"}),
+    "AmethystClusterBlock": ("kAmethystCluster", "kPlaceCluster", {
+        "canSurvive", "getFluidState", "getShape", "mirror", "onProjectileHit", "rotate", "updateShape",
+        "createBlockStateDefinition", "getStateForPlacement"}),
+    "TorchBlock": ("kTorch", "kPlaceTorch", {"canSurvive", "getShape", "updateShape", "animateTick"}, "StandingAndWallBlockItem"),
+    "WallTorchBlock": ("kWallTorch", "kPlaceTorch", {
+        "canSurvive", "getShape", "mirror", "rotate", "updateShape", "animateTick", "createBlockStateDefinition",
+        "getStateForPlacement"}, "StandingAndWallBlockItem"),
+    "RedstoneLampBlock": ("kLamp", "kPlaceLamp", {"neighborChanged", "tick", "createBlockStateDefinition", "getStateForPlacement"}),
+    "SandBlock": ("kFalling", "kPlaceDefault", {"onPlace", "tick", "updateShape", "animateTick"}),
+    "ColoredFallingBlock": ("kFalling", "kPlaceDefault", {"onPlace", "tick", "updateShape", "animateTick"}),
+    "ConcretePowderBlock": ("kConcretePowder", "kPlaceConcretePowder", {
+        "onPlace", "tick", "updateShape", "animateTick", "getStateForPlacement"}),
 }
-BLOCK_KINDS = ["kPlain", "kChest", "kFurnace", "kCraftingTable", "kTnt", "kPowered"]
+BLOCK_KINDS = ["kPlain", "kChest", "kFurnace", "kCraftingTable", "kTnt", "kPowered", "kSnowy", "kSpreading", "kNylium",
+               "kWeathering", "kBuddingAmethyst", "kAmethystCluster", "kTorch", "kWallTorch", "kLamp", "kFalling",
+               "kConcretePowder"]
+# The kinds whose randomTick is ported, and of those the ones whose tick may act whatever stands
+# around the block (the others are asked what is around them: state::kSmothers and its like).
+RANDOM_TICK_KINDS = {"kSpreading", "kNylium", "kWeathering", "kBuddingAmethyst"}
+RANDOM_TICK_ALWAYS = {"kWeathering", "kBuddingAmethyst"}
+# Placeable blocks whose class overrides randomTick and is not ported: what they would do waits
+# for something else. Named here so that a new one stops the generator.
+RANDOM_TICK_GAPS = {"IceBlock": "melts into water: it waits for fluids"}
 
 # Property layouts the C++ side computes states from: block -> [(property, values in order)].
 # state = first_state + sum(value index * stride); gen.py emits the strides and checks the orders.
+_CLUSTER = [("facing", ["north", "east", "south", "west", "up", "down"]), ("waterlogged", ["true", "false"])]
+_WALL_TORCH = [("facing", ["north", "south", "west", "east"])]
 STATE_LAYOUTS = {
     "minecraft:chest": [("facing", ["north", "south", "west", "east"]), ("type", ["single", "left", "right"]),
                         ("waterlogged", ["true", "false"])],
     "minecraft:furnace": [("facing", ["north", "south", "west", "east"]), ("lit", ["true", "false"])],
     "minecraft:tnt": [("unstable", ["true", "false"])],
+    "minecraft:redstone_lamp": [("lit", ["true", "false"])],
+    "minecraft:wall_torch": _WALL_TORCH,
+    "minecraft:soul_wall_torch": _WALL_TORCH,
+    "minecraft:copper_wall_torch": _WALL_TORCH,
+    "minecraft:small_amethyst_bud": _CLUSTER,
+    "minecraft:medium_amethyst_bud": _CLUSTER,
+    "minecraft:large_amethyst_bud": _CLUSTER,
+    "minecraft:amethyst_cluster": _CLUSTER,
+    "minecraft:snow": [("layers", ["1", "2", "3", "4", "5", "6", "7", "8"])],
 }
 
 # Sounds and particles the server sends by id (static registries: sound_event, particle_type).
@@ -80,19 +121,31 @@ def load_gamedata(d) -> dict:
     if not path.exists():
         die("gamedata/entities.json is missing - run: mcgen.py gamedata")
     out["entities"] = json.loads(path.read_text())  # entity types: class chains, default attributes
+    path = d / "gamedata" / "enums.json"
+    if not path.exists():
+        die("gamedata/enums.json is missing - run: mcgen.py gamedata")
+    out["enums"] = json.loads(path.read_text())["enums"]  # enum constants in ordinal order
+    path = d / "gamedata" / "fluids.json"
+    if not path.exists():
+        die("gamedata/fluids.json is missing - run: mcgen.py gamedata")
+    out["fluids"] = json.loads(path.read_text())  # fluid states: which fluid, how much of it
+    path = d / "gamedata" / "statics.json"
+    if not path.exists():
+        die("gamedata/statics.json is missing - run: mcgen.py gamedata")
+    out["statics"] = json.loads(path.read_text())["classes"]  # static tables of classes (WeatheringCopper.NEXT_BY_BLOCK)
     return out
 
 
 def ported_block(game_block: dict):
-    """(kind, placement) of a block whose own class is ported, else None. Checks the hook set."""
+    """(kind, placement, item class) of a block whose own class is ported, else None. Checks the hook set."""
     cls = game_block["class"][0]
     if cls not in PORTED_BLOCKS:
         return None
-    kind, place, hooks = PORTED_BLOCKS[cls]
+    kind, place, hooks, *item = PORTED_BLOCKS[cls]
     if set(game_block["hooks"]) != hooks:
         die(f"{game_block['name']}: {cls} overrides {sorted(set(game_block['hooks']) ^ hooks)} differently from the version "
             "the server's port was written against - read the class again, then update PORTED_BLOCKS")
-    return kind, place
+    return kind, place, item[0] if item else "BlockItem"
 
 
 # ----------------------------------------------------------------------------- explosion drops

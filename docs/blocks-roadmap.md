@@ -2,7 +2,7 @@
 
 Minecraft 26.3 has 1286 blocks in 268 block classes. The server holds a block only if it
 simulates everything vanilla would do with it - so the list of what can be **placed** is the list
-of what is **done**: 325 blocks today. This file is that list, block class by block class,
+of what is **done**: 355 blocks today. This file is that list, block class by block class,
 in the order the missing systems are meant to be built.
 
 **Generated** by `tools/mcgen/roadmap.py` from the jar's block classes (`mcgen.py gamedata`) and the
@@ -18,8 +18,8 @@ A box is ticked when every block of the class can be placed; `(n of m)` says how
 
 Some blocks that are ticked still do less than in vanilla, because a system around them is
 missing; those gaps are listed under "Systems" below and in docs/architecture.md, never
-silently: ice does not melt and copper does not weather (random ticks), grass does not spread,
-ores give no experience, an amethyst block does not chime.
+silently: ice does not melt (it would leave water), concrete powder meets no water that
+flows, ores give no experience, an amethyst block does not chime.
 
 ## Systems
 
@@ -31,21 +31,25 @@ What the block classes lean on. A milestone below is workable once the systems i
 - [x] Entity physics for one kind (primed TNT): gravity, collision with blocks, bounce, speed factor
 - [x] Explosions: rays, exposure, block drops without a tool, chain reactions
 - [ ] Survival: mining over time, tools, block drops through loot tables with a tool and enchantments
-- [ ] Sounds and particles of placing and breaking, heard by others (`sound`, level event 2001)
-- [ ] Scheduled block ticks (`LevelTicks`) - a chest's recount of its openers has a queue of its own
-- [ ] Random block ticks
-- [ ] Fluids
+- [x] Neighbour updates: `neighborChanged` and `updateShape` in vanilla's order (`CollectingNeighborUpdater`), blocks that break when what holds them goes
+- [x] Scheduled block ticks (`LevelTicks`), saved with their chunk
+- [x] Random block ticks, at the simulation distance
+- [x] Falling blocks (`FallingBlockEntity`)
+- [x] The particles and the sound of a block breaking, for the others (level event 2001)
+- [ ] The sound of a block being placed (`sound`)
+- [ ] Fluids: water and lava that flow, fluid ticks, waterlogged blocks that ask for them
 - [ ] Redstone signals beyond the block of redstone
+- [ ] The time of day and the weather: light that changes with them, rain and snow on blocks (`tickPrecipitation`)
 - [ ] Experience orbs: a furnace's stored experience, ores blown up by a player's TNT
-- [ ] Item physics: dropped and spilled items fall, are pushed by explosions and carried by water
+- [x] Item physics: dropped and spilled items fall and are pushed by explosions
 - [ ] What blocks do to entities inside them (`entityInside`): cobweb, honey, bubble columns, portals, pressure plates
 - [ ] The recipe book (`recipe_book_add`, `place_recipe`) and recipe unlocking
 - [ ] Special crafting recipes: dyed armour, banner and book copies, fireworks, map extending, repairing, shield decoration, tipped arrows, decorated pots
 - [ ] Block entity names and locks (a chest named on an anvil), saved block entity data on placed items (ctrl + pick block)
 - [ ] Comparator output of containers (`getAnalogOutputSignal`)
-- [ ] Persistence of block entities with their chunk
+- [x] Persistence of block entities with their chunk
 
-## 0. Plain blocks (320 of 321 blocks)
+## 0. Plain blocks (302 of 303 blocks)
 
 Needs: Nothing: a state that is stored, lit and sent. Done since the first world.
 
@@ -57,24 +61,16 @@ Needs: Nothing: a state that is stored, lit and sent. Done since the first world
   gold_ore, deepslate_gold_ore, iron_ore, deepslate_iron_ore, coal_ore, deepslate_coal_ore, nether_gold_ore, lapis_ore, deepslate_lapis_ore, diamond_ore, deepslate_diamond_ore, emerald_ore, deepslate_emerald_ore, nether_quartz_ore, copper_ore, deepslate_copper_ore
 - [x] **StainedGlassBlock** (16)  
   white_stained_glass, orange_stained_glass, magenta_stained_glass, light_blue_stained_glass, yellow_stained_glass, lime_stained_glass, pink_stained_glass, gray_stained_glass, light_gray_stained_glass, cyan_stained_glass, purple_stained_glass, blue_stained_glass, brown_stained_glass, green_stained_glass, red_stained_glass, black_stained_glass
-- [x] **WeatheringCopperFullBlock** (12) - `isRandomlyTicking`, `randomTick`  
-  copper_block, exposed_copper, weathered_copper, oxidized_copper, cut_copper, exposed_cut_copper, weathered_cut_copper, oxidized_cut_copper, chiseled_copper, exposed_chiseled_copper, weathered_chiseled_copper, oxidized_chiseled_copper
 - [x] **InfestedBlock** (6) - `spawnAfterBreak`  
   infested_stone, infested_cobblestone, infested_stone_bricks, infested_mossy_stone_bricks, infested_cracked_stone_bricks, infested_chiseled_stone_bricks
 - [x] **AirBlock** (3)  
   air, void_air, cave_air
 - [x] **BonemealableFeaturePlacerBlock** (2)  
   moss_block, pale_moss_block
-- [x] **NyliumBlock** (2) - `randomTick`  
-  warped_nylium, crimson_nylium
 - [x] **AmethystBlock** (1) - `onProjectileHit`  
   amethyst_block
-- [x] **BuddingAmethystBlock** (1) - `onProjectileHit`, `randomTick`  
-  budding_amethyst
 - [x] **CryingObsidianBlock** (1)  
   crying_obsidian
-- [x] **GrassBlock** (1) - `getStateForPlacement`, `randomTick`, `updateShape`  
-  grass_block
 - [x] **HalfTransparentBlock** (1)  
   blue_ice
 - [x] **HayBlock** (1) - `fallOn`, `getStateForPlacement`  
@@ -89,8 +85,6 @@ Needs: Nothing: a state that is stored, lit and sent. Done since the first world
   magma_block
 - [x] **MudBlock** (1)  
   mud
-- [x] **MyceliumBlock** (1) - `getStateForPlacement`, `randomTick`, `updateShape`  
-  mycelium
 - [x] **NetherrackBlock** (1)  
   netherrack
 - [x] **PoweredBlock** (1) - `isSignalSource`, `ownSignal`  
@@ -99,8 +93,6 @@ Needs: Nothing: a state that is stored, lit and sent. Done since the first world
   rooted_dirt
 - [x] **SlimeBlock** (1) - `fallOn`, `stepOn`  
   slime_block
-- [x] **SnowyBlock** (1) - `getStateForPlacement`, `updateShape`  
-  podzol
 - [x] **SoulSandBlock** (1)  
   soul_sand
 - [x] **StructureVoidBlock** (1)  
@@ -125,9 +117,9 @@ Needs: Menus over containers, recipes, a furnace's tick, primed TNT and explosio
 - [x] **TntBlock** (1) - `dropFromExplosion`, `neighborChanged`, `onPlace`, `onProjectileHit`, `playerWillDestroy`, `useItemOn`, `wasExploded`  
   tnt
 
-## 2. Shapes: a state from how the block is placed and what stands beside it (0 of 306 blocks)
+## 2. Shapes: a state from how the block is placed and what stands beside it (1 of 307 blocks)
 
-Needs: BlockPlaceContext in full (the clicked face and where on it, the player's look, replacing a block with more of itself) and `updateShape` for every neighbour change. No ticking.
+Needs: BlockPlaceContext in full (the clicked face and where on it, the player's look, replacing a block with more of itself). `updateShape` for every neighbour change is there (`Game::update_shape`; podzol under snow is the first). No ticking.
 
 - [ ] **SlabBlock** (97) - `canBeReplaced(BlockState,BlockPlaceContext)`, `getFluidState`, `getStateForPlacement`, `updateShape`  
   white_wool_slab, orange_wool_slab, magenta_wool_slab, light_blue_wool_slab, yellow_wool_slab, lime_wool_slab, pink_wool_slab, gray_wool_slab, light_gray_wool_slab, cyan_wool_slab, purple_wool_slab, blue_wool_slab, brown_wool_slab, green_wool_slab, red_wool_slab, black_wool_slab, resin_brick_slab, prismarine_slab, prismarine_brick_slab, dark_prismarine_slab, oak_slab, spruce_slab, birch_slab, jungle_slab, acacia_slab, cherry_slab, dark_oak_slab, pale_oak_slab, mangrove_slab, poplar_slab, bamboo_slab, bamboo_mosaic_slab, stone_slab, sandstone_slab, cut_sandstone_slab, petrified_oak_slab, cobblestone_slab, brick_slab, stone_brick_slab, mud_brick_slab, nether_brick_slab, quartz_slab, red_sandstone_slab, cut_red_sandstone_slab, smooth_stone_slab, purpur_slab, white_concrete_slab, orange_concrete_slab, magenta_concrete_slab, light_blue_concrete_slab, yellow_concrete_slab, lime_concrete_slab, pink_concrete_slab, gray_concrete_slab, light_gray_concrete_slab, cyan_concrete_slab, purple_concrete_slab, blue_concrete_slab, brown_concrete_slab, green_concrete_slab, red_concrete_slab, black_concrete_slab, polished_granite_slab, smooth_red_sandstone_slab, mossy_stone_brick_slab, polished_diorite_slab, mossy_cobblestone_slab, end_stone_brick_slab, smooth_sandstone_slab, smooth_quartz_slab, granite_slab, andesite_slab, red_nether_brick_slab, polished_andesite_slab, diorite_slab, crimson_slab, warped_slab, blackstone_slab, polished_blackstone_brick_slab, polished_blackstone_slab, tuff_slab, polished_tuff_slab, tuff_brick_slab, sulfur_slab, polished_sulfur_slab, sulfur_brick_slab, cinnabar_slab, polished_cinnabar_slab, cinnabar_brick_slab, waxed_cut_copper_slab, waxed_exposed_cut_copper_slab, waxed_weathered_cut_copper_slab, waxed_oxidized_cut_copper_slab, cobbled_deepslate_slab, polished_deepslate_slab, deepslate_tile_slab, deepslate_brick_slab
@@ -177,24 +169,26 @@ Needs: BlockPlaceContext in full (the clicked face and where on it, the player's
   pointed_dripstone
 - [ ] **SculkVeinBlock** (1) - `canBeReplaced(BlockState,BlockPlaceContext)`, `canSurvive`, `getFluidState`, `getStateForPlacement`, `updateShape`  
   sculk_vein
+- [x] **SnowyBlock** (1) - `getStateForPlacement`, `updateShape`  
+  podzol
 
-## 3. Support: blocks that need something to stand on or hang from (0 of 81 blocks)
+## 3. Support: blocks that need something to stand on or hang from (10 of 81 blocks)
 
-Needs: `canSurvive`, and the break-and-drop when the support goes (a scheduled tick). Survival drops need loot tables with a tool.
+Needs: `canSurvive` and the break-and-drop when the support goes are there (`Game::can_survive`, `break_block`: torches, amethyst); each class is its own rule of placement and its own drops. Survival drops need loot tables with a tool.
 
 - [ ] **WoolCarpetBlock** (16) - `canSurvive`, `updateShape`  
   white_carpet, orange_carpet, magenta_carpet, light_blue_carpet, yellow_carpet, lime_carpet, pink_carpet, gray_carpet, light_gray_carpet, cyan_carpet, purple_carpet, blue_carpet, brown_carpet, green_carpet, red_carpet, black_carpet
 - [ ] **FlowerBlock** (14) - `canSurvive`, `updateShape`  
   dandelion, golden_dandelion, torchflower, poppy, blue_orchid, allium, azure_bluet, red_tulip, orange_tulip, white_tulip, pink_tulip, oxeye_daisy, cornflower, lily_of_the_valley
-- [ ] **AmethystClusterBlock** (4) - `canSurvive`, `getFluidState`, `getStateForPlacement`, `onProjectileHit`, `updateShape`  
+- [x] **AmethystClusterBlock** (4) - `canSurvive`, `getFluidState`, `getStateForPlacement`, `onProjectileHit`, `updateShape`  
   amethyst_cluster, large_amethyst_bud, medium_amethyst_bud, small_amethyst_bud
 - [ ] **TallFlowerBlock** (4) - `canSurvive`, `getStateForPlacement`, `playerDestroy`, `playerWillDestroy`, `setPlacedBy`, `updateShape`  
   sunflower, lilac, rose_bush, peony
 - [ ] **DoublePlantBlock** (3) - `canSurvive`, `getStateForPlacement`, `playerDestroy`, `playerWillDestroy`, `setPlacedBy`, `updateShape`  
   tall_grass, large_fern, pitcher_plant
-- [ ] **TorchBlock** (3) - `canSurvive`, `updateShape`  
+- [x] **TorchBlock** (3) - `canSurvive`, `updateShape`  
   torch, soul_torch, copper_torch
-- [ ] **WallTorchBlock** (3) - `canSurvive`, `getStateForPlacement`, `updateShape`  
+- [x] **WallTorchBlock** (3) - `canSurvive`, `getStateForPlacement`, `updateShape`  
   wall_torch, soul_wall_torch, copper_wall_torch
 - [ ] **AzaleaBlock** (2) - `canSurvive`, `updateShape`  
   azalea, flowering_azalea
@@ -251,19 +245,19 @@ Needs: `canSurvive`, and the break-and-drop when the support goes (a scheduled t
 - [ ] **WitherRoseBlock** (1) - `canSurvive`, `entityInside`, `updateShape`  
   wither_rose
 
-## 4. Scheduled ticks and falling blocks (0 of 26 blocks)
+## 4. Scheduled ticks and falling blocks (19 of 26 blocks)
 
-Needs: A tick queue per level (`LevelTicks`), and `FallingBlockEntity` on the entity physics TNT now has.
+Needs: The tick queue (`world::LevelTicks`) and `FallingBlockEntity` are there: sand, gravel, concrete powder. What is left hurts what it lands on (anvils: damage), teleports (the dragon egg) or has a block entity.
 
-- [ ] **ConcretePowderBlock** (16) - `getStateForPlacement`, `onPlace`, `tick`, `updateShape`  
+- [x] **ConcretePowderBlock** (16) - `getStateForPlacement`, `onPlace`, `tick`, `updateShape`  
   white_concrete_powder, orange_concrete_powder, magenta_concrete_powder, light_blue_concrete_powder, yellow_concrete_powder, lime_concrete_powder, pink_concrete_powder, gray_concrete_powder, light_gray_concrete_powder, cyan_concrete_powder, purple_concrete_powder, blue_concrete_powder, brown_concrete_powder, green_concrete_powder, red_concrete_powder, black_concrete_powder
 - [ ] **AnvilBlock** (3) - `getMenuProvider`, `getStateForPlacement`, `onPlace`, `tick`, `updateShape`, `useWithoutItem`  
   anvil, chipped_anvil, damaged_anvil
 - [ ] **BrushableBlock** (2, *block entity*) - `getMenuProvider`, `onPlace`, `tick`, `triggerEvent`, `updateShape`  
   suspicious_sand, suspicious_gravel
-- [ ] **SandBlock** (2) - `onPlace`, `tick`, `updateShape`  
+- [x] **SandBlock** (2) - `onPlace`, `tick`, `updateShape`  
   sand, red_sand
-- [ ] **ColoredFallingBlock** (1) - `onPlace`, `tick`, `updateShape`  
+- [x] **ColoredFallingBlock** (1) - `onPlace`, `tick`, `updateShape`  
   gravel
 - [ ] **DragonEggBlock** (1) - `attack`, `onPlace`, `tick`, `updateShape`, `useWithoutItem`  
   dragon_egg
@@ -321,10 +315,12 @@ Needs: Water and lava: flowing (`FlowingFluid.tick`), waterlogging (`getFluidSta
 - [ ] **WetSpongeBlock** (1) - `onPlace`  
   wet_sponge
 
-## 6. Random ticks: growth, spread and decay (1 of 111 blocks)
+## 6. Random ticks: growth, spread and decay (18 of 128 blocks)
 
-Needs: Random block ticks per chunk section (the `kRandomTicks` state flag is there), bone meal, tree and mushroom features for what grows into a structure.
+Needs: Random block ticks are there, and sections whose ticks could do nothing are passed by: a class that is ported says in `state::kRandom` when its tick can act (`RANDOM_TICK_KINDS` in gen_game.py; docs/architecture.md, "Block updates"). Still needed: bone meal, tree and mushroom features for what grows into a structure, fire's spread.
 
+- [x] **WeatheringCopperFullBlock** (12) - `isRandomlyTicking`, `randomTick`  
+  copper_block, exposed_copper, weathered_copper, oxidized_copper, cut_copper, exposed_cut_copper, weathered_cut_copper, oxidized_cut_copper, chiseled_copper, exposed_chiseled_copper, weathered_chiseled_copper, oxidized_chiseled_copper
 - [ ] **SaplingBlock** (9) - `canSurvive`, `randomTick`, `updateShape`  
   oak_sapling, spruce_sapling, birch_sapling, jungle_sapling, acacia_sapling, cherry_sapling, dark_oak_sapling, pale_oak_sapling, poplar_sapling
 - [ ] **UntintedParticleLeavesBlock** (7) - `getFluidState`, `getStateForPlacement`, `isRandomlyTicking`, `randomTick`, `tick`, `updateShape`  
@@ -359,6 +355,8 @@ Needs: Random block ticks per chunk section (the `kRandomTicks` state flag is th
   attached_pumpkin_stem, attached_melon_stem
 - [ ] **NetherFungusBlock** (2) - `canSurvive`, `updateShape`  
   warped_fungus, crimson_fungus
+- [x] **NyliumBlock** (2) - `randomTick`  
+  warped_nylium, crimson_nylium
 - [ ] **RedStoneOreBlock** (2) - `attack`, `isRandomlyTicking`, `randomTick`, `spawnAfterBreak`, `stepOn`, `useItemOn`  
   redstone_ore, deepslate_redstone_ore
 - [ ] **StemBlock** (2) - `canSurvive`, `getCloneItemStack`, `randomTick`, `updateShape`  
@@ -369,6 +367,8 @@ Needs: Random block ticks per chunk section (the `kRandomTicks` state flag is th
   bamboo
 - [ ] **BeetrootBlock** (1) - `canSurvive`, `entityInside`, `getCloneItemStack`, `isRandomlyTicking`, `randomTick`, `updateShape`  
   beetroots
+- [x] **BuddingAmethystBlock** (1) - `onProjectileHit`, `randomTick`  
+  budding_amethyst
 - [ ] **CactusBlock** (1) - `canSurvive`, `entityInside`, `randomTick`, `tick`, `updateShape`  
   cactus
 - [ ] **CarrotBlock** (1) - `canSurvive`, `entityInside`, `getCloneItemStack`, `isRandomlyTicking`, `randomTick`, `updateShape`  
@@ -391,10 +391,14 @@ Needs: Random block ticks per chunk section (the `kRandomTicks` state flag is th
   farmland
 - [ ] **FireBlock** (1) - `canSurvive`, `entityInside`, `getStateForPlacement`, `onPlace`, `playerWillDestroy`, `spawnDestroyByEntityParticles`, `tick`, `updateShape`  
   fire
+- [x] **GrassBlock** (1) - `getStateForPlacement`, `randomTick`, `updateShape`  
+  grass_block
 - [ ] **LeavesBlock** (1) - `getFluidState`, `getStateForPlacement`, `isRandomlyTicking`, `randomTick`, `tick`, `updateShape`  
   spruce_leaves
 - [ ] **MangroveLeavesBlock** (1) - `getFluidState`, `getStateForPlacement`, `isRandomlyTicking`, `randomTick`, `tick`, `updateShape`  
   mangrove_leaves
+- [x] **MyceliumBlock** (1) - `getStateForPlacement`, `randomTick`, `updateShape`  
+  mycelium
 - [ ] **NetherWartBlock** (1) - `canSurvive`, `getCloneItemStack`, `isRandomlyTicking`, `randomTick`, `updateShape`  
   nether_wart
 - [ ] **PitcherCropBlock** (1) - `canBeReplaced(BlockState,BlockPlaceContext)`, `canSurvive`, `entityInside`, `getStateForPlacement`, `isRandomlyTicking`, `playerDestroy`, `playerWillDestroy`, `randomTick`, `setPlacedBy`, `updateShape`  
@@ -578,9 +582,9 @@ Needs: Block entities whose data travels to the client: `getUpdateTag` in the ch
 - [ ] **WitherWallSkullBlock** (1, *block entity*) - `getMenuProvider`, `getStateForPlacement`, `neighborChanged`, `setPlacedBy`, `triggerEvent`  
   wither_skeleton_wall_skull
 
-## 11. Redstone (0 of 52 blocks)
+## 11. Redstone (1 of 52 blocks)
 
-Needs: Signals (`SignalGetter`), neighbour updates in vanilla's order, the scheduled ticks above. TNT already asks for a neighbour signal; a block of redstone is the one source so far.
+Needs: Signals (`SignalGetter`) beyond "is there a block of redstone beside me". Neighbour updates in vanilla's order and scheduled ticks are there; TNT and the lamp ask for a neighbour signal, a block of redstone is the one source so far.
 
 - [ ] **ButtonBlock** (15) - `affectNeighborsAfterRemoval`, `canSurvive`, `entityInside`, `getDirectSignal`, `getStateForPlacement`, `isSignalSource`, `onExplosionHit`, `ownSignal`, `tick`, `updateShape`, `useWithoutItem`  
   stone_button, oak_button, spruce_button, birch_button, jungle_button, acacia_button, cherry_button, dark_oak_button, pale_oak_button, mangrove_button, poplar_button, bamboo_button, crimson_button, warped_button, polished_blackstone_button
@@ -608,7 +612,7 @@ Needs: Signals (`SignalGetter`), neighbour updates in vanilla's order, the sched
   observer
 - [ ] **RailBlock** (1) - `affectNeighborsAfterRemoval`, `canSurvive`, `getFluidState`, `getStateForPlacement`, `neighborChanged`, `onPlace`, `updateShape`  
   rail
-- [ ] **RedstoneLampBlock** (1) - `getStateForPlacement`, `neighborChanged`, `tick`  
+- [x] **RedstoneLampBlock** (1) - `getStateForPlacement`, `neighborChanged`, `tick`  
   redstone_lamp
 - [ ] **RedstoneTorchBlock** (1) - `affectNeighborsAfterRemoval`, `canSurvive`, `getDirectSignal`, `getSignal`, `isSignalSource`, `neighborChanged`, `onPlace`, `ownSignal`, `tick`, `updateShape`  
   redstone_torch

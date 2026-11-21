@@ -39,6 +39,8 @@ ALWAYS_INLINE u32 find_in(const u16* pal, u32 n, u32 s) {
 
 ALWAYS_INLINE u32 air_bit(BlockState s) { return flags_of(s) & state::kIsAir; }
 ALWAYS_INLINE u32 fluid_bit(BlockState s) { return (flags_of(s) & state::kHasFluid) != 0; }
+ALWAYS_INLINE u32 tick_bit(BlockState s) { return state::kRandom[s] & state::kRandomTick; }
+static_assert(state::kRandomTick == 1);  // (counted by adding the bit)
 
 }  // namespace
 
@@ -68,7 +70,7 @@ void Section::detach(SectionAllocator& a) {
 void Section::release(SectionAllocator& a) {
     detach(a);
     single = kAir;
-    non_air = fluids = 0;
+    non_air = fluids = ticking = 0;
 }
 
 void Section::fill(SectionAllocator& a, BlockState s) {
@@ -78,15 +80,17 @@ void Section::fill(SectionAllocator& a, BlockState s) {
 }
 
 void Section::recount() {
-    u32 solid = 0, wet = 0;
+    u32 solid = 0, wet = 0, ticks = 0;
     if (bits == 0) {
         solid = air_bit(single) ? 0 : kVolume;
         wet = fluid_bit(single) ? kVolume : 0;
+        ticks = tick_bit(single) ? kVolume : 0;
     } else if (bits == kDirectBits) {
         for (u32 i = 0; i < kVolume; ++i) {
             const BlockState s = load_le<u16>(data + 2 * i);
             solid += 1 - air_bit(s);
             wet += fluid_bit(s);
+            ticks += tick_bit(s);
         }
     } else {
         const u16* r = refs();
@@ -94,10 +98,12 @@ void Section::recount() {
             if (!r[i]) continue;
             solid += air_bit(palette[i]) ? 0 : r[i];
             wet += fluid_bit(palette[i]) ? r[i] : 0;
+            ticks += tick_bit(palette[i]) ? r[i] : 0;
         }
     }
     non_air = static_cast<u16>(solid);
     fluids = static_cast<u16>(wet);
+    ticking = static_cast<u16>(ticks);
 }
 
 BlockState Section::set(SectionAllocator& a, u32 i, BlockState s) {
@@ -122,6 +128,7 @@ BlockState Section::set(SectionAllocator& a, u32 i, BlockState s) {
         store_le<u16>(data + 2 * i, s);
         non_air = static_cast<u16>(non_air + air_bit(old) - air_bit(s));
         fluids = static_cast<u16>(fluids + fluid_bit(s) - fluid_bit(old));
+        ticking = static_cast<u16>(ticking + tick_bit(s) - tick_bit(old));
         return old;
     }
     u32 slot = find(s);
@@ -137,6 +144,7 @@ BlockState Section::set(SectionAllocator& a, u32 i, BlockState s) {
     dead = static_cast<u16>(dead - (r[slot]++ == 0));
     non_air = static_cast<u16>(non_air + air_bit(old) - air_bit(s));
     fluids = static_cast<u16>(fluids + fluid_bit(s) - fluid_bit(old));
+    ticking = static_cast<u16>(ticking + tick_bit(s) - tick_bit(old));
     if (UNLIKELY(r[slot] == kVolume)) {  // one state everywhere again: give the block back
         detach(a);
         single = s;
@@ -249,6 +257,7 @@ void Section::copy_from(SectionAllocator& a, const Section& o) {
     single = o.single;
     non_air = o.non_air;
     fluids = o.fluids;
+    ticking = o.ticking;
     if (o.bits == 0) return;
     attach(a, o.bits);
     const void* src = o.bits == kDirectBits ? static_cast<const void*>(o.data) : static_cast<const void*>(o.palette);

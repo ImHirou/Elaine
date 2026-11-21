@@ -1,10 +1,10 @@
-// Blocks that are more than a state: a chest and a furnace (block entities), the crafting table
-// (a menu without one), and what happens around a block when it changes.
+// Blocks that are more than a state: a chest and a furnace (block entities) and the crafting
+// table (a menu without one). What happens around a block when it changes is
+// server/block_updates.cpp.
 //
 // The rules are vanilla's, read from the 26.3 jar; each function names the method it follows:
-//   LevelChunk.setBlockState (block entities come and go with their block), Level.setBlock
-//   (neighbours are told), BaseContainerBlockEntity.preRemoveSideEffects, Containers.dropContents
-//   ChestBlock (updateShape, useWithoutItem, combine, isChestBlockedAt), DoubleBlockCombiner,
+//   BaseContainerBlockEntity.preRemoveSideEffects, Containers.dropContents
+//   ChestBlock (updateShape, tick, useWithoutItem, combine, isChestBlockedAt), DoubleBlockCombiner,
 //   ChestBlockEntity + ContainerOpenersCounter (who has it open: the lid, the sound, the recount)
 //   AbstractFurnaceBlock / FurnaceBlock.openContainer, CraftingTableBlock, TntBlock.useItemOn
 //   ServerPlayer.openMenu / closeContainer / doCloseContainer, the stillValid of each menu
@@ -37,7 +37,7 @@ namespace be_type = proto::gen::block_entity_type;
 
 namespace {
 
-constexpr u64 kRecheckDelay = 5;           // ContainerOpenersCounter.CHECK_TICK_DELAY
+constexpr i32 kRecheckDelay = 5;           // ContainerOpenersCounter.CHECK_TICK_DELAY
 constexpr double kBlockEventRange = 64.0;  // ServerLevel.runBlockEvents
 constexpr double kMenuReach = 4.0;         // Container.stillValidBlockEntity, AbstractContainerMenu.stillValid
 constexpr u8 kEventOpenCount = 1;          // ChestBlockEntity.EVENT_SET_OPEN_COUNT
@@ -93,124 +93,20 @@ void Game::init_titles() {
 
 // ---------------------------------------------------------------------------- blocks changing
 
-// Level.setBlock(pos, state, flags) with everything that hangs on it: the block entity of the
-// old block goes (its contents fall out), the one of the new block comes, the new block is
-// told it was placed, and the six neighbours are told that something changed beside them.
-// Every change of a block the game makes goes through here. `flags` are vanilla's (kUpdate*):
-// what a player does is kUpdateAll; a command leaves parts of it out.
-bool Game::set_block(BlockPos pos, BlockState state, u32 flags) {
-    const BlockState old = world_.block(pos.x, pos.y, pos.z);
-    if (!world_.set_block(pos.x, pos.y, pos.z, state)) return false;
-    wake_near(pos);  // what lay at rest on it, or beside it
-    const world::BlockInfo& was = world::block_info_of(old);
-    const world::BlockInfo& now = world::block_info_of(state);
-    // A block entity that went with the old block: its entry stays (dead, and empty) until the
-    // menus that are open on it have been closed.
-    u32 gone_kind = block_kind::kPlain, gone = 0;
-    const auto forget = [&] {
-        if (gone_kind == block_kind::kPlain) return;
-        // In vanilla a menu finds its container gone at its player's next tick: it shows the
-        // slots that emptied, then closes (stillValid). Here that happens now, once the
-        // neighbours have heard of the change - the other half of a double chest is a chest of
-        // its own by the time its lid is heard to fall.
-        close_menus_on(gone_kind, gone);
-        free_block_entity(gone_kind, gone);
-    };
-    if (&was != &now) {  // LevelChunk.setBlockState: another block, not another state of the same
-        if ((world::flags_of(old) & world::state::kBlockEntity) && world_.remove_block_entity(pos.x, pos.y, pos.z, gone)) {
-            // BaseContainerBlockEntity.preRemoveSideEffects: Containers.dropContents.
-            // ...unless the change says to leave that out: then what it held is gone with it.
-            gone_kind = was.kind;
-            const bool spill = !(flags & kUpdateSkipContainer);
-            if (gone & kOpaqueBlockEntity) {
-                // One that is kept as the tag it came with: nobody here knows what it held. It
-                // goes with its block and spills nothing.
-                free_block_entity(gone_kind, gone);
-                gone_kind = block_kind::kPlain;
-            } else if (gone_kind == block_kind::kChest) {
-                chests_[gone].alive = false;  // ChestBlockEntity.stopOpen does nothing for a removed chest
-                if (spill) drop_contents(pos, chests_[gone].items, Chest::kSlots);
-            } else if (gone_kind == block_kind::kFurnace) {
-                furnaces_[gone].alive = false;
-                if (spill) drop_contents(pos, furnaces_[gone].items, Furnace::kSlots);
-            }
-        }
-        if (now.kind == block_kind::kChest || now.kind == block_kind::kFurnace) {  // EntityBlock.newBlockEntity
-            const u32 data = now.kind == block_kind::kChest ? new_chest(pos) : new_furnace(pos);
-            world_.add_block_entity(pos.x, pos.y, pos.z, now.block_entity, data);
-        }
-        // BlockState.onPlace. TntBlock: next to a redstone signal it goes off at once.
-        if (!(flags & kUpdateSkipOnPlace) && now.kind == block_kind::kTnt && has_neighbour_signal(pos)) {
-            prime_tnt(pos, 80, true);
-            set_block(pos, world::kAir);
-            forget();
-            return true;
-        }
+// ChestBlock.updateShape: what the chest `state` becomes when its neighbour in direction `dir`
+// is `neighbour`. (A waterlogged one would ask for a tick of its water: there are no fluid ticks.)
+BlockState Game::chest_update_shape(BlockState state, u32 dir, BlockState neighbour) const {
+    ChestState c = chest_state(state);
+    const bool horizontal = dir >= world::kNorth;
+    if (is_chest(neighbour) && horizontal) {
+        // A single chest joins the half that was just placed against it.
+        const ChestState n = chest_state(neighbour);
+        if (c.type == kSingle && n.type != kSingle && c.facing == n.facing && connected_direction(n) == world::opposite(dir))
+            c.type = n.type == kLeft ? kRight : kLeft;
+    } else if (connected_direction(c) == dir) {
+        c.type = kSingle;  // the other half is gone
     }
-    // Level.markAndNotifyBlock: updateNeighborsAt, then BlockState.updateNeighbourShapes - each
-    // neighbour takes the shape it has beside the new block (Block.updateOrDestroy: set without
-    // telling its own neighbours again).
-    if (flags & kUpdateNeighbors) update_neighbors_at(pos);
-    if (!(flags & kUpdateKnownShape)) {
-        for (u32 dir = 0; dir < 6; ++dir) {
-            const BlockPos at = step(pos, dir);
-            const BlockState there = world_.block(at.x, at.y, at.z);
-            if (LIKELY(there == world::kAir) || !is_chest(there)) continue;  // (SnowyBlock's is world::Dimension's own)
-            const BlockState shaped = update_shape(there, world::opposite(dir), world_.block(pos.x, pos.y, pos.z));
-            if (shaped != there) set_block(at, shaped, flags & ~kUpdateNeighbors);
-        }
-    }
-    forget();
-    return true;
-}
-
-// Level.updateNeighborsAt: the six blocks around `pos` hear that it changed.
-void Game::update_neighbors_at(BlockPos pos) {
-    for (u32 dir = 0; dir < 6; ++dir) neighbor_changed(step(pos, dir));
-}
-
-// BlockBehaviour.neighborChanged, for the blocks that override it.
-void Game::neighbor_changed(BlockPos pos) {
-    const BlockState state = world_.block(pos.x, pos.y, pos.z);
-    if (LIKELY(state == world::kAir)) return;
-    if (world::block_info_of(state).kind == block_kind::kTnt && has_neighbour_signal(pos)) {  // TntBlock.neighborChanged
-        prime_tnt(pos, 80, true);
-        set_block(pos, world::kAir);
-    }
-}
-
-// BlockState.updateShape: what `state` becomes when its neighbour in direction `dir` is
-// `neighbour` - for the blocks that override it, itself for the others.
-BlockState Game::update_shape(BlockState state, u32 dir, BlockState neighbour) const {
-    const world::BlockInfo& info = world::block_info_of(state);
-    if (info.kind == block_kind::kChest) {  // ChestBlock.updateShape
-        ChestState c = chest_state(state);
-        const bool horizontal = dir >= world::kNorth;
-        if (is_chest(neighbour) && horizontal) {
-            // A single chest joins the half that was just placed against it.
-            const ChestState n = chest_state(neighbour);
-            if (c.type == kSingle && n.type != kSingle && c.facing == n.facing && connected_direction(n) == world::opposite(dir))
-                c.type = n.type == kLeft ? kRight : kLeft;
-        } else if (connected_direction(c) == dir) {
-            c.type = kSingle;  // the other half is gone
-        }
-        return chest_block(c);
-    }
-    // SnowyBlock.updateShape: snowy while what lies on it is snow.
-    if ((info.flags & world::block_flag::kPlaceMask) == world::block_flag::kPlaceSnowy && dir == world::kUp)
-        return info.alt[(world::block_info_of(neighbour).flags & world::block_flag::kSnowTag) ? 1 : 0];
-    return state;
-}
-
-// Block.updateFromNeighbourShapes: the state as its six neighbours would have it, asked in
-// vanilla's order (BlockBehaviour.UPDATE_SHAPE_ORDER: west, east, north, south, down, up).
-BlockState Game::update_from_neighbour_shapes(BlockState state, BlockPos pos) const {
-    static constexpr u32 kOrder[6] = {world::kWest, world::kEast, world::kNorth, world::kSouth, world::kDown, world::kUp};
-    for (const u32 dir : kOrder) {
-        const BlockPos at = step(pos, dir);
-        state = update_shape(state, dir, state_for_client(at));
-    }
-    return state;
+    return chest_block(c);
 }
 
 // Containers.dropContents: every stack falls out in pieces of 10 to 30, all pieces of a stack
@@ -431,57 +327,48 @@ void Game::chest_opened(u32 chest) {
     Chest& c = chests_[chest];
     if (c.open++ == 0) {
         chest_sound(c, gen::sound::kBlockChestOpen);
-        if (!c.recheck) {
-            c.recheck = true;
-            // Scheduled while packets are handled: the level's clock is one tick behind, so
-            // the fifth tick from "now" is the fourth from this one.
-            rechecks_.push_back({tick_ + kRecheckDelay - 1, c.x, c.y, c.z});
-        }
+        // ContainerOpenersCounter.scheduleRecheck: a tick of the block (one per chest at a time).
+        schedule_tick({c.x, c.y, c.z}, world_.block(c.x, c.y, c.z), kRecheckDelay);
     }
-    block_events_.push_back({c.x, c.y, c.z, kEventOpenCount, static_cast<u8>(c.open)});
+    block_event(c.x, c.y, c.z, kEventOpenCount, static_cast<u8>(c.open));
 }
 
 // ContainerOpenersCounter.decrementOpeners
 void Game::chest_closed(u32 chest) {
     Chest& c = chests_[chest];
     if (c.open > 0 && --c.open == 0) chest_sound(c, gen::sound::kBlockChestClose);
-    block_events_.push_back({c.x, c.y, c.z, kEventOpenCount, static_cast<u8>(c.open)});
+    block_event(c.x, c.y, c.z, kEventOpenCount, static_cast<u8>(c.open));
 }
 
-// The scheduled ChestBlock.tick -> ChestBlockEntity.recheckOpen -> recheckOpeners: every five
-// ticks an open chest counts again who has it open and says so - which is how someone who comes
-// into view later sees its lid up. Runs where vanilla runs block ticks: first thing in the level.
-void Game::recheck_chests() {
-    while (recheck_head_ < rechecks_.size() && rechecks_[recheck_head_].tick <= tick_) {
-        const Recheck r = rechecks_[recheck_head_++];
-        const world::BlockEntityRef* be = world_.block_entity(r.x, r.y, r.z);
-        if (!be || be->type != be_type::kChest || (be->data & kOpaqueBlockEntity)) continue;  // the chest is gone
-        const u32 chest = be->data;
-        Chest& c = chests_[chest];
-        c.recheck = false;
-        u32 open = 0;
-        for (const Player& p : players_)
-            open += p.menu.kind() == Menu::Kind::kChest && (p.open_data[0] == chest || p.open_data[1] == chest);
-        if (open != c.open) {
-            if (open != 0 && c.open == 0)
-                chest_sound(c, gen::sound::kBlockChestOpen);
-            else if (open == 0)
-                chest_sound(c, gen::sound::kBlockChestClose);
-            c.open = static_cast<u16>(open);
-        }
-        block_events_.push_back({c.x, c.y, c.z, kEventOpenCount, static_cast<u8>(open)});
-        if (open > 0) {
-            c.recheck = true;
-            rechecks_.push_back({tick_ + kRecheckDelay, c.x, c.y, c.z});
-        }
+// ChestBlock.tick -> ChestBlockEntity.recheckOpen -> ContainerOpenersCounter.recheckOpeners:
+// every five ticks an open chest counts again who has it open and says so - which is how someone
+// who comes into view later sees its lid up.
+void Game::recheck_chest(BlockPos pos) {
+    const world::BlockEntityRef* be = world_.block_entity(pos.x, pos.y, pos.z);
+    if (!be || be->type != be_type::kChest || (be->data & kOpaqueBlockEntity)) return;
+    const u32 chest = be->data;
+    Chest& c = chests_[chest];
+    u32 open = 0;
+    for (const Player& p : players_)
+        open += p.menu.kind() == Menu::Kind::kChest && (p.open_data[0] == chest || p.open_data[1] == chest);
+    if (open != c.open) {
+        if (open != 0 && c.open == 0)
+            chest_sound(c, gen::sound::kBlockChestOpen);
+        else if (open == 0)
+            chest_sound(c, gen::sound::kBlockChestClose);
+        c.open = static_cast<u16>(open);
     }
-    if (recheck_head_ == rechecks_.size()) {
-        rechecks_.clear();
-        recheck_head_ = 0;
-    } else if (recheck_head_ > 1024) {
-        rechecks_.erase(rechecks_.begin(), rechecks_.begin() + static_cast<std::ptrdiff_t>(recheck_head_));
-        recheck_head_ = 0;
-    }
+    block_event(c.x, c.y, c.z, kEventOpenCount, static_cast<u8>(open));
+    if (open > 0) schedule_tick(pos, world_.block(pos.x, pos.y, pos.z), kRecheckDelay);
+}
+
+// Level.blockEvent: queued for this tick's runBlockEvents - once. Vanilla keeps its events in
+// a set (an ObjectLinkedOpenHashSet of records), so one that is asked for twice before it is
+// sent is sent once: a lid that falls in the tick of its chest's recount is told once.
+void Game::block_event(i32 x, i32 y, i32 z, u8 b0, u8 b1) {
+    for (const BlockEventData& e : block_events_)
+        if (e.x == x && e.y == y && e.z == z && e.b0 == b0 && e.b1 == b1) return;
+    block_events_.push_back({x, y, z, b0, b1});
 }
 
 // ServerLevel.runBlockEvents: each event that its block still answers to goes to everyone

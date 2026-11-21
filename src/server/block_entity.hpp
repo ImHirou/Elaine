@@ -23,9 +23,8 @@ struct Chest {
     static constexpr u32 kSlots = 27;
     ItemStack items[kSlots];
     i32 x = 0, y = 0, z = 0;
-    u16 open = 0;          // ContainerOpenersCounter.openCount: players that have it open
-    bool recheck = false;  // a recount of them is scheduled (ChestBlock.tick, every 5 ticks while open)
-    bool alive = false;    // false: a free entry of the store
+    u16 open = 0;        // ContainerOpenersCounter.openCount: players that have it open
+    bool alive = false;  // false: a free entry of the store
     // What its saved tag held that nothing here reads and nothing here needs to act as vanilla
     // does (an imported block entity's `components`...): an entry of Game::opaque_, ~0 for none.
     u32 keep = ~0u;

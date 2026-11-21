@@ -33,6 +33,10 @@ struct Settings {
     u32 worker_threads = 0;         // worker-threads: threads that read, write and generate chunks; 0 = by the machine
     u32 chunk_unload_seconds = 10;  // chunk-unload-seconds: how long a chunk stays loaded once nobody is near
     u32 autosave_seconds = 300;     // autosave-seconds: how long a chunk that changed may wait to be written
+    // max-chained-neighbor-updates: how many neighbour updates one block change may set off
+    // before the rest are skipped (CollectingNeighborUpdater); negative: any number.
+    i32 max_chained_neighbor_updates = 1000000;
+    u32 random_tick_speed = 3;  // random-tick-speed: the game rule randomTickSpeed, until there are game rules
 };
 
 // Missing file is not an error (defaults apply). Returns false + err on a malformed value.

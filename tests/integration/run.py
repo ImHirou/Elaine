@@ -54,8 +54,11 @@ class Server:
         self.ops_file = os.path.join(tempfile.gettempdir(), f"ops-{os.getpid()}-{self.port}.json")
         self.own_world = None if world else tempfile.mkdtemp(prefix="world-")
         self.world = world or self.own_world
+        # No random ticks unless a scenario asks for them: grass under a stone that was placed dies
+        # whenever chance has it, and what a scenario is told must not depend on when.
         opts = {"server-ip": "127.0.0.1", "server-port": self.port, "online-mode": "false", "debug": "true",
-                "config": "/nonexistent/server.properties", "ops-file": self.ops_file, "level-name": self.world}
+                "config": "/nonexistent/server.properties", "ops-file": self.ops_file, "level-name": self.world,
+                "random-tick-speed": 0}
         start_timeout = float(args.pop("start_timeout", 5))  # (importing a world takes its time)
         opts.update({k.replace("_", "-"): v for k, v in args.items()})
         self.log = tempfile.NamedTemporaryFile("w+", suffix=".log", delete=False)
@@ -653,8 +656,10 @@ def place_and_break_blocks(srv: Server):
 @test()
 def placement_rules(srv: Server):
     a, b = srv.client(), srv.client()
-    join(a, "Alice")
-    join(b, "Bob")
+    # A small view: the sixty ticks below run from the moment Alice joined, and the 441 chunks of
+    # the default view take a sanitized server longer than that to make and send.
+    join(a, "Alice", view=2)
+    join(b, "Bob", view=2)
     skip_tab_updates(a, 1)
     grass, air = mc.BLOCK["kGrassBlock"], 0
 
@@ -1898,6 +1903,33 @@ def chest(srv: Server):
     assert all(not ch["block_entities"] for at, ch in jd["chunks"].items() if at != (0, 0))
 
 
+@test()
+def a_lid_is_told_once(srv: Server):
+    """A chest says how many have it open when that changes, and again with every recount - five
+    ticks apart while it is open, and once more after. A block event that is asked for twice in a
+    tick is sent once (vanilla keeps the tick's events in a set): closed in the very tick of the
+    recount, the lid is told to fall once, not twice."""
+    a = srv.client()
+    join(a, "Alice")
+    a.send("player_loaded")
+    settle(a)
+    ground, pos = (8, -61, 10), (8, -60, 10)
+    give(a, 36, I["kChest"], 1)
+    click(a, ground, 1, seq=1)
+    assert collect(a)[pos] == mc.BLOCK["kChest"]
+    told = []
+    for wait in range(1, 9):                # every phase of the five ticks, and some of them again
+        click(a, pos, 1, seq=1 + wait)
+        collect(a, ticks=wait)
+        n = len(a.block_events)
+        close_window(a)
+        collect(a, ticks=8)                 # (the recount that was due when it closed has come by now)
+        after = [e[:3] for e in a.block_events[n:]]
+        assert set(after) <= {(pos, 1, 1), (pos, 1, 0)} and after[-1] == (pos, 1, 0), (wait, after)
+        told.append(after.count((pos, 1, 0)))   # (a short wait: the lid's going up is still on its way)
+    assert set(told) == {1, 2}, told        # by the close and by the recount - or by both at once
+
+
 def furnace_setup(srv: Server, stone: int, planks: int):
     c = srv.client()
     join(c, "Alice")
@@ -2111,6 +2143,371 @@ def tnt(srv: Server):
     assert collect(a).get((9, -60, 6), AIR) == AIR
     collect(b)
     assert len(of_type(b, "kTnt")) == 1
+
+
+# ----------------------------------------------------------------------------- block updates
+
+DESTROY_BLOCK = 2001   # LevelEvent.PARTICLES_AND_SOUND_DESTROY_BLOCK
+BLOCK_POS = mc.SERIALIZER["kBlockPos"]
+
+
+def until(c: Client, done, ticks: int = 60, others: tuple = ()) -> dict:
+    """Let server ticks pass until done(changes so far) says so; the block changes they brought."""
+    changes = {}
+    for _ in range(ticks):
+        changes.update(collect(c, ticks=1))
+        for o in others:
+            collect(o, ticks=1)
+        if done(changes):
+            return changes
+    raise AssertionError(f"never happened; block changes so far: {changes}")
+
+
+def shows(changes: dict, expected: dict) -> bool:
+    """The block changes a client was sent hold these. (They hold more: whoever clicks is told
+    what the block it clicked, and the one beside it, are - changed or not.)"""
+    assert all(changes.get(pos) == state for pos, state in expected.items()), (changes, expected)
+    return True
+
+
+def items_of(c: Client, item: str) -> list:
+    return [e for e in of_type(c, "kItem").values() if e.data[D_ITEM][1][0] == I[item]]
+
+
+@test()
+def torches(srv: Server):
+    """A torch stands on what holds it or hangs on a wall, by the face that is clicked and by where
+    its player looks; when what held it goes it breaks - seen and heard by whoever is near - and
+    drops. The neighbours of a block take their new shapes in vanilla's order."""
+    a, b = srv.client(), srv.client()
+    join(a, "Alice")
+    jb = join(b, "Bob")
+    a.expect("player_info_update")
+    for cl in (a, b):
+        cl.send("player_loaded")
+    walk(b, jb, 8.5, 20.5, 10)
+    settle(a, b)
+    torch, wall, stone = mc.BLOCK["kTorch"], mc.BLOCK["kWallTorch"], mc.BLOCK["kStone"]   # wall: facing north, south, west, east
+    give(a, 36, I["kStone"], 16)
+    give(a, 37, I["kTorch"], 16)
+    click(a, (8, -61, 12), 1, seq=1)                 # a pillar of two stones
+    click(a, (8, -60, 12), 1, seq=2)
+    assert shows(collect(a), {(8, -60, 12): stone, (8, -59, 12): stone})
+    a.send("set_carried_item", struct.pack(">h", 1))
+    click(a, (8, -59, 12), 1, seq=3)                 # on top of it: the torch stands
+    click(a, (8, -59, 12), 2, seq=4)                 # against its sides: it hangs, facing away from the stone
+    click(a, (8, -59, 12), 5, seq=5)
+    click(a, (8, -59, 12), 3, seq=6)
+    click(a, (8, -61, 14), 1, seq=7)                 # on the grass
+    assert shows(collect(a), {(8, -58, 12): torch, (8, -59, 11): wall, (9, -59, 12): wall + 3, (8, -59, 13): wall + 1,
+                              (8, -60, 14): torch})
+    collect(b)
+    # Nothing holds a torch on top of a torch, and there is no wall beside it.
+    click(a, (8, -60, 14), 1, seq=8)
+    assert collect(a).get((8, -59, 14), AIR) == AIR
+    assert not a.level_events and not of_type(a, "kItem")
+
+    # The stone that holds four of them goes. Its neighbours are asked west, east, north, south,
+    # down, up (BlockBehaviour.UPDATE_SHAPE_ORDER): the torches break in that order.
+    a.send("set_carried_item", struct.pack(">h", 0))
+    dig(a, (8, -59, 12), seq=9)
+    gone = collect(a)
+    assert collect(b) == gone                            # (Bob clicked nothing: what he is told is what changed)
+    assert gone == {(8, -59, 12): AIR, (9, -59, 12): AIR, (8, -59, 11): AIR, (8, -59, 13): AIR, (8, -58, 12): AIR}, gone
+    broke = [(DESTROY_BLOCK, (9, -59, 12), wall + 3, False), (DESTROY_BLOCK, (8, -59, 11), wall, False),
+             (DESTROY_BLOCK, (8, -59, 13), wall + 1, False), (DESTROY_BLOCK, (8, -58, 12), torch, False)]
+    assert a.level_events == broke, a.level_events
+    # Bob also sees the stone break under Alice's hand (her own client showed her that).
+    assert b.level_events == [(DESTROY_BLOCK, (8, -59, 12), stone, False)] + broke, b.level_events
+    settle(a, b)
+    for cl in (a, b):
+        dropped = items_of(cl, "kTorch")
+        assert len(dropped) == 4 and all(e.data[D_ITEM][1] == plain("kTorch", 1) for e in dropped), [e.data for e in dropped]
+    # The one on the grass stands until the grass goes.
+    dig(a, (8, -61, 14), seq=10)
+    assert shows(collect(a), {(8, -61, 14): AIR, (8, -60, 14): AIR})
+    assert a.level_events[4:] == [(DESTROY_BLOCK, (8, -60, 14), torch, False)]
+
+    # Under a block, where a torch cannot hang: it goes where its player looks. Level, towards a
+    # wall in the south: onto that wall. Down: onto the ground.
+    for x in (4, 12):
+        click(a, (x, -61, 9), 1, seq=11)                 # a stone, one on it...
+        click(a, (x, -60, 9), 1, seq=12)
+        click(a, (x, -61, 10), 1, seq=13)                # ...and the wall to the south
+    collect(a)
+    dig(a, (4, -60, 9), seq=14)                          # the lower stones go: the upper ones hang there
+    dig(a, (12, -60, 9), seq=15)
+    collect(a)
+    a.send("set_carried_item", struct.pack(">h", 1))
+    look(a, 0.0, 0.0)
+    click(a, (4, -59, 9), 0, seq=16, cursor=(0.5, 0.0, 0.5))
+    assert shows(collect(a), {(4, -60, 9): wall})             # facing north, on the stone south of it
+    look(a, 0.0, DOWN)
+    click(a, (12, -59, 9), 0, seq=17, cursor=(0.5, 0.0, 0.5))
+    assert shows(collect(a), {(12, -60, 9): torch})
+
+
+@test()
+def sand_falls(srv: Server):
+    """Sand, gravel and concrete powder with nothing under them fall: two ticks after the block
+    was placed, or lost its ground, it is an entity, and where it lands it is a block again -
+    or an item, on what does not give way."""
+    a, b = srv.client(), srv.client()
+    join(a, "Alice")
+    jb = join(b, "Bob")
+    a.expect("player_info_update")
+    for cl in (a, b):
+        cl.send("player_loaded")
+    walk(b, jb, 8.5, 22.5, 10)
+    settle(a, b)
+    sand, stone, powder = mc.BLOCK["kSand"], mc.BLOCK["kStone"], mc.BLOCK["kWhiteConcretePowder"]
+    falling = lambda cl: of_type(cl, "kFallingBlock")
+    give(a, 36, I["kStone"], 32)
+    give(a, 37, I["kSand"], 8)
+    give(a, 38, I["kWhiteConcretePowder"], 8)
+    give(a, 39, I["kTorch"], 8)
+    give(a, 40, I["kGravel"], 8)
+
+    # On the ground it lies.
+    a.send("set_carried_item", struct.pack(">h", 1))
+    click(a, (6, -61, 12), 1, seq=1)
+    assert shows(collect(a), {(6, -60, 12): sand})
+    assert collect(b) == {(6, -60, 12): sand}
+    assert collect(a, ticks=6) == {} and collect(b, ticks=6) == {}
+    assert not falling(a) and not falling(b)
+
+    # On a stone that goes: the sand above it follows two ticks later.
+    a.send("set_carried_item", struct.pack(">h", 0))
+    click(a, (8, -61, 12), 1, seq=2)
+    a.send("set_carried_item", struct.pack(">h", 1))
+    click(a, (8, -60, 12), 1, seq=3)
+    assert shows(collect(a), {(8, -60, 12): stone, (8, -59, 12): sand})
+    collect(b)
+    dig(a, (8, -60, 12), seq=4)
+    changes = until(a, lambda ch: ch.get((8, -59, 12)) == AIR, others=(b,))
+    assert changes == {(8, -60, 12): AIR, (8, -59, 12): AIR}, changes
+    collect(a, ticks=2), collect(b, ticks=2)
+    for cl in (a, b):
+        (eid, e), = falling(cl).items()
+        assert e.object_data == sand and e.spawned[0] == (8.5, -59.0, 12.5), (e.object_data, e.spawned)
+        assert e.data[mc.FALLING_DATA["kStartPos"]] == (BLOCK_POS, (8, -59, 12)), e.data
+    assert not a.transient_blocks
+    changes = until(a, lambda ch: ch.get((8, -60, 12)) == sand, others=(b,))
+    assert changes == {(8, -60, 12): sand}, changes
+    # (Told twice: at once, as somebody who saw the entity; and with the chunk's changes, a tick later.)
+    assert collect(a) in ({}, {(8, -60, 12): sand}) and collect(b) in ({}, {(8, -60, 12): sand})
+    for cl in (a, b):
+        assert not falling(cl)                                   # the entity went as the block came
+        assert cl.transient_blocks == [((8, -60, 12), sand)], cl.transient_blocks
+        assert not of_type(cl, "kItem")
+
+    # Placed where nothing is under it - against the side of a pillar - it falls at once, and lands as itself.
+    a.send("set_carried_item", struct.pack(">h", 0))
+    for seq, y in enumerate((-61, -60, -59), start=5):
+        click(a, (10, y, 12), 1, seq=seq)
+    collect(a)
+    a.send("set_carried_item", struct.pack(">h", 2))
+    click(a, (10, -58, 12), 5, seq=8)
+    changes = until(a, lambda ch: ch.get((11, -60, 12)) == powder, others=(b,))
+    assert shows(changes, {(11, -58, 12): AIR, (11, -60, 12): powder})   # (it was there, and went)
+    collect(a), collect(b)
+    assert not falling(a) and not falling(b)
+
+    # Onto a torch: that does not give way. What fell breaks, and lies there as an item.
+    a.send("set_carried_item", struct.pack(">h", 3))
+    click(a, (9, -61, 12), 1, seq=9)
+    assert shows(collect(a), {(9, -60, 12): mc.BLOCK["kTorch"]})
+    a.send("set_carried_item", struct.pack(">h", 4))
+    click(a, (10, -58, 12), 4, seq=10)                           # gravel, west of the pillar's top: over the torch
+    until(a, lambda ch: ch.get((9, -58, 12)) == AIR, others=(b,))
+    for _ in range(40):
+        collect(a, ticks=2), collect(b, ticks=2)
+        if not falling(a):
+            break
+    assert not falling(a) and not falling(b)
+    for cl in (a, b):
+        # (One time in ten gravel is flint when it is mined; this one was not mined.)
+        assert [e.data[D_ITEM][1] for e in of_type(cl, "kItem").values()] == [plain("kGravel", 1)]
+    assert collect(a).get((9, -60, 12), mc.BLOCK["kTorch"]) == mc.BLOCK["kTorch"]
+
+
+@test()
+def redstone_lamp(srv: Server):
+    """A redstone lamp is lit the moment a signal arrives, and goes out four ticks after it left -
+    a neighbour update, and a scheduled tick."""
+    a = srv.client()
+    join(a, "Alice")
+    a.send("player_loaded")
+    settle(a)
+    lit, unlit, redstone = mc.BLOCK["kRedstoneLamp"] - 1, mc.BLOCK["kRedstoneLamp"], mc.BLOCK["kRedstoneBlock"]
+    give(a, 36, I["kRedstoneLamp"], 4)
+    give(a, 37, I["kRedstoneBlock"], 4)
+    click(a, (8, -61, 12), 1, seq=1)
+    assert shows(collect(a), {(8, -60, 12): unlit})
+    a.send("set_carried_item", struct.pack(">h", 1))
+    click(a, (9, -61, 12), 1, seq=2)
+    assert shows(collect(a), {(9, -60, 12): redstone, (8, -60, 12): lit})        # at once
+    # Beside a signal a lamp is placed lit.
+    a.send("set_carried_item", struct.pack(">h", 0))
+    click(a, (10, -61, 12), 1, seq=3)
+    assert shows(collect(a), {(10, -60, 12): lit})
+    # The signal goes: both stay lit for four ticks, then go out together.
+    dig(a, (9, -60, 12), seq=4)
+    assert collect(a, ticks=3) == {(9, -60, 12): AIR}    # (the block's going, and for three ticks no more)
+    assert until(a, lambda ch: len(ch) == 2, ticks=5) == {(8, -60, 12): unlit, (10, -60, 12): unlit}
+    # A signal that comes back before the four ticks are over: the lamp never goes out.
+    a.send("set_carried_item", struct.pack(">h", 1))
+    click(a, (9, -61, 12), 1, seq=5)
+    assert shows(collect(a), {(9, -60, 12): redstone, (8, -60, 12): lit, (10, -60, 12): lit})
+    dig(a, (9, -60, 12), seq=6)
+    click(a, (9, -61, 12), 1, seq=7)
+    after = collect(a, ticks=8)
+    assert after.get((9, -60, 12)) == redstone and (8, -60, 12) not in after and (10, -60, 12) not in after, after
+
+
+@test(random_tick_speed=4096, simulation_distance=2)
+def random_ticks(srv: Server):
+    """Random ticks, a great many of them a tick so that nobody has to wait: grass takes bare
+    dirt and dies under stone, copper weathers, amethyst buds."""
+    a = srv.client()
+    join(a, "Alice", view=2)
+    a.send("player_loaded")
+    settle(a)
+    grass, dirt, stone = mc.BLOCK["kGrassBlock"], mc.BLOCK["kDirt"], mc.BLOCK["kStone"]
+    settle(a, ticks=10)
+    assert collect(a) == {}                              # a world of grass with nowhere to go: nothing happens
+    # A hole in the grass: the dirt at its bottom is taken from all sides.
+    dig(a, (8, -61, 12), seq=1)
+    changes = until(a, lambda ch: ch.get((8, -62, 12)) == grass)
+    assert changes == {(8, -61, 12): AIR, (8, -62, 12): grass}, changes
+    # A stone on grass: dirt, under it.
+    give(a, 36, I["kStone"], 4)
+    give(a, 37, I["kDirt"], 4)
+    give(a, 38, I["kCopperBlock"], 4)
+    give(a, 39, I["kBuddingAmethyst"], 4)
+    click(a, (10, -61, 12), 1, seq=2)
+    changes = until(a, lambda ch: ch.get((10, -61, 12)) == dirt)
+    assert shows(changes, {(10, -60, 12): stone, (10, -61, 12): dirt})
+    # Dirt on grass: the grass under it dies, and the dirt on top is grass before long.
+    a.send("set_carried_item", struct.pack(">h", 1))
+    click(a, (6, -61, 12), 1, seq=3)
+    until(a, lambda ch: ch.get((6, -61, 12)) == dirt and ch.get((6, -60, 12)) == grass)
+    settle(a, ticks=10)
+    assert collect(a) == {}                              # and then it is quiet again
+    # Copper, by itself: stage by stage to the last. (Two random ticks may fall on it in one game
+    # tick at this speed, so not every stage need be seen - but what is seen comes in order.)
+    a.send("set_carried_item", struct.pack(">h", 2))
+    click(a, (8, -61, 6), 1, seq=4)
+    stages = [mc.BLOCK[k] for k in ("kCopperBlock", "kExposedCopper", "kWeatheredCopper", "kOxidizedCopper")]
+    seen = []
+
+    def weathered(ch: dict) -> bool:
+        state = ch.get((8, -60, 6))
+        if state is not None and state not in seen[-1:]:
+            seen.append(state)
+        return state == stages[-1]
+
+    until(a, weathered, ticks=1200)
+    assert seen == [s for s in stages if s in seen] and len(seen) >= 3, seen
+    # Budding amethyst: small buds on its free sides, each facing away from it, and growing.
+    a.send("set_carried_item", struct.pack(">h", 3))
+    click(a, (11, -61, 6), 1, seq=5)
+    # A state of the family: its block's first, + 2 x facing (north, east, south, west, up, down), + 1 when dry.
+    facing = {(11, -60, 5): 0, (12, -60, 6): 1, (11, -60, 7): 2, (10, -60, 6): 3, (11, -59, 6): 4}
+    buds = until(a, lambda ch: all(pos in ch for pos in facing), ticks=600)
+    for pos, index in facing.items():
+        kind = next(k for k in ("kSmallAmethystBud", "kMediumAmethystBud", "kLargeAmethystBud", "kAmethystCluster")
+                    if 0 <= buds[pos] - (mc.BLOCK[k] - 9) < 12)
+        # facing away from the block it grows on, and dry
+        assert buds[pos] - (mc.BLOCK[kind] - 9) == index * 2 + 1, (pos, buds[pos], kind)
+
+
+@test()
+def falling_block_survives_a_restart():
+    """A block that is falling when the server stops is falling when it starts again, and lands."""
+    world = tempfile.mkdtemp(prefix="world-falling-")
+    srv = None
+    try:
+        srv = Server(EXE, world=world)
+        a = srv.client()
+        join(a, "Alice", view=3)
+        a.send("player_loaded")
+        settle(a)
+        make_op(srv, a, "Alice")
+        out = run_command(a, "setblock 8 120 12 minecraft:sand")
+        assert out["said"] == [tr("commands.setblock.success", 8, 120, 12)], out["said"]
+        for _ in range(20):
+            settle(a, ticks=2)
+            if of_type(a, "kFallingBlock"):
+                break
+        (eid, e), = of_type(a, "kFallingBlock").items()
+        assert e.object_data == mc.BLOCK["kSand"] and e.spawned[0] == (8.5, 120.0, 12.5)
+        settle(a, ticks=8)
+        assert srv.stop() == 0, srv.read_log()
+        os.unlink(srv.log.name)
+
+        srv = Server(EXE, world=world)
+        c = srv.client()
+        join(c, "Carol", view=3)
+        c.send("player_loaded")
+        settle(c, ticks=6)
+        (eid, e), = of_type(c, "kFallingBlock").items()
+        assert e.object_data == mc.BLOCK["kSand"] and 20.0 < e.pos[1] < 120.0, e.pos
+        assert mc.FALLING_DATA["kStartPos"] not in e.data      # where it began is not kept (vanilla does not either)
+        changes = until(c, lambda ch: ch.get((8, -60, 12)) == mc.BLOCK["kSand"], ticks=300)
+        assert changes == {(8, -60, 12): mc.BLOCK["kSand"]}, changes
+        collect(c)
+        assert not of_type(c, "kFallingBlock") and c.transient_blocks == [((8, -60, 12), mc.BLOCK["kSand"])]
+        assert srv.stop() == 0, srv.read_log()
+        os.unlink(srv.log.name)
+    finally:
+        if srv:
+            srv.stop()
+        shutil.rmtree(world, ignore_errors=True)
+
+
+@test()
+def a_tick_waits_for_its_chunk():
+    """Scheduled ticks run where blocks tick - within the simulation distance of a player and one
+    chunk beyond - and wait elsewhere, a restart long if need be: sand set into the air four chunks
+    off hangs there until somebody comes nearer; three chunks off its tick runs at once."""
+    world = tempfile.mkdtemp(prefix="world-ticks-")
+    srv = None
+    sand = mc.BLOCK["kSand"]
+    near, far = (56, -50, 8), (72, -50, 8)      # in chunks 3 and 4; the players stand in chunk 0 and simulate two around it
+    try:
+        srv = Server(EXE, world=world, simulation_distance=2)
+        a = srv.client()
+        join(a, "Alice", view=6)
+        a.send("player_loaded")
+        settle(a)
+        make_op(srv, a, "Alice")
+        got = run_command(a, "setblock 72 -50 8 minecraft:sand", ticks=12)
+        assert got["said"] == [tr("commands.setblock.success", 72, -50, 8)] and got["blocks"] == {far: sand}, got
+        assert not of_type(a, "kFallingBlock")
+        # (What becomes of the entity out there is another matter: vanilla ticks entities a chunk
+        # less far than blocks, this server wherever a chunk ticks - here it has landed by the end.)
+        got = run_command(a, "setblock 56 -50 8 minecraft:sand", ticks=60)
+        assert got["blocks"][near] == AIR, got
+        assert srv.stop() == 0, srv.read_log()
+        os.unlink(srv.log.name)
+
+        srv = Server(EXE, world=world, simulation_distance=2)
+        c = srv.client()
+        join(c, "Carol", view=6)
+        c.send("player_loaded")
+        settle(c, ticks=12)                     # (a block that changed would have been said)
+        assert not of_type(c, "kFallingBlock")
+        make_op(srv, c, "Carol")
+        got = run_command(c, "tp 40 -60 12", ticks=60)      # into chunk 2: the tick the sand was saved with is due
+        assert got["blocks"] == {far: AIR, (72, -60, 8): sand}, got
+        assert not of_type(c, "kFallingBlock") and c.transient_blocks == [((72, -60, 8), sand)]
+        assert srv.stop() == 0, srv.read_log()
+        os.unlink(srv.log.name)
+    finally:
+        if srv:
+            srv.stop()
+        shutil.rmtree(world, ignore_errors=True)
 
 
 # ----------------------------------------------------------------------------- commands
@@ -2551,7 +2948,8 @@ def tick_stats(srv: Server) -> list:
     """The server's own account of its ticks (--debug, one line every 100 ticks): per line
     (ms avg, ms worst, ms entity tracker, ms entities' ticks, ms flush, KiB/tick, players, entities, at rest)."""
     return re.findall(r"tick: ([\d.]+) ms avg, ([\d.]+) ms worst, ([\d.]+) ms of it the entity tracker, ([\d.]+) ms the entities' own "
-                      r"ticks, ([\d.]+) ms flush; ([\d.]+) KiB/tick sent; (\d+) players, (\d+) entities \((\d+) at rest\)", srv.read_log())
+                      r"ticks, ([\d.]+) ms flush, [\d.]+ ms block ticks; ([\d.]+) KiB/tick sent; (\d+) players, (\d+) entities "
+                      r"\((\d+) at rest\)", srv.read_log())
 
 
 F32_098 = struct.unpack(">f", struct.pack(">f", 0.98))[0]      # (double) 0.98f

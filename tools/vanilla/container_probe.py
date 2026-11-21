@@ -36,8 +36,7 @@ Reading the diff:
   * The steps are cut by the clock, not by the tick: a chest's five-tick recount can fall on
     either side of a step's end, and then two neighbouring steps differ by one block event each.
   * Sounds this server does not make at all (a block being placed, footsteps, the slimes of a
-    flat world) and the particles of a broken block are left out; one arm swing stands for
-    vanilla's two per click.
+    flat world) are left out; one arm swing stands for vanilla's two per click.
   * Known differences are listed in docs/architecture.md ("Blocks that do something").
 """
 from __future__ import annotations
@@ -330,8 +329,8 @@ def _normalise(rec: dict, who: str) -> dict[str, list]:
                     sets[key] = sorted(r.varint() for _ in range(r.varint()))
                 rows.append((name, f"{sorted(sets)} {zlib.crc32(json.dumps(sets, sort_keys=True).encode()):08x}"))
                 rows.append(("  (not compared)", f"{r.varint()} stonecutter recipes"))
-            elif name == "level_event":   # a block breaking, as others see it: not sent by ours yet
-                rows.append(("  (not compared)", f"level_event {r.i32()} at {_rel(mc.unpack_block_pos(r.u64()), origin)} data {r.i32()}"))
+            elif name == "level_event":   # a block breaking, as others see it
+                rows.append((name, f"{r.i32()} at {_rel(mc.unpack_block_pos(r.u64()), origin)} data {r.i32()}"))
             elif name in ("block_entity_data", "disconnect"):
                 rows.append((name, hexdata))
         exploded = any(n == "explode" for n, _ in rows)

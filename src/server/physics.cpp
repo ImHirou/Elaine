@@ -110,6 +110,8 @@ void Game::tick_entities() {
             tick_item(slot, row);
         else if (kind == gp::kMoverTnt)
             tick_tnt(slot, row);
+        else if (kind == gp::kMoverFallingBlock)
+            tick_falling(slot, row);
         else if (LIKELY(kind != kMoverEmptyItem))
             tick_living(slot, row);
         else

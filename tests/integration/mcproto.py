@@ -80,6 +80,7 @@ COMPONENT = _constants("items.hpp", "proto::gen::component")  # data component t
 EQUIPMENT_SLOT = _constants("entities.hpp", "proto::gen::equipment_slot")
 SWING = _constants("entities.hpp", "proto::gen::swing_animation")   # SwingAnimationType ids: SWING["kWhack"]
 TNT_DATA = _constants("entities.hpp", "primed_tnt")     # entity-data accessors of primed TNT: TNT_DATA["kFuse"]
+FALLING_DATA = _constants("entities.hpp", "falling_block")   # ...of a falling block: FALLING_DATA["kStartPos"]
 MENUS = _constants("static_ids.hpp", "menu")            # menu types: MENUS["kGeneric9x3"]
 BLOCK_ENTITY = _constants("static_ids.hpp", "block_entity_type")
 SOUND = _constants("static_ids.hpp", "sound")           # the sounds the server sends by itself: SOUND["kBlockChestOpen"]
@@ -407,6 +408,8 @@ class Client:
         # very slots 9..44 of self.slots, as in the client, where both menus show one Inventory.
         self.window = None
         self.block_events: list[tuple] = []    # ((x, y, z), b0, b1, block id)
+        self.level_events: list[tuple] = []    # (type, (x, y, z), data, global)
+        self.transient_blocks: list[tuple] = []  # add_transient_block: ((x, y, z), state)
         self.explosions: list[dict] = []
         # The chunks the client holds (ClientChunkCache), kept up to date by recv() like the
         # entities: position -> the chunk as parse_chunk() reads it. A batch is answered as a
@@ -794,7 +797,7 @@ class ChunkCache(dict):
 
 MENU_PACKETS = {"container_set_content", "container_set_slot", "set_cursor_item", "set_player_inventory", "set_held_slot",
                 "sound", "open_screen", "container_set_data", "container_close", "update_recipes", "block_event", "explode",
-                "commands", "stop_sound"}
+                "commands", "stop_sound", "level_event", "add_transient_block"}
 # Slots of the menus a block opens, by menu type (the menu registry): the container's own, then
 # the 36 of the inventory. From the constructors of ChestMenu, AbstractFurnaceMenu, CraftingMenu.
 WINDOW_SLOTS = {"kGeneric9x3": 27, "kGeneric9x6": 54, "kFurnace": 3, "kCrafting": 10}
@@ -990,6 +993,12 @@ def _apply_menu_packet(self: "Client", name: str, r: Reader) -> None:
     elif name == "block_event":
         pos = unpack_block_pos(r.u64())
         self.block_events.append((pos, r.u8(), r.u8(), r.varint()))
+    elif name == "level_event":   # ClientboundLevelEventPacket: int type, BlockPos, int data, boolean globalEvent
+        kind = r.i32()
+        self.level_events.append((kind, unpack_block_pos(r.u64()), r.i32(), r.bool()))
+    elif name == "add_transient_block":   # ClientboundAddTransientBlockPacket: BlockPos, the state's id
+        pos = unpack_block_pos(r.u64())
+        self.transient_blocks.append((pos, r.varint()))
     elif name == "explode":
         e = {"center": (r.f64(), r.f64(), r.f64()), "radius": r.f32(), "blocks": r.i32()}
         e["knockback"] = (r.f64(), r.f64(), r.f64()) if r.bool() else None
@@ -1069,6 +1078,8 @@ def read_entity_data(r: Reader) -> dict[int, tuple]:
             value = r.varint()
         elif ser == SERIALIZER["kItemStack"]:
             value = read_item(r)
+        elif ser == SERIALIZER["kBlockPos"]:
+            value = unpack_block_pos(r.u64())
         else:
             raise AssertionError(f"entity data of serializer {ser} is not known to the test client")
         assert index not in out, f"entity data {index} twice in one packet"

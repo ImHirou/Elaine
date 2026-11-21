@@ -182,6 +182,9 @@ class Store {
                                                          // where vanilla does, anything else through set_item()
     i32* fuse = nullptr;                                 // PrimedTnt.DATA_FUSE_ID (primed TNT): 4 bytes a row for one kind,
                                                          // against a lookup per TNT and tick in the tracker's encode pass
+    u16* block_state = nullptr;                          // FallingBlockEntity.blockState: what its add_entity carries as `data`
+    u64* start_pos = nullptr;                            // FallingBlockEntity.DATA_START_POS as the wire packs a BlockPos;
+                                                         // 0 is BlockPos.ZERO, its default. Written once, when it is made
     Uuid* uuid = nullptr;                                // cold: only read when the entity is shown to someone
 
   private:
@@ -189,6 +192,7 @@ class Store {
     void each_column(F&& f) {
         f(x), f(y), f(z), f(vx), f(vy), f(vz), f(yaw), f(pitch), f(head_yaw);
         f(flags), f(type), f(slot), f(dirty), f(shared_flags), f(pose), f(skin_parts), f(main_hand), f(item), f(fuse), f(uuid);
+        f(block_state), f(start_pos);
     }
     void grow(u32 cap);
     void move_row(u32 from, u32 to, Moves& moved);

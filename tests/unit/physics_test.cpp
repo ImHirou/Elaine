@@ -13,11 +13,13 @@
 //   i32 chunk x, z of the bot, i32 the server's simulation distance,
 //   u32 n, n x (i32 chunk x0, z0, x1, z1)                    chunks that were force-loaded
 //   u32 scenarios, then per scenario
-//     str name, u8 kind (item, tnt, armor_stand, pig), u8 summoned on the ground, f64 step height (-1: the type's)
+//     str name, u8 kind (item, tnt, armor_stand, pig, falling_block), u8 summoned on the ground, f64 step height (-1: the type's)
 //     u32 n, n x (i32 x, y, z, str block)                    the blocks, "minecraft:oak_stairs[facing=east]"
 //     u32 n, n x (u32 tick, i32 x, y, z, str block)          blocks set after that tick was recorded
 //     u32 n, n x (i32 entity id, u32 states, states x (u8 flags: 1 on the ground, 2 gone; i32 fuse; f64 x 7))
 //   str: u8 length, bytes.
+// physics_falling.bin is a second recording in the same form: falling blocks (FallingBlockEntity),
+// made when they were ported, beside the first instead of into it.
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -25,6 +27,7 @@
 #include <cmath>
 #include <cstdio>
 #include <random>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -42,6 +45,9 @@ namespace {
 
 constexpr unsigned char kVectors[] = {
 #embed "data/physics_vectors.bin"
+};
+constexpr unsigned char kFallingVectors[] = {
+#embed "data/physics_falling.bin"
 };
 
 struct State {
@@ -61,7 +67,7 @@ struct Event {
     u32 tick;
     BlockAtPos block;
 };
-enum class Kind : u8 { kItem, kTnt, kArmorStand, kPig };
+enum class Kind : u8 { kItem, kTnt, kArmorStand, kPig, kFallingBlock };
 struct Scenario {
     std::string name;
     Kind kind;
@@ -113,10 +119,10 @@ struct Ticking {
     }
 };
 
-std::vector<Scenario> load_vectors(Ticking& ticking) {
-    VectorReader r(kVectors, sizeof kVectors);
+std::vector<Scenario> load_vectors(Ticking& ticking, std::span<const unsigned char> vectors = kVectors) {
+    VectorReader r(vectors.data(), vectors.size());
     std::vector<Scenario> out;
-    if (std::memcmp(kVectors, "PHYSVEC1", 8) != 0) std::abort();
+    if (std::memcmp(vectors.data(), "PHYSVEC1", 8) != 0) std::abort();
     for (int i = 0; i < 8; ++i) r.get<u8>();
     ticking.cx = r.get<i32>(), ticking.cz = r.get<i32>(), ticking.distance = r.get<i32>();
     for (u32 n = r.get<u32>(); n > 0; --n) {
@@ -216,6 +222,7 @@ phys::Kind kind_of(const Scenario& s) {
         case Kind::kArmorStand:  // EntityTypes.ARMOR_STAND; its step_height is 0 unless the scenario gave it one
             return phys::living_kind(0.5f, 1.975f, s.step_height < 0 ? 0.0f : static_cast<float>(s.step_height), 0.08);
         case Kind::kPig: return phys::living_kind(0.9f, 0.9f, 0.6f, 0.08);  // EntityTypes.PIG
+        case Kind::kFallingBlock: return phys::kFallingBlock;
     }
     return phys::kItem;
 }
@@ -309,6 +316,18 @@ void replay(const std::vector<Scenario>& scenarios, const Ticking& ticking, std:
                         l.asleep = phys::item_rests(world, l.m, l.b, t, l.ent->id, l.rest);
                     break;
                 case Kind::kTnt: phys::tnt_tick(world, l.m, l.b); break;
+                case Kind::kFallingBlock: {
+                    // FallingBlockEntity.tick as Game::tick_falling runs it: on the ground it is a block
+                    // again, or broken - gone either way; in the air it is slowed (Entity.getAirDrag).
+                    phys::falling_move(world, l.m, l.b);
+                    if (l.b.on_ground) {
+                        fate = phys::Fate::kGone;
+                        break;
+                    }
+                    const double drag = static_cast<double>(0.98f);
+                    for (double& v : l.m.vel) v = v * drag;
+                    break;
+                }
                 case Kind::kArmorStand: fate = phys::living_tick(world, l.kind, l.m, l.b); break;
                 case Kind::kPig: {
                     fate = phys::living_tick(world, l.kind, l.m, l.b);
@@ -396,6 +415,26 @@ TEST(Physics, ReplaysWhatAVanillaServerRecorded) {
         ++failed;
         ADD_FAILURE() << scenarios[i].name << ": " << diffs[i];
     }
+    std::printf("            %zu scenarios, %u recorded states, %u scenarios differ\n", scenarios.size(), states, failed);
+}
+
+TEST(Physics, ReplaysTheFallingBlocksAVanillaServerRecorded) {
+    Ticking ticking;
+    const std::vector<Scenario> scenarios = load_vectors(ticking, kFallingVectors);
+    ASSERT_GE(scenarios.size(), 12u);
+    std::vector<std::string> diffs;
+    replay(scenarios, ticking, diffs);
+    u32 states = 0, failed = 0, landed = 0;
+    for (usize i = 0; i < scenarios.size(); ++i) {
+        for (const Entity& e : scenarios[i].entities) {
+            states += static_cast<u32>(e.states.size());
+            landed += e.states.back().gone;
+        }
+        if (diffs[i].empty()) continue;
+        ++failed;
+        ADD_FAILURE() << scenarios[i].name << ": " << diffs[i];
+    }
+    EXPECT_GE(landed, 10u) << "hardly any of them came down: the recording is of something else";
     std::printf("            %zu scenarios, %u recorded states, %u scenarios differ\n", scenarios.size(), states, failed);
 }
 

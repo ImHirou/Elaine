@@ -64,7 +64,10 @@ void Game::apply_view(u32 pi, i32 cx, i32 cz, i32 distance) {
     const bool had = cs.has_view;
     const i32 ocx = pcx_[pi], ocz = pcz_[pi], od = pview_[pi];
     if (had && ocx == cx && ocz == cz && od == distance) return;
-    if (!had || ocx != cx || ocz != cz) send(pi, cb::SetChunkCacheCenter{cx, cz});
+    if (!had || ocx != cx || ocz != cz) {
+        send(pi, cb::SetChunkCacheCenter{cx, cz});
+        move_simulation(had, ocx, ocz, true, cx, cz);
+    }
 
     u64 bits[ChunkSender::kWords] = {};
     const i32 x0 = cx - distance - 1, z0 = cz - distance - 1;
@@ -129,6 +132,47 @@ void Game::apply_view(u32 pi, i32 cx, i32 cz, i32 distance) {
                 if (in_view(cx, cz, distance, x, z, kLoadMargin)) world_.request(x, z);
         }
     }
+}
+
+// DistanceManager.addPlayer / removePlayer, as ChunkMap.move calls them: a player's simulation
+// ticket is at the chunk it is in. The chunks within `simulation-distance` of it (a square) are
+// simulated - random ticks, as vanilla's entity-ticking level - and those one chunk further still
+// run their scheduled ticks (block-ticking). Counted per chunk, a player at a time, when it
+// crosses into another chunk: nothing is worked out per tick.
+void Game::move_simulation(bool had, i32 old_cx, i32 old_cz, bool has, i32 cx, i32 cz) {
+    const i32 r = static_cast<i32>(s_.simulation_distance);
+    const auto visit = [&](i32 x0, i32 x1, i32 z0, i32 z1) {
+        for (i32 z = z0; z <= z1; ++z) {
+            for (i32 x = x0; x <= x1; ++x) {
+                const i32 before = had ? std::max(std::abs(x - old_cx), std::abs(z - old_cz)) : INT32_MAX;
+                const i32 after = has ? std::max(std::abs(x - cx), std::abs(z - cz)) : INT32_MAX;
+                const i32 sim = (after <= r) - (before <= r), block = (after <= r + 1) - (before <= r + 1);
+                if (!(sim | block)) continue;
+                if (world::Chunk* c = world_.find(x, z)) world_.simulate(*c, sim, block);
+            }
+        }
+    };
+    const i32 reach = r + 1;
+    if (had && has && std::abs(old_cx - cx) <= 2 * reach && std::abs(old_cz - cz) <= 2 * reach) {
+        visit(std::min(old_cx, cx) - reach, std::max(old_cx, cx) + reach, std::min(old_cz, cz) - reach,
+              std::max(old_cz, cz) + reach);
+    } else {
+        if (had) visit(old_cx - reach, old_cx + reach, old_cz - reach, old_cz + reach);
+        if (has) visit(cx - reach, cx + reach, cz - reach, cz + reach);
+    }
+}
+
+// A chunk that has just entered the world: the players that have it within their simulation distance.
+void Game::simulate_adopted(world::Chunk& c) {
+    const i32 r = static_cast<i32>(s_.simulation_distance);
+    i32 sim = 0, block = 0;
+    for (u32 pi = 0; pi < players_.size(); ++pi) {
+        if (!senders_[pi].has_view) continue;
+        const i32 d = std::max(std::abs(c.x - pcx_[pi]), std::abs(c.z - pcz_[pi]));
+        sim += d <= r;
+        block += d <= r + 1;
+    }
+    if (sim | block) world_.simulate(c, sim, block);
 }
 
 // ChunkMap.onChunkReadyToSend: a chunk began to tick - whoever has it in view is to be sent it.
@@ -222,6 +266,7 @@ void Game::pump_chunks(u64 tick_start_ns) {
         read_block_entities(*a.chunk, a.from->parts.block_entities);
         read_entities(*a.chunk, a.from->parts.entities);
         a.chunk->dirty = dirty;  // what it came with is what is on disk
+        simulate_adopted(*a.chunk);
     }
     world_.release_adopted();
     for (world::Chunk* c : world_.ready()) chunk_ready(*c);

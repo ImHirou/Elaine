@@ -61,7 +61,7 @@ MATERIAL_FLAGS = [
 INSIDE = ["kInsideNone", "kInsideWeb", "kInsideHoney"]
 
 # How an entity type moves. Everything is read off its class chain (gamedata/entities.json):
-MOVERS = ["kMoverNone", "kMoverItem", "kMoverTnt", "kMoverLiving", "kMoverArmorStand"]
+MOVERS = ["kMoverNone", "kMoverItem", "kMoverTnt", "kMoverLiving", "kMoverArmorStand", "kMoverFallingBlock"]
 # Living classes that declare one of MOVE_METHODS, as of the version the port was written
 # against. A class that appears here, disappears, or changes its set stops the generator: read
 # it, then decide whether its types still move as plain LivingEntity.travel does.
@@ -387,6 +387,8 @@ struct Shape {
             mover, gravity = "kMoverItem", 0.04            # ItemEntity.getDefaultGravity
         elif chain[0] == "PrimedTnt":
             mover, gravity = "kMoverTnt", 0.04             # PrimedTnt.getDefaultGravity
+        elif chain[0] == "FallingBlockEntity":
+            mover, gravity = "kMoverFallingBlock", 0.04    # FallingBlockEntity.getDefaultGravity
         elif "LivingEntity" in chain:
             if "ArmorStand" in chain:
                 mover = "kMoverArmorStand"
