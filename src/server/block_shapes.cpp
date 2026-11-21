@@ -47,6 +47,11 @@ constexpr u32 kCounterClockwise[6] = {0, 0, world::kWest, world::kEast, world::k
 
 BlockPos step(BlockPos p, u32 dir) { return {p.x + world::kStepX[dir], p.y + world::kStepY[dir], p.z + world::kStepZ[dir]}; }
 bool horizontal(u32 dir) { return dir >= world::kNorth; }
+
+// SegmentableBlock: petals count their segments in `flower_amount`, leaf litter in `segment_amount` -
+// two names for one layout, and the code reads both as props::flower_bed (facing, then the amount).
+static_assert(props::flower_bed::kFacingStride == 4 && props::leaf_litter::kFacingStride == 4 &&
+              props::flower_bed::kFlowerAmountStride == 1 && props::leaf_litter::kSegmentAmountStride == 1);
 bool same_axis(u32 a, u32 b) { return (a >> 1) == (b >> 1); }
 
 // A boolean property is (true, false): the state with it true is the lower one.
@@ -211,6 +216,13 @@ BlockState Game::shaped_for_placement(u32 pi, const sb::UseItemOn& u, const Bloc
             for (u32 dir = world::kNorth; dir <= world::kEast; ++dir)
                 connected[dir] = connects(block_kind::kWall, block.default_state, neighbour(dir), dir);
             return wall_block(block, wet, neighbour(world::kUp), connected);
+        }
+        case block_flag::kPlaceSegment: {  // SegmentableBlock: one more of what is there, or the first, facing the player
+            if (world::block_of(replaced) == world::block_of(block.first_state))
+                return static_cast<BlockState>(replaced +
+                                               ((replaced - block.first_state) % props::flower_bed::kFacingStride < 3 ? 1 : 0));
+            const u32 facing = world::opposite(horizontal_direction(ents_.yaw[pi]));
+            return static_cast<BlockState>(block.first_state + (facing - world::kNorth) * props::flower_bed::kFacingStride);
         }
         case block_flag::kPlaceHorizontal:  // GlazedTerracottaBlock: facing the one who places it
             return static_cast<BlockState>(block.first_state +

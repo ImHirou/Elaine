@@ -21,7 +21,8 @@
 //                    minecraft:full) holds nothing anyone made: it is left to the generator here.
 //   light            the layers that were saved, queued as vanilla queues them when it loads the
 //                    chunk; a chunk saved lit is not lit again.
-//   block entities   a chest or a furnace whose tag says nothing this server would not act on -
+//   block entities   a chest (of wood or copper), a barrel, a furnace, a smoker or a blast furnace
+//                    whose tag says nothing this server would not act on -
 //                    stacks without components, no name, lock or loot table - becomes one of ours.
 //                    Every other block entity is kept as its tag (canonical: nbt::Doc::write): a
 //                    client is told that it is there, and it does nothing.

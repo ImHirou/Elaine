@@ -774,7 +774,7 @@ TEST(Import, AVanillaChunkBecomesOneOfOurs) {
 
     // Block entities: the layout of server/persist.cpp, read by hand.
     proto::Reader r(lc.parts.block_entities.data(), lc.parts.block_entities.size());
-    EXPECT_EQ(r.u8v(), 1);
+    EXPECT_EQ(r.u8v(), 2);
     ASSERT_EQ(r.varint(), 4u);
     const auto stack = [&]() -> std::pair<u32, u32> {
         const u32 count = r.varint();
@@ -814,6 +814,7 @@ TEST(Import, AVanillaChunkBecomesOneOfOurs) {
     EXPECT_EQ(r.be32(), 1600u);
     EXPECT_EQ(r.be32(), 7u);
     EXPECT_EQ(r.be32(), 200u);
+    EXPECT_EQ(r.f32(), 1.0f);  // speed_multiplier
     {
         const std::span<const u8> kept = r.bytes(r.varint());
         nbt::Doc doc;

@@ -94,11 +94,11 @@ def load_item_table() -> dict[str, dict]:
     text = (_gen_dir() / "block_tables.hpp").read_text()
     body = re.search(r"ItemInfo kItems\[\d+\] = \{\n(.*?)\n\};", text, re.S).group(1)
     out = {}
-    for m in re.finditer(r"\{(\d+), (\d+), (\d+), 0x([0-9A-F]+), (\d+), 0x([0-9A-F]+), (\d+), (\d+)\},  // (\w+)", body):
-        block, sound, stack, flags, slot, swing, fuel, remainder, name = m.groups()
+    for m in re.finditer(r"\{(\d+), (\d+), (\d+), 0x([0-9A-F]+), (\d+), 0x([0-9A-F]+), (\d+), (\d+), (\d+)\},  // (\w+)", body):
+        block, sound, stack, flags, slot, swing, fuel, fuel_fast, remainder, name = m.groups()
         out[name] = {"block": int(block), "equip_sound": int(sound), "max_stack": int(stack), "flags": int(flags, 16), "equip_slot": int(slot),
                      "attack_swing": (int(swing, 16) >> 6, int(swing, 16) & 0x3F),   # (SwingAnimationType, ticks)
-                     "fuel_ticks": int(fuel), "remainder": int(remainder)}
+                     "fuel_ticks": int(fuel), "fuel_ticks_fast": int(fuel_fast), "remainder": int(remainder)}
     assert len(out) == ITEM["kCount"], (len(out), ITEM["kCount"])
     return out
 
@@ -895,7 +895,7 @@ MENU_PACKETS = {"container_set_content", "container_set_slot", "set_cursor_item"
                 "commands", "stop_sound", "level_event", "add_transient_block"}
 # Slots of the menus a block opens, by menu type (the menu registry): the container's own, then
 # the 36 of the inventory. From the constructors of ChestMenu, AbstractFurnaceMenu, CraftingMenu.
-WINDOW_SLOTS = {"kGeneric9x3": 27, "kGeneric9x6": 54, "kFurnace": 3, "kCrafting": 10}
+WINDOW_SLOTS = {"kGeneric9x3": 27, "kGeneric9x6": 54, "kFurnace": 3, "kSmoker": 3, "kBlastFurnace": 3, "kCrafting": 10}
 
 
 # ----------------------------------------------------------------------------- item stacks
@@ -1070,9 +1070,11 @@ def _apply_menu_packet(self: "Client", name: str, r: Reader) -> None:
         self.menu_log.append((name, cid, types[kind], title))
     elif name == "container_set_data":
         cid, index, value = r.varint(), r.i16(), r.i16()
-        assert self.window and cid == self.window["id"], cid
-        self.window["data"][index] = value
-        self.menu_log.append((name, index, value))
+        # ClientPacketListener.handleContainerSetData: for the menu that is open, or for nobody -
+        # what a burning furnace said last may still be on its way when its screen is closed.
+        if self.window and cid == self.window["id"]:
+            self.window["data"][index] = value
+            self.menu_log.append((name, index, value))
     elif name == "container_close":
         cid = r.varint()
         assert self.window and cid == self.window["id"], (cid, self.window)

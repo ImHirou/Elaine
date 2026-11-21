@@ -13,7 +13,8 @@
 // and, for the blocks that have a part in any of it:
 //   SnowyBlock, SpreadingSnowyBlock (grass, mycelium), NyliumBlock, ChangeOverTimeBlock /
 //   WeatheringCopper, BuddingAmethystBlock, AmethystClusterBlock, BaseTorchBlock, WallTorchBlock,
-//   RedstoneLampBlock, FallingBlock, ConcretePowderBlock, TntBlock, ChestBlock (their hooks)
+//   RedstoneLampBlock, FallingBlock, ConcretePowderBlock, TntBlock, ChestBlock, CopperChestBlock,
+//   BarrelBlock, VegetationBlock and what is one (their hooks)
 // The blocks whose state is their shape - stairs, fences, panes, walls, lanterns, mushroom
 // blocks - answer updateShape in server/block_shapes.cpp.
 //
@@ -103,7 +104,10 @@ bool Game::set_block(BlockPos pos, BlockState state, u32 flags, i32 limit) {
     // A block entity that went with the old block: its entry stays (dead, and empty) until the
     // menus that are open on it have been closed.
     u32 gone_kind = block_kind::kPlain, gone = 0;
-    if (old_block != new_block && (world::flags_of(old) & st::kBlockEntity) &&
+    // BlockState.shouldChangedStateKeepBlockEntity: a copper chest that becomes another copper
+    // chest - weathered, or the block of the chest it joined - is the chest it was.
+    const bool kept = was.kind == block_kind::kChest && now.kind == block_kind::kChest && copper_chest(was) && copper_chest(now);
+    if (old_block != new_block && !kept && (world::flags_of(old) & st::kBlockEntity) &&
         world_.remove_block_entity(pos.x, pos.y, pos.z, gone)) {
         // BaseContainerBlockEntity.preRemoveSideEffects: Containers.dropContents...
         // ...unless the change says to leave that out: then what it held is gone with it.
@@ -114,7 +118,7 @@ bool Game::set_block(BlockPos pos, BlockState state, u32 flags, i32 limit) {
             // goes with its block and spills nothing.
             free_block_entity(gone_kind, gone);
             gone_kind = block_kind::kPlain;
-        } else if (gone_kind == block_kind::kChest) {
+        } else if (chest_kind(gone_kind)) {
             chests_[gone].alive = false;  // ChestBlockEntity.stopOpen does nothing for a removed chest
             if (spill) drop_contents(pos, chests_[gone].items, Chest::kSlots);
         } else if (gone_kind == block_kind::kFurnace) {
@@ -125,10 +129,10 @@ bool Game::set_block(BlockPos pos, BlockState state, u32 flags, i32 limit) {
     // (BlockState.affectNeighborsAfterRemoval comes here. Of the ported classes the containers
     // have one, and it tells comparators.)
     if (!(flags & kUpdateSkipOnPlace)) on_place(state, pos, old);
-    // EntityBlock.newBlockEntity - if the block is still the one that was set.
-    if (old_block != new_block && (now.kind == block_kind::kChest || now.kind == block_kind::kFurnace) &&
-        world::block_of(world_.block(pos.x, pos.y, pos.z)) == new_block) {
-        const u32 data = now.kind == block_kind::kChest ? new_chest(pos) : new_furnace(pos);
+    // EntityBlock.newBlockEntity - if the block is still the one that was set, and has none yet.
+    if (old_block != new_block && (chest_kind(now.kind) || now.kind == block_kind::kFurnace) &&
+        world::block_of(world_.block(pos.x, pos.y, pos.z)) == new_block && !(kept && world_.block_entity(pos.x, pos.y, pos.z))) {
+        const u32 data = chest_kind(now.kind) ? new_chest(pos) : new_furnace(pos, cooker_of(now.block_entity));
         world_.add_block_entity(pos.x, pos.y, pos.z, now.block_entity, data);
     }
     // Back in Level.setBlock: the rest happens only if the block is what was asked for - onPlace
@@ -172,7 +176,8 @@ void Game::drop_resources(BlockState state, BlockPos pos) {
 
 // Block.getDrops without a tool: the loot table, reduced by mcgen to what it gives then
 // (BlockInfo::drop) - the first candidate with its chance, else the second; a count that comes
-// out below one is nothing (a mushroom block, most times); and a double slab is two.
+// out below one is nothing (a mushroom block, most times); a double slab is two, and a block of
+// petals as many as it holds.
 ItemStack Game::block_drop(BlockState state) {
     const world::BlockInfo& info = world::block_info_of(state);
     const world::BlockInfo::Drop& drop =
@@ -180,6 +185,9 @@ ItemStack Game::block_drop(BlockState state) {
     if (!drop.item) return {};
     i32 count = drop.min + static_cast<i32>(random_int(static_cast<u32>(drop.max - drop.min) + 1u));
     if (info.kind == block_kind::kSlab && (state - info.first_state) / props::slab::kTypeStride == 2) count *= 2;  // type=double
+    // One for each of the petals, or leaves, that the block holds (the amount: 1, 2, 3, 4).
+    if (info.kind == block_kind::kSegmented)
+        count *= 1 + static_cast<i32>((state - info.first_state) % props::flower_bed::kFacingStride);
     return count > 0 ? ItemStack(drop.item, static_cast<u32>(count)) : ItemStack();
 }
 
@@ -335,6 +343,9 @@ BlockState Game::update_shape(BlockState state, BlockPos pos, u32 dir, BlockPos 
             return world::opposite(dir) == wall_torch_facing(state, info) && !can_survive(state, pos) ? world::kAir : state;
         case block_kind::kAmethystCluster:  // (waterlogged: a tick for the water - there are no fluid ticks)
             return dir == world::opposite(cluster_facing(state, info)) && !can_survive(state, pos) ? world::kAir : state;
+        case block_kind::kPlant:
+        case block_kind::kSegmented:  // VegetationBlock: whatever changes beside it, it looks at what it stands on
+            return can_survive(state, pos) ? state : world::kAir;
         case block_kind::kConcretePowder:  // ConcretePowderBlock: water beside it makes it concrete
             if (touches_water(pos)) return info.alt[0];
             [[fallthrough]];
@@ -385,6 +396,10 @@ bool Game::can_survive(BlockState state, BlockPos pos) const {
             const u32 facing = cluster_facing(state, info);
             return world::face_sturdy(state_for_client(step(pos, world::opposite(facing))), facing);
         }
+        // VegetationBlock.mayPlaceOn of the block below, and LeafLitterBlock.canSurvive: what the
+        // plant's class asks is a bit of that state, and the plant says which (state::kSupport).
+        case block_kind::kPlant:
+        case block_kind::kSegmented: return (st::kSupport[state_for_client({pos.x, pos.y - 1, pos.z})] & info.alt[0]) != 0;
         case block_kind::kLantern: {  // LanternBlock: Block.canSupportCenter of what it hangs from or stands on
             if ((state - info.first_state) / props::lantern::kHangingStride != 0)  // (hanging: true, false)
                 return world::face_sturdy_center(state_for_client({pos.x, pos.y - 1, pos.z}), world::kUp);
@@ -429,8 +444,9 @@ void Game::run_block_ticks() {
 void Game::tick_block(BlockState state, BlockPos pos) {
     if (!(st::kHooks[state] & st::kHookTick)) return;
     switch (world::block_info_of(state).kind) {
-        case block_kind::kChest: recheck_chest(pos); break;
-        case block_kind::kLamp:  // RedstoneLampBlock
+        case block_kind::kChest:
+        case block_kind::kBarrel: recheck_chest(pos); break;  // ChestBlock / BarrelBlock: recheckOpen
+        case block_kind::kLamp:                               // RedstoneLampBlock
             if (lamp_lit(state) && !has_neighbour_signal(pos)) set_block(pos, lamp_state(false), kUpdateClients);
             break;
         case block_kind::kFalling:
@@ -479,7 +495,12 @@ void Game::run_random_ticks() {
 // BlockBehaviour.randomTick, for the classes whose random tick is ported (state::kRandomTick).
 void Game::random_tick(BlockState state, BlockPos pos) {
     const world::BlockInfo& info = world::block_info_of(state);
-    if (info.next_stage) return tick_weathering(state, pos);  // copper, whatever else its class is
+    if (info.next_stage) {  // copper, whatever else its class is
+        // WeatheringCopperChestBlock.randomTick: the left half of a pair weathers, and takes the
+        // right one with it (CopperChestBlock.updateShape) - while nobody has the chest open.
+        if (info.kind == block_kind::kChest && !copper_chest_may_weather(state, pos)) return;
+        return tick_weathering(state, pos);
+    }
     switch (info.kind) {
         case block_kind::kSpreading: tick_spreading(state, pos); break;
         case block_kind::kNylium:  // NyliumBlock: netherrack under what shuts the light out

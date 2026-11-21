@@ -299,10 +299,13 @@ void convert_block_entity(nbt::Doc& doc, nbt::Tag tag, const world::Chunk& c, co
     const u32 kind = world::block_info_of(state).kind;
     const u8 xz = static_cast<u8>(lx << 4 | lz);
 
-    const bool chest = kind == block_kind::kChest && type == be_type::kChest;
-    const bool furnace = kind == block_kind::kFurnace && type == be_type::kFurnace;
+    // A block entity of the type its block has: a chest of any kind, a barrel; a furnace, a smoker, a blast furnace.
+    const bool own_type = type == world::block_info_of(state).block_entity;
+    const bool chest = (kind == block_kind::kChest || kind == block_kind::kBarrel) && own_type;
+    const bool furnace = kind == block_kind::kFurnace && own_type;
     PlainStack stacks[27];
     i32 timers[4] = {0, 0, 0, 0};  // lit remaining, lit total, cooking, cooking total: AbstractFurnaceBlockEntity.dataAccess
+    float speed = 1.0f;            // speedMultiplier: of the fuel that burns
     nbt::Tag recipes{};
     bool plain = chest || furnace;
     if (plain) {
@@ -331,7 +334,10 @@ void convert_block_entity(nbt::Doc& doc, nbt::Tag tag, const world::Chunk& c, co
                     timers[3] = e.as_int();
                     continue;
                 }
-                if (key == "speed_multiplier" && e.as_double() == 1.0) continue;
+                if (key == "speed_multiplier") {  // ValueInput.getFloatOr: any number, as a float
+                    speed = static_cast<float>(e.as_double());
+                    continue;
+                }
             }
             // What a furnace has cooked - the experience it owes - changes nothing it does here: kept beside it.
             if (furnace && key == "RecipesUsed" && e.type == nbt::kCompound) {
@@ -358,9 +364,9 @@ void convert_block_entity(nbt::Doc& doc, nbt::Tag tag, const world::Chunk& c, co
         record::put_counted(out.records, {});
         return;
     }
-    u8* p = out.records.reserve(16);
+    u8* p = out.records.reserve(20);
     for (const i32 t : timers) p = proto::put_be32(p, static_cast<u32>(t));
-    out.records.commit(p);
+    out.records.commit(proto::put_f32(p, speed));
     base::ByteBuf kept;
     if (recipes && recipes.size()) {
         base::ByteBuf payload;

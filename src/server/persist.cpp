@@ -5,13 +5,17 @@
 //
 // Written with the wire's own primitives (big-endian, VarInts) and read with proto::Reader:
 //
-//   block entities   u8 version (1), VarInt count, then per block entity
+//   block entities   u8 version (2; 1 is the same without kind 3), VarInt count, then per block entity
 //                      u8 xz (x << 4 | z in the chunk), i16 y, VarInt block_entity_type, u8 kind
 //                      kind 0 kept:    VarInt n + n bytes - the tag it came with (an import), as
 //                                      nbt::Doc::write left it. Listed for clients, never opened
-//                      kind 1 chest:   27 stacks, then a kept tag (VarInt n + bytes, n = 0: none)
+//                      kind 1 chest:   27 stacks, then a kept tag (VarInt n + bytes, n = 0: none).
+//                                      A barrel's too: which it is, its block says
 //                      kind 2 furnace: 3 stacks, i32 lit remaining, lit total, cooking, cooking
-//                                      total, then a kept tag
+//                                      total, then a kept tag (version 1: its fuel's speed was 1)
+//                      kind 3 furnace: the same with a float after the four numbers: the speed
+//                                      of the fuel that was lit last. Of a furnace, a smoker or
+//                                      a blast furnace: which it is, its block says
 //   entities         u8 version (2; 1 is the same without kind 4), then until the end
 //                      u8 kind, VarInt entity type, uuid, 3 doubles position, 3 doubles velocity,
 //                      float yaw, pitch, head yaw, u8 flags (1 on the ground, 2 no gravity),
@@ -70,7 +74,13 @@ u32 Game::new_chest(BlockPos pos) {
     return data;
 }
 
-u32 Game::new_furnace(BlockPos pos) {
+item::Cooker Game::cooker_of(u32 block_entity_type) {
+    return block_entity_type == gen::block_entity_type::kSmoker         ? item::Cooker::kSmoking
+           : block_entity_type == gen::block_entity_type::kBlastFurnace ? item::Cooker::kBlasting
+                                                                        : item::Cooker::kSmelting;
+}
+
+u32 Game::new_furnace(BlockPos pos, item::Cooker type) {
     u32 data;
     if (!furnace_free_.empty()) {
         data = furnace_free_.back();
@@ -81,6 +91,7 @@ u32 Game::new_furnace(BlockPos pos) {
     }
     furnaces_[data].alive = true;
     furnaces_[data].x = pos.x, furnaces_[data].y = pos.y, furnaces_[data].z = pos.z;
+    furnaces_[data].type = type;
     return data;
 }
 
@@ -93,7 +104,7 @@ void Game::free_block_entity(u32 kind, u32 data) {
         opaque_free_.push_back(index);
     };
     if (data & kOpaqueBlockEntity) return free_kept(data & ~kOpaqueBlockEntity);
-    if (kind == block_kind::kChest) {
+    if (chest_kind(kind)) {
         free_kept(chests_[data].keep);
         chests_[data] = {};
         chest_free_.push_back(data);
@@ -115,19 +126,19 @@ void Game::write_block_entities(const world::Chunk& c, base::ByteBuf& out) const
         const BlockPos pos{c.x * 16 + (be.xz >> 4), be.y, c.z * 16 + (be.xz & 15)};
         const u32 kind = world::block_info_of(world_.block(pos.x, pos.y, pos.z)).kind;
         const bool opaque = (be.data & kOpaqueBlockEntity) != 0;
-        put_block_entity(out, be.xz, be.y, be.type, opaque ? kKept : kind == block_kind::kChest ? kChest : kFurnace);
+        put_block_entity(out, be.xz, be.y, be.type, opaque ? kKept : chest_kind(kind) ? kChest : kFurnace);
         if (opaque) {
             kept(be.data & ~kOpaqueBlockEntity);
-        } else if (kind == block_kind::kChest) {
+        } else if (chest_kind(kind)) {
             const Chest& chest = chests_[be.data];
             for (const ItemStack& stack : chest.items) item::write_untrusted(out, stack);
             kept(chest.keep);
         } else {
             const Furnace& f = furnaces_[be.data];
             for (const ItemStack& stack : f.items) item::write_untrusted(out, stack);
-            u8* p = out.reserve(16);
+            u8* p = out.reserve(20);
             for (u32 d = 0; d < Furnace::kDataCount; ++d) p = put_be32(p, static_cast<u32>(f.data(d)));
-            out.commit(p);
+            out.commit(put_f32(p, f.speed));
             kept(f.keep);
         }
     }
@@ -138,7 +149,7 @@ void Game::read_block_entities(world::Chunk& c, std::span<const u8> bytes) {
     Reader r(bytes.data(), bytes.size());
     const u8 version = r.u8v();
     const u32 count = r.varint();
-    if (!r.ok || version != kVersion) {
+    if (!r.ok || version < 1 || version > kVersion) {
         LOG_ERROR("chunk %d, %d: its block entities are of a version this server does not read", c.x, c.z);
         return;
     }
@@ -180,24 +191,26 @@ void Game::read_block_entities(world::Chunk& c, std::span<const u8> bytes) {
             Chest chest;
             stacks(chest.items, Chest::kSlots);
             const std::span<const u8> tag = r.bytes(r.varint());
-            if (!r.ok || !fits || kind != block_kind::kChest) continue;
+            if (!r.ok || !fits || !chest_kind(kind)) continue;
             const u32 data = new_chest(pos);
             for (u32 s = 0; s < Chest::kSlots; ++s) chests_[data].items[s] = std::move(chest.items[s]);
             chests_[data].keep = keep(tag);
             world_.add_block_entity(pos.x, pos.y, pos.z, type, data);
-        } else if (record == kFurnace) {
+        } else if (record == kFurnace || record == kFurnaceV1) {
             Furnace f;
             stacks(f.items, Furnace::kSlots);
             f.lit_remaining = static_cast<i32>(r.be32());
             f.lit_total = static_cast<i32>(r.be32());
             f.cook = static_cast<i32>(r.be32());
             f.cook_total = static_cast<i32>(r.be32());
+            if (record == kFurnace) f.speed = r.f32();
             const std::span<const u8> tag = r.bytes(r.varint());
             if (!r.ok || !fits || kind != block_kind::kFurnace) continue;
-            const u32 data = new_furnace(pos);
+            const u32 data = new_furnace(pos, cooker_of(world::block_info_of(state).block_entity));
             Furnace& to = furnaces_[data];
             for (u32 s = 0; s < Furnace::kSlots; ++s) to.items[s] = std::move(f.items[s]);
             to.lit_remaining = f.lit_remaining, to.lit_total = f.lit_total, to.cook = f.cook, to.cook_total = f.cook_total;
+            to.speed = f.speed;
             to.keep = keep(tag);
             world_.add_block_entity(pos.x, pos.y, pos.z, type, data);
         } else {
@@ -212,7 +225,7 @@ void Game::drop_block_entities(world::Chunk& c) {
     for (u32 i = 0; i < c.block_entity_count; ++i) {
         const world::BlockEntityRef& be = c.block_entities[i];
         const u32 kind = world::block_info_of(world_.block(c.x * 16 + (be.xz >> 4), be.y, c.z * 16 + (be.xz & 15))).kind;
-        if (!(be.data & kOpaqueBlockEntity) && (kind == block_kind::kChest || kind == block_kind::kFurnace)) {
+        if (!(be.data & kOpaqueBlockEntity) && (chest_kind(kind) || kind == block_kind::kFurnace)) {
             // Nobody can have it open - a menu closes four blocks away, a chunk leaves far beyond
             // every view - but an entry must not go while a menu names it.
             close_menus_on(kind, be.data);

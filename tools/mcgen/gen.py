@@ -18,7 +18,7 @@ Emitted files (all deterministic; none is in git - their lock is, see "the lock"
   state_*.bin         one table per file, indexed by block state id
   block_info.hpp      layout + flag bits of the cold tables
   block_tables.hpp    COLD per-block / per-item / collision-shape tables (include from one .cpp)
-  recipes.hpp         crafting and smelting recipes (gen_game.py; include from one .cpp)
+  recipes.hpp         crafting and cooking recipes (gen_game.py; include from one .cpp)
   update_recipes.bin  pre-serialized play `update_recipes` packet body (recipe property sets)
   static_ids.hpp      menu and block entity type ids, the sounds and particles the server sends
   command_data.hpp    what commands look up by name: argument type ids, block properties, item
@@ -378,7 +378,8 @@ BLOCK_FLAGS = [
     ("kPlaceDefault", 1, "Block.getStateForPlacement(): the default state"),
     ("kPlaceAxis", 2, "RotatedPillarBlock: axis = clicked face's axis; alt = states for x, y, z"),
     ("kPlaceSnowy", 3, "SnowyBlock: snowy = block above is in #snow; alt = states for false, true"),
-    ("kPlaceChest", 4, "ChestBlock: faces the player, joins a single chest beside it (props::chest)"),
+    ("kPlaceChest", 4, "ChestBlock: faces the player, joins a single chest beside it (props::chest); alt = the sounds of "
+                       "its lid, open and close, and for a waxed copper chest the first state of the block it is without the wax"),
     ("kPlaceFacing", 5, "AbstractFurnaceBlock: `facing` = opposite of the player's horizontal direction (props::furnace)"),
     ("kPlaceTorch", 6, "StandingAndWallBlockItem: standing, or on the first wall the player looks at that holds it; "
                        "alt = the standing block's state, the wall block's first state (facing north, south, west, east)"),
@@ -395,6 +396,9 @@ BLOCK_FLAGS = [
     ("kPlaceEndRod", 17, "EndRodBlock: `facing` = the clicked face, turned round on a rod that points the same way (props::end_rod)"),
     ("kPlaceWaterlogged", 18, "the default state, waterlogged in water (props::waterlogged)"),
     ("kPlaceMushroom", 19, "HugeMushroomBlock: a side is skin unless more of the same block is there (props::mushroom)"),
+    ("kPlaceBarrel", 20, "BarrelBlock: `facing` = opposite of the direction the player looks along most (props::barrel)"),
+    ("kPlaceSegment", 21, "SegmentableBlock (petals, leaf litter): one more onto the block of it that is there, else one "
+                          "that faces the player (props::flower_bed)"),
     ("kSnowTag", 0x40, "member of #minecraft:snow (makes the SnowyBlock below it snowy)"),
     ("kInteractive", 0x80, "overrides useItemOn/useWithoutItem: a click may be consumed by the block"),
     ("kGameMaster", 0x100, "GameMasterBlock: only operators may break it"),
@@ -837,6 +841,54 @@ def build_block_tables(v: dict, blocks: dict, data: dict, static_regs: dict, van
                     die(f"{b['name']}: a wall without `up`")
                 w |= wbit["kWallPost"] if props["up"] == "true" else 0
             wall_above[i] = w
+    # ---- what a plant asks of the state under it (gen_game.PLANT_SUPPORT): a bit a rule
+    def support_rule(block_name: str) -> str | None:
+        gb = game["blocks"][block_name]
+        rule = gen_game.PLANT_SUPPORT.get(gb["class"][0])
+        if rule is None:
+            return None
+        if rule.startswith("field:"):
+            rule = gb["fields"].get(rule[6:], "")
+            if not rule.startswith("#minecraft:"):
+                die(f"{block_name}: its {gb['class'][0]} names no tag of blocks it stands on")
+            rule = "#" + rule[11:]
+        return rule
+
+    def supporting(rule: str) -> bytes:
+        """One byte a state: may a plant of this rule stand on it?"""
+        if rule.startswith("#"):
+            members = block_id_set(tagged(rule[1:]))
+            return bytes(1 if st["block"][i] in members else 0 for i in range(n))
+        if rule == "cactus_flower":
+            members = block_id_set(tagged("support_override_cactus_flower"))
+            return bytes(1 if st["block"][i] in members or (cols["sturdy_center"][i] >> up) & 1 else 0 for i in range(n))
+        if rule == "sturdy_top":
+            return bytes((cols["sturdy_full"][i] >> up) & 1 for i in range(n))
+        die(f"gen_game.PLANT_SUPPORT: {rule} is not a rule gen.py knows")
+
+    def block_id_set(ids: set[int]) -> set[int]:
+        index_of = {b["id"]: k for k, b in enumerate(ext_blocks)}  # st["block"] holds indices into ext_blocks
+        return {index_of[i] for i in ids}
+
+    support_bits: dict[bytes, int] = {}   # the states a rule accepts -> its bit (two tags with the same members are one)
+    support_of: dict[str, int] = {}       # block -> the bit of its rule
+    for b in ext_blocks:
+        rule = support_rule(b["name"])
+        if rule is None:
+            if (ported_of[b["name"]] or (None,))[0] in ("kPlant", "kSegmented"):
+                die(f"{b['name']}: a plant whose class has no entry in gen_game.PLANT_SUPPORT")
+            continue
+        if (ported_of[b["name"]] or (None,))[0] not in ("kPlant", "kSegmented"):
+            die(f"{b['name']}: in gen_game.PLANT_SUPPORT, and not a ported plant")
+        accepts = supporting(rule)
+        support_of[b["name"]] = support_bits.setdefault(accepts, 1 << len(support_bits))
+    if len(support_bits) > 8:
+        die("state::kSupport is one byte a state: more than eight different rules of what a plant stands on")
+    support = bytearray(n)
+    for accepts, mask in support_bits.items():
+        for i in range(n):
+            support[i] |= mask if accepts[i] else 0
+
     stone = next((b["default_state"] for b in ext_blocks if b["name"] == "minecraft:stone"), None)
     if stone is None or wall_above[stone] != 0x1F or wall_above[0] != 0:
         die("kWallAbove: a full block does not cover a wall's every test shape, or air covers one")
@@ -856,6 +908,7 @@ def build_block_tables(v: dict, blocks: dict, data: dict, static_regs: dict, van
         "state_sturdy_center.bin": bytes(cols["sturdy_center"]),
         "state_connect.bin": bytes(connect),
         "state_wall_above.bin": bytes(wall_above),
+        "state_support.bin": bytes(support),
     }
 
     hdr = HEADER.format(id=v["id"], proto=v["protocol_version"])
@@ -911,6 +964,11 @@ inline constexpr unsigned char kConnect[] = {
 inline constexpr unsigned char kWallAbove[] = {
 #embed "state_wall_above.bin"
 };
+// What a plant may stand on (VegetationBlock.mayPlaceOn): a bit a rule - a tag of blocks, mostly -
+// and BlockInfo::alt[0] of a plant is the bit of its own. Nothing here names a rule: the plant does.
+inline constexpr unsigned char kSupport[] = {
+#embed "state_support.bin"
+};
 // emission << 4 | dampening  (BlockState.getLightEmission() / getLightDampening())
 inline constexpr unsigned char kLight[] = {
 #embed "state_light.bin"
@@ -931,7 +989,7 @@ inline constexpr unsigned char kFluidLegacyBytes[] = {
 };
 static_assert(sizeof kFlags == kCount && sizeof kLight == kCount && sizeof kOcclusion == kCount);
 static_assert(sizeof kHooks == kCount && sizeof kRandom == kCount && sizeof kSturdyFull == kCount && sizeof kSturdyCenter == kCount);
-static_assert(sizeof kConnect == kCount && sizeof kWallAbove == kCount);
+static_assert(sizeof kConnect == kCount && sizeof kWallAbove == kCount && sizeof kSupport == kCount);
 static_assert(sizeof kBlockBytes == 2 * kCount && sizeof kCollisionBytes == 2 * kCount && sizeof kFluidLegacyBytes == 2 * kCount);
 
 constexpr unsigned u16_at(const unsigned char* t, unsigned i) { return t[2 * i] | static_cast<unsigned>(t[2 * i + 1]) << 8; }
@@ -988,6 +1046,7 @@ struct BlockInfo {
     unsigned short flags;       // kPlace* kind in the low bits, then the k* bits below
     unsigned short alt[3];      // states its placement kind chooses between (see kPlace*) - and then, by kind:
                                 // kSpreading: [2] the soil it dies into
+                                // kPlant, kSegmented: [0] the bit of state::kSupport the state under it must have
     unsigned short next_stage;  // WeatheringCopper.getNext() of a block that weathers: the first state of the block it
                                 // becomes, with the properties it has (+ state - first_state); 0: it does not
     unsigned short place_sound, break_sound;  // sound_event registry ids
@@ -1016,11 +1075,13 @@ struct ItemInfo {
     unsigned char equip_slot;   // EquipmentSlot ordinal of the default EQUIPPABLE, kNoEquipSlot without one
     unsigned char attack_swing; // default ATTACK_ANIMATION: SwingAnimationType id << kSwingTypeShift | ticks
     unsigned short fuel_ticks;  // default COOKING_FUEL burn time in a furnace, 0 = not a fuel
+    unsigned short fuel_ticks_fast;  // ...and in a smoker or a blast furnace, where it also cooks kFastCookingSpeed times as fast
     unsigned short remainder;   // Item.getCraftingRemainder(): what crafting or burning it leaves, 0 = nothing
 };
 inline constexpr unsigned short kNoBlock = 0xFFFF;
 inline constexpr unsigned char kNoBlockEntity = 0xFF;
 inline constexpr unsigned char kNoEquipSlot = 0xFF;
+inline constexpr float kFastCookingSpeed = %sf;  // AbstractFurnaceBlockEntity.getSpeedMultiplier of a fuel in a smoker or a blast furnace
 inline constexpr unsigned kSwingTypeShift = 6;
 inline constexpr unsigned char kSwingTicksMask = 0x3F;
 struct Box {
@@ -1028,7 +1089,7 @@ struct Box {
 };
 
 namespace block_flag {
-"""]
+""".replace("%sf", cfloat(gen_game.FAST_COOKING_SPEED) + "f")]
     for name, value, why in BLOCK_FLAGS:
         info.append(f"inline constexpr unsigned short {name} = 0x{value:X};  // {why}\n")
     info.append("}  // namespace block_flag\nnamespace item_flag {\n")
@@ -1107,6 +1168,8 @@ namespace proto::gen {
             torch_pairs[standing] = torch_pairs[wall] = (standing, wall)
     weather_states = [c["name"] for c in game["enums"]["net.minecraft.world.level.block.WeatheringCopper$WeatherState"]]
     weathering_next = game["statics"]["net.minecraft.world.level.block.WeatheringCopper"]["NEXT_BY_BLOCK"]
+    wax_off = game["statics"]["net.minecraft.world.item.HoneycombItem"]["WAX_OFF_BY_BLOCK"]
+    copper_chests = tagged("copper_chests")
     t.append(f"inline constexpr BlockInfo kBlocks[{len(ext_blocks)}] = {{\n")
     for b in ext_blocks:
         name = b["name"]
@@ -1130,7 +1193,9 @@ namespace proto::gen {
             if overridden and cls != "TntBlock":
                 die(f"{name}: a placeable block that overrides {overridden}")
             # TntBlock.dropFromExplosion is false: it is primed instead (wasExploded).
-            drops = [] if cls == "TntBlock" else loot.explosion_drops(name, gb.get("loot_table"), "SlabBlock" in gb["class"])
+            # SegmentableBlock: the property that counts its segments is the family's second (props::flower_bed).
+            segments = gb["properties"][1]["name"] if (ported or (None,))[0] == "kSegmented" else None
+            drops = [] if cls == "TntBlock" else loot.explosion_drops(name, gb.get("loot_table"), "SlabBlock" in gb["class"], segments)
             if ("SlabBlock" in gb["class"]) != ((ported or (None,))[0] == "kSlab"):
                 die(f"{name}: SlabBlock and block_kind::kSlab are not the same blocks")
         drops += [(1.0, 0, 0, 0)] * (2 - len(drops))
@@ -1156,6 +1221,22 @@ namespace proto::gen {
             alt = [default_of(pair[0]), first[pair[1]], 0]
         elif kind == bf["kPlaceConcretePowder"]:
             alt = [default_of(gb["fields"]["concrete"]), 0, 0]
+        elif own_kind == "kChest":
+            # ChestBlock.getOpenChestSound / getCloseChestSound, and for a copper chest
+            # HoneycombItem.WAX_OFF_BY_BLOCK: what it is without its wax - withPropertiesOf is
+            # the same offset from the first state (props::chest is one layout for all of them).
+            copper = "CopperChestBlock" in gb["class"]
+            if copper != (b["id"] in copper_chests) or (not copper and gb["class"][0] != "ChestBlock"):
+                die(f"{name}: CopperChestBlock and #copper_chests are not the same blocks - chestCanConnectTo is read off the class")
+            waxed = copper and "WeatheringCopper" not in gb["interfaces"]
+            bare = wax_off.get(name)
+            if waxed != (bare is not None) or (waxed and (
+                    game["blocks"][bare]["class"][0] != "WeatheringCopperChestBlock" or
+                    game["blocks"][bare]["fields"]["weatherState"] != gb["fields"]["weatherState"])):
+                die(f"{name}: a waxed copper chest without an unwaxed one of its age, or the other way round")
+            alt = [sound(gb["fields"]["openSound"]), sound(gb["fields"]["closeSound"]), first[bare] if waxed else 0]
+        elif own_kind in ("kPlant", "kSegmented"):
+            alt = [support_of[name], 0, 0]
         # ChangeOverTimeBlock: every block of the family counts when one of them weathers, ported or not.
         weather = 0
         if "WeatheringCopper" in gb["interfaces"]:
@@ -1254,7 +1335,7 @@ namespace proto::gen {
         if remainder is not None and set(remainder) != {"id"}:
             die(f"{name}: a crafting remainder with a count or components: {remainder}")
         t.append(f"    {{{blk}, {equip_sound}, {stack}, 0x{f:X}, {equip_slot}, "
-                 f"0x{swing_types[swing_type] << 6 | swing_ticks:02X}, {gen_game.fuel_ticks(vanilla, comps, name)}, "
+                 f"0x{swing_types[swing_type] << 6 | swing_ticks:02X}, {', '.join(map(str, gen_game.fuel_ticks(vanilla, comps, name)))}, "
                  f"{item_ids[remainder['id']] if remainder else 0}}},  // {name.split(':', 1)[1]}\n")
     t.append("};\n\n")
 
@@ -1805,7 +1886,7 @@ def lock_problems(out: Path) -> list[str] | None:
 def print_stats(out: Path, stats: dict) -> None:
     print(f"mcgen: generated {out.relative_to(ROOT)}: {stats['registries']} registries, {stats['entries']} entries, "
           f"{stats['tags']} tags, {stats['blocks']} blocks ({stats['placeable']} placeable), {stats['entity_types']} entity types, "
-          f"{stats['crafting']} crafting and {stats['smelting']} smelting recipes ({stats['recipes_skipped']} of other kinds left out), "
+          f"{stats['crafting']} crafting and {stats['cooking']} cooking recipes ({stats['recipes_skipped']} of other kinds left out), "
           f"{stats['materials']} block materials, {stats['shapes_grid']} collision grids, "
           f"{stats['movers']} entity types that move, packet ids from {stats['packets']}")
     changed = stats["changed"]  # the rest was left as it was, so nothing that includes it is rebuilt

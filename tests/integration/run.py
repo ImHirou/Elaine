@@ -1920,6 +1920,37 @@ def chest(srv: Server):
 
 
 @test()
+def picking_up_with_a_chest_open(srv: Server):
+    """What a player picks up while it looks into a chest appears in that screen's inventory rows.
+    (It crashed the server once: the menu was synchronised without its chest.)"""
+    a, b = srv.client(), srv.client()
+    join(a, "Alice")
+    join(b, "Bob")
+    a.expect("player_info_update")
+    for cl in (a, b):
+        cl.send("player_loaded")
+    settle(a, b)
+    give(a, 36, I["kChest"])
+    click(a, (8, -61, 10), 1, seq=1)
+    click(a, (8, -60, 10), 1, seq=2)
+    collect(a)
+    assert a.window and a.window["type"] == "kGeneric9x3"
+    # Bob, who stands where Alice stands, drops a stone at their feet and walks off.
+    give(b, 36, I["kStone"], 1)
+    look(b, 0.0, DOWN)
+    action(b, DROP_ONE)
+    collect(b)
+    b.send("move_player_pos", struct.pack(">dddB", 13.5, SPAWN[1], 13.5, 1))
+    for _ in range(30):                         # (a dropped item can be picked up after two seconds)
+        collect(a, ticks=3)
+        collect(b, ticks=1)
+        if plain("kStone", 1) in a.window["slots"][27:]:
+            break
+    assert a.window and plain("kStone", 1) in a.window["slots"][27:], a.window["slots"][27:]
+    assert not of_type(a, "kItem")
+
+
+@test()
 def a_lid_is_told_once(srv: Server):
     """A chest says how many have it open when that changes, and again with every recount - five
     ticks apart while it is open, and once more after. A block event that is asked for twice in a
@@ -2019,6 +2050,384 @@ def furnace_smelts(srv: Server):
     menu_click(c, 2, 0, QUICK_MOVE)          # the stone into the inventory: the hotbar's far end first
     settle(c)
     assert w["slots"][2] is None and w["slots"][38] == plain("kStone", 1)
+
+
+COOKERS = (("kSmoker", "container.smoker", "kBeef", "kCookedBeef", "kIronOre"),
+           ("kBlastFurnace", "container.blast_furnace", "kIronOre", "kIronIngot", "kBeef"))
+
+
+def cooker_setup(c: Client, n: int, count: int, planks: int):
+    """Places the n-th of COOKERS, opens it and fills it by shift-clicks; (where it is, its unlit state)."""
+    block, title, cooks, _, other = COOKERS[n]
+    ground, pos = (8 + 2 * n, -61, 10), (8 + 2 * n, -60, 10)
+    give(c, 36, I[block])
+    give(c, 37, I[cooks], count)
+    give(c, 38, I["kOakPlanks"], planks)
+    give(c, 39, I[other], 3)
+    click(c, ground, 1, seq=10 * n + 1)
+    off = mc.BLOCK[block]                           # the default state: facing north, not lit
+    assert collect(c)[pos] == off
+    click(c, pos, 1, seq=10 * n + 2)
+    collect(c)
+    w = c.window
+    assert (w["type"], w["title"]) == (block, {"translate": title}), w      # (the menu types are named as the blocks are)
+    assert len(w["slots"]) == 39 and w["data"] == {0: 0, 1: 0, 2: 0, 3: 0}
+    # What the other of the two cooks is nothing to this one: a shift-click sends it up into the inventory.
+    menu_click(c, 33, 0, QUICK_MOVE)
+    settle(c)
+    assert w["slots"][0] is None and w["slots"][3] == plain(other, 3), w["slots"][:4]
+    menu_click(c, 31, 0, QUICK_MOVE)
+    menu_click(c, 32, 0, QUICK_MOVE)
+    changes = collect(c, ticks=4)
+    assert changes[pos] == off - 1, changes         # lit
+    assert w["slots"][0] == plain(cooks, count) and w["slots"][2] is None
+    assert w["slots"][1] == (plain("kOakPlanks", planks - 1) if planks > 1 else None)
+    # A plank burns for 150 ticks here, not 300, and what cooks takes 100, not 200.
+    assert w["data"][1] == 150 and w["data"][3] == 100 and 0 < w["data"][2] <= 6 and 143 <= w["data"][0] < 150, w["data"]
+    return pos, off
+
+
+@test()
+def smoker_and_blast_furnace(srv: Server):
+    """A smoker and a blast furnace are furnaces with recipes of their own - meat for the one, ore
+    for the other - a menu of their own type and name, and twice the speed on half the fuel."""
+    c = srv.client()
+    join(c, "Alice")
+    c.send("player_loaded")
+    settle(c)
+    smokes, blasts = c.recipe_sets["minecraft:smoker_input"], c.recipe_sets["minecraft:blast_furnace_input"]
+    assert I["kBeef"] in smokes and I["kIronOre"] not in smokes and I["kCobblestone"] not in smokes
+    assert I["kIronOre"] in blasts and I["kBeef"] not in blasts and I["kCobblestone"] not in blasts
+    for n in range(2):
+        cooker_setup(c, n, count=3, planks=2)
+        close_window(c)
+        settle(c)
+        for slot in range(9, 45):               # (an empty inventory for the next one)
+            give(c, slot, 0, 0)
+    # Who joins is told of both, each by its own type.
+    d = srv.client()
+    jd = join(d, "Dave", view=2)
+    assert sorted(jd["chunks"][(0, 0)]["block_entities"]) == [((8, -60, 10), mc.BLOCK_ENTITY["kSmoker"], None),
+                                                               ((10, -60, 10), mc.BLOCK_ENTITY["kBlastFurnace"], None)]
+
+
+@test(slow=True)
+def smoker_smokes(srv: Server):
+    """One piece of beef, one plank, in a smoker: a steak after 100 ticks, and the fire out after
+    150. An ingot from a blast furnace likewise."""
+    c = srv.client()
+    join(c, "Alice")
+    c.send("player_loaded")
+    settle(c)
+    for n in range(2):
+        pos, off = cooker_setup(c, n, count=1, planks=1)
+        w = c.window
+        changes = {}
+        for _ in range(40):
+            changes.update(collect(c, ticks=3))
+            if w["slots"][2]:
+                break
+        assert w["slots"][2] == plain(COOKERS[n][3], 1) and w["slots"][0] is None and w["data"][2] == 0, (w["slots"][:3], w["data"])
+        assert 30 < w["data"][0] <= 51 and pos not in changes, (w["data"], changes)
+        for _ in range(25):
+            changes.update(collect(c, ticks=3))
+            if pos in changes:
+                break
+        assert changes[pos] == off and w["data"][0] == 0, (changes, w["data"])
+        close_window(c)
+        settle(c)
+        for slot in range(9, 45):
+            give(c, slot, 0, 0)
+
+
+@test()
+def barrel(srv: Server):
+    """A barrel is a chest's 27 slots without a lid: it shows that it is open by its state, has
+    sounds of its own, opens whatever stands on it, and its mouth is towards whoever placed it."""
+    a, b = srv.client(), srv.client()
+    join(a, "Alice")
+    join(b, "Bob")
+    a.expect("player_info_update")
+    for cl in (a, b):
+        cl.send("player_loaded")
+    settle(a, b)
+    ground, pos = (8, -61, 10), (8, -60, 10)
+    give(a, 36, I["kBarrel"], 2)
+    give(a, 37, I["kStone"], 20)
+    click(a, ground, 1, seq=1)
+    shut = mc.BLOCK["kBarrel"]                  # the default state: facing north - at Alice, who looks south - and shut
+    assert collect(a)[pos] == shut
+    collect(b)
+    a.send("set_carried_item", struct.pack(">h", 1))
+    a.send("player_input", bytes([INPUT_SHIFT]))    # a stone on top of it does not keep it shut
+    click(a, pos, 1, seq=2)
+    assert collect(a)[(8, -59, 10)] == mc.BLOCK["kStone"]
+    a.send("player_input", bytes([0]))
+    collect(b)
+
+    click(a, pos, 2, seq=3, cursor=(0.5, 0.5, 0.0))
+    changes = collect(a)
+    w = a.window
+    assert w and (w["type"], w["title"]) == ("kGeneric9x3", {"translate": "container.barrel"}) and len(w["slots"]) == 63, w
+    assert changes[pos] == shut - 1 and collect(b)[pos] == shut - 1         # `open`
+    sound, source, where, volume, pitch = b.sounds[-1]                      # from the middle of the face that opens
+    assert (sound, source, where, volume) == (mc.SOUND["kBlockBarrelOpen"], 4, (8.5, -59.5, 10.0), 0.5) and 0.9 <= pitch < 1.0
+    assert not a.block_events and not b.block_events                        # no lid: nothing to tell about one
+    menu_click(a, 55, 0, QUICK_MOVE)
+    settle(a)
+    assert w["slots"][0] == plain("kStone", 20)
+
+    # Bob opens it too: it was open already. It shuts when the last of them has closed it.
+    heard = len(a.sounds)
+    click(b, pos, 2, seq=1, cursor=(0.5, 0.5, 0.0))
+    assert pos not in collect(a)
+    collect(b)
+    assert b.window["slots"][0] == plain("kStone", 20) and len(a.sounds) == heard
+    close_window(a)
+    assert pos not in collect(a, ticks=8) and len(a.sounds) == heard     # (the recount of who has it open has come by)
+    collect(b)
+    close_window(b)
+    assert collect(a)[pos] == shut
+    assert a.sounds[heard][:4] == (mc.SOUND["kBlockBarrelClose"], 4, (8.5, -59.5, 10.0), 0.5)
+    assert not a.block_events
+
+    # Looking down as it is placed: its mouth is up, and so is where it is heard from.
+    look(a, 0.0, DOWN)
+    a.send("set_carried_item", struct.pack(">h", 0))
+    click(a, (10, -61, 9), 1, seq=4)
+    up = shut + 8                               # facing: north, east, south, west, up, down; then open
+    assert collect(a)[(10, -60, 9)] == up
+    click(a, (10, -60, 9), 1, seq=5)
+    assert collect(a)[(10, -60, 9)] == up - 1
+    assert a.sounds[-1][:4] == (mc.SOUND["kBlockBarrelOpen"], 4, (10.5, -59.0, 9.5), 0.5), a.sounds[-1]
+    close_window(a)
+    assert collect(a)[(10, -60, 9)] == up
+    collect(b)
+
+    # Broken, it spills what it holds.
+    dig(b, pos, seq=2)
+    assert collect(a)[pos] == AIR
+    spilled = [e for e in of_type(a, "kItem").values() if e.data[D_ITEM] == (STACK, plain("kStone", 20))]
+    assert len(spilled) == 1, [e.data for e in of_type(a, "kItem").values()]
+    d = srv.client()
+    jd = join(d, "Dave", view=2)
+    assert jd["chunks"][(0, 0)]["block_entities"] == [((10, -60, 9), mc.BLOCK_ENTITY["kBarrel"], None)]
+
+
+LEFT, RIGHT = 2, 4      # a chest's `type`, counted from its default state (single, dry): props::chest
+
+
+def put_stone_in(c: Client, pos: tuple, seq: int, hotbar: int, sound: str, title: str = "container.chest") -> None:
+    """Opens the chest at pos - heard as `sound` -, shift-clicks the stone of that hotbar slot into it, closes it."""
+    click(c, pos, 1, seq=seq)
+    collect(c)
+    assert c.window and c.window["title"] == {"translate": title}, c.window
+    assert c.sounds[-1][0] == mc.SOUND[sound], (c.sounds[-1], mc.SOUND[sound])
+    menu_click(c, len(c.window["slots"]) - 9 + hotbar, 0, QUICK_MOVE)
+    settle(c)
+    close_window(c)
+    settle(c)
+
+
+@test()
+def copper_chests(srv: Server):
+    """Copper chests join each other whatever their age - the pair is then of the less weathered
+    block, and of no wax if only one had any - and keep what they hold as their block changes.
+    They are heard as copper of their age, and are nothing to a chest of wood."""
+    a = srv.client()
+    join(a, "Alice")
+    a.send("player_loaded")
+    settle(a)
+    copper, exposed, oxidized, wooden = (mc.BLOCK[k] for k in ("kCopperChest", "kExposedCopperChest", "kOxidizedCopperChest", "kChest"))
+    for slot, (item, count) in enumerate((("kOxidizedCopperChest", 4), ("kCopperChest", 4), ("kStone", 20),
+                                          ("kWaxedOxidizedCopperChest", 2), ("kExposedCopperChest", 2), ("kChest", 2),
+                                          ("kWaxedCopperChest", 2))):
+        give(a, 36 + slot, I[item], count)
+    hold = lambda slot: a.send("set_carried_item", struct.pack(">h", slot))  # noqa: E731
+
+    # An oxidized one with stone in it, then a new one beside it: both are new copper, and the stone is there.
+    click(a, (8, -61, 10), 1, seq=1)
+    assert collect(a)[(8, -60, 10)] == oxidized
+    put_stone_in(a, (8, -60, 10), 2, 2, "kBlockCopperChestOxidizedOpen")
+    assert a.sounds[-1][0] == mc.SOUND["kBlockCopperChestOxidizedClose"]
+    hold(1)
+    click(a, (9, -61, 10), 1, seq=3)
+    assert shows(collect(a), {(8, -60, 10): copper + LEFT, (9, -60, 10): copper + RIGHT})
+    click(a, (9, -60, 10), 1, seq=4)
+    collect(a)
+    w = a.window
+    assert (w["type"], w["title"]) == ("kGeneric9x6", {"translate": "container.chestDouble"}), w
+    assert w["slots"][27] == plain("kStone", 20) and a.sounds[-1][0] == mc.SOUND["kBlockCopperChestOpen"]
+    close_window(a)
+    settle(a)
+    assert not of_type(a, "kItem")                      # nothing was spilled as the block became another
+
+    # Wood and copper stand side by side, each a chest of its own.
+    hold(5)
+    click(a, (8, -61, 12), 1, seq=5)
+    hold(1)
+    click(a, (9, -61, 12), 1, seq=6)
+    changes = collect(a)
+    assert changes[(8, -60, 12)] == wooden and changes[(9, -60, 12)] == copper, changes
+
+    # Wax on one of the two: the pair has none. Here the new one is the less weathered...
+    hold(3)
+    click(a, (11, -61, 10), 1, seq=7)
+    assert collect(a)[(11, -60, 10)] == mc.BLOCK["kWaxedOxidizedCopperChest"]
+    hold(4)
+    click(a, (12, -61, 10), 1, seq=8)
+    assert shows(collect(a), {(11, -60, 10): exposed + LEFT, (12, -60, 10): exposed + RIGHT})
+    # ...and here the one that stood: the pair is the block that one is without its wax.
+    hold(6)
+    click(a, (11, -61, 12), 1, seq=9)
+    assert collect(a)[(11, -60, 12)] == mc.BLOCK["kWaxedCopperChest"]
+    hold(0)
+    click(a, (12, -61, 12), 1, seq=10)
+    assert shows(collect(a), {(11, -60, 12): copper + LEFT, (12, -60, 12): copper + RIGHT})
+    # Two with wax keep it: the pair is the less weathered of them, waxed.
+    hold(3)
+    click(a, (5, -61, 10), 1, seq=11)
+    hold(6)
+    click(a, (6, -61, 10), 1, seq=12)
+    waxed = mc.BLOCK["kWaxedCopperChest"]
+    assert shows(collect(a), {(5, -60, 10): waxed + LEFT, (6, -60, 10): waxed + RIGHT})
+
+
+@test(random_tick_speed=4096, simulation_distance=2)
+def copper_chest_weathers(srv: Server):
+    """A copper chest weathers as copper does, and is the same chest after it: with what it held.
+    Not while somebody has it open. Of a pair the left half weathers, and the right one with it."""
+    a = srv.client()
+    join(a, "Alice", view=2)
+    a.send("player_loaded")
+    settle(a)
+    copper = mc.BLOCK["kCopperChest"]
+    aged = [mc.BLOCK[k] for k in ("kExposedCopperChest", "kWeatheredCopperChest", "kOxidizedCopperChest")]
+    held, shut, left, right = (4, -60, 8), (12, -60, 8), (8, -60, 12), (9, -60, 12)   # (far enough apart not to count each other)
+    oxidized = mc.BLOCK["kOxidizedCopperChest"]
+    give(a, 36, I["kCopperChest"], 4)
+    give(a, 37, I["kStone"], 20)
+    seen = {}                                   # the blocks as Alice knows them: they change whenever chance has it
+
+    def wait(ticks: int = 3) -> None:
+        seen.update(collect(a, ticks=ticks))
+    for n, pos in enumerate((shut, left, right, held)):
+        click(a, (pos[0], -61, pos[2]), 1, seq=1 + n)
+    wait()
+    assert seen[left] - LEFT == seen[right] - RIGHT and seen[left] - LEFT in (copper, *aged), seen
+    click(a, shut, 1, seq=5)                    # stone into one of them
+    wait()
+    menu_click(a, 55, 0, QUICK_MOVE)
+    wait()
+    assert a.window and a.window["slots"][0] == plain("kStone", 20), a.window
+    close_window(a)
+    wait()
+    click(a, held, 1, seq=6)                    # and another one open, for as long as the others take
+    wait()
+    assert a.window
+    frozen = seen[held]
+    for _ in range(1200):
+        wait(1)
+        # The halves of a pair are one block whenever a client is told of them: the right one follows in the same tick.
+        assert seen[left] - LEFT == seen[right] - RIGHT, seen
+        if seen[shut] == oxidized and seen[left] != copper + LEFT:
+            break
+    else:
+        raise AssertionError(f"never weathered: {seen}")
+    assert seen[held] == frozen and a.window, (seen, frozen)
+    close_window(a)
+    for _ in range(1200):
+        wait(1)
+        if seen[held] != frozen:
+            break
+    else:
+        raise AssertionError(f"the chest that was open never weathered once it was shut: {seen}")
+    # Each is the chest it was: the stone is in the one it was put into, which is heard as old copper now.
+    click(a, shut, 1, seq=7)
+    wait()
+    assert a.window and a.window["slots"][0] == plain("kStone", 20), a.window
+    assert a.sounds[-1][0] == mc.SOUND["kBlockCopperChestOxidizedOpen"], a.sounds[-1]
+    assert not of_type(a, "kItem")
+
+
+@test()
+def plants(srv: Server):
+    """A flower stands on what its kind grows on and breaks - seen, heard, dropped - when that goes.
+    Petals and leaf litter lie up to four to a block, each placed onto the ones before it."""
+    a = srv.client()
+    join(a, "Alice")
+    a.send("player_loaded")
+    settle(a)
+    poppy, petals, litter, stone, grass = (mc.BLOCK[k] for k in ("kPoppy", "kPinkPetals", "kLeafLitter", "kStone", "kShortGrass"))
+    for slot, (item, count) in enumerate((("kPoppy", 8), ("kStone", 8), ("kPinkPetals", 8), ("kLeafLitter", 8),
+                                          ("kShortGrass", 4), ("kDeadBush", 4), ("kSand", 4))):
+        give(a, 36 + slot, I[item], count)
+    hold = lambda slot: a.send("set_carried_item", struct.pack(">h", slot))  # noqa: E731
+
+    click(a, (8, -61, 12), 1, seq=1)            # a poppy on the grass
+    assert collect(a)[(8, -60, 12)] == poppy
+    hold(1)
+    click(a, (10, -61, 12), 1, seq=2)           # ...and none on stone
+    hold(0)
+    click(a, (10, -60, 12), 1, seq=3)
+    changes = collect(a)
+    assert changes[(10, -60, 12)] == stone and changes.get((10, -59, 12), AIR) == AIR, changes
+    # A dead bush wants sand (or soil); stone is nothing to it either.
+    hold(5)
+    click(a, (10, -60, 12), 1, seq=4)
+    assert collect(a).get((10, -59, 12), AIR) == AIR
+    hold(6)
+    click(a, (12, -61, 12), 1, seq=5)
+    hold(5)
+    click(a, (12, -60, 12), 1, seq=6)
+    assert shows(collect(a), {(12, -60, 12): mc.BLOCK["kSand"], (12, -59, 12): mc.BLOCK["kDeadBush"]})
+
+    # Leaf litter lies on anything with a whole top. One, and three more onto it: the amount counts up.
+    hold(3)
+    click(a, (10, -60, 12), 1, seq=7)
+    assert collect(a)[(10, -59, 12)] == litter  # facing north (at Alice), one of it
+    for n in (2, 3, 4):
+        click(a, (10, -59, 12), 1, seq=6 + n)
+        assert collect(a)[(10, -59, 12)] == litter + n - 1
+    click(a, (10, -59, 12), 1, seq=11)          # a fifth has nowhere to go: not into the block, not on top of it
+    changes = collect(a)
+    assert changes[(10, -59, 12)] == litter + 3 and changes.get((10, -58, 12), AIR) == AIR, changes
+    # Petals the same, placed by a click on the ground under them - but not by one who sneaks.
+    hold(2)
+    for n in (1, 2, 3):
+        click(a, (8, -61, 14), 1, seq=11 + n)
+        assert collect(a)[(8, -60, 14)] == petals + n - 1
+    a.send("player_input", bytes([INPUT_SHIFT]))
+    click(a, (8, -61, 14), 1, seq=15)
+    assert collect(a)[(8, -60, 14)] == petals + 2
+    a.send("player_input", bytes([0]))
+    click(a, (8, -61, 14), 1, seq=16)
+    assert collect(a)[(8, -60, 14)] == petals + 3
+    assert not a.level_events and not of_type(a, "kItem")
+
+    # Short grass and leaf litter give way to a block that is set into them; petals and flowers do not.
+    hold(4)
+    click(a, (6, -61, 12), 1, seq=17)
+    assert collect(a)[(6, -60, 12)] == grass
+    click(a, (6, -60, 12), 1, seq=18)           # not to more of itself, though
+    assert collect(a)[(6, -60, 12)] == grass
+    hold(1)
+    click(a, (6, -60, 12), 1, seq=19)
+    click(a, (10, -59, 12), 1, seq=20)
+    click(a, (8, -60, 12), 2, seq=21, cursor=(0.5, 0.5, 0.0))      # against the poppy's side: beside it
+    assert shows(collect(a), {(6, -60, 12): stone, (10, -59, 12): stone, (8, -60, 12): poppy, (8, -60, 11): stone})
+    assert not a.level_events and not of_type(a, "kItem")           # what was replaced is gone, not broken
+
+    # The ground under them goes: the poppy breaks and drops, and the petals as many as there were.
+    hold(8)
+    dig(a, (8, -61, 12), seq=22)
+    assert shows(collect(a), {(8, -61, 12): AIR, (8, -60, 12): AIR})
+    dig(a, (8, -61, 14), seq=23)
+    assert shows(collect(a), {(8, -61, 14): AIR, (8, -60, 14): AIR})
+    assert a.level_events == [(DESTROY_BLOCK, (8, -60, 12), poppy, False), (DESTROY_BLOCK, (8, -60, 14), petals + 3, False)]
+    settle(a)
+    assert [e.data[D_ITEM][1] for e in items_of(a, "kPoppy")] == [plain("kPoppy", 1)]
+    assert [e.data[D_ITEM][1] for e in items_of(a, "kPinkPetals")] == [plain("kPinkPetals", 4)]
 
 
 @test()
@@ -4417,6 +4826,36 @@ def build_something(a: Client) -> dict:
     return {"chest": chest, "glow": glow}
 
 
+def build_more(a: Client) -> dict:
+    """...and, after build_something (Alice looks down): a smoker that burns coal, full of beef, and
+    a barrel with twenty stone in it. Returns where."""
+    smoker, barrel = (10, -60, 10), (11, -60, 7)
+    for slot, (item, count) in enumerate((("kSmoker", 1), ("kBeef", 64), ("kCoal", 1), ("kBarrel", 1), ("kStone", 20))):
+        give(a, 39 + slot, I[item], count)
+    a.send("set_carried_item", struct.pack(">h", 3))
+    click(a, (10, -61, 10), 1, seq=4)
+    a.send("set_carried_item", struct.pack(">h", 6))
+    click(a, (11, -61, 7), 1, seq=5)
+    up = mc.BLOCK["kBarrel"] + 8                # its mouth towards Alice: up
+    assert shows(collect(a), {smoker: mc.BLOCK["kSmoker"], barrel: up})
+    click(a, smoker, 1, seq=6)
+    collect(a)
+    menu_click(a, 34, 0, QUICK_MOVE)
+    menu_click(a, 35, 0, QUICK_MOVE)
+    changes = collect(a, ticks=4)
+    assert changes[smoker] == mc.BLOCK["kSmoker"] - 1 and a.window["data"][1] == 800 and a.window["data"][3] == 100, a.window["data"]
+    close_window(a)
+    settle(a)
+    click(a, barrel, 1, seq=7)
+    collect(a)
+    menu_click(a, 61, 0, QUICK_MOVE)
+    settle(a)
+    assert a.window["slots"][0] == plain("kStone", 20)
+    close_window(a)
+    assert collect(a)[barrel] == up             # shut again: that is how it is saved
+    return {"smoker": smoker, "barrel": barrel}
+
+
 def near(p: tuple, q: tuple) -> bool:
     """The same place, give or take what a watcher does not know: an item's last slide before it
     lay still reaches a client with its next update, a second later, and rounded to 1 / 4096."""
@@ -4552,6 +4991,7 @@ def the_world_is_kept():
         a.send("player_loaded")
         settle(a)
         made = build_something(a)
+        made |= build_more(a)
         # Bob comes to look: his chunks are the world as it is now.
         b = srv.client()
         join(b, "Bob", view=3)
@@ -4593,10 +5033,29 @@ def the_world_is_kept():
         assert set(after) == set(before)
         differ = [pos for pos in before if before[pos] != after[pos]]
         assert not differ, f"chunks that came back different: {differ}"
-        assert c.chunks[(0, 0)]["block_entities"] == [((8, -60, 10), mc.BLOCK_ENTITY["kChest"], None)]
+        assert sorted(c.chunks[(0, 0)]["block_entities"]) == sorted([
+            ((8, -60, 10), mc.BLOCK_ENTITY["kChest"], None), (made["smoker"], mc.BLOCK_ENTITY["kSmoker"], None),
+            (made["barrel"], mc.BLOCK_ENTITY["kBarrel"], None)])
         back = the_stone(c)
         assert near(back.pos, where), (back.pos, where)
         open_and_check_chest(c, made["chest"], 1)
+        click(c, made["barrel"], 1, seq=2)
+        assert collect(c)[made["barrel"]] == mc.BLOCK["kBarrel"] + 7    # mouth up, open
+        assert c.window["title"] == {"translate": "container.barrel"} and c.window["slots"][0] == plain("kStone", 20)
+        close_window(c)
+        assert collect(c)[made["barrel"]] == mc.BLOCK["kBarrel"] + 8
+        # The smoker burns on, at the speed of its coal: pork put into it now takes 100 ticks, as the beef did.
+        give(c, 36, I["kPorkchop"])
+        click(c, made["smoker"], 1, seq=3)
+        collect(c)
+        w = c.window
+        assert w and w["type"] == "kSmoker" and w["data"][1] == 800 and w["data"][3] == 100 and 0 < w["data"][0] < 800, w
+        menu_click(c, 0, 0, QUICK_MOVE)
+        menu_click(c, 30, 0, QUICK_MOVE)
+        settle(c)
+        assert w["slots"][0] == plain("kPorkchop", 1) and w["data"][3] == 100, (w["slots"][:3], w["data"])
+        close_window(c)
+        settle(c)
         # Alice is back where she stood, with what she had; Bob too, and he had nothing.
         a = srv.client()
         ja = join(a, "Alice", view=3)
@@ -4782,6 +5241,8 @@ def anvil_world(path: str, extra: dict | None = None) -> dict:
         (7, 4, 1): "minecraft:oak_sign",
         (9, 4, 1): {"id": "minecraft:oak_stairs", "properties": {"shape": "no such shape"}},   # an unknown value: the default's
         (11, 4, 1): "minecraft:glowstone",
+        (1, 4, 3): "minecraft:barrel",
+        (3, 4, 3): {"id": "minecraft:blast_furnace", "properties": {"facing": "north", "lit": "true"}},
     }
     things.update(extra or {})
     block_entities = [
@@ -4794,6 +5255,11 @@ def anvil_world(path: str, extra: dict | None = None) -> dict:
          "lit_total_time": mc.Short(0), "RecipesUsed": {"minecraft:iron_ingot_from_smelting_iron_ore": 2}},
         {"id": "minecraft:sign", "x": 7, "y": -60, "z": 1, "is_waxed": mc.Byte(0),
          "front_text": {"messages": ["hello", "", "", ""]}},
+        {"id": "minecraft:barrel", "x": 1, "y": -60, "z": 3, "Items": [{"Slot": mc.Byte(4), "id": "minecraft:stone", "count": 7}]},
+        # A blast furnace half-way through an ore, on coal: 800 ticks of it, at twice the speed.
+        {"id": "minecraft:blast_furnace", "x": 3, "y": -60, "z": 3, "Items": [{"Slot": mc.Byte(0), "id": "minecraft:iron_ore", "count": 5}],
+         "cooking_time_spent": mc.Short(10), "cooking_total_time": mc.Short(100), "lit_time_remaining": mc.Short(700),
+         "lit_total_time": mc.Short(800), "speed_multiplier": mc.Float(2.0)},
     ]
     two_biomes = {-4: anvil_container(["minecraft:desert", "minecraft:jungle"], [(i >> 2) & 1 for i in range(64)], 1)}
     # A chunk that says its light is right: it is believed. (No server would compute this light.)
@@ -4828,7 +5294,7 @@ def a_vanilla_world_is_imported():
         srv = Server(EXE, world=world, start_timeout=30)
         log = srv.read_log()
         assert "imported 10 chunks" in log and "(1 more were not finished" in log, log
-        assert "2 chests and furnaces, 2 other block entities and 1 entities kept" in log, log
+        assert "4 chests and furnaces, 2 other block entities and 1 entities kept" in log, log
         c = srv.client()
         j = join(c, "Alice", view=3)
         c.send("player_loaded")
@@ -4862,7 +5328,8 @@ def a_vanilla_world_is_imported():
         # Every block entity is listed - a client draws a chest only if it is told of one.
         kinds = {pos: kind for pos, kind, tag in ch["block_entities"]}
         assert kinds == {(1, -60, 1): mc.BLOCK_ENTITY["kChest"], (3, -60, 1): mc.BLOCK_ENTITY["kChest"],
-                         (5, -60, 1): mc.BLOCK_ENTITY["kFurnace"], (7, -60, 1): mc.BLOCK_ENTITY["kSign"]}, kinds
+                         (5, -60, 1): mc.BLOCK_ENTITY["kFurnace"], (7, -60, 1): mc.BLOCK_ENTITY["kSign"],
+                         (1, -60, 3): mc.BLOCK_ENTITY["kBarrel"], (3, -60, 3): mc.BLOCK_ENTITY["kBlastFurnace"]}, kinds
         # Light: a chunk that was not lit is lit here (the glowstone shines); one that was is believed.
         assert mc.light_get(ch["light"]["block"][1], 10, 4, 1) == 14
         odd = c.chunks[(2, 2)]["light"]
@@ -4881,9 +5348,22 @@ def a_vanilla_world_is_imported():
         collect(c)
         assert c.window and c.window["type"] == "kFurnace" and c.window["slots"][0] == plain("kIronOre", 3), c.window
         close_window(c)
+        # The blast furnace too - which burns on as it did, at the speed of its fuel: another ore
+        # put into it takes the 100 ticks the first one took.
+        give(c, 36, I["kGoldOre"])
+        click(c, (3, -60, 3), 1, seq=4)
+        collect(c)
+        w = c.window
+        assert w and w["type"] == "kBlastFurnace" and w["slots"][0] == plain("kIronOre", 5), w
+        assert w["data"][1] == 800 and w["data"][3] == 100 and 600 < w["data"][0] < 700 and w["data"][2] >= 10, w["data"]
+        menu_click(c, 0, 0, QUICK_MOVE)
+        menu_click(c, 30, 0, QUICK_MOVE)
+        settle(c)
+        assert w["slots"][0] == plain("kGoldOre", 1) and w["data"][3] == 100, (w["slots"][:3], w["data"])
+        close_window(c)
         # The chest with a name is kept as it is and stays shut: nothing opens, nothing is placed against it.
         give(c, 36, I["kStone"], 5)
-        click(c, (3, -60, 1), 1, seq=3)
+        click(c, (3, -60, 1), 1, seq=5)
         assert collect(c) == {(3, -60, 1): mc.BLOCK["kChest"], (3, -59, 1): 0} and c.window is None
         first = frames(c)
         assert srv.stop() == 0, srv.read_log()
@@ -4901,6 +5381,15 @@ def a_vanilla_world_is_imported():
         again = frames(c)
         differ = [pos for pos in first if first[pos] != again.get(pos)]
         assert not differ, f"chunks that came back different: {differ}"
+        # The barrel is a barrel still, with what vanilla left in it. (Opened only now: an open
+        # barrel is another state, and the section's palette remembers that it was there.)
+        c.send("player_loaded")
+        settle(c)
+        click(c, (1, -60, 3), 1, seq=1)
+        assert collect(c)[(1, -60, 3)] == mc.BLOCK["kBarrel"] - 1
+        assert c.window and c.window["title"] == {"translate": "container.barrel"} and c.window["slots"][4] == plain("kStone", 7)
+        close_window(c)
+        assert collect(c)[(1, -60, 3)] == mc.BLOCK["kBarrel"]
         assert srv.stop() == 0, srv.read_log()
         os.unlink(srv.log.name)
     finally:

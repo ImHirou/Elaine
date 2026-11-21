@@ -435,7 +435,8 @@ ItemStack Menu::quick_move(i32 slot, const Ctx& cx) {
                 moved = move_to(stack, base, end, true, cx);
             else if (slot < base)
                 moved = move_to(stack, base, end, false, cx);
-            else if (item::smeltable(stack))  // canSmelt: RecipePropertySet.FURNACE_INPUT
+            else if (item::cookable(c_.furnace->type,
+                                    stack))  // canSmelt: RecipePropertySet.FURNACE_INPUT, or the smoker's, or the blast furnace's
                 moved = move_to(stack, 0, 1, false, cx);
             else if (item::is_fuel(stack))
                 moved = move_to(stack, 1, 2, false, cx);

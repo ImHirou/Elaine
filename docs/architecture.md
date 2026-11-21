@@ -458,7 +458,8 @@ under "A text component is read by a codec" below.
 ## Blocks that do something (src/server/block_entities.cpp, block_entity.*, explosion.cpp, src/item/recipes.*, src/world/collide.*)
 
 Until here a block was a state: stored, lit, sent. Four blocks are more now - a chest, a
-furnace, a crafting table, TNT - and each is the first of a family. `docs/blocks-roadmap.md`
+furnace, a crafting table, TNT - and each is the first of a family; the chest's and the
+furnace's have their first members (below: "The rest of two families"). `docs/blocks-roadmap.md`
 lists every other block by the class that gives it its behaviour, in the order the missing
 systems are meant to be built; it is generated, so it cannot say "done" about a block the
 server would refuse to place.
@@ -475,9 +476,10 @@ adds a hook to `ChestBlock` stops the generator until someone has read it.
   (`world::BlockEntityRef`). That is all a chunk packet says about a chest - and it has to say
   it: a client draws a chest only if the packet lists a block entity there. Finding one by
   position is a scan of its chunk's array; chunks hold a handful.
-- **What it holds** belongs to the game: `server::Chest` (27 stacks, who has it open) and
-  `server::Furnace` (three stacks, four timers) are plain structs in two arrays that the
-  chunk's entry points into. Entries are reused but never moved - a menu names its chest by
+- **What it holds** belongs to the game: `server::Chest` (27 stacks, who has it open - of a
+  chest of wood or copper, and of a barrel) and `server::Furnace` (three stacks, four timers,
+  the speed of its fuel - of a furnace, a smoker, a blast furnace) are plain structs in two
+  arrays that the chunk's entry points into. Entries are reused but never moved - a menu names its chest by
   index - and furnaces, the one kind that ticks, are walked in a row: one that neither burns
   nor could start costs the test at the top of the loop.
 - **Who is looking** belongs to the player: the menu (below).
@@ -520,21 +522,65 @@ see "Block updates". A tick's block events are a set in vanilla (`ServerLevel.bl
 a lid that is closed in the very tick of its recount is told to fall once; `Game::block_event`
 drops the second likewise.
 
+### The rest of two families
+
+**A smoker and a blast furnace** are the furnace: one class in vanilla
+(`AbstractFurnaceBlockEntity`) with a `RecipeType`, one struct here with an `item::Cooker`. What
+tells them apart is data. Their recipes are their own type's (`recipe::kCooking`, 107 rows of
+three types, the first of a type in id order winning); their menu has another type and name
+and the same slots. And they are fast - which in 26.x is not a property of the block but of
+the fuel in it: `cooking_fuel` names two providers that ask whether the block is in
+`#fast_cooking`, one for the burn time (halved there) and one for a speed multiplier (2 there).
+The block entity remembers the multiplier of the fuel it lit last and divides every recipe's
+time by it, rounding up in float - so a smoker that has never burnt takes 200 ticks for its
+first steak on the clock of its menu until the coal catches, and 100 from then on, and a file
+keeps the number (`speed_multiplier`). `mcgen` evaluates both providers for all three blocks:
+two burn times an item (`ItemInfo::fuel_ticks`, `fuel_ticks_fast`) and one speed for every
+fuel (`kFastCookingSpeed` - a fuel with another stops the generator).
+
+**A barrel** is a chest's 27 stacks behind the same `ChestMenu`, and the same count of who has
+it open. Where a chest moves its lid with a block event, a barrel changes its block
+(`BarrelBlockEntity.updateBlockState`: `open`, through `Game::set_block` like any change) and is
+heard from the middle of the face it opens at. Nothing on top of it keeps it shut.
+
+**Copper chests** are `ChestBlock` with three rules more (`CopperChestBlock`), and eight
+blocks: four ages, each with and without wax.
+
+- *Any two of them join* (`chestCanConnectTo` asks `#copper_chests`; a chest of wood asks for
+  its own block). A menu still needs both halves to be one block (`DoubleBlockCombiner`), so:
+- *a pair is one block.* The one that is placed takes the block of the less weathered of the
+  two - without wax, if only one of them has any (`getLeastOxidizedChestOfConnectedBlocks`) -
+  and the one that stood takes its neighbour's block as it takes its place in the pair
+  (`updateShape`). The same hook carries weathering across: the left half weathers
+  (`WeatheringCopperChestBlock.randomTick`: not the right one, and not while anybody has it
+  open), and the right one follows in the neighbour update of that change.
+- *It stays the chest it was* (`shouldChangedStateKeepBlockEntity`): `Game::set_block` leaves
+  the block entity where it is when one copper chest becomes another - nothing spills, no menu
+  closes, the entry in `chests_` is the same.
+
+None of this is a list of blocks: a chest's `BlockInfo::alt` carries the two sounds of its lid
+(wood, copper, weathered copper, oxidized copper - `ChestBlock.openSound`) and, for a waxed
+one, the first state of the chest it is without its wax (`HoneycombItem.WAX_OFF_BY_BLOCK`);
+"copper" is "weathers, or has such a twin", which `mcgen` holds against the tag. One layout
+(`props::chest`) serves all nine, each from its own first state, so `withPropertiesOf` is an
+addition. Honeycomb and axes - which make and unmake the waxed ones - are items that do
+something, and no item does yet.
+
 ### Recipes are tables (`src/item/recipes.*`)
 
 `mcgen` reduces `data/minecraft/recipe` to what matching needs: an ingredient is a sorted list
 of item ids (a tag is expanded), a recipe a few bytes. 1235 crafting recipes - shaped,
-shapeless, transmute - and the 73 of the furnace; the 31 recipes that compute their result from
+shapeless, transmute - and 107 for the furnace, the smoker and the blast furnace; the 31 recipes that compute their result from
 components (dyed armour, fireworks, banner copies...) are not there, and a grid that holds one
 makes nothing.
 
 The first recipe in id order that matches wins, as in `RecipeManager`. Trying 1235 in a row on
 every click would be the simple way; instead the recipes that name an item at all are listed
 per item, in order, and only the shortest of the grid's lists is walked - any recipe that
-matches is in every one of them. Smelting is one table load per item: a furnace asks for its
-recipe every tick it burns. Fuel is an item component in 26.x (`cooking_fuel`, a provider that
-asks whether the block cooks fast); `mcgen` evaluates it for the plain furnace into
-`ItemInfo::fuel_ticks`.
+matches is in every one of them. Cooking is one table load per item and kind of furnace: a
+furnace asks for its recipe every tick it burns. Fuel is an item component in 26.x
+(`cooking_fuel`, a provider that asks whether the block cooks fast); `mcgen` evaluates it for
+the furnace and for the two fast ones (above).
 
 ### TNT (`src/server/explosion.cpp`)
 
@@ -588,7 +634,10 @@ with 20 000 mobs.
 
 `tools/vanilla/container_probe.py` runs one script against a vanilla 26.3 server and against
 this one: a chest placed, opened by two players at once, filled, made double, broken; the
-inventory's grid and a crafting table; a furnace fed and broken; a TNT lit beside another. It
+inventory's grid and a crafting table; a furnace fed and broken; a smoker and a blast furnace
+fed with what each cooks and what it does not; a barrel filled, opened by two, placed looking
+down; copper chests paired old with new, waxed with unwaxed, both ways round, and beside a
+chest of wood; a TNT lit beside another. It
 diffs what the two bots are sent. Every menu packet - `open_screen` with its title, contents,
 slot and cursor updates with their state ids, the furnace's four numbers, `container_close` -
 comes out the same byte for byte, in the same order; so do the block states (which way a chest
@@ -607,7 +656,20 @@ again with the second chest placed sneaking against the first one's side), and s
 Only the half that is open gets lid events, on both servers; a vanilla client raises both lids
 all the same, because its renderer takes the wider of the two (`ChestBlock.opennessCombiner`).
 A client whose mod draws chests itself may not: Better Block Entities (part of Fabulously
-Optimized) shows one lid up and one down there - on a vanilla server as on this one. What
+Optimized) shows one lid up and one down there - on a vanilla server as on this one. Of the newer blocks the same holds: the smoker's and the blast furnace's screens, their four
+numbers tick by tick (800 for a coal, 100 to cook, and 100 again for what is put in while
+the fuel burns), which of beef and ore a shift-click takes; the barrel's `open`
+state, its two sounds and where they come from, no block event; every pair of copper chests -
+which block both halves end up as, the screen of a player who had the old half open, the
+sounds by age, the stone that is still in it.
+
+Two things make two recordings of *one* server differ, and are not differences: a stack that
+is spilled falls apart into pieces of ten to thirty, and a bot that stands near picks up what
+slides its way - after which its inventory, and so every menu it is sent, is another. (That
+is why the later steps are played ten blocks from the earlier ones; and how the probe found
+that picking something up with a chest open synchronised the menu without its chest -
+`picking_up_with_a_chest_open` in run.py.) Record each server twice, in a world of its own
+each time (`--world`), and believe what differs in both pairs. What
 differs:
 
 - vanilla shows a new entity the moment it is created, so `add_entity` of a primed TNT comes
@@ -650,7 +712,9 @@ inside it, step for step:
 
 1. the state is stored (`world::Dimension::set_block`: heightmaps, light, the change for the
    clients, the counts of "Random ticks" below);
-2. the block entity of the block that went goes, and spills what it held;
+2. the block entity of the block that went goes, and spills what it held - unless the new
+   block says it is the same thing still (`shouldChangedStateKeepBlockEntity`: one copper
+   chest becoming another);
 3. the new block is told it was placed (`onPlace`: TNT beside a signal goes off, sand asks for
    a tick), and gets its block entity;
 4. if the block is still the one that was set - `onPlace` may have made it another - the six
@@ -885,6 +949,30 @@ update - the water flowing out of the block - and there are none: the water stay
 Only an imported world has any, and `/setblock` refuses a waterlogged state as it refuses
 water.
 
+**Plants.** What stands on something and is nothing else: `VegetationBlock` - flowers, short
+grass and ferns, bushes, dead bushes and dry grass, azaleas, the nether's roots, sprouts and
+fungi, the cactus flower. Two hooks: `canSurvive` asks `mayPlaceOn` of the block below, and
+`updateShape` breaks the plant - seen, heard, dropped - when that says no. `mayPlaceOn` is a
+block tag for most (`#supports_vegetation` and five others, one of them named by a field of
+the block) and a face for two (a cactus flower stands on whatever holds a centre, leaf litter
+on a whole top). `mcgen` makes each rule a column of bits over the states
+(`state::kSupport`: seven rules today, of which two tags with the same members are one) and
+gives a plant the bit of its rule (`BlockInfo::alt[0]`); `PLANT_SUPPORT` in `gen_game.py` says
+which class has which, read from the class. The code is one line for all of them.
+
+Petals, wildflowers and leaf litter lie up to four in a block (`SegmentableBlock`): the amount
+is a property, and one more is placed *onto* the block - `canBeReplaced(state, context)`
+answers yes to its own item while there is room and the player does not sneak, the same
+question a slab answers for its other half, and `getStateForPlacement` counts one up. Their
+loot tables say "one a segment" as a slab's says "two for a double": a state, not a draw, so
+`Game::block_drop` multiplies and `mcgen` holds every such table to the form. A table that
+draws - short grass gives seeds one time in eight (`random_chance`), a dead bush up to two
+sticks - is the two candidates a `BlockInfo` has always had.
+
+Nothing grows. Bone meal is an item's doing; saplings, crops and mushrooms have random ticks
+that want trees and light rules; plants of two blocks break as a pair; a pot is a click. Each
+of those is a class that is not entered, so none of them can be placed.
+
 **Copper.** The copper stairs, slabs, bars, chains, lanterns and grates that are not waxed
 weather as the full block does (`ChangeOverTimeBlock`, the same random tick), and
 `WeatheringCopper.getNext(state)` is the next block `withPropertiesOf` this one: with one
@@ -894,7 +982,7 @@ has a next stage.
 
 ### Compared with vanilla
 
-`tools/vanilla/block_probe.py` runs both servers through the same 110 steps - two bots, one
+`tools/vanilla/block_probe.py` runs both servers through the same 136 steps - two bots, one
 building, one watching from three blocks off, and the console - and compares what each bot is
 told: every block change, level event, falling block, primed TNT and dropped item, in the
 order it came and by the tick it came in. It starts the servers itself; vanilla gets a new flat world every time.
@@ -946,6 +1034,15 @@ In the last recordings nothing differs, in any step, for either bot. What that c
   the others are the neighbours' doing), of one set `strict`; `/fill` of a row of walls, and of
   air over it, destroying;
 - **copper stairs**, upside down and facing east, weathering to oxidized stairs that are both;
+- **a pair of copper chests** weathering: both halves the next block in the same tick;
+- **plants**: a poppy on grass and none on stone, a dead bush on sand and none on stone, an
+  azalea, a cactus flower on a stone; leaf litter and petals counted up to four by clicks on
+  the block and on the ground under it, a fifth refused, a sneaking player's refused; petals
+  and litter facing their player; short grass and litter giving way to a stone set into them,
+  a poppy and petals not; the ground dug from under a poppy, four petals (one stack of four)
+  and a cactus flower; `/setblock` of a poppy in the air and of full wildflowers, destroyed;
+- **barrels** by where their player looks - level, up, down - and a smoker and a blast furnace
+  facing theirs; `/setblock` of an open barrel and a lit smoker, which stay as they were set;
 - **TNT** on five sides of a block of redstone is primed west, east, up, north, south.
 
 What a recording cannot say is said by the unit tests: the tick queue's order against a model
@@ -982,6 +1079,10 @@ tick queue under load and the random pass belong with the first claim that any o
   fence or a wall stays in it. Ice does not melt - it would leave water - and lava sets
   nothing alight (a fluid's random tick). Concrete powder hardens beside water, which only an
   imported world has, and that water does not flow.
+- **Of the plants**: everything that grows or spreads (saplings, crops, stems, mushrooms,
+  bamboo, vines, bone meal on anything), the ones that are two blocks tall, the ones that act
+  on who walks into them (the wither rose, sweet berries), eyeblossoms, flower pots; and
+  candles, which lie four to a block as petals do but are lit and put out.
 - **Of the shapes**: a fence takes no lead (`FenceBlock.useWithoutItem`: nothing is on one, and
   the click passes as it does in vanilla then); a wall under bamboo or pointed dripstone -
   blocks whose collision shape depends on where they stand - reads the shape they have in the
@@ -1411,7 +1512,8 @@ block state is saved as its block's name alone when it is the default one and as
 - **Light**: the saved layers, queued as vanilla queues them when it loads the chunk.
 - **A chunk vanilla had not finished generating** (any `Status` but `minecraft:full`) holds
   nothing anyone made, and is left to the generator here.
-- **Block entities**: a chest or a furnace whose tag says nothing this server would not act on -
+- **Block entities**: a chest (of wood or copper), a barrel, a furnace, a smoker or a blast
+  furnace whose tag says nothing this server would not act on -
   stacks without components, no name, no lock, no loot table - becomes one of ours. Every other
   one is kept as its tag: a client is told that it is there, and it does nothing - a chest with
   an enchanted sword in it stays shut rather than open as if it were something else.

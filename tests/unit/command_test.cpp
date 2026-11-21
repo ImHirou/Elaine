@@ -424,7 +424,8 @@ TEST(CommandArguments, BlockStatesAndPredicates) {
     EXPECT_EQ(b.state, proto::gen::block::kChest);  // the default state: facing north, single, dry
     // facing: north south west east; type: single left right; waterlogged: true false.
     EXPECT_EQ(block("chest[facing=east, type = right]", false, &b), "ok 32");
-    EXPECT_EQ(b.state, chest::kFirst + 3 * chest::kFacingStride + 2 * chest::kTypeStride + 1);
+    const unsigned first = world::block_info_of(proto::gen::block::kChest).first_state;
+    EXPECT_EQ(b.state, first + 3 * chest::kFacingStride + 2 * chest::kTypeStride + 1);
     ASSERT_EQ(b.given.size(), 2u);
     EXPECT_TRUE(b.test(b.state));
     EXPECT_TRUE(b.test(static_cast<world::BlockState>(b.state - 1)));  // waterlogged was not asked about

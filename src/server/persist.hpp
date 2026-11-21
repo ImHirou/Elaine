@@ -10,9 +10,10 @@
 
 namespace server::record {
 
-inline constexpr u8 kVersion = 1;
-// block entities
-enum : u8 { kKept = 0, kChest = 1, kFurnace = 2 };
+// block entities. Version 2 knows one kind more than version 1 (a furnace with the speed of its
+// fuel), and is otherwise the same; a furnace is written as that kind.
+inline constexpr u8 kVersion = 2;
+enum : u8 { kKept = 0, kChest = 1, kFurnaceV1 = 2, kFurnace = 3 };
 // entities. Version 2 knows one kind more than version 1 (a falling block), and is otherwise the same.
 inline constexpr u8 kEntitiesVersion = 2;
 enum : u8 { kItem = 1, kTnt = 2, kOther = 3, kFalling = 4 };

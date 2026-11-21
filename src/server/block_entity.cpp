@@ -3,8 +3,6 @@
 
 #include <cmath>
 
-#include "item/recipes.hpp"
-
 #include PROTO_GEN_ITEMS_HPP
 
 namespace server {
@@ -15,11 +13,10 @@ constexpr i32 kBurnTimeStandard = 200;  // AbstractFurnaceBlockEntity.BURN_TIME_
 constexpr i32 kCoolSpeed = 2;           // BURN_COOL_SPEED
 constexpr u32 kContainerLimit = 99;     // Container.getMaxStackSize()
 
-// getTotalCookTime(level, entity): the recipe's cooking time for what is in the input slot.
-// (Divided by the fuel's speed multiplier, which is 1 for every fuel in a furnace - mcgen checks.)
-i32 total_cook_time(const ItemStack& input) {
-    const item::Smelting r = item::smelting(input.item());
-    return r.result ? r.ticks : kBurnTimeStandard;
+// getTotalCookTime(recipe, entity): the recipe's cooking time, divided by the speed of the fuel
+// that was lit last - in float, rounded up, as vanilla has it.
+i32 total_cook_time(i32 ticks, float speed) {
+    return speed > 0.0f ? static_cast<i32>(std::ceil(static_cast<double>(static_cast<float>(ticks) / speed))) : ticks;
 }
 
 }  // namespace
@@ -28,7 +25,9 @@ void Furnace::set_item(u32 slot, ItemStack stack) {
     const bool same = !stack.empty() && item::same_item_same_components(items[slot], stack);
     items[slot] = std::move(stack);
     if (slot == kInput && !same) {
-        cook_total = total_cook_time(items[kInput]);
+        // getTotalCookTime(level, entity): of the recipe for what is in the input slot now, 200 without one.
+        const item::Smelting r = item::cooking(type, items[kInput].item());
+        cook_total = r.result ? total_cook_time(r.ticks, speed) : kBurnTimeStandard;
         cook = 0;
     }
 }
@@ -45,7 +44,7 @@ Furnace::Ticked Furnace::tick() {
     if (lit || (has_fuel && has_input)) {
         if (!has_input) {
             cook = 0;
-        } else if (const item::Smelting recipe = item::smelting(input.item()); recipe.result) {
+        } else if (const item::Smelting recipe = item::cooking(type, input.item()); recipe.result) {
             const ItemStack made(recipe.result, recipe.count);  // recipe.assemble(input)
             // canBurn: the result slot is empty, or holds the same thing with room for more.
             const ItemStack& result = items[kResult];
@@ -56,11 +55,15 @@ Furnace::Ticked Furnace::tick() {
                 cook = 0;
             } else {
                 if (!lit) {  // light the next piece of fuel
-                    const i32 burns = static_cast<i32>(item::fuel_ticks(fuel));
+                    // getBurnDuration, getSpeedMultiplier: the fuel's, by the block it burns in
+                    // (0 and 1 for what has no COOKING_FUEL: a bucket waiting for a wet sponge).
+                    const bool fast = item::fast_cooking(type);
+                    const i32 burns = static_cast<i32>(item::fuel_ticks(fuel, fast));
                     lit_remaining = lit_total = burns;
+                    speed = burns > 0 && fast ? proto::gen::kFastCookingSpeed : 1.0f;
                     if (cook_total > 0 && cook < cook_total) {
                         const float done = static_cast<float>(cook) / static_cast<float>(cook_total);
-                        cook_total = recipe.ticks;
+                        cook_total = total_cook_time(recipe.ticks, speed);
                         cook = static_cast<i32>(std::ceil(static_cast<double>(done * static_cast<float>(cook_total))));
                     }
                     if (burns > 0) {
@@ -82,7 +85,7 @@ Furnace::Ticked Furnace::tick() {
                 if (lit) {
                     if (++cook >= cook_total) {
                         cook = 0;
-                        cook_total = recipe.ticks;
+                        cook_total = total_cook_time(recipe.ticks, speed);
                         // burn: one input becomes the result. A wet sponge dries into a bucket
                         // standing in the fuel slot.
                         if (items[kResult].empty())

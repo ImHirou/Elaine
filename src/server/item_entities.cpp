@@ -294,7 +294,8 @@ void Game::pick_up_items(u32 pi) {
         write_packet(scratch_, s_.compression_threshold, cb::TakeItemEntity{ents_.net_id(row), ents_.net_id(pi), count});
         tracker_.broadcast(row, {scratch_.data, scratch_.len}, out_.data());
         // ServerPlayer.take: ...and the menu is synchronised at once, not at the next tick.
-        p.menu.send_changes(out(pi), p.threshold);
+        // (Of whatever menu is open: one on a chest shows the inventory too.)
+        p.menu.send_changes(out(pi), p.threshold, containers(p));
         dirty_[pi] |= kEquipDirty;
         if (stack.empty()) remove_item(slot);
     }

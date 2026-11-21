@@ -2,7 +2,7 @@
 
 Minecraft 26.3 has 1286 blocks in 268 block classes. The server holds a block only if it
 simulates everything vanilla would do with it - so the list of what can be **placed** is the list
-of what is **done**: 675 blocks today. This file is that list, block class by block class,
+of what is **done**: 719 blocks today. This file is that list, block class by block class,
 in the order the missing systems are meant to be built.
 
 **Generated** by `tools/mcgen/roadmap.py` from the jar's block classes (`mcgen.py gamedata`) and the
@@ -28,7 +28,7 @@ What the block classes lean on. A milestone below is workable once the systems i
 
 - [x] Block entities: stored per chunk, listed in the chunk packet, created and removed with their block
 - [x] Menus on blocks: `open_screen`, any number of slots, data slots, closing when out of reach
-- [x] Crafting: shaped, shapeless and transmute recipes; smelting; fuel
+- [x] Crafting: shaped, shapeless and transmute recipes; smelting, smoking and blasting; fuel, and how fast it cooks
 - [x] Entity physics for one kind (primed TNT): gravity, collision with blocks, bounce, speed factor
 - [x] Explosions: rays, exposure, block drops without a tool, chain reactions
 - [ ] Survival: mining over time, tools, block drops through loot tables with a tool and enchantments
@@ -173,13 +173,13 @@ Needs: BlockPlaceContext - the clicked face and where on it, the player's look, 
 - [x] **SnowyBlock** (1) - `getStateForPlacement`, `updateShape`  
   podzol
 
-## 3. Support: blocks that need something to stand on or hang from (10 of 81 blocks)
+## 3. Support: blocks that need something to stand on or hang from (41 of 81 blocks)
 
 Needs: `canSurvive` and the break-and-drop when the support goes are there (`Game::can_survive`, `break_block`: torches, amethyst); each class is its own rule of placement and its own drops. Survival drops need loot tables with a tool.
 
 - [ ] **WoolCarpetBlock** (16) - `canSurvive`, `updateShape`  
   white_carpet, orange_carpet, magenta_carpet, light_blue_carpet, yellow_carpet, lime_carpet, pink_carpet, gray_carpet, light_gray_carpet, cyan_carpet, purple_carpet, blue_carpet, brown_carpet, green_carpet, red_carpet, black_carpet
-- [ ] **FlowerBlock** (14) - `canSurvive`, `updateShape`  
+- [x] **FlowerBlock** (14) - `canSurvive`, `updateShape`  
   dandelion, golden_dandelion, torchflower, poppy, blue_orchid, allium, azure_bluet, red_tulip, orange_tulip, white_tulip, pink_tulip, oxeye_daisy, cornflower, lily_of_the_valley
 - [x] **AmethystClusterBlock** (4) - `canSurvive`, `getFluidState`, `getStateForPlacement`, `onProjectileHit`, `updateShape`  
   amethyst_cluster, large_amethyst_bud, medium_amethyst_bud, small_amethyst_bud
@@ -191,33 +191,33 @@ Needs: `canSurvive` and the break-and-drop when the support goes are there (`Gam
   torch, soul_torch, copper_torch
 - [x] **WallTorchBlock** (3) - `canSurvive`, `getStateForPlacement`, `updateShape`  
   wall_torch, soul_wall_torch, copper_wall_torch
-- [ ] **AzaleaBlock** (2) - `canSurvive`, `updateShape`  
+- [x] **AzaleaBlock** (2) - `canSurvive`, `updateShape`  
   azalea, flowering_azalea
-- [ ] **BushBlock** (2) - `canSurvive`, `updateShape`  
+- [x] **BushBlock** (2) - `canSurvive`, `updateShape`  
   bush, red_shrub
 - [ ] **EyeblossomBlock** (2) - `canSurvive`, `entityInside`, `randomTick`, `tick`, `updateShape`  
   open_eyeblossom, closed_eyeblossom
-- [ ] **FlowerBedBlock** (2) - `canBeReplaced(BlockState,BlockPlaceContext)`, `canSurvive`, `getStateForPlacement`, `updateShape`  
+- [x] **FlowerBedBlock** (2) - `canBeReplaced(BlockState,BlockPlaceContext)`, `canSurvive`, `getStateForPlacement`, `updateShape`  
   pink_petals, wildflowers
 - [ ] **MushroomBlock** (2) - `canSurvive`, `randomTick`, `updateShape`  
   brown_mushroom, red_mushroom
-- [ ] **NetherRootsBlock** (2) - `canSurvive`, `updateShape`  
+- [x] **NetherRootsBlock** (2) - `canSurvive`, `updateShape`  
   warped_roots, crimson_roots
-- [ ] **TallGrassBlock** (2) - `canSurvive`, `updateShape`  
+- [x] **TallGrassBlock** (2) - `canSurvive`, `updateShape`  
   short_grass, fern
 - [ ] **BigDripleafBlock** (1) - `canSurvive`, `entityInside`, `getFluidState`, `getStateForPlacement`, `neighborChanged`, `onProjectileHit`, `tick`, `updateShape`  
   big_dripleaf
 - [ ] **BigDripleafStemBlock** (1) - `canSurvive`, `getCloneItemStack`, `getFluidState`, `tick`, `updateShape`  
   big_dripleaf_stem
-- [ ] **CactusFlowerBlock** (1) - `canSurvive`, `updateShape`  
+- [x] **CactusFlowerBlock** (1) - `canSurvive`, `updateShape`  
   cactus_flower
 - [ ] **CarpetBlock** (1) - `canSurvive`, `updateShape`  
   moss_carpet
 - [ ] **DecoratedPotBlock** (1, *block entity*) - `affectNeighborsAfterRemoval`, `getAnalogOutputSignal`, `getCloneItemStack`, `getDrops`, `getFluidState`, `getMenuProvider`, `getStateForPlacement`, `hasAnalogOutputSignal`, `onProjectileHit`, `playerWillDestroy`, `triggerEvent`, `updateShape`, `useItemOn`, `useWithoutItem`  
   decorated_pot
-- [ ] **DryVegetationBlock** (1) - `canSurvive`, `updateShape`  
+- [x] **DryVegetationBlock** (1) - `canSurvive`, `updateShape`  
   dead_bush
-- [ ] **FireflyBushBlock** (1) - `canSurvive`, `updateShape`  
+- [x] **FireflyBushBlock** (1) - `canSurvive`, `updateShape`  
   firefly_bush
 - [ ] **FrogspawnBlock** (1) - `canSurvive`, `entityInside`, `onPlace`, `tick`, `updateShape`  
   frogspawn
@@ -225,15 +225,15 @@ Needs: `canSurvive` and the break-and-drop when the support goes are there (`Gam
   hanging_roots
 - [ ] **LadderBlock** (1) - `canSurvive`, `getFluidState`, `getStateForPlacement`, `updateShape`  
   ladder
-- [ ] **LeafLitterBlock** (1) - `canBeReplaced(BlockState,BlockPlaceContext)`, `canSurvive`, `getStateForPlacement`, `updateShape`  
+- [x] **LeafLitterBlock** (1) - `canBeReplaced(BlockState,BlockPlaceContext)`, `canSurvive`, `getStateForPlacement`, `updateShape`  
   leaf_litter
 - [ ] **LilyPadBlock** (1) - `canSurvive`, `entityInside`, `updateShape`  
   lily_pad
-- [ ] **NetherSproutsBlock** (1) - `canSurvive`, `updateShape`  
+- [x] **NetherSproutsBlock** (1) - `canSurvive`, `updateShape`  
   nether_sprouts
 - [ ] **ShelfMushroomBlock** (1) - `bounceOn`, `canSurvive`, `getStateForPlacement`, `updateShape`  
   shelf_mushroom
-- [ ] **ShortDryGrassBlock** (1) - `canSurvive`, `updateShape`  
+- [x] **ShortDryGrassBlock** (1) - `canSurvive`, `updateShape`  
   short_dry_grass
 - [ ] **SmallDripleafBlock** (1) - `canSurvive`, `getFluidState`, `getStateForPlacement`, `playerDestroy`, `playerWillDestroy`, `setPlacedBy`, `updateShape`  
   small_dripleaf
@@ -241,7 +241,7 @@ Needs: `canSurvive` and the break-and-drop when the support goes are there (`Gam
   snow
 - [ ] **SporeBlossomBlock** (1) - `canSurvive`, `updateShape`  
   spore_blossom
-- [ ] **TallDryGrassBlock** (1) - `canSurvive`, `updateShape`  
+- [x] **TallDryGrassBlock** (1) - `canSurvive`, `updateShape`  
   tall_dry_grass
 - [ ] **WitherRoseBlock** (1) - `canSurvive`, `entityInside`, `updateShape`  
   wither_rose
@@ -316,7 +316,7 @@ Needs: Water and lava: flowing (`FlowingFluid.tick`), waterlogging (`getFluidSta
 - [ ] **WetSpongeBlock** (1) - `onPlace`  
   wet_sponge
 
-## 6. Random ticks: growth, spread and decay (42 of 128 blocks)
+## 6. Random ticks: growth, spread and decay (48 of 128 blocks)
 
 Needs: Random block ticks are there, and sections whose ticks could do nothing are passed by: a class that is ported says in `state::kRandom` when its tick can act (`RANDOM_TICK_KINDS` in gen_game.py; docs/architecture.md, "Block updates"). Still needed: bone meal, tree and mushroom features for what grows into a structure, fire's spread.
 
@@ -334,7 +334,7 @@ Needs: Random block ticks are there, and sections whose ticks could do nothing a
   copper_bulb, exposed_copper_bulb, weathered_copper_bulb, oxidized_copper_bulb
 - [x] **WeatheringCopperChainBlock** (4) - `getFluidState`, `getStateForPlacement`, `isRandomlyTicking`, `randomTick`, `updateShape`  
   copper_chain, exposed_copper_chain, weathered_copper_chain, oxidized_copper_chain
-- [ ] **WeatheringCopperChestBlock** (4, *block entity*) - `affectNeighborsAfterRemoval`, `getAnalogOutputSignal`, `getFluidState`, `getMenuProvider`, `getStateForPlacement`, `hasAnalogOutputSignal`, `isRandomlyTicking`, `randomTick`, `shouldChangedStateKeepBlockEntity`, `tick`, `triggerEvent`, `updateShape`, `useWithoutItem`  
+- [x] **WeatheringCopperChestBlock** (4, *block entity*) - `affectNeighborsAfterRemoval`, `getAnalogOutputSignal`, `getFluidState`, `getMenuProvider`, `getStateForPlacement`, `hasAnalogOutputSignal`, `isRandomlyTicking`, `randomTick`, `shouldChangedStateKeepBlockEntity`, `tick`, `triggerEvent`, `updateShape`, `useWithoutItem`  
   copper_chest, exposed_copper_chest, weathered_copper_chest, oxidized_copper_chest
 - [ ] **WeatheringCopperDoorBlock** (4) - `canSurvive`, `getStateForPlacement`, `isRandomlyTicking`, `neighborChanged`, `onExplosionHit`, `playerWillDestroy`, `randomTick`, `setPlacedBy`, `updateShape`, `useWithoutItem`  
   copper_door, exposed_copper_door, weathered_copper_door, oxidized_copper_door
@@ -354,7 +354,7 @@ Needs: Random block ticks are there, and sections whose ticks could do nothing a
   lightning_rod, exposed_lightning_rod, weathered_lightning_rod, oxidized_lightning_rod
 - [ ] **AttachedStemBlock** (2) - `canSurvive`, `getCloneItemStack`, `updateShape`  
   attached_pumpkin_stem, attached_melon_stem
-- [ ] **NetherFungusBlock** (2) - `canSurvive`, `updateShape`  
+- [x] **NetherFungusBlock** (2) - `canSurvive`, `updateShape`  
   warped_fungus, crimson_fungus
 - [x] **NyliumBlock** (2) - `randomTick`  
   warped_nylium, crimson_nylium
@@ -483,7 +483,7 @@ Needs: The menu classes and their recipes: `AnvilMenu`, `GrindstoneMenu`, `LoomM
 - [ ] **StonecutterBlock** (1) - `getMenuProvider`, `getStateForPlacement`, `useWithoutItem`  
   stonecutter
 
-## 9. Block entities: containers (0 of 49 blocks)
+## 9. Block entities: containers (7 of 49 blocks)
 
 Needs: The chest's machinery again - a block entity with stacks, a menu, what the client is told - plus each one's own tick or rule: hoppers move items, shulker boxes keep theirs when broken (stacks inside stacks).
 
@@ -491,13 +491,13 @@ Needs: The chest's machinery again - a block entity with stacks, a menu, what th
   shulker_box, white_shulker_box, orange_shulker_box, magenta_shulker_box, light_blue_shulker_box, yellow_shulker_box, lime_shulker_box, pink_shulker_box, gray_shulker_box, light_gray_shulker_box, cyan_shulker_box, purple_shulker_box, blue_shulker_box, brown_shulker_box, green_shulker_box, red_shulker_box, black_shulker_box
 - [ ] **ShelfBlock** (13, *block entity*) - `affectNeighborsAfterRemoval`, `getAnalogOutputSignal`, `getFluidState`, `getMenuProvider`, `getStateForPlacement`, `hasAnalogOutputSignal`, `neighborChanged`, `onPlace`, `triggerEvent`, `updateShape`, `useItemOn`  
   acacia_shelf, bamboo_shelf, birch_shelf, cherry_shelf, crimson_shelf, dark_oak_shelf, jungle_shelf, mangrove_shelf, oak_shelf, pale_oak_shelf, poplar_shelf, spruce_shelf, warped_shelf
-- [ ] **CopperChestBlock** (4, *block entity*) - `affectNeighborsAfterRemoval`, `getAnalogOutputSignal`, `getFluidState`, `getMenuProvider`, `getStateForPlacement`, `hasAnalogOutputSignal`, `shouldChangedStateKeepBlockEntity`, `tick`, `triggerEvent`, `updateShape`, `useWithoutItem`  
+- [x] **CopperChestBlock** (4, *block entity*) - `affectNeighborsAfterRemoval`, `getAnalogOutputSignal`, `getFluidState`, `getMenuProvider`, `getStateForPlacement`, `hasAnalogOutputSignal`, `shouldChangedStateKeepBlockEntity`, `tick`, `triggerEvent`, `updateShape`, `useWithoutItem`  
   waxed_copper_chest, waxed_exposed_copper_chest, waxed_weathered_copper_chest, waxed_oxidized_copper_chest
 - [ ] **CampfireBlock** (2, *block entity*) - `entityInside`, `getFluidState`, `getMenuProvider`, `getStateForPlacement`, `onProjectileHit`, `triggerEvent`, `updateShape`, `useItemOn`  
   campfire, soul_campfire
-- [ ] **BarrelBlock** (1, *block entity*) - `affectNeighborsAfterRemoval`, `getAnalogOutputSignal`, `getMenuProvider`, `getStateForPlacement`, `hasAnalogOutputSignal`, `tick`, `triggerEvent`, `useWithoutItem`  
+- [x] **BarrelBlock** (1, *block entity*) - `affectNeighborsAfterRemoval`, `getAnalogOutputSignal`, `getMenuProvider`, `getStateForPlacement`, `hasAnalogOutputSignal`, `tick`, `triggerEvent`, `useWithoutItem`  
   barrel
-- [ ] **BlastFurnaceBlock** (1, *block entity*) - `affectNeighborsAfterRemoval`, `getAnalogOutputSignal`, `getMenuProvider`, `getStateForPlacement`, `hasAnalogOutputSignal`, `triggerEvent`, `useWithoutItem`  
+- [x] **BlastFurnaceBlock** (1, *block entity*) - `affectNeighborsAfterRemoval`, `getAnalogOutputSignal`, `getMenuProvider`, `getStateForPlacement`, `hasAnalogOutputSignal`, `triggerEvent`, `useWithoutItem`  
   blast_furnace
 - [ ] **BrewingStandBlock** (1, *block entity*) - `affectNeighborsAfterRemoval`, `getAnalogOutputSignal`, `getMenuProvider`, `hasAnalogOutputSignal`, `triggerEvent`, `useWithoutItem`  
   brewing_stand
@@ -517,7 +517,7 @@ Needs: The chest's machinery again - a block entity with stacks, a menu, what th
   jukebox
 - [ ] **LecternBlock** (1, *block entity*) - `affectNeighborsAfterRemoval`, `getAnalogOutputSignal`, `getDirectSignal`, `getMenuProvider`, `getStateForPlacement`, `hasAnalogOutputSignal`, `isSignalSource`, `ownSignal`, `tick`, `triggerEvent`, `useItemOn`, `useWithoutItem`  
   lectern
-- [ ] **SmokerBlock** (1, *block entity*) - `affectNeighborsAfterRemoval`, `getAnalogOutputSignal`, `getMenuProvider`, `getStateForPlacement`, `hasAnalogOutputSignal`, `triggerEvent`, `useWithoutItem`  
+- [x] **SmokerBlock** (1, *block entity*) - `affectNeighborsAfterRemoval`, `getAnalogOutputSignal`, `getMenuProvider`, `getStateForPlacement`, `hasAnalogOutputSignal`, `triggerEvent`, `useWithoutItem`  
   smoker
 - [ ] **TrappedChestBlock** (1, *block entity*) - `affectNeighborsAfterRemoval`, `getAnalogOutputSignal`, `getDirectSignal`, `getFluidState`, `getMenuProvider`, `getStateForPlacement`, `hasAnalogOutputSignal`, `isSignalSource`, `ownSignal`, `tick`, `triggerEvent`, `updateShape`, `useWithoutItem`  
   trapped_chest

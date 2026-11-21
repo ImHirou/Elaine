@@ -255,6 +255,13 @@ bool Game::place_block(u32 pi, const sb::UseItemOn& u, const ItemStack& held) {
     const auto replaceable = [&](BlockState s, bool clicked) {
         const world::BlockInfo& b = world::block_info_of(s);
         if (b.kind == gen::block_kind::kSlab) return slab_can_be_replaced(s, held, u, clicked);
+        if (b.kind == gen::block_kind::kSegmented) {
+            // SegmentableBlock.canBeReplaced: by one more of itself, while it holds fewer than four
+            // and the player does not sneak - or as any block (leaf litter gives way, petals do not).
+            const bool full = (s - b.first_state) % gen::props::flower_bed::kFacingStride == 3;
+            if (!players_[pi].shift && b.item == held.item() && !full) return true;
+            return world::is_replaceable(s) && b.item != held.item();
+        }
         return world::is_replaceable(s) && !(b.flags & block_flag::kCustomReplace) && b.item != held.item();
     };
     // BlockPlaceContext: into the clicked block if that can be replaced, otherwise against its
@@ -327,10 +334,16 @@ BlockState Game::state_for_placement(u32 pi, const sb::UseItemOn& u, const world
         }
         case block_flag::kPlaceFacing: {  // AbstractFurnaceBlock: facing the one who places it, unlit
             const u32 facing = world::opposite(horizontal_direction(ents_.yaw[pi]));
-            return static_cast<BlockState>(gen::props::furnace::kFirst +
-                                           (facing - world::kNorth) * gen::props::furnace::kFacingStride + 1);
+            return static_cast<BlockState>(block.first_state + (facing - world::kNorth) * gen::props::furnace::kFacingStride + 1);
         }
-        case block_flag::kPlaceChest: return chest_for_placement(pi, at, u.direction);
+        case block_flag::kPlaceChest: return chest_for_placement(pi, block, at, u.direction);
+        case block_flag::kPlaceBarrel: {                         // BarrelBlock: its lid towards the one who places it, shut
+            static constexpr u8 kIndex[6] = {5, 4, 0, 2, 3, 1};  // facing: north, east, south, west, up, down
+            u32 dirs[6];
+            nearest_looking_directions(pi, dirs);  // BlockPlaceContext.getNearestLookingDirection: whatever face was clicked
+            return static_cast<BlockState>(gen::props::barrel::kFirst +
+                                           kIndex[world::opposite(dirs[0])] * gen::props::barrel::kFacingStride + 1);
+        }
         case block_flag::kPlaceTorch: {
             u32 dirs[6];
             placement_directions(pi, u.direction, replacing_clicked, dirs);

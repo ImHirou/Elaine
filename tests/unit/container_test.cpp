@@ -232,6 +232,79 @@ TEST(Furnace, BurnsFuelAndCooks) {
     EXPECT_TRUE(f.idle());
 }
 
+TEST(Recipes, ThreeCookers) {
+    using item::Cooker;
+    // Each of the three has recipes of its own type; a blasting recipe takes as long as the
+    // smelting one (it is the fuel that is twice as fast in a blast furnace).
+    EXPECT_EQ(item::cooking(Cooker::kBlasting, it::kIronOre).result, it::kIronIngot);
+    EXPECT_EQ(item::cooking(Cooker::kBlasting, it::kIronOre).ticks, 200);
+    EXPECT_EQ(item::cooking(Cooker::kBlasting, it::kCobblestone).result, 0u);
+    EXPECT_EQ(item::cooking(Cooker::kBlasting, it::kBeef).result, 0u);
+    EXPECT_EQ(item::cooking(Cooker::kSmoking, it::kBeef).result, it::kCookedBeef);
+    EXPECT_EQ(item::cooking(Cooker::kSmoking, it::kBeef).ticks, 200);
+    EXPECT_EQ(item::cooking(Cooker::kSmoking, it::kIronOre).result, 0u);
+    EXPECT_EQ(item::cooking(Cooker::kSmelting, it::kBeef).result, it::kCookedBeef);
+    EXPECT_TRUE(item::cookable(Cooker::kSmoking, ItemStack(it::kKelp, 1)));
+    EXPECT_FALSE(item::cookable(Cooker::kBlasting, ItemStack(it::kKelp, 1)));
+    // #fast_cooking: a fuel burns half as long there.
+    EXPECT_EQ(item::fuel_ticks(ItemStack(it::kCoal, 1), true), 800u);
+    EXPECT_EQ(item::fuel_ticks(ItemStack(it::kStick, 1), true), 50u);
+    EXPECT_EQ(item::fuel_ticks(ItemStack(it::kLavaBucket, 1), true), 10000u);
+    EXPECT_EQ(item::fuel_ticks(ItemStack(it::kStone, 1), true), 0u);
+}
+
+TEST(Furnace, ASmokerCooksTwiceAsFastOnHalfTheFuel) {
+    Furnace f;
+    f.type = item::Cooker::kSmoking;
+    f.set_item(Furnace::kInput, ItemStack(it::kBeef, 2));
+    EXPECT_EQ(f.cook_total, 200);  // no fuel has been lit: the speed is still one
+    f.set_item(Furnace::kFuel, ItemStack(it::kCoal, 1));
+    EXPECT_TRUE(f.tick().lit_changed);
+    EXPECT_EQ(f.lit_remaining, 800);
+    EXPECT_EQ(f.lit_total, 800);
+    EXPECT_EQ(f.speed, 2.0f);
+    EXPECT_EQ(f.cook_total, 100);  // the time is worked out again as the fuel catches
+    EXPECT_EQ(f.cook, 1);
+    for (int i = 0; i < 98; ++i) f.tick();
+    EXPECT_TRUE(f.items[Furnace::kResult].empty());
+    f.tick();  // the 100th
+    EXPECT_EQ(is(f.items[Furnace::kResult]), is(it::kCookedBeef, 1));
+    EXPECT_EQ(f.cook_total, 100);
+    // Another input while that fuel burns: its time is the faster one from the start.
+    f.set_item(Furnace::kInput, ItemStack(it::kPorkchop, 1));
+    EXPECT_EQ(f.cook_total, 100);
+    // What a smoker does not smoke takes the standard time, and never begins.
+    f.set_item(Furnace::kInput, ItemStack(it::kIronOre, 1));
+    EXPECT_EQ(f.cook_total, 200);
+    f.tick();
+    EXPECT_EQ(f.cook, 0);
+
+    // A blast furnace: ore, not stone. A stick burns for 50 ticks there - half an ingot.
+    Furnace b;
+    b.type = item::Cooker::kBlasting;
+    b.set_item(Furnace::kInput, ItemStack(it::kCobblestone, 1));
+    b.set_item(Furnace::kFuel, ItemStack(it::kStick, 1));
+    EXPECT_FALSE(b.tick().lit_changed);
+    EXPECT_EQ(is(b.items[Furnace::kFuel]), is(it::kStick, 1));
+    b.set_item(Furnace::kInput, ItemStack(it::kIronOre, 1));
+    EXPECT_TRUE(b.tick().lit_changed);
+    EXPECT_EQ(b.lit_total, 50);
+    EXPECT_EQ(b.cook_total, 100);
+    for (int i = 0; i < 48; ++i) b.tick();
+    EXPECT_EQ(b.cook, 49);
+    EXPECT_EQ(b.lit_remaining, 2);
+    EXPECT_FALSE(b.tick().lit_changed);
+    EXPECT_TRUE(b.tick().lit_changed);  // out, with nothing to light: what was cooked cools
+    EXPECT_FALSE(b.idle());
+    EXPECT_TRUE(b.items[Furnace::kResult].empty());
+    // A second stick: the half that was done is kept, at the speed of the new fuel.
+    b.set_item(Furnace::kFuel, ItemStack(it::kStick, 1));
+    const i32 before = b.cook;
+    b.tick();
+    EXPECT_EQ(b.cook_total, 100);
+    EXPECT_EQ(b.cook, before + 1);
+}
+
 TEST(Furnace, EdgesOfTheTick) {
     // A lava bucket leaves its bucket in the fuel slot.
     Furnace f;

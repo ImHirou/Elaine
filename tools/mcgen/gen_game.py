@@ -4,7 +4,7 @@ simulates it. Called from gen.py; everything here reads the jar's data pack and 
 `mcgen.py reports` / `gamedata`, and runs nothing.
 
 Emitted:
-  recipes.hpp         crafting (shaped, shapeless, transmute) and smelting recipes, ingredients as
+  recipes.hpp         crafting (shaped, shapeless, transmute) and cooking recipes, ingredients as
                       item lists, results; include from one .cpp
   update_recipes.bin  the play `update_recipes` packet body: the recipe property sets a client needs
   static_ids.hpp      ids of static registries the server names: menus, block entity types, and the
@@ -44,14 +44,29 @@ _LANTERN = {"canSurvive", "getFluidState", "getShape", "isPathfindable", "update
             "getStateForPlacement"}
 _GRATE = {"getFluidState", "getShadeBrightness", "getVisualShape", "propagatesSkylightDown", "skipRendering", "updateShape",
           "createBlockStateDefinition", "getStateForPlacement"}
+_CHEST = {"affectNeighborsAfterRemoval", "getAnalogOutputSignal", "getFluidState", "getMenuProvider", "getShape",
+          "hasAnalogOutputSignal", "isPathfindable", "mirror", "rotate", "tick", "triggerEvent", "updateShape",
+          "useWithoutItem", "createBlockStateDefinition", "getStateForPlacement"}
+_FURNACE = {"affectNeighborsAfterRemoval", "getAnalogOutputSignal", "getMenuProvider", "hasAnalogOutputSignal", "mirror",
+            "rotate", "triggerEvent", "useWithoutItem", "animateTick", "createBlockStateDefinition", "getStateForPlacement"}
+_PLANT = {"canSurvive", "isPathfindable", "propagatesSkylightDown", "updateShape"}  # VegetationBlock
+_SEGMENTS = _PLANT | {"canBeReplaced(BlockState,BlockPlaceContext)", "getShape", "mirror", "rotate",
+                      "createBlockStateDefinition", "getStateForPlacement"}
 PORTED_BLOCKS = {
-    "ChestBlock": ("kChest", "kPlaceChest", {
-        "affectNeighborsAfterRemoval", "getAnalogOutputSignal", "getFluidState", "getMenuProvider", "getShape",
-        "hasAnalogOutputSignal", "isPathfindable", "mirror", "rotate", "tick", "triggerEvent", "updateShape",
-        "useWithoutItem", "createBlockStateDefinition", "getStateForPlacement"}),
-    "FurnaceBlock": ("kFurnace", "kPlaceFacing", {
+    "ChestBlock": ("kChest", "kPlaceChest", _CHEST),
+    # A copper chest joins any other copper chest, and the pair is then of one block: the less
+    # weathered of the two. The unwaxed ones weather (the left half, and the right one after it).
+    "CopperChestBlock": ("kChest", "kPlaceChest", _CHEST | {"shouldChangedStateKeepBlockEntity"}),
+    "WeatheringCopperChestBlock": ("kChest", "kPlaceChest", _CHEST | {"shouldChangedStateKeepBlockEntity"} | _WEATHERS),
+    # One block entity (AbstractFurnaceBlockEntity) for the three: which recipes it cooks, and
+    # how fast its fuel burns, goes by its block entity type.
+    "FurnaceBlock": ("kFurnace", "kPlaceFacing", _FURNACE),
+    "SmokerBlock": ("kFurnace", "kPlaceFacing", _FURNACE),
+    "BlastFurnaceBlock": ("kFurnace", "kPlaceFacing", _FURNACE),
+    # A chest's 27 stacks behind a ChestMenu; `open` instead of a lid.
+    "BarrelBlock": ("kBarrel", "kPlaceBarrel", {
         "affectNeighborsAfterRemoval", "getAnalogOutputSignal", "getMenuProvider", "hasAnalogOutputSignal", "mirror",
-        "rotate", "triggerEvent", "useWithoutItem", "animateTick", "createBlockStateDefinition", "getStateForPlacement"}),
+        "rotate", "tick", "triggerEvent", "useWithoutItem", "createBlockStateDefinition", "getStateForPlacement"}),
     "CraftingTableBlock": ("kCraftingTable", "kPlaceDefault", {"getMenuProvider", "useWithoutItem"}),
     "TntBlock": ("kTnt", "kPlaceDefault", {
         "neighborChanged", "onPlace", "onProjectileHit", "useItemOn", "createBlockStateDefinition", "dropFromExplosion",
@@ -113,10 +128,49 @@ PORTED_BLOCKS = {
     "WeatheringCopperChainBlock": ("kPlain", "kPlaceChain", _CHAIN | _WEATHERS),
     "WeatheringLanternBlock": ("kLantern", "kPlaceLantern", _LANTERN | _WEATHERS),
     "WeatheringCopperGrateBlock": ("kPlain", "kPlaceWaterlogged", _GRATE | _WEATHERS),
+    # ---- plants: VegetationBlock - they stand on what their class says they may (PLANT_SUPPORT),
+    # and break when that goes. Nothing grows: bone meal is an item's business, and there is none.
+    "FlowerBlock": ("kPlant", "kPlaceDefault", _PLANT | {"getShape"}),
+    "TallGrassBlock": ("kPlant", "kPlaceDefault", _PLANT | {"getShape"}),
+    "BushBlock": ("kPlant", "kPlaceDefault", _PLANT | {"getShape"}),
+    "FireflyBushBlock": ("kPlant", "kPlaceDefault", _PLANT | {"animateTick"}),
+    "DryVegetationBlock": ("kPlant", "kPlaceDefault", _PLANT | {"getShape", "animateTick"}),
+    "ShortDryGrassBlock": ("kPlant", "kPlaceDefault", _PLANT | {"getShape", "animateTick"}),
+    "TallDryGrassBlock": ("kPlant", "kPlaceDefault", _PLANT | {"getShape", "animateTick"}),
+    "AzaleaBlock": ("kPlant", "kPlaceDefault", _PLANT | {"getShape"}),
+    "NetherSproutsBlock": ("kPlant", "kPlaceDefault", _PLANT | {"getShape"}),
+    "NetherFungusBlock": ("kPlant", "kPlaceDefault", _PLANT | {"getShape"}),
+    "NetherRootsBlock": ("kPlant", "kPlaceDefault", _PLANT | {"getShape"}),
+    "CactusFlowerBlock": ("kPlant", "kPlaceDefault", _PLANT | {"getShape"}),
+    # SegmentableBlock: up to four of it in one block, each placed onto the ones that are there.
+    "FlowerBedBlock": ("kSegmented", "kPlaceSegment", _SEGMENTS),
+    "LeafLitterBlock": ("kSegmented", "kPlaceSegment", _SEGMENTS),
+}
+# What a plant stands on: VegetationBlock.mayPlaceOn of its class, asked of the state below it
+# (canSurvive) - a block tag, the tag a field of the block names ("field:<name>"), or one of the
+# two rules that ask for more than a tag. gen.py makes each rule a bit a state (state::kSupport)
+# and gives the block the bit of its rule (BlockInfo::alt[0]).
+PLANT_SUPPORT = {
+    "FlowerBlock": "#supports_vegetation",
+    "TallGrassBlock": "#supports_vegetation",
+    "BushBlock": "#supports_vegetation",
+    "FireflyBushBlock": "#supports_vegetation",
+    "FlowerBedBlock": "#supports_vegetation",
+    "DryVegetationBlock": "#supports_dry_vegetation",
+    "ShortDryGrassBlock": "#supports_dry_vegetation",   # (a DryVegetationBlock)
+    "TallDryGrassBlock": "#supports_dry_vegetation",
+    "AzaleaBlock": "#supports_azalea",
+    "NetherSproutsBlock": "#supports_nether_sprouts",
+    "NetherFungusBlock": "field:supportBlocks",
+    "NetherRootsBlock": "field:supportBlocks",
+    # CactusFlowerBlock.mayPlaceOn: #support_override_cactus_flower, or a face that holds a centre.
+    "CactusFlowerBlock": "cactus_flower",
+    # LeafLitterBlock.canSurvive: isFaceSturdy(UP) of the block below - no tag at all.
+    "LeafLitterBlock": "sturdy_top",
 }
 BLOCK_KINDS = ["kPlain", "kChest", "kFurnace", "kCraftingTable", "kTnt", "kPowered", "kSnowy", "kSpreading", "kNylium",
                "kBuddingAmethyst", "kAmethystCluster", "kTorch", "kWallTorch", "kLamp", "kFalling", "kConcretePowder",
-               "kSlab", "kStairs", "kFence", "kBars", "kWall", "kLantern", "kMushroom"]
+               "kSlab", "kStairs", "kFence", "kBars", "kWall", "kLantern", "kMushroom", "kBarrel", "kPlant", "kSegmented"]
 # The kinds whose randomTick is ported, and of those the ones whose tick may act whatever stands
 # around the block (the others are asked what is around them: state::kSmothers and its like).
 RANDOM_TICK_KINDS = {"kSpreading", "kNylium", "kBuddingAmethyst"}
@@ -126,7 +180,7 @@ RANDOM_TICK_ALWAYS = {"kBuddingAmethyst"}
 # properties (BlockInfo::next_stage), and may do so whatever stands around it.
 WEATHERING_CLASSES = {"WeatheringCopperFullBlock", "WeatheringCopperSlabBlock", "WeatheringCopperStairBlock",
                       "WeatheringCopperBarsBlock", "WeatheringCopperChainBlock", "WeatheringLanternBlock",
-                      "WeatheringCopperGrateBlock"}
+                      "WeatheringCopperGrateBlock", "WeatheringCopperChestBlock"}
 # Classes whose updateShape only asks for the tick of the water in a waterlogged block
 # (ticks.scheduleTick(pos, Fluids.WATER, ...), then super): with no fluid ticks it does nothing,
 # and their states carry no kHookShape.
@@ -140,9 +194,7 @@ RANDOM_TICK_GAPS = {"IceBlock": "melts into water: it waits for fluids"}
 _CLUSTER = [("facing", ["north", "east", "south", "west", "up", "down"]), ("waterlogged", ["true", "false"])]
 _WALL_TORCH = [("facing", ["north", "south", "west", "east"])]
 STATE_LAYOUTS = {
-    "minecraft:chest": [("facing", ["north", "south", "west", "east"]), ("type", ["single", "left", "right"]),
-                        ("waterlogged", ["true", "false"])],
-    "minecraft:furnace": [("facing", ["north", "south", "west", "east"]), ("lit", ["true", "false"])],
+    "minecraft:barrel": [("facing", ["north", "east", "south", "west", "up", "down"]), ("open", ["true", "false"])],
     "minecraft:tnt": [("unstable", ["true", "false"])],
     "minecraft:redstone_lamp": [("lit", ["true", "false"])],
     "minecraft:wall_torch": _WALL_TORCH,
@@ -159,7 +211,14 @@ STATE_LAYOUTS = {
 _WET = ("waterlogged", ["true", "false"])
 _BOOL = ["true", "false"]
 _SIDE = ["none", "low", "tall"]
+_HORIZONTAL = ["north", "south", "west", "east"]
+_FOUR = ["1", "2", "3", "4"]
 FAMILY_LAYOUTS = {
+    "chest": ({"ChestBlock", "CopperChestBlock", "WeatheringCopperChestBlock"},
+              [("facing", _HORIZONTAL), ("type", ["single", "left", "right"]), _WET]),
+    "furnace": ({"FurnaceBlock", "SmokerBlock", "BlastFurnaceBlock"}, [("facing", _HORIZONTAL), ("lit", _BOOL)]),
+    "flower_bed": ({"FlowerBedBlock"}, [("facing", _HORIZONTAL), ("flower_amount", _FOUR)]),
+    "leaf_litter": ({"LeafLitterBlock"}, [("facing", _HORIZONTAL), ("segment_amount", _FOUR)]),
     "slab": ({"SlabBlock", "WeatheringCopperSlabBlock"}, [("type", ["top", "bottom", "double"]), _WET]),
     "stairs": ({"StairBlock", "WeatheringCopperStairBlock"},
                [("facing", ["north", "south", "west", "east"]), ("half", ["top", "bottom"]),
@@ -179,7 +238,9 @@ FAMILY_LAYOUTS = {
 
 # Sounds and particles the server sends by id (static registries: sound_event, particle_type).
 SOUNDS = ["block.chest.open", "block.chest.close", "entity.tnt.primed", "entity.generic.explode", "entity.item.pickup",
-          "entity.armor_stand.break"]
+          "entity.armor_stand.break", "block.barrel.open", "block.barrel.close", "block.copper_chest.open",
+          "block.copper_chest.close", "block.copper_chest_weathered.open", "block.copper_chest_weathered.close",
+          "block.copper_chest_oxidized.open", "block.copper_chest_oxidized.close"]
 PARTICLES = ["explosion", "explosion_emitter", "poof", "smoke"]
 
 
@@ -244,6 +305,8 @@ class Loot:
         self.item_ids = item_ids
         self.block = ""        # the block whose table is being read
         self.doubles = False   # ...and whether its table gives two for `type=double` (a slab's)
+        self.segments: set[int] = set()  # ...and the counts it gives by the number of segments (petals, leaf litter)
+        self.segment_property = None
 
     def read(self, kind: str, name: str):
         path = f"data/minecraft/{kind}/{name.split(':', 1)[1]}.json"
@@ -271,6 +334,10 @@ class Loot:
             die(f"{where}: a match_tool predicate the reduction cannot decide for an empty tool: {p}")
         if kind == "minecraft:table_bonus":
             return float(c["chances"][0])  # the enchantment's level on an empty tool is 0
+        if kind == "minecraft:random_chance":
+            if not isinstance(c["chance"], (int, float)):
+                die(f"{where}: a random_chance that is not a number")
+            return float(c["chance"])       # the same draw: random.nextFloat() < chance
         if kind == "minecraft:any_of":
             terms = [self.condition(t, where) for t in c["terms"]]
             if any(t is True for t in terms):
@@ -290,6 +357,15 @@ class Loot:
             if kind == "minecraft:set_count" and m.get("count") == 2 and not m.get("add") and m.get("condition") == {
                     "type": "minecraft:match_block", "blocks": self.block, "state": {"type": "double"}}:
                 self.doubles = True
+                continue
+            # Petals' and leaf litter's: as many as the block holds, one set_count a number of
+            # segments. A state again, not a draw (Game::block_drop multiplies; mcgen holds
+            # every block of the kind to this form, all four counts).
+            cond = m.get("condition", {})
+            if kind == "minecraft:set_count" and not m.get("add") and isinstance(m.get("count"), int) and isinstance(cond, dict) \
+                    and cond.get("type") == "minecraft:match_block" and cond.get("blocks") == self.block \
+                    and self.segment_property and cond.get("state") == {self.segment_property: str(m["count"])}:
+                self.segments.add(m["count"])
                 continue
             if "condition" in m or "conditions" in m:
                 die(f"{where}: a conditional loot function")
@@ -348,16 +424,22 @@ class Loot:
             return out
         die(f"{where}: loot entry type {e['type']}")
 
-    def explosion_drops(self, block: str, table_name: str | None, slab: bool = False) -> list[tuple[float, int, int, int]]:
-        """`slab`: the block is a SlabBlock - its table must give two for the double slab, and no other's may."""
+    def explosion_drops(self, block: str, table_name: str | None, slab: bool = False,
+                        segments: str | None = None) -> list[tuple[float, int, int, int]]:
+        """`slab`: the block is a SlabBlock - its table must give two for the double slab, and no other's may.
+        `segments`: the property that counts the segments of a SegmentableBlock - its table must give
+        one a segment, and no other's may."""
         if not table_name:
-            if slab:
-                die(f"{block}: a slab without a loot table")
+            if slab or segments:
+                die(f"{block}: a slab or a segmented block without a loot table")
             return []
         t = self.read("loot_table", table_name)
         where = f"loot table of {block}"
-        self.block, self.doubles = block, False
+        self.block, self.doubles, self.segments, self.segment_property = block, False, set(), segments
         out = self.reduce(t, where)
+        if self.segments != ({1, 2, 3, 4} if segments else set()) or (segments and (
+                len(out) != 1 or out[0][0] < 1.0 or (out[0][2], out[0][3]) != (1, 1))):
+            die(f"{where}: {'not ' if segments else ''}a segmented block's table (one of it a segment) - Game::block_drop goes by the kind")
         if self.doubles != slab or (slab and (len(out) != 1 or out[0][0] < 1.0 or (out[0][2], out[0][3]) != (1, 1))):
             die(f"{where}: {'not ' if slab else ''}a slab's table (one of it, two for the double slab) - Game::block_drop goes by the class")
         return out
@@ -385,17 +467,25 @@ class Loot:
 
 # ----------------------------------------------------------------------------- fuel
 
-def fuel_ticks(vanilla, comps: dict, name: str) -> int:
-    """AbstractFurnaceBlockEntity.getBurnDuration in a furnace: the item's cooking_fuel burn time.
+# AbstractFurnaceBlockEntity.getSpeedMultiplier of every fuel in a smoker and a blast furnace
+# (context_float_provider/cooking/fast_speed_multiplier): one number for all of them, which
+# fuel_ticks holds each fuel to. In a furnace it is 1.
+FAST_COOKING_SPEED = 2.0
+FAST_COOKERS = ("minecraft:smoker", "minecraft:blast_furnace")
+
+
+def fuel_ticks(vanilla, comps: dict, name: str) -> tuple[int, int]:
+    """AbstractFurnaceBlockEntity.getBurnDuration of the item: its cooking_fuel burn time in a
+    furnace, and in a smoker or a blast furnace. (0, 0): not a fuel.
 
     26.x: the component names two context providers (data/minecraft/context_int_provider,
     context_float_provider) that ask whether the block is #fast_cooking - a smoker or a blast
-    furnace. Evaluated here for the plain furnace, where the speed multiplier must come out as 1:
-    the server's furnace has no other.
+    furnace. Evaluated here for each of the three blocks; the two fast ones must agree, and the
+    speed multiplier must come out as 1 in a furnace and as FAST_COOKING_SPEED in the others.
     """
     fuel = comps.get("minecraft:cooking_fuel")
     if fuel is None:
-        return 0
+        return 0, 0
 
     def read(kind: str, ref):
         path = f"data/minecraft/{kind}/{ref.split(':', 1)[1]}.json"
@@ -403,34 +493,39 @@ def fuel_ticks(vanilla, comps: dict, name: str) -> int:
             die(f"{name}: cooking_fuel refers to {ref}, which is not in the jar")
         return json.loads(vanilla.zip.read(path))
 
-    def fast(cond) -> bool:
+    def holds(cond, block: str) -> bool:
         p = read("predicate", cond) if isinstance(cond, str) else cond
         if p.get("type") != "minecraft:match_block" or "state" in p:
             die(f"{name}: the fast-cooking condition is no longer a plain match_block: {p}")
         blocks = p["blocks"]
-        return "minecraft:furnace" in ([blocks] if isinstance(blocks, str) else blocks)
+        return block in ([blocks] if isinstance(blocks, str) else blocks)
 
-    def value(kind: str, v):
+    def value(kind: str, v, block: str):
         if isinstance(v, (int, float)):
             return v
         if isinstance(v, str):
-            return value(kind, read(kind, v))
+            return value(kind, read(kind, v), block)
         if v.get("type") == "minecraft:conditional":
-            return value(kind, v["on_true"] if fast(v["condition"]) else v["on_false"])
+            return value(kind, v["on_true"] if holds(v["condition"], block) else v["on_false"], block)
         if v.get("type") == "minecraft:div":
-            left, right = value(kind, v["left"]), value(kind, v["right"])
+            left, right = value(kind, v["left"], block), value(kind, v["right"], block)
             if right == 0:
                 die(f"{name}: burn time divides by zero")
             return int(left / right) if kind == "context_int_provider" else left / right
         die(f"{name}: cooking_fuel provider {v} is not one mcgen evaluates")
 
-    ticks = value("context_int_provider", fuel["burn_time"])
-    speed = value("context_float_provider", fuel.get("speed_multiplier", 1.0))
-    if speed != 1.0:
-        die(f"{name}: burns with speed multiplier {speed} in a furnace - the server's furnace has none")
-    if ticks != int(ticks) or not 0 < ticks <= 0xFFFF:
-        die(f"{name}: burn time {ticks} does not fit ItemInfo::fuel_ticks")
-    return int(ticks)
+    out = []
+    for block, want in (("minecraft:furnace", 1.0), *((b, FAST_COOKING_SPEED) for b in FAST_COOKERS)):
+        ticks = value("context_int_provider", fuel["burn_time"], block)
+        speed = value("context_float_provider", fuel.get("speed_multiplier", 1.0), block)
+        if speed != want:
+            die(f"{name}: burns with speed multiplier {speed} in a {block} - the server's has {want} for every fuel")
+        if ticks != int(ticks) or not 0 < ticks <= 0xFFFF:
+            die(f"{name}: burn time {ticks} in a {block} does not fit ItemInfo::fuel_ticks")
+        out.append(int(ticks))
+    if len(set(out[1:])) != 1:
+        die(f"{name}: burns for {out[1:]} in {FAST_COOKERS} - ItemInfo has one burn time for both")
+    return out[0], out[1]
 
 
 # ----------------------------------------------------------------------------- recipes
@@ -468,6 +563,10 @@ def shrink(pattern: list[str]) -> list[str]:
     if len(pattern) == bottom:
         return []
     return [line[left:right + 1] for line in pattern[top:len(pattern) - bottom]]
+
+
+# The cooking recipes the server has a block for, by recipe type -> recipe::Cooker.
+COOKING = {"minecraft:smelting": "kSmelting", "minecraft:smoking": "kSmoking", "minecraft:blasting": "kBlasting"}
 
 
 class Recipes:
@@ -539,7 +638,7 @@ class Recipes:
 
     def build(self) -> dict:
         crafting = []   # (name, kind, a, b, extra, [ingredients], result, count, patch)
-        smelting = []   # (name, ingredient, result, count, ticks, experience)
+        cooking = []    # (name, type, ingredient, result, count, ticks, experience)
         skipped: dict[str, int] = {}
         sets: dict[str, set[int]] = {k: set() for k in (
             "smithing_base", "smithing_template", "smithing_addition", "furnace_input", "blast_furnace_input",
@@ -592,12 +691,13 @@ class Recipes:
             elif kind in cooking_sets:
                 items = self.ingredient_items(r["ingredient"], where)
                 sets[cooking_sets[kind]].update(items)
-                if kind == "minecraft:smelting":
+                if kind in COOKING:
                     item, count, patch = self.result(r["result"], where)
                     ticks = r.get("cookingtime", 200)
                     if patch or not 1 <= ticks <= 0x7FFF:
-                        die(f"{where}: a smelting result with components, or a cooking time of {ticks}")
-                    smelting.append((name, self.ingredient(r["ingredient"], where), item, count, ticks, float(r.get("experience", 0.0))))
+                        die(f"{where}: a cooking result with components, or a cooking time of {ticks}")
+                    cooking.append((name, COOKING[kind], self.ingredient(r["ingredient"], where), item, count, ticks,
+                                    float(r.get("experience", 0.0))))
                 else:
                     skipped[kind] = skipped.get(kind, 0) + 1
             else:
@@ -611,9 +711,9 @@ class Recipes:
                     sets["brewing_input"].update(self.ingredient_items(r["input"]["item"], where))
                     sets["brewing_reagent"].update(self.ingredient_items(r["reagent"]["item"], where))
                 skipped[kind] = skipped.get(kind, 0) + 1
-        if not crafting or not smelting:
-            die("no crafting or no smelting recipes in the jar: the recipe directory moved")
-        return {"crafting": crafting, "smelting": smelting, "skipped": skipped, "sets": sets}
+        if not crafting or {c[1] for c in cooking} != set(COOKING.values()):
+            die("no crafting recipes in the jar, or none of one of the cooking kinds: the recipe directory moved")
+        return {"crafting": crafting, "cooking": cooking, "skipped": skipped, "sets": sets}
 
     def emit(self, header: str, packets: dict) -> dict:
         b = self.build()
@@ -623,7 +723,8 @@ class Recipes:
         o = [header, """
 // Recipes of the vanilla data pack (data/minecraft/recipe), reduced to what the server matches:
 // an ingredient is a sorted list of item ids, a result an item, a count and - rarely - components.
-// kCrafting is in the order RecipeManager looks recipes up in (by id): the first match wins.
+// kCrafting and kCooking are in the order RecipeManager looks recipes up in (by id): the first
+// match - of its type, for a cooking recipe - wins.
 // Include from exactly one .cpp (item/recipes.cpp).
 namespace proto::gen::recipe {
 
@@ -639,10 +740,13 @@ struct Crafting {
     unsigned char count;
     unsigned char patch;       // the result's components: index into kPatchFirst + 1, 0 = none
 };
-struct Smelting {
+// RecipeType of an AbstractCookingRecipe: what a furnace, a smoker and a blast furnace cook.
+enum Cooker : unsigned char { kSmelting, kSmoking, kBlasting, kCookers };
+struct Cooking {
     unsigned short ingredient, result;
     unsigned short ticks;      // cookingtime
     unsigned char count;
+    unsigned char type;        // a Cooker
     float experience;
 };
 
@@ -675,10 +779,10 @@ struct Smelting {
         for name, kind, a, bb, extra, ing, item, count, patch in b["crafting"]:
             cells = ", ".join("kNoIngredient" if i == 0xFFFF else str(i) for i in ing)
             o.append(f"    {{{kind}, {a}, {bb}, {extra}, {{{cells}}}, {item}, {count}, {patch}}},  // {name}\n")
-        o.append(f"}};\n\ninline constexpr unsigned kSmeltingCount = {len(b['smelting'])};\n"
-                 f"inline constexpr Smelting kSmelting[kSmeltingCount] = {{\n")
-        for name, ing, item, count, ticks, xp in b["smelting"]:
-            o.append(f"    {{{ing}, {item}, {ticks}, {count}, {_cfloat32(xp)}}},  // {name}\n")
+        o.append(f"}};\n\ninline constexpr unsigned kCookingCount = {len(b['cooking'])};\n"
+                 f"inline constexpr Cooking kCooking[kCookingCount] = {{\n")
+        for name, kind, ing, item, count, ticks, xp in b["cooking"]:
+            o.append(f"    {{{ing}, {item}, {ticks}, {count}, {kind}, {_cfloat32(xp)}}},  // {name}\n")
         o.append("};\n\n}  // namespace proto::gen::recipe\n")
 
         # ClientboundUpdateRecipesPacket: Map<ResourceKey<RecipePropertySet>, RecipePropertySet>
@@ -692,7 +796,7 @@ struct Smelting {
             for i in sorted(b["sets"][key]):
                 body += _varint(i)
         body += _varint(0)
-        stats = {"crafting": len(b["crafting"]), "smelting": len(b["smelting"]), "recipes_skipped": sum(b["skipped"].values())}
+        stats = {"crafting": len(b["crafting"]), "cooking": len(b["cooking"]), "recipes_skipped": sum(b["skipped"].values())}
         return {"recipes.hpp": "".join(o), "update_recipes.bin": bytes(body), "_stats": stats}
 
 

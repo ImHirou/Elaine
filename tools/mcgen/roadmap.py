@@ -105,7 +105,7 @@ MILESTONES = [
 SYSTEMS = [
     ("x", "Block entities: stored per chunk, listed in the chunk packet, created and removed with their block"),
     ("x", "Menus on blocks: `open_screen`, any number of slots, data slots, closing when out of reach"),
-    ("x", "Crafting: shaped, shapeless and transmute recipes; smelting; fuel"),
+    ("x", "Crafting: shaped, shapeless and transmute recipes; smelting, smoking and blasting; fuel, and how fast it cooks"),
     ("x", "Entity physics for one kind (primed TNT): gravity, collision with blocks, bounce, speed factor"),
     ("x", "Explosions: rays, exposure, block drops without a tool, chain reactions"),
     (" ", "Survival: mining over time, tools, block drops through loot tables with a tool and enchantments"),

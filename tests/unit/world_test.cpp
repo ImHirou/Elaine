@@ -4,6 +4,7 @@
 // The wire tests decode with an independent reader written from the vanilla layout (see the comment
 // in world/chunk_codec.hpp for where it was read), not with anything from the encoder.
 #include <gtest/gtest.h>
+#include <bit>
 
 #include <map>
 #include <random>
@@ -742,6 +743,41 @@ TEST(Blocks, WhatAChangeAndATickAskOfAState) {
     EXPECT_FALSE(holds_water(kAir));
 }
 
+TEST(Blocks, WhatAPlantStandsOn) {
+    // VegetationBlock.mayPlaceOn, as tables: the plant's bit in the state below it.
+    const auto stands = [](BlockState plant, BlockState below) {
+        return (state::kSupport[below] & block_info_of(plant).alt[0]) != 0;
+    };
+    for (const BlockState flower : {blk::kPoppy, blk::kShortGrass, blk::kPinkPetals, blk::kFireflyBush}) {
+        EXPECT_TRUE(stands(flower, blk::kGrassBlock)) << flower;  // #supports_vegetation
+        EXPECT_TRUE(stands(flower, blk::kDirt)) << flower;
+        EXPECT_TRUE(stands(flower, blk::kFarmland)) << flower;
+        EXPECT_FALSE(stands(flower, blk::kStone)) << flower;
+        EXPECT_FALSE(stands(flower, blk::kSand)) << flower;
+        EXPECT_FALSE(stands(flower, kAir)) << flower;
+    }
+    EXPECT_TRUE(stands(blk::kDeadBush, blk::kSand));  // #supports_dry_vegetation: sand, terracotta, soil
+    EXPECT_TRUE(stands(blk::kDeadBush, blk::kTerracotta));
+    EXPECT_TRUE(stands(blk::kShortDryGrass, blk::kGrassBlock));
+    EXPECT_FALSE(stands(blk::kDeadBush, blk::kStone));
+    EXPECT_TRUE(stands(blk::kAzalea, blk::kClay));
+    EXPECT_FALSE(stands(blk::kPoppy, blk::kClay));
+    EXPECT_TRUE(stands(blk::kCrimsonFungus, blk::kWarpedNylium));  // the tag its block names
+    EXPECT_TRUE(stands(blk::kWarpedRoots, blk::kSoulSoil));
+    EXPECT_TRUE(stands(blk::kNetherSprouts, blk::kCrimsonNylium));
+    EXPECT_FALSE(stands(blk::kCrimsonFungus, blk::kNetherrack));
+    EXPECT_FALSE(stands(blk::kPoppy, blk::kWarpedNylium));
+    // The two that ask for a face: a cactus flower for one that holds a centre (or a cactus), leaf litter for a whole one.
+    EXPECT_TRUE(stands(blk::kCactusFlower, blk::kCactus));
+    EXPECT_TRUE(stands(blk::kCactusFlower, blk::kStone));
+    EXPECT_FALSE(stands(blk::kCactusFlower, blk::kTorch));
+    EXPECT_TRUE(stands(blk::kLeafLitter, blk::kStone));
+    EXPECT_TRUE(stands(blk::kLeafLitter, blk::kGlass));
+    EXPECT_FALSE(stands(blk::kLeafLitter, blk::kCactus));
+    EXPECT_FALSE(stands(blk::kLeafLitter, blk::kLeafLitter));
+    EXPECT_FALSE(stands(blk::kLeafLitter, kAir));
+}
+
 TEST(Blocks, GeneratedTablesAgreeWithEachOther) {
     EXPECT_TRUE(is_air(kAir));
     EXPECT_TRUE(is_air(blk::kVoidAir));
@@ -782,8 +818,26 @@ TEST(Blocks, GeneratedTablesAgreeWithEachOther) {
             ASSERT_TRUE(item_info(info.item).flags & item_flag::kPlainBlockItem) << block_name(b);
         }
         ASSERT_FALSE(info.flags & block_flag::kGameMaster) << block_name(b);
-        // canBeReplaced(state, context) is its class's own: a slab's, which is ported (Game::slab_can_be_replaced).
-        ASSERT_EQ((info.flags & block_flag::kCustomReplace) != 0, info.kind == proto::gen::block_kind::kSlab) << block_name(b);
+        // canBeReplaced(state, context) is its class's own: a slab's, which is ported (Game::slab_can_be_replaced),
+        // and that of what lies four to a block (SegmentableBlock: Game::place_block).
+        ASSERT_EQ((info.flags & block_flag::kCustomReplace) != 0,
+                  info.kind == proto::gen::block_kind::kSlab || info.kind == proto::gen::block_kind::kSegmented)
+            << block_name(b);
+        // A plant names the one rule of what it stands on.
+        if (info.kind == proto::gen::block_kind::kPlant || info.kind == proto::gen::block_kind::kSegmented) {
+            ASSERT_TRUE(std::has_single_bit(static_cast<u32>(info.alt[0]))) << block_name(b);
+        }
+        // A chest has the sounds of its lid, and a waxed one of copper the chest it is without the wax.
+        if (info.kind == proto::gen::block_kind::kChest) {
+            ASSERT_EQ(info.state_count, 24u) << block_name(b);
+            ASSERT_TRUE(info.alt[0] && info.alt[1] && info.alt[0] != info.alt[1]) << block_name(b);
+            if (info.alt[2]) {
+                const BlockInfo& bare = block_info_of(info.alt[2]);
+                ASSERT_EQ(bare.first_state, info.alt[2]) << block_name(b);
+                ASSERT_TRUE(bare.kind == proto::gen::block_kind::kChest && bare.weather && !bare.alt[2] && !info.weather)
+                    << block_name(b);
+            }
+        }
         if (info.next_stage) {
             const BlockInfo& next = block_info_of(info.next_stage);
             ASSERT_EQ(next.first_state, info.next_stage) << block_name(b);

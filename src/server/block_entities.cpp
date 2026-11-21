@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Blocks that are more than a state: a chest and a furnace (block entities) and the crafting
-// table (a menu without one). What happens around a block when it changes is
-// server/block_updates.cpp.
+// Blocks that are more than a state: chests - of wood and of copper -, the barrel, the furnace,
+// the smoker and the blast furnace (block entities) and the crafting table (a menu without
+// one). What happens around a block when it changes is server/block_updates.cpp.
 //
 // The rules are vanilla's, read from the 26.3 jar; each function names the method it follows:
 //   BaseContainerBlockEntity.preRemoveSideEffects, Containers.dropContents
 //   ChestBlock (updateShape, tick, useWithoutItem, combine, isChestBlockedAt), DoubleBlockCombiner,
+//   CopperChestBlock (chestCanConnectTo, getLeastOxidizedChestOfConnectedBlocks, updateShape),
+//   WeatheringCopperChestBlock.randomTick,
 //   ChestBlockEntity + ContainerOpenersCounter (who has it open: the lid, the sound, the recount)
-//   AbstractFurnaceBlock / FurnaceBlock.openContainer, CraftingTableBlock, TntBlock.useItemOn
+//   BarrelBlock, BarrelBlockEntity (the same count; `open` and its own sounds instead of a lid)
+//   AbstractFurnaceBlock / FurnaceBlock, SmokerBlock, BlastFurnaceBlock.openContainer,
+//   CraftingTableBlock, TntBlock.useItemOn
 //   ServerPlayer.openMenu / closeContainer / doCloseContainer, the stillValid of each menu
 //   ServerLevel.blockEvent / runBlockEvents
 // What a block entity holds and how a furnace burns is server/block_entity.cpp; what a click in
@@ -17,6 +21,8 @@
 //   * a furnace gives no experience (no orbs yet), and nothing is remembered about its recipes;
 //   * comparators (affectNeighborsAfterRemoval, getAnalogOutputSignal): there are none;
 //   * custom names: a chest named on an anvil cannot be placed (its item carries a component);
+//   * wax and axes: a copper chest is waxed, scraped or made by no item here (HoneycombItem,
+//     AxeItem; the copper golem that sorts into them does not exist);
 //   * what a leaving player has on a menu's cursor or in a crafting grid is not dropped: a
 //     player's inventory is not kept either;
 //   * ContainerOpenersCounter counts by a box around the chest; here a player counts while its
@@ -50,16 +56,31 @@ struct ChestState {
     u32 type;
     bool waterlogged;
 };
+// (One layout for every chest - props::chest -, each from its own first state.)
 ChestState chest_state(BlockState s) {
-    const u32 off = s - props::chest::kFirst;
+    const u32 off = s - world::block_info_of(s).first_state;
     return {world::kNorth + off / props::chest::kFacingStride, off % props::chest::kFacingStride / props::chest::kTypeStride,
             off % props::chest::kTypeStride == 0};
 }
-BlockState chest_block(const ChestState& c) {
-    return static_cast<BlockState>(props::chest::kFirst + (c.facing - world::kNorth) * props::chest::kFacingStride +
+BlockState chest_block(const world::BlockInfo& block, const ChestState& c) {
+    return static_cast<BlockState>(block.first_state + (c.facing - world::kNorth) * props::chest::kFacingStride +
                                    c.type * props::chest::kTypeStride + (c.waterlogged ? 0 : 1));
 }
 bool is_chest(BlockState s) { return world::block_info_of(s).kind == block_kind::kChest; }
+// ChestBlock.chestCanConnectTo: a chest joins its own block - a copper chest any copper chest
+// (CopperChestBlock: #copper_chests).
+bool chest_connects(const world::BlockInfo& chest, BlockState to) {
+    const world::BlockInfo& other = world::block_info_of(to);
+    if (other.kind != block_kind::kChest) return false;
+    return copper_chest(chest) ? copper_chest(other) : &chest == &other;
+}
+// CopperChestBlock.weatherState, as BlockInfo::weather has it: of the chest, or of the chest it
+// is without its wax.
+u32 chest_age(const world::BlockInfo& copper) {
+    return copper.weather ? copper.weather : world::block_info_of(static_cast<BlockState>(copper.alt[2])).weather;
+}
+// BarrelBlock's state: facing (north, east, south, west, up, down), open.
+constexpr u8 kBarrelFacing[6] = {world::kNorth, world::kEast, world::kSouth, world::kWest, world::kUp, world::kDown};
 // Direction.getClockWise / getCounterClockWise, for the horizontal ones.
 constexpr u32 kClockwise[6] = {0, 0, world::kEast, world::kWest, world::kNorth, world::kSouth};
 constexpr u32 kCounterClockwise[6] = {0, 0, world::kWest, world::kEast, world::kSouth, world::kNorth};
@@ -90,6 +111,9 @@ void Game::init_titles() {
     title_double_chest_ = translatable("container.chestDouble");
     title_furnace_ = translatable("container.furnace");
     title_crafting_ = translatable("container.crafting");
+    title_barrel_ = translatable("container.barrel");
+    title_smoker_ = translatable("container.smoker");
+    title_blast_furnace_ = translatable("container.blast_furnace");
 }
 
 // ---------------------------------------------------------------------------- blocks changing
@@ -97,9 +121,11 @@ void Game::init_titles() {
 // ChestBlock.updateShape: what the chest `state` becomes when its neighbour in direction `dir`
 // is `neighbour`. (A waterlogged one would ask for a tick of its water: there are no fluid ticks.)
 BlockState Game::chest_update_shape(BlockState state, u32 dir, BlockState neighbour) const {
+    const world::BlockInfo& block = world::block_info_of(state);
     ChestState c = chest_state(state);
     const bool horizontal = dir >= world::kNorth;
-    if (is_chest(neighbour) && horizontal) {
+    const bool connects = chest_connects(block, neighbour);
+    if (connects && horizontal) {
         // A single chest joins the half that was just placed against it.
         const ChestState n = chest_state(neighbour);
         if (c.type == kSingle && n.type != kSingle && c.facing == n.facing && connected_direction(n) == world::opposite(dir))
@@ -107,7 +133,19 @@ BlockState Game::chest_update_shape(BlockState state, u32 dir, BlockState neighb
     } else if (connected_direction(c) == dir) {
         c.type = kSingle;  // the other half is gone
     }
-    return chest_block(c);
+    // CopperChestBlock.updateShape: a half takes the block of its other half - the one that was
+    // placed against it (already the less weathered of the two), or the one that just weathered.
+    if (connects && copper_chest(block) && c.type != kSingle && connected_direction(c) == dir)
+        return chest_block(world::block_info_of(neighbour), c);
+    return chest_block(block, c);
+}
+
+// WeatheringCopperChestBlock.randomTick: not the right half of a pair, and not while somebody has
+// it open (ChestBlockEntity.getEntitiesWithContainerOpen - of a pair, both halves count the same).
+bool Game::copper_chest_may_weather(BlockState state, BlockPos pos) const {
+    if (chest_state(state).type == kRight) return false;
+    const world::BlockEntityRef* be = world_.block_entity(pos.x, pos.y, pos.z);
+    return be && ((be->data & kOpaqueBlockEntity) || chests_[be->data].open == 0);
 }
 
 // Containers.dropContents: every stack falls out in pieces of 10 to 30, all pieces of a stack
@@ -132,12 +170,12 @@ void Game::drop_contents(BlockPos pos, ItemStack* items, u32 n) {
 
 // ChestBlock.getStateForPlacement: a chest faces the one who places it, and joins a single chest
 // beside it that faces the same way - or, placed sneaking against the side of one, that one.
-BlockState Game::chest_for_placement(u32 pi, BlockPos at, u32 face) const {
+BlockState Game::chest_for_placement(u32 pi, const world::BlockInfo& block, BlockPos at, u32 face) const {
     // candidatePartnerFacing: the facing of a single chest in direction `dir`, kNone without one.
     const auto partner = [&](u32 dir) {
         const BlockPos n = step(at, dir);
         const BlockState s = world_.block(n.x, n.y, n.z);
-        if (!is_chest(s)) return kNone;
+        if (!chest_connects(block, s)) return kNone;
         const ChestState c = chest_state(s);
         return c.type == kSingle ? c.facing : kNone;
     };
@@ -160,7 +198,21 @@ BlockState Game::chest_for_placement(u32 pi, BlockPos at, u32 face) const {
         else if (c.facing == partner(kCounterClockwise[c.facing]))
             c.type = kRight;
     }
-    return chest_block(c);
+    // CopperChestBlock.getLeastOxidizedChestOfConnectedBlocks: half of a pair is the block of
+    // the less weathered of the two - and of neither's wax, if only one of them has any.
+    if (c.type != kSingle && copper_chest(block)) {
+        const BlockPos n = step(at, connected_direction(c));
+        const world::BlockInfo& other = world::block_info_of(world_.block(n.x, n.y, n.z));
+        if (other.kind == block_kind::kChest && copper_chest(other)) {
+            const bool waxed = block.alt[2] != 0, other_waxed = other.alt[2] != 0;
+            const world::BlockInfo& mine =
+                waxed && !other_waxed ? world::block_info_of(static_cast<BlockState>(block.alt[2])) : block;
+            const world::BlockInfo& theirs =
+                other_waxed && !waxed ? world::block_info_of(static_cast<BlockState>(other.alt[2])) : other;
+            return chest_block(chest_age(block) <= chest_age(other) ? mine : theirs, c);
+        }
+    }
+    return chest_block(block, c);
 }
 
 // ---------------------------------------------------------------------------- clicking a block
@@ -181,14 +233,34 @@ bool Game::use_block(u32 pi, BlockPos pos, BlockState state, const ItemStack& he
             open_menu(pi, Menu::Kind::kCrafting, gen::menu::kCrafting, title_crafting_, 0);
             p.open_pos = pos;
             return true;
-        case block_kind::kFurnace: {  // AbstractFurnaceBlock.useWithoutItem -> FurnaceBlock.openContainer
+        case block_kind::kFurnace: {  // AbstractFurnaceBlock.useWithoutItem -> openContainer of the three
             if (hand != cb::SwingAnimation::kMainHand) return false;
             const world::BlockEntityRef* be = world_.block_entity(pos.x, pos.y, pos.z);
             if (!be) return true;
             const u32 data = be->data;
-            open_menu(pi, Menu::Kind::kFurnace, gen::menu::kFurnace, title_furnace_, 0);
+            // FurnaceMenu, SmokerMenu, BlastFurnaceMenu: one menu, three types and names of it.
+            switch (furnaces_[data].type) {
+                case item::Cooker::kSmoking: open_menu(pi, Menu::Kind::kFurnace, gen::menu::kSmoker, title_smoker_, 0); break;
+                case item::Cooker::kBlasting:
+                    open_menu(pi, Menu::Kind::kFurnace, gen::menu::kBlastFurnace, title_blast_furnace_, 0);
+                    break;
+                default: open_menu(pi, Menu::Kind::kFurnace, gen::menu::kFurnace, title_furnace_, 0); break;
+            }
             p.open_pos = pos;
             p.open_data[0] = data;
+            p.menu.send_all(out(pi), p.threshold, containers(p));
+            return true;
+        }
+        case block_kind::kBarrel: {  // BarrelBlock.useWithoutItem: a ChestMenu of three rows, whatever is on top of it
+            if (hand != cb::SwingAnimation::kMainHand) return false;
+            const world::BlockEntityRef* be = world_.block_entity(pos.x, pos.y, pos.z);
+            if (!be) return true;
+            const u32 barrel = be->data;
+            if (p.menu.kind() != Menu::Kind::kInventory) close_menu(pi, true);
+            chest_opened(barrel);  // Container.startOpen comes before the screen opens
+            open_menu(pi, Menu::Kind::kChest, gen::menu::kGeneric9x3, title_barrel_, 3);
+            p.open_pos = pos;
+            p.open_data[0] = barrel;
             p.menu.send_all(out(pi), p.threshold, containers(p));
             return true;
         }
@@ -205,7 +277,7 @@ bool Game::use_block(u32 pi, BlockPos pos, BlockState state, const ItemStack& he
             if (c.type != kSingle) {
                 const BlockPos other = step(pos, connected_direction(c));
                 const BlockState os = world_.block(other.x, other.y, other.z);
-                if (is_chest(os)) {
+                if (world::block_of(os) == world::block_of(state)) {  // combineWithNeigbour: the same block
                     const ChestState o = chest_state(os);
                     const world::BlockEntityRef* obe = world_.block_entity(other.x, other.y, other.z);
                     if (o.type != kSingle && o.type != c.type && o.facing == c.facing) {
@@ -300,7 +372,7 @@ bool Game::menu_still_valid(u32 pi) {
 // The block entity `data` (a chest or a furnace, by block kind) is gone: every menu on it says
 // what changed one last time (ServerPlayer.tick: broadcastChanges) and closes.
 void Game::close_menus_on(u32 kind, u32 data) {
-    const Menu::Kind menu = kind == block_kind::kChest ? Menu::Kind::kChest : Menu::Kind::kFurnace;
+    const Menu::Kind menu = chest_kind(kind) ? Menu::Kind::kChest : Menu::Kind::kFurnace;
     for (u32 pi = 0; pi < players_.size(); ++pi) {
         Player& p = players_[pi];
         if (p.menu.kind() != menu || (p.open_data[0] != data && p.open_data[1] != data)) continue;
@@ -309,60 +381,80 @@ void Game::close_menus_on(u32 kind, u32 data) {
     }
 }
 
-// ---------------------------------------------------------------------------- chests: who has one open
+// ---------------------------------------------------------------------------- chests and barrels: who has one open
 
-// ChestBlockEntity.playSound: from the middle of the chest - of both halves, for a double one,
-// whose left half stays silent.
-void Game::chest_sound(const Chest& c, u32 sound) {
-    const ChestState s = chest_state(world_.block(c.x, c.y, c.z));
+// ContainerOpenersCounter.onOpen / onClose, as the two block entities have them.
+// ChestBlockEntity.playSound: its block's own sound (wood, copper, copper that has weathered),
+// from the middle of the chest - of both halves, for a double one, whose left half stays silent.
+// BarrelBlockEntity: its sound from the middle of the face that opens, and `open` on the block.
+void Game::lid_moved(u32 chest, bool open) {
+    const BlockPos pos{chests_[chest].x, chests_[chest].y, chests_[chest].z};
+    const BlockState state = world_.block(pos.x, pos.y, pos.z);
+    const world::BlockInfo& info = world::block_info_of(state);
+    const float pitch = random_float() * 0.1f + 0.9f;
+    if (info.kind == block_kind::kBarrel) {
+        const u32 off = state - props::barrel::kFirst;
+        const u32 facing = kBarrelFacing[off / props::barrel::kFacingStride];
+        play_sound(open ? gen::sound::kBlockBarrelOpen : gen::sound::kBlockBarrelClose, cb::Sound::kSourceBlocks,
+                   (pos.x + 0.5) + world::kStepX[facing] / 2.0, (pos.y + 0.5) + world::kStepY[facing] / 2.0,
+                   (pos.z + 0.5) + world::kStepZ[facing] / 2.0, 0.5f, pitch);
+        // updateBlockState: setBlockAndUpdate - the block entity stays, the neighbours hear of it.
+        set_block(pos, static_cast<BlockState>(state - off % props::barrel::kFacingStride + (open ? 0 : 1)));
+        return;
+    }
+    if (info.kind != block_kind::kChest) return;  // (onOpen: the block is no chest any more)
+    const ChestState s = chest_state(state);
     if (s.type == kLeft) return;
-    double x = c.x + 0.5, z = c.z + 0.5;
+    double x = pos.x + 0.5, z = pos.z + 0.5;
     if (s.type == kRight) {
         const u32 dir = connected_direction(s);
         x += world::kStepX[dir] * 0.5;
         z += world::kStepZ[dir] * 0.5;
     }
-    play_sound(sound, cb::Sound::kSourceBlocks, x, c.y + 0.5, z, 0.5f, random_float() * 0.1f + 0.9f);
+    play_sound(info.alt[open ? 0 : 1], cb::Sound::kSourceBlocks, x, pos.y + 0.5, z, 0.5f, pitch);
 }
 
 // ContainerOpenersCounter.incrementOpeners: the first opener is heard and starts the recount;
-// every one moves the lid (ChestBlockEntity.signalOpenCount: a block event with the count).
+// every one moves a chest's lid (ChestBlockEntity.signalOpenCount: a block event with the count -
+// a barrel's openerCountChanged does nothing).
 void Game::chest_opened(u32 chest) {
-    Chest& c = chests_[chest];
-    if (c.open++ == 0) {
-        chest_sound(c, gen::sound::kBlockChestOpen);
+    const BlockPos pos{chests_[chest].x, chests_[chest].y, chests_[chest].z};
+    if (chests_[chest].open++ == 0) {
+        lid_moved(chest, true);
         // ContainerOpenersCounter.scheduleRecheck: a tick of the block (one per chest at a time).
-        schedule_tick({c.x, c.y, c.z}, world_.block(c.x, c.y, c.z), kRecheckDelay);
+        schedule_tick(pos, world_.block(pos.x, pos.y, pos.z), kRecheckDelay);
     }
-    block_event(c.x, c.y, c.z, kEventOpenCount, static_cast<u8>(c.open));
+    if (is_chest(world_.block(pos.x, pos.y, pos.z)))
+        block_event(pos.x, pos.y, pos.z, kEventOpenCount, static_cast<u8>(chests_[chest].open));
 }
 
 // ContainerOpenersCounter.decrementOpeners
 void Game::chest_closed(u32 chest) {
-    Chest& c = chests_[chest];
-    if (c.open > 0 && --c.open == 0) chest_sound(c, gen::sound::kBlockChestClose);
-    block_event(c.x, c.y, c.z, kEventOpenCount, static_cast<u8>(c.open));
+    const BlockPos pos{chests_[chest].x, chests_[chest].y, chests_[chest].z};
+    if (chests_[chest].open > 0 && --chests_[chest].open == 0) lid_moved(chest, false);
+    if (is_chest(world_.block(pos.x, pos.y, pos.z)))
+        block_event(pos.x, pos.y, pos.z, kEventOpenCount, static_cast<u8>(chests_[chest].open));
 }
 
-// ChestBlock.tick -> ChestBlockEntity.recheckOpen -> ContainerOpenersCounter.recheckOpeners:
+// ChestBlock.tick / BarrelBlock.tick -> recheckOpen -> ContainerOpenersCounter.recheckOpeners:
 // every five ticks an open chest counts again who has it open and says so - which is how someone
 // who comes into view later sees its lid up.
 void Game::recheck_chest(BlockPos pos) {
     const world::BlockEntityRef* be = world_.block_entity(pos.x, pos.y, pos.z);
-    if (!be || be->type != be_type::kChest || (be->data & kOpaqueBlockEntity)) return;
+    const bool barrel = be && be->type == be_type::kBarrel;
+    if (!be || (be->type != be_type::kChest && !barrel) || (be->data & kOpaqueBlockEntity)) return;
     const u32 chest = be->data;
-    Chest& c = chests_[chest];
     u32 open = 0;
     for (const Player& p : players_)
         open += p.menu.kind() == Menu::Kind::kChest && (p.open_data[0] == chest || p.open_data[1] == chest);
-    if (open != c.open) {
-        if (open != 0 && c.open == 0)
-            chest_sound(c, gen::sound::kBlockChestOpen);
+    if (const u32 was = chests_[chest].open; open != was) {
+        chests_[chest].open = static_cast<u16>(open);
+        if (open != 0 && was == 0)
+            lid_moved(chest, true);
         else if (open == 0)
-            chest_sound(c, gen::sound::kBlockChestClose);
-        c.open = static_cast<u16>(open);
+            lid_moved(chest, false);
     }
-    block_event(c.x, c.y, c.z, kEventOpenCount, static_cast<u8>(open));
+    if (!barrel) block_event(pos.x, pos.y, pos.z, kEventOpenCount, static_cast<u8>(open));
     if (open > 0) schedule_tick(pos, world_.block(pos.x, pos.y, pos.z), kRecheckDelay);
 }
 
@@ -408,10 +500,10 @@ void Game::tick_furnaces() {
         Furnace::Ticked t = f.tick();
         const BlockPos pos{f.x, f.y, f.z};
         if (UNLIKELY(t.lit_changed)) {  // the block's `lit` follows: it glows, and the light with it
-            const u32 off = world_.block(pos.x, pos.y, pos.z) - props::furnace::kFirst;
-            set_block(pos, static_cast<BlockState>(props::furnace::kFirst +
-                                                   off / props::furnace::kFacingStride * props::furnace::kFacingStride +
-                                                   (t.lit ? 0 : 1)));
+            const BlockState state = world_.block(pos.x, pos.y, pos.z);
+            set_block(pos, static_cast<BlockState>(
+                               state - (state - world::block_info_of(state).first_state) % props::furnace::kFacingStride +
+                               (t.lit ? 0 : 1)));
         }
         if (UNLIKELY(!t.spilled.empty())) drop_contents(pos, &t.spilled, 1);  // Containers.dropItemStack
     }

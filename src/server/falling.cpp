@@ -129,9 +129,11 @@ void Game::tick_falling(u32 slot, u32 row) {
         if (world::block_of(current) != world::block_of(gen::block::kMovingPiston)) {
             if (f.cancel_drop) return discard(false);
             // canBeReplaced(new DirectionalPlaceContext(..., ItemStack.EMPTY, ...)): what gives way to a block
-            // set into it. (A class with a rule of its own for that is none of the ported ones: it does not.)
-            const bool may_replace =
-                world::is_replaceable(current) && !(world::block_info_of(current).flags & block_flag::kCustomReplace);
+            // set into it. (A class with a rule of its own for that: a slab never does, and petals and leaf
+            // litter - which make room for more of themselves only - do as any block of theirs would.)
+            const world::BlockInfo& there = world::block_info_of(current);
+            const bool may_replace = world::is_replaceable(current) &&
+                                     (!(there.flags & block_flag::kCustomReplace) || there.kind == gen::block_kind::kSegmented);
             const bool would_go_on =
                 (st::kHooks[state_for_client({pos.x, pos.y - 1, pos.z})] & st::kFallThrough) && (!concrete || !in_water);
             if (may_replace && can_survive(state, pos) && !would_go_on) {

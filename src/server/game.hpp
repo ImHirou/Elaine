@@ -43,6 +43,12 @@ namespace server {
 // section sign (server/chat.cpp).
 bool chat_allowed(std::string_view s);
 
+// The block kinds whose block entity is a Chest (Game::chests_): a chest of any kind, and a barrel.
+constexpr bool chest_kind(u32 kind) { return kind == proto::gen::block_kind::kChest || kind == proto::gen::block_kind::kBarrel; }
+// #copper_chests, of a block of kind kChest: it weathers, or is one that would but for its wax
+// (BlockInfo::alt[2], see kPlaceChest).
+constexpr bool copper_chest(const world::BlockInfo& chest) { return chest.weather != 0 || chest.alt[2] != 0; }
+
 // The chunk a block coordinate is in (SectionPos.blockToSectionCoord).
 inline i32 chunk_of(double v) { return proto::floor_int(v) >> 4; }
 
@@ -233,7 +239,9 @@ class Game {
     void drop_block_entities(world::Chunk& c);
     void free_block_entity(u32 kind, u32 data);
     u32 new_chest(proto::BlockPos pos);
-    u32 new_furnace(proto::BlockPos pos);
+    u32 new_furnace(proto::BlockPos pos, item::Cooker type);
+    // AbstractFurnaceBlockEntity's recipeType, by the type of the block entity.
+    static item::Cooker cooker_of(u32 block_entity_type);
     void keepalives(u64 now);
     u64 flush();  // returns the bytes handed to the reactors
     void kick(u32 pi, std::string_view reason);
@@ -427,6 +435,7 @@ class Game {
     u32 raw_brightness(proto::BlockPos pos) const;
     void recheck_chest(proto::BlockPos pos);
     world::BlockState chest_update_shape(world::BlockState state, u32 dir, world::BlockState neighbour) const;
+    bool copper_chest_may_weather(world::BlockState state, proto::BlockPos pos) const;
     // ---- blocks whose state is their shape: slabs, stairs, fences, panes, walls... (server/block_shapes.cpp)
     world::BlockState shaped_for_placement(u32 pi, const proto::sb::UseItemOn& u, const world::BlockInfo& block, u32 kind,
                                            proto::BlockPos at, bool replacing_clicked) const;
@@ -453,14 +462,14 @@ class Game {
 
     // ---- block entities and the menus on them (server/block_entities.cpp)
     bool use_block(u32 pi, proto::BlockPos pos, world::BlockState state, const ItemStack& held, u32 hand);
-    world::BlockState chest_for_placement(u32 pi, proto::BlockPos at, u32 face) const;
+    world::BlockState chest_for_placement(u32 pi, const world::BlockInfo& block, proto::BlockPos at, u32 face) const;
     void open_menu(u32 pi, Menu::Kind kind, u32 menu_type, std::span<const u8> title, u32 rows);
     void close_menu(u32 pi, bool tell_client);
     bool menu_still_valid(u32 pi);
     void close_menus_on(u32 kind, u32 data);
     void chest_opened(u32 chest);
     void chest_closed(u32 chest);
-    void chest_sound(const Chest& c, u32 sound);
+    void lid_moved(u32 chest, bool open);
     void block_event(i32 x, i32 y, i32 z, u8 b0, u8 b1);
     void run_block_events();
     void tick_furnaces();
@@ -599,7 +608,8 @@ class Game {
     std::vector<i8> item_health_;    // ItemEntity.health: 5, less what explosions took
     Effects effects_;                // what the menu operation being handled asks of the world
 
-    // Block entities: what a chest and a furnace hold. A world::BlockEntityRef's `data` is the
+    // Block entities: what a chest (of wood or copper; a barrel too) and a furnace (a smoker, a
+    // blast furnace) hold. A world::BlockEntityRef's `data` is the
     // index here; entries are reused (alive = false in between), never moved, so that the menus
     // open on them can name them by index. Furnaces are walked every tick: the ones that
     // neither burn nor could start to are skipped by one test (Furnace::idle).
@@ -631,7 +641,8 @@ class Game {
     std::vector<Falling> falling_;    // by entity slot
     std::vector<u32> falling_slots_;  // the falling blocks there are: what a block being placed, or an explosion, looks through
     // Menu titles, as the text components vanilla sends (text::transcode), and update_recipes.
-    std::vector<u8> title_chest_, title_double_chest_, title_furnace_, title_crafting_;
+    std::vector<u8> title_chest_, title_double_chest_, title_furnace_, title_crafting_, title_barrel_, title_smoker_,
+        title_blast_furnace_;
     base::ByteBuf recipes_frame_;
 
     // Primed TNT, by slot: what an explosion looks through for others to push.

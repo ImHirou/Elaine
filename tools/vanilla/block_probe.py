@@ -22,8 +22,11 @@ at which the sky gives grass light enough to spread. Then the blocks whose state
 stairs that turn corners and stop turning them, slabs by the half that is clicked and two halves
 that become one block, fences, panes and walls that reach for what stands beside them and let
 go of it, a wall under a block, a torch and a wall, lanterns that hang and stand and fall, chains,
-end rods, glazed terracotta, mushroom blocks - by hand, and by `/setblock` and `/fill`. Last, TNT
-on five sides of a block of redstone.
+end rods, glazed terracotta, mushroom blocks - by hand, and by `/setblock` and `/fill`. Then
+plants: a poppy, a dead bush, an azalea and a cactus flower on what holds them and on what does
+not, leaf litter and petals up to four to a block, what gives way to a stone that is set into it,
+the ground dug from under them; barrels by where their player looks. Last, TNT on five sides of a
+block of redstone.
 
 `vanilla` starts the reference server under the rules in AGENTS.md (from .cache/vanilla-server/,
 the cached jar, Java 25; gamemode=creative, level-type=flat, spawn-protection=0,
@@ -272,7 +275,7 @@ def record(port: int, out_path: str, name_a: str, name_b: str, random_ticks=None
     # ---- random ticks
     if random_ticks:
         at = place(2)
-        hotbar("kStone", "kDirt", "kCopperBlock", "kBuddingAmethyst", "kCrimsonNylium", "kCutCopperStairs")
+        hotbar("kStone", "kDirt", "kCopperBlock", "kBuddingAmethyst", "kCrimsonNylium", "kCutCopperStairs", "kCopperChest")
         grass, dirt = mc.BLOCK["kGrassBlock"], mc.BLOCK["kDirt"]
         cluster = range(mc.BLOCK["kAmethystCluster"] - 9, mc.BLOCK["kAmethystCluster"] + 3)   # its twelve states
         random_ticks(True)
@@ -299,6 +302,15 @@ def record(port: int, out_path: str, name_a: str, name_b: str, random_ticks=None
              lambda: (b.select(0), b.use(at(0, 0, 2)), b.select(5), b.look(-90.0, 0.0),
                       b.use(at(0, 1, 2), face=EAST, cursor=(1.0, 0.75, 0.5)), b.look(0.0, 0.0)), ticks=2400,
              until=lambda blocks: blocks.get(at(1, 1, 2)) == oxidized, about=[at(1, 1, 2)])
+        # A copper chest weathers too - a pair of them as one: whenever a client is told, both halves are the same block.
+        aged = {mc.BLOCK[k] - 1: n for n, k in enumerate(("kCopperChest", "kExposedCopperChest", "kWeatheredCopperChest",
+                                                          "kOxidizedCopperChest"))}     # first state of each -> its age
+
+        def pair_is(blocks: dict, age: int) -> bool:
+            left, right = blocks.get(at(2, 1, 5)), blocks.get(at(3, 1, 5))
+            return left is not None and right is not None and aged.get(left - 3) == age and aged.get(right - 5) == age
+        step("B places two copper chests side by side: the pair weathers", lambda: (b.select(6), b.use(at(2, 0, 5)), b.use(at(3, 0, 5))),
+             ticks=2400, until=lambda blocks: pair_is(blocks, 1), about=[at(2, 1, 5), at(3, 1, 5)])
         step("and then it is quiet", ticks=30, about=untouched + buds + [at(5, 1, 0), at(1, 1, 3), at(1, 1, 2)])
         if console:
             # The time of day. Grass spreads where the light above it is nine or more - the sky's
@@ -412,8 +424,55 @@ def record(port: int, out_path: str, name_a: str, name_b: str, random_ticks=None
         step("the console fills the row with air, destroying", ticks=12,
              action=lambda: console("fill {} {} {} {} {} {} minecraft:air destroy".format(*at(-3, 1, -4), *at(-1, 1, -4))))
 
-    # ---- TNT, last, for what it leaves: a signal reaches the six blocks around it in an order
+    # ---- plants: what they stand on, how many lie in one block, what gives way to a block and what breaks
     at = place(5)
+    hotbar("kStone", "kPoppy", "kPinkPetals", "kLeafLitter", "kShortGrass", "kDeadBush", "kSand", "kCactusFlower", "kAzalea")
+
+    def sneak(on: bool) -> None:
+        b.c.send("player_input", bytes([0x20 if on else 0]))   # the shift bit of player_input
+
+    step("B places a poppy on the grass, and tries one on a stone",
+         lambda: (b.select(1), b.use(at(0, 0, 2)), b.select(0), b.use(at(1, 0, 2)), b.select(1), b.use(at(1, 1, 2))))
+    step("B tries a dead bush on the stone, and places one on sand",
+         lambda: (b.select(5), b.use(at(1, 1, 2)), b.select(6), b.use(at(2, 0, 2)), b.select(5), b.use(at(2, 1, 2))))
+    step("B tries an azalea on the stone, and places a cactus flower there", lambda: (b.select(8), b.use(at(1, 1, 2)), b.select(7), b.use(at(1, 1, 2))))
+    step("B places an azalea on the grass", lambda: (b.select(8), b.use(at(2, 0, 4))))
+    step("B places leaf litter on a stone", lambda: (b.select(0), b.use(at(3, 0, 2)), b.select(3), b.use(at(3, 1, 2))))
+    step("...a second onto it", lambda: b.use(at(3, 2, 2)))
+    step("...a third and a fourth", lambda: (b.use(at(3, 2, 2)), b.use(at(3, 2, 2))))
+    step("...and a fifth, which has nowhere to go", lambda: b.use(at(3, 2, 2)))
+    step("B places petals on the grass", lambda: (b.select(2), b.use(at(-1, 0, 2))))
+    step("...two more, by the ground under them", lambda: (b.use(at(-1, 0, 2)), b.use(at(-1, 0, 2))))
+    step("B, sneaking, clicks the ground under them with petals", lambda: (sneak(True), b.use(at(-1, 0, 2)), sneak(False)))
+    step("...and not sneaking: the fourth", lambda: b.use(at(-1, 0, 2)))
+    step("B, looking west, places petals and leaf litter", lambda: (b.look(90.0, 0.0), b.use(at(-1, 0, 3)), b.select(3), b.use(at(-1, 0, 4)),
+                                                                     b.look(0.0, 0.0)))
+    step("B places short grass, and tries short grass on it", lambda: (b.select(4), b.use(at(-2, 0, 2)), b.use(at(-2, 1, 2))))
+    step("B sets a stone into the short grass, into the leaf litter, and against the poppy",
+         lambda: (b.select(0), b.use(at(-2, 1, 2)), b.use(at(3, 2, 2)), against(at(0, 1, 2), NORTH)))
+    step("B clicks the petals with a stone: it is set over them", lambda: b.use(at(-1, 1, 3)))
+    step("B digs the ground from under the poppy", lambda: b.dig(at(0, 0, 2)), ticks=12)
+    step("B digs the ground from under the four petals", lambda: b.dig(at(-1, 0, 2)), ticks=12)
+    step("B breaks the stone under the cactus flower", lambda: b.dig(at(1, 1, 2)), ticks=12)
+    step("B places a stone, litter on it, and breaks the stone", lambda: (b.select(0), b.use(at(4, 0, 4)), b.select(3), b.use(at(4, 1, 4)),
+                                                                          b.use(at(4, 2, 4)), b.dig(at(4, 1, 4))), ticks=12)
+    if console:
+        step("the console sets a poppy in the air, and one on the grass",
+             lambda: (setblock(at(5, 3, 2), "minecraft:poppy"), setblock(at(5, 1, 2), "minecraft:poppy")), ticks=10)
+        step("the console sets full petals facing east, and destroys them",
+             lambda: (setblock(at(5, 1, 3), "minecraft:wildflowers[facing=east,flower_amount=4]"),
+                      setblock(at(5, 1, 3), "minecraft:air destroy")), ticks=12)
+        step("the console sets a barrel, open, and a smoker, lit", ticks=10,
+             action=lambda: (setblock(at(5, 1, 5), "minecraft:barrel[facing=up,open=true]"), setblock(at(4, 1, 5), "minecraft:smoker[lit=true]")))
+    hotbar("kBarrel", "kSmoker", "kBlastFurnace")
+    step("B places a barrel looking south, looking up, and looking down", ticks=10,
+         action=lambda: (b.select(0), b.use(at(-2, 0, 5)), b.look(0.0, -90.0), b.use(at(-1, 0, 5)),
+                         b.look(0.0, 90.0), b.use(at(0, 0, 5)), b.look(0.0, 0.0)))
+    step("B, looking east, places a smoker and a blast furnace", ticks=10,
+         action=lambda: (b.look(-90.0, 0.0), b.select(1), b.use(at(1, 0, 5)), b.select(2), b.use(at(2, 0, 5)), b.look(0.0, 0.0)))
+
+    # ---- TNT, last, for what it leaves: a signal reaches the six blocks around it in an order
+    at = place(6)
     hotbar("kStone", "kTnt", "kRedstoneBlock")
     step("B places TNT west, east, south and north of an empty place",
          lambda: (b.select(1), b.use(at(-1, 0, 3)), b.use(at(1, 0, 3)), b.use(at(0, 0, 4)), b.use(at(0, 0, 2))))

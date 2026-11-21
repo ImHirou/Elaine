@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""What does a server do with a chest, a furnace, a crafting grid and TNT? Record it, on vanilla
-and on ours, and diff.
+"""What does a server do with a chest, a furnace, a crafting grid and TNT - and with a smoker, a
+blast furnace, a barrel and chests of copper? Record it, on vanilla and on ours, and diff.
 
     container_probe.py record <port> <out.json> [nameA nameB]
     container_probe.py diff <vanilla.json> <ours.json>
@@ -9,8 +9,9 @@ and on ours, and diff.
 `record` joins two bots (tests/integration/mcproto.py, offline mode, creative): B acts, A stands
 three blocks away and watches - and reaches into B's chest once. B places a chest and opens it,
 moves stacks, the two have it open together, B makes it a double chest and breaks half of it;
-crafts in its inventory's grid and at a crafting table; feeds a furnace and breaks it; lights a
-TNT beside a second one. Every packet either of them receives about a menu, a block, a block
+crafts in its inventory's grid and at a crafting table; feeds a furnace and breaks it; feeds a
+smoker and a blast furnace; fills a barrel, with A looking into it; makes pairs of copper chests of
+different ages and waxes; lights a TNT beside a second one. Every packet either of them receives about a menu, a block, a block
 event, a sound, an explosion, primed TNT or an item on the ground is logged per step. `diff`
 lines two recordings up step by step.
 
@@ -25,8 +26,11 @@ level-type=flat, spawn-protection=0):
 
 Reading the diff:
   * Use names vanilla has not seen, and a spot it has not seen either: it saves players and the
-    world, so a second recording finds the first one's crater. (`record` picks a spot from the
-    names; delete .cache/vanilla-server/ref-flat/ to start over.)
+    world, so a second recording finds the first one's crater - where nothing can be placed.
+    Best a world of its own for every recording: start vanilla with `--world <a new name>`.
+  * What is chance on one server is chance between two: a spilled stack falls into pieces of
+    10 to 30, and a bot picks up what slides its way - from then on its inventory is another
+    in every menu it is sent. Record each server twice and believe what differs in both pairs.
   * Positions are written relative to the block B stands on when it begins, so that the two
     servers' spawn points do not matter. Entity ids, UUIDs and sound seeds are cut.
   * What is random in vanilla is not compared value by value: the pitch of a chest's lid, which
@@ -57,6 +61,8 @@ from mcproto import ITEM, varint  # noqa: E402
 
 MENU = {"container_set_content", "container_set_slot", "set_cursor_item", "set_player_inventory", "container_close",
         "container_set_data", "open_screen"}
+# What a chest of any kind and a barrel are heard as: at a pitch that is drawn.
+LID_SOUNDS = {v for k, v in mc.SOUND.items() if k.startswith(("kBlockChest", "kBlockCopperChest", "kBlockBarrel"))}
 WORLD = {"block_update", "section_blocks_update", "block_event", "sound", "explode", "block_entity_data", "level_event"}
 ENTITY = {"add_entity", "set_entity_data", "remove_entities", "move_entity_pos", "move_entity_pos_rot", "entity_position_sync",
           "set_entity_motion", "swing_animation", "bundle_delimiter"}
@@ -217,6 +223,88 @@ def record(port: int, out_path: str, name_a: str, name_b: str) -> None:
     step("B takes the cobblestone out", lambda: b.wclick(0, 0, PICKUP))
     step("B breaks the furnace", lambda: b.dig(at(0, 1, 2)), ticks=10)
 
+    # The rest happens ten blocks north of what was spilled so far, and a block further from B
+    # than before: whether a bot picks up an item that slides its way is chance, and what it
+    # has picked up is in every menu it is sent from then on.
+    near = at
+    walk(b, ox + 0.5, oz - 9.5)
+    walk(a, ox + 3.5, oz - 9.5)
+    for bot in (a, b):
+        bot.look(0.0, 0.0)
+
+    def at(dx: int, dy: int, dz: int) -> tuple:     # noqa: F811
+        return (ox + dx, oy + dy, oz - 10 + dz + 1)
+    step("the two walk north", ticks=10)
+
+    # ---- a smoker and a blast furnace: each with what it cooks, what the other cooks, and coal
+    for n, block in enumerate(("kSmoker", "kBlastFurnace")):
+        what = "smoker" if n == 0 else "blast furnace"
+        step(f"B empties its hotbar and takes a {what}", lambda block=block: (
+            [b.give(slot, None) for slot in range(36, 45)], b.give(36, block), b.give(37, "kBeef", 3),
+            b.give(38, "kIronOre", 3), b.give(39, "kCoal", 2)))
+        step(f"B places the {what}", lambda: (b.select(0), b.use(at(0, 0, 2))))
+        step(f"B opens the {what}", lambda: b.use(at(0, 1, 2)))
+        step(f"B shift-clicks beef, ore and coal into the {what}",
+             lambda: (b.wclick(31, 0, QUICK_MOVE), b.wclick(32, 0, QUICK_MOVE), b.wclick(33, 0, QUICK_MOVE)))
+        step(f"the {what} burns for 10 ticks", ticks=10)
+        step(f"B takes out of the {what} what cooks and puts it back", lambda: (b.wclick(0, 0, PICKUP), b.wclick(0, 0, PICKUP)))
+        step(f"the {what} burns for 10 ticks more", ticks=10)
+        step(f"B closes the {what}", b.close)
+        step(f"B breaks the {what}", lambda: b.dig(at(0, 1, 2)), ticks=10)
+
+    # ---- a barrel
+    step("B takes barrels and stone", lambda: ([b.give(slot, None) for slot in range(36, 45)], b.give(36, "kBarrel", 2),
+                                               b.give(37, "kStone", 20)))
+    step("B places a barrel", lambda: (b.select(0), b.use(at(0, 0, 2))))
+    step("B opens the barrel", lambda: b.use(at(0, 1, 2)))
+    step("B shift-clicks its stone into the barrel", lambda: b.wclick(55, 0, QUICK_MOVE))
+    step("A opens the barrel too", lambda: a.use(at(0, 1, 2)))
+    step("both keep the barrel open for 12 ticks", ticks=12)
+    step("B closes the barrel", b.close)
+    step("A closes the barrel", a.close)
+    step("B looks down and places a second barrel", lambda: (b.look(0.0, 90.0), b.use(at(1, 0, 2)), b.look(0.0, 0.0)))
+    step("B opens the second barrel", lambda: b.use(at(1, 1, 2)))
+    step("B closes the second barrel", b.close)
+    step("B breaks the barrel with the stone in it", lambda: b.dig(at(0, 1, 2)), ticks=10)
+    step("B breaks the other barrel", lambda: b.dig(at(1, 1, 2)))
+
+    # ---- copper chests: an old one and a new one become a pair of the new block
+    step("B takes copper chests", lambda: (
+        [b.give(slot, None) for slot in range(36, 45)], b.give(36, "kOxidizedCopperChest", 2), b.give(37, "kCopperChest", 2),
+        b.give(38, "kStone", 20), b.give(39, "kWaxedOxidizedCopperChest", 2), b.give(40, "kExposedCopperChest", 2),
+        b.give(41, "kWaxedCopperChest", 2), b.give(42, "kChest", 2)))
+    step("B places an oxidized copper chest", lambda: (b.select(0), b.use(at(0, 0, 2))))
+    step("B opens the oxidized chest", lambda: b.use(at(0, 1, 2)))
+    step("B shift-clicks stone into the oxidized chest", lambda: b.wclick(56, 0, QUICK_MOVE))
+    step("B closes the oxidized chest", b.close)
+    step("A opens the oxidized chest", lambda: a.use(at(0, 1, 2)))
+    step("B places a new copper chest beside it", lambda: (b.select(1), b.use(at(1, 0, 2))))
+    step("A keeps the copper screen for 12 ticks", ticks=12)
+    step("A closes the copper screen", a.close)
+    step("B opens the copper pair", lambda: b.use(at(1, 1, 2)))
+    step("B closes the copper pair", b.close)
+    step("B places a wooden chest beside the pair", lambda: (b.select(6), b.use(at(2, 0, 2))))
+    step("B breaks the wooden chest", lambda: b.dig(at(2, 1, 2)))
+    step("B breaks the copper half with the stone", lambda: b.dig(at(0, 1, 2)), ticks=10)
+    step("B breaks the other copper half", lambda: b.dig(at(1, 1, 2)))
+    step("B places a waxed oxidized copper chest", lambda: (b.select(3), b.use(at(0, 0, 2))))
+    step("B places an exposed one beside the waxed", lambda: (b.select(4), b.use(at(1, 0, 2))))
+    step("B breaks those two", lambda: (b.dig(at(0, 1, 2)), b.dig(at(1, 1, 2))))
+    step("B places a waxed copper chest", lambda: (b.select(5), b.use(at(0, 0, 2))))
+    step("B places an oxidized one beside the waxed", lambda: (b.select(0), b.use(at(1, 0, 2))))
+    step("B breaks those two as well", lambda: (b.dig(at(0, 1, 2)), b.dig(at(1, 1, 2))))
+    step("B places a waxed oxidized copper chest again", lambda: (b.select(3), b.use(at(0, 0, 2))))
+    step("B places a waxed new one beside the waxed", lambda: (b.select(5), b.use(at(1, 0, 2))))
+    step("B breaks the waxed pair", lambda: (b.dig(at(0, 1, 2)), b.dig(at(1, 1, 2))))
+    step("B takes TNT again", lambda: ([b.give(slot, None) for slot in range(36, 45)], b.give(42, "kTnt", 2),
+                                       b.give(43, "kFlintAndSteel")))
+    walk(b, ox + 0.5, oz + 0.5)
+    walk(a, ox + 3.5, oz + 0.5)
+    for bot in (a, b):
+        bot.look(0.0, 0.0)
+    at = near
+    step("the two walk back", ticks=10)
+
     # ---- TNT
     step("B places two TNT, four blocks ahead", lambda: (b.select(6), b.use(at(0, 0, 4)), b.use(at(1, 0, 4))))
     step("B lights the first", lambda: (b.select(7), b.use(at(0, 1, 4))), ticks=20)
@@ -260,7 +348,7 @@ def _normalise(rec: dict, who: str) -> dict[str, list]:
                 sound, source = r.varint() - 1, r.varint()
                 pos = tuple(v / 8 - o for v, o in zip((r.i32(), r.i32(), r.i32()), origin))
                 volume, pitch = r.f32(), r.f32()
-                random_pitch = sound in (mc.SOUND["kBlockChestOpen"], mc.SOUND["kBlockChestClose"])
+                random_pitch = sound in LID_SOUNDS
                 text = f"{sound} source {source} at {pos} volume {volume} pitch {'0.9..1' if random_pitch and 0.9 <= pitch < 1 else pitch}"
                 # Only the sounds this server makes at all: a flat world is full of slimes, players
                 # have footsteps, and a placed block is heard (docs/architecture.md lists those).

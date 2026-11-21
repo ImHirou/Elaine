@@ -27,8 +27,8 @@ struct Index {
     // RecipeManager tries them in. recipes[first[item] .. first[item + 1]).
     std::vector<u32> first;
     std::vector<u16> recipes;
-    std::vector<u16> smelt;             // per item: its smelting recipe + 1, 0 = none
-    std::vector<PatchId> result_patch;  // rc::kPatchBytes, interned; held for the life of the process
+    std::vector<u16> cook[rc::kCookers];  // per cooker, per item: its recipe + 1, 0 = none
+    std::vector<PatchId> result_patch;    // rc::kPatchBytes, interned; held for the life of the process
 
     Index() {
         const u32 items = world::item_count();
@@ -59,12 +59,12 @@ struct Index {
             recipes.insert(recipes.end(), by_item[item].begin(), by_item[item].end());
         }
         first[items] = static_cast<u32>(recipes.size());
-        // The first smelting recipe, in id order, that takes the item.
-        smelt.assign(items, 0);
-        for (u32 i = rc::kSmeltingCount; i-- > 0;) {
-            const u32 ing = rc::kSmelting[i].ingredient;
+        // The first cooking recipe of each type, in id order, that takes the item.
+        for (auto& table : cook) table.assign(items, 0);
+        for (u32 i = rc::kCookingCount; i-- > 0;) {
+            const u32 ing = rc::kCooking[i].ingredient;
             for (u32 k = rc::kIngredientFirst[ing]; k < rc::kIngredientFirst[ing + 1]; ++k)
-                smelt[rc::kIngredientItems[k]] = static_cast<u16>(i + 1);
+                cook[rc::kCooking[i].type][rc::kIngredientItems[k]] = static_cast<u16>(i + 1);
         }
     }
     ~Index() {
@@ -183,17 +183,20 @@ bool transmute(const rc::Crafting& c, const Input& in, ItemStack* out) {
 
 }  // namespace
 
-Smelting smelting(u32 item) {
-    const u16 at = index().smelt[item];
+static_assert(static_cast<u32>(Cooker::kSmelting) == rc::kSmelting && static_cast<u32>(Cooker::kSmoking) == rc::kSmoking &&
+              static_cast<u32>(Cooker::kBlasting) == rc::kBlasting && rc::kCookers == 3);
+
+Smelting cooking(Cooker type, u32 item) {
+    const u16 at = index().cook[static_cast<u32>(type)][item];
     if (!at) return {};
-    const rc::Smelting& s = rc::kSmelting[at - 1];
+    const rc::Cooking& s = rc::kCooking[at - 1];
     return {s.result, s.count, s.ticks, s.experience};
 }
 
-u32 fuel_ticks(const ItemStack& s) {
+u32 fuel_ticks(const ItemStack& s, bool fast) {
     if (s.empty()) return 0;
     if (UNLIKELY(s.has_patch()) && patches().find(s.patch(), component::kCookingFuel).state == Patches::State::kRemoved) return 0;
-    return s.info().fuel_ticks;
+    return fast ? s.info().fuel_ticks_fast : s.info().fuel_ticks;
 }
 
 ItemStack craft(const ItemStack* grid, u32 width, u32 height) {
