@@ -21,6 +21,7 @@ struct Prelogin::Pre {
     u8 view_distance = 10;
     u8 skin_parts = 0;  // ClientInformation.createDefault(): what a client that never sends its options gets
     u8 main_hand = 1;
+    u8 chat_visibility = 0;
 };
 
 void encode_join(base::ByteBuf& out, const JoinInfo& j) {
@@ -38,6 +39,7 @@ void encode_join(base::ByteBuf& out, const JoinInfo& j) {
     p = put_u8(p, j.view_distance);
     p = put_u8(p, j.skin_parts);
     p = put_u8(p, j.main_hand);
+    p = put_u8(p, j.chat_visibility);
     p = put_str(p, j.remote);
     out.commit(p);
 }
@@ -57,6 +59,7 @@ bool decode_join(const u8* data, usize n, JoinInfo& out) {
     out.view_distance = r.u8v();
     out.skin_parts = r.u8v();
     out.main_hand = r.u8v();
+    out.chat_visibility = r.u8v();
     out.remote = std::string(r.str(128));
     return r.ok;
 }
@@ -267,6 +270,7 @@ void Prelogin::config(Reactor& r, Conn& c, u32 id, Reader& rd) {
         if (rd.ok) {
             pre.skin_parts = info.skin_parts;
             pre.main_hand = info.main_hand == 1 ? 1 : 0;  // HumanoidArm.BY_ID: anything unknown is LEFT
+            pre.chat_visibility = sb::ClientInformation::visibility(info.chat_visibility);
         }
     } else if (id == ids::configuration::sb::kSelectKnownPacks) {
         if (pre.stage != Stage::KnownPacks) {
@@ -303,6 +307,7 @@ void Prelogin::config(Reactor& r, Conn& c, u32 id, Reader& rd) {
         j.props = std::move(pre.props);
         j.view_distance = pre.view_distance;
         j.skin_parts = pre.skin_parts;
+        j.chat_visibility = pre.chat_visibility;
         j.main_hand = pre.main_hand;
         j.remote = c.remote;
         base::ByteBuf blob(512);

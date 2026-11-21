@@ -287,6 +287,50 @@ std::string selector(std::string_view text, cmd::Type type, cmd::Selector* out =
 
 }  // namespace
 
+// MessageArgument: the rest of the line, at most 256 characters of it; for a source that may use
+// selectors, the selectors in it and where they stand.
+TEST(CommandArguments, Messages) {
+    Registry r;
+    r.add("me <action:message>", cmd::kAll, &nothing);
+    const auto message = [&](std::string_view line, u8 level, cmd::Value& out) {
+        cmd::Parsed p;
+        r.parse(line, level, p);
+        if (!p.run) return p.error.message.plain() + " @" + std::to_string(p.error.cursor);
+        out = p.steps.back().value;
+        return std::string("ok");
+    };
+    cmd::Value v;
+    ASSERT_EQ(message("me waves at @a and @e[type=pig] !", cmd::kAll, v), "ok");
+    EXPECT_EQ(v.type, cmd::Type::kMessage);
+    EXPECT_EQ(v.text, "waves at @a and @e[type=pig] !");
+    EXPECT_TRUE(v.parts.empty()) << "who may not use selectors has none read";
+    ASSERT_EQ(message("me waves at @a and @e[type=pig] !", cmd::kGamemasters, v), "ok");
+    EXPECT_EQ(v.text, "waves at @a and @e[type=pig] !");
+    ASSERT_EQ(v.parts.size(), 2u);
+    EXPECT_EQ(v.text.substr(v.parts[0].start, v.parts[0].end - v.parts[0].start), "@a");
+    EXPECT_EQ(v.text.substr(v.parts[1].start, v.parts[1].end - v.parts[1].start), "@e[type=pig]");
+    EXPECT_FALSE(v.parts[0].selector.includes_entities);
+    EXPECT_TRUE(v.parts[1].selector.includes_entities);
+    // An '@' that begins no selector is a character: a mail address, an '@' at the end.
+    ASSERT_EQ(message("me mail me@example.org or @ or @", cmd::kOwners, v), "ok");
+    ASSERT_EQ(v.parts.size(), 1u);
+    EXPECT_EQ(v.text.substr(v.parts[0].start, v.parts[0].end - v.parts[0].start),
+              "@e");  // of "me@example.org": vanilla's reading too
+    ASSERT_EQ(message("me a@b @x @", cmd::kOwners, v), "ok");
+    EXPECT_TRUE(v.parts.empty());
+    // Any other mistake in a selector is the message's mistake - for who has them read.
+    EXPECT_EQ(message("me hi @e[type=nothing]", cmd::kOwners, v), "Invalid or unknown entity type 'minecraft:nothing' @14");
+    EXPECT_EQ(message("me hi @e[type=nothing]", cmd::kAll, v), "ok");
+    // 256 characters, as Java counts them; the complaint names no place.
+    EXPECT_EQ(message("me " + std::string(256, 'a'), cmd::kAll, v), "ok");
+    EXPECT_EQ(message("me " + std::string(257, 'a'), cmd::kAll, v),
+              "Chat message was too long (257 > maximum 256 characters) @-1");
+    std::string emoji;
+    for (u32 i = 0; i < 128; ++i) emoji += "\xF0\x9F\x98\x80";
+    EXPECT_EQ(message("me " + emoji, cmd::kAll, v), "ok");
+    EXPECT_EQ(message("me " + emoji + "a", cmd::kAll, v), "Chat message was too long (257 > maximum 256 characters) @-1");
+}
+
 TEST(CommandArguments, EntitySelectors) {
     using T = cmd::Type;
     using Check = cmd::Selector::Test;
@@ -585,9 +629,20 @@ TEST(CommandPackets, Layouts) {
     sig.insert(sig.end(), {6, 'r', 'e', 'a', 's', 'o', 'n'});
     sig.insert(sig.end(), 256, 0xAB);        // ...its signature
     sig.insert(sig.end(), {0, 0, 0, 0, 0});  // last seen: offset, 20 bits, checksum
+    sig[sig.size() - 5] = 0;                 // (the offset)
+    sig[sig.size() - 4] = 0x02;
+    sig[sig.size() - 1] = 0x21;
     proto::Reader b(sig.data(), sig.size());
-    EXPECT_EQ(proto::sb::ChatCommand::decode_signed(b).command, "kick");
+    const proto::sb::ChatCommand kick = proto::sb::ChatCommand::decode_signed(b);
     EXPECT_TRUE(b.done());
+    EXPECT_EQ(kick.command, "kick");
+    EXPECT_TRUE(kick.is_signed);
+    ASSERT_EQ(kick.signatures, 1u);
+    EXPECT_EQ(kick.signed_names[0], "reason");
+    EXPECT_EQ(kick.last_seen.offset, 0u);
+    EXPECT_EQ(kick.last_seen.acknowledged, 2u);
+    EXPECT_EQ(kick.last_seen.checksum, 0x21);
+    EXPECT_FALSE(proto::sb::ChatCommand::decode(a).is_signed);
     sig[21] = 9;  // more signatures than a command has arguments
     proto::Reader c(sig.data(), sig.size());
     proto::sb::ChatCommand::decode_signed(c);

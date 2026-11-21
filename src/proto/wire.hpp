@@ -186,6 +186,18 @@ struct Reader {
 
 // ---------------------------------------------------------------- text helpers (cold)
 
+// String.length() of a UTF-8 string: UTF-16 code units, which is what vanilla's limits count
+// (Utf8String.read). A code point beyond the BMP is two.
+inline u32 utf16_length(std::string_view s) {
+    u32 n = 0;
+    for (const char c : s) {
+        const u8 b = static_cast<u8>(c);
+        n += (b & 0xC0) != 0x80;  // not a continuation byte: a new code point
+        n += b >= 0xF0;           // four bytes: a surrogate pair
+    }
+    return n;
+}
+
 // Java "modified UTF-8" as used by NBT strings: NUL -> C0 80, astral code points -> surrogate pair.
 u8* put_mutf8(u8* p, std::string_view utf8);
 inline constexpr usize mutf8_bound(std::string_view s) { return s.size() * 2 + 2; }

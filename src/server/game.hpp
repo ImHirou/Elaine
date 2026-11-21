@@ -39,6 +39,10 @@
 
 namespace server {
 
+// StringUtil.isAllowedChatCharacter for every character of a line: no control characters, no
+// section sign (server/chat.cpp).
+bool chat_allowed(std::string_view s);
+
 // The chunk a block coordinate is in (SectionPos.blockToSectionCoord).
 inline i32 chunk_of(double v) { return proto::floor_int(v) >> 4; }
 
@@ -111,6 +115,8 @@ class Game {
         // ...and commandSpamThrottler: +20 for each command, -1 a tick, up to 20 a second of the threshold.
         u32 command_spam = 0;
         u64 command_spam_tick = 0;
+        u32 chat_spam = 0;  // chatSpamThrottler: the same for what is said
+        u64 chat_spam_tick = 0;
         u8 level = cmd::kAll;  // PermissionLevel: 0, or what the ops list gives
         Menu menu;             // the inventory, the menu that is open, and what the client knows of both
         // The menu that is open, when it is not the player's own: its number
@@ -123,6 +129,16 @@ class Game {
         // saving, and a hash of the bytes that were written then.
         u64 saved_tick = 0;
         u64 saved_hash = 0;
+    };
+    // PlayerChatMessage, of a sender without a chat session (there are no others here): whose it
+    // is, what was typed, and - where a command made something else of it (the selectors in a
+    // /say) - what is shown instead (unsignedContent).
+    struct ChatMessage {
+        Uuid sender;  // all zero: nobody's (PlayerChatMessage.system), which travels as disguised_chat
+        std::string content;
+        bool decorated = false;
+        text::Text shown;
+        bool system() const { return sender == Uuid{}; }
     };
     // Somebody whose connection is the tick thread's already and whose file is still being
     // read: a player from the moment it is (finish_join).
@@ -323,6 +339,20 @@ class Game {
     void move_in_push_grid(u32 slot, double x, double z);
     static float random_float_of(void* game) { return static_cast<Game*>(game)->random_float(); }
 
+    // ---- chat (server/chat.cpp)
+    void on_chat(u32 pi, const proto::sb::Chat& c);
+    void on_chat_ack(u32 pi, u32 offset);
+    bool chat_seen(u32 pi, const proto::sb::LastSeenUpdate& seen);
+    bool detect_spam(u32 pi, bool chat);
+    void encode_chat(const ChatMessage& m, u32 chat_type, const text::Text& name, const text::Text* target);
+    void deliver_chat(u32 pi, bool system);
+    void broadcast_chat(const ChatMessage& m, u32 chat_type, const text::Text& name);
+    void send_chat(u32 pi, const ChatMessage& m, u32 chat_type, const text::Text& name, const text::Text* target);
+    void broadcast_system(const text::Text& message, u32 except = kNone);
+    static text::Text chat_content(const ChatMessage& m);
+    static text::Text decorate_chat(u32 chat_type, const text::Text& name, const text::Text* target, const text::Text& content);
+    text::Text join_names(const std::vector<u32>& slots) const;
+
     // ---- commands (server/commands.cpp)
     struct Op {  // an entry of ops.json (ServerOpListEntry)
         Uuid uuid;
@@ -331,7 +361,7 @@ class Game {
         bool bypasses_player_limit;
     };
     void init_commands();
-    void on_chat_command(u32 pi, std::string_view line);
+    void on_chat_command(u32 pi, const proto::sb::ChatCommand& c);
     void run_command(const cmd::Source& source, std::string_view line);
     void run_console();
     cmd::Source source_of(u32 pi) const;
@@ -339,7 +369,7 @@ class Game {
     u32 player_of(const cmd::Source& source) const;
     void send_commands(u32 pi);
     void send_permission_level(u32 pi);
-    void system_message(u32 pi, const text::Text& message);
+    void system_message(u32 pi, const text::Text& message, bool overlay = false);
     void command_success(const cmd::Source& source, const text::Text& message, bool broadcast);
     void command_failure(const cmd::Source& source, const text::Text& message);
     text::Text display_name(u32 row) const;
@@ -483,8 +513,13 @@ class Game {
     // hot (SoA), index = player index = entity index
     std::vector<i32> pcx_, pcz_, pview_;  // chunk the client's view is centred on, and its radius
     std::vector<i32> ack_;                // highest block-change sequence to acknowledge this tick, -1 = none
-    std::vector<u8> dirty_;               // k*Dirty bits: almost always 0, so a tick skips the inventories
-    std::vector<base::ByteBuf*> out_;     // this tick's output, never null
+    // Chat, read for every recipient of every message: how many player_chat packets this client
+    // has been sent (ServerGamePacketListenerImpl.nextChatIndex - it counts along and leaves
+    // when the two disagree), and what it wants to be shown (ChatVisiblity).
+    std::vector<u32> chat_index_;
+    std::vector<u8> chat_visibility_;
+    std::vector<u8> dirty_;            // k*Dirty bits: almost always 0, so a tick skips the inventories
+    std::vector<base::ByteBuf*> out_;  // this tick's output, never null
     // cold, same index
     std::vector<ChunkSender> senders_;
     std::vector<Player> players_;
@@ -498,7 +533,8 @@ class Game {
 
     base::BufPool pool_;
     base::ByteBuf scratch_;
-    base::ByteBuf text_scratch_;  // one text component, encoded, on its way into a packet
+    base::ByteBuf text_scratch_;                                      // one text component, encoded, on its way into a packet
+    base::ByteBuf chat_name_, chat_target_, chat_shown_, chat_tail_;  // a chat message being encoded
     std::vector<crypto::Cfb8Job> jobs_;
     std::vector<u8> touched_;  // per reactor: needs a wake after flush
     std::vector<u32> viewers_, border_;

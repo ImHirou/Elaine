@@ -23,6 +23,8 @@ namespace argument = proto::gen::command::argument;
 
 namespace {
 
+constexpr u32 kMessageMaxChars = 256;  // MessageArgument.Message.parseText: what a message may be long
+
 // ---------------------------------------------------------------------------- StringReader
 
 struct Reader {
@@ -447,10 +449,43 @@ bool Registry::parse_argument(const Node& n, std::string_view line, u32& cursor,
         case Type::kWord: out.text = read_unquoted(r); break;
         case Type::kString: ok = read_string(r, out.text, err); break;
         case Type::kGreedy:
-        case Type::kMessage:  // MessageArgument: the text as it stands (selectors in it are not resolved)
             out.text = r.rest();
             r.at = static_cast<u32>(line.size());
             break;
+        case Type::kMessage: {  // MessageArgument.Message.parseText
+            const std::string_view rest = r.rest();
+            if (const u32 length = proto::utf16_length(rest); length > kMessageMaxChars) {
+                err = {Text::translatable("argument.message.too_long").arg(length).arg(kMessageMaxChars),
+                       -1};  // (create: no place)
+                return false;
+            }
+            out.text = rest;
+            const u32 offset = r.at;
+            r.at = static_cast<u32>(line.size());
+            // EntitySelectorParser.allowSelectors(source): only who may use selectors has them
+            // looked for. An '@' that is followed by no selector type is text; any other mistake
+            // in a selector is the message's.
+            for (u32 at = offset; level >= kGamemasters && at < line.size();) {
+                if (line[at] != '@') {
+                    ++at;
+                    continue;
+                }
+                const u32 start = at;
+                MessagePart part;
+                Error why;
+                if (parse_selector(line, at, Type::kEntities, true, part.selector, why)) {
+                    part.start = start - offset;
+                    part.end = at - offset;
+                    out.parts.push_back(std::move(part));
+                } else if (why.kind == Error::kNoSelectorType) {
+                    at = start + 1;
+                } else {
+                    err = std::move(why);
+                    return false;
+                }
+            }
+            break;
+        }
         case Type::kIdentifier:
         case Type::kSound: ok = read_identifier(r, out.text, err); break;
         case Type::kSummonable: {  // ResourceArgument.parse over minecraft:entity_type

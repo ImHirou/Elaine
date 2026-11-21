@@ -150,6 +150,12 @@ struct ItemArg {
     bool test(u32 item_id) const;
 };
 
+// MessageArgument.Part: a selector inside a message, and where it stands in the text.
+struct MessagePart {
+    u32 start = 0, end = 0;
+    Selector selector;
+};
+
 struct Value {
     Type type{};
     u32 start = 0, end = 0;  // where it stands in the line
@@ -161,6 +167,7 @@ struct Value {
     Selector selector;
     BlockArg block;
     ItemArg item;
+    std::vector<MessagePart> parts;  // a message's selectors, for a source that may use them
 };
 
 // A parser's complaint: CommandSyntaxException. `cursor` is where in the line (createWithContext),
@@ -168,6 +175,9 @@ struct Value {
 struct Error {
     text::Text message;
     i32 cursor = -1;
+    // What a caller may want to tell apart: EntitySelectorParser.ERROR_MISSING_SELECTOR_TYPE and
+    // ERROR_UNKNOWN_SELECTOR_TYPE, after which a message takes its '@' as text.
+    enum Kind : u8 { kOther, kNoSelectorType } kind = kOther;
 };
 
 // Who runs a command: CommandSourceStack.
@@ -178,6 +188,9 @@ struct Source {
     double x = 0, y = 0, z = 0;  // where "~" is
     float yaw = 0, pitch = 0;    // where "^" points
     std::string name;            // getTextName(): the player's name, "Server"
+    // CommandSigningContext: the line came as chat_command_signed, so what its message arguments
+    // say is said by the player (player_chat) and not for it (disguised_chat).
+    bool signs = false;
 };
 
 struct Invocation;

@@ -21,6 +21,7 @@ using net::InHeader;
 using net::InKind;
 using net::OutKind;
 using net::OutMsg;
+using text::Text;
 
 namespace {
 constexpr u64 kKeepAliveEveryNs = 15 * base::kNsPerSec;
@@ -64,6 +65,8 @@ Game::Game(const Settings& s, std::vector<std::unique_ptr<net::Reactor>>& reacto
     pcz_.reserve(s.max_players);
     pview_.reserve(s.max_players);
     ack_.reserve(s.max_players);
+    chat_index_.reserve(s.max_players);
+    chat_visibility_.reserve(s.max_players);
     dirty_.reserve(s.max_players);
     out_.reserve(s.max_players);
     players_.reserve(s.max_players);
@@ -76,6 +79,10 @@ Game::Game(const Settings& s, std::vector<std::unique_ptr<net::Reactor>>& reacto
     init_titles();
     init_commands();
     load_ops();
+    // DedicatedServer.enforceSecureProfile is true only for a server that can check the keys
+    // players sign their chat with. This one cannot yet, and says so rather than pretend.
+    if (s.online_mode && s.enforce_secure_profile)
+        LOG_INFO("enforce-secure-profile is set, but chat is not signed here yet: clients are told that it is not enforced");
     if (!world.dir.empty()) {
         player_dir_ = world.dir + "/playerstate";
         std::error_code ec;
@@ -377,6 +384,8 @@ void Game::finish_join(u32 ri, const InHeader& h, const net::JoinTransport& t, J
     tracker_.set_view_distance(pi, static_cast<u32>(pview_[pi]));
     senders_.emplace_back();
     ack_.push_back(-1);
+    chat_index_.push_back(0);
+    chat_visibility_.push_back(j.chat_visibility);
     dirty_.push_back(0);
     out_.push_back(pool_.get(kOutInitial));
     slot_to_player_[ri][h.slot] = pi;
@@ -417,6 +426,9 @@ void Game::finish_join(u32 ri, const InHeader& h, const net::JoinTransport& t, J
     // it predicts), and so on. The recipe book stays empty: nothing is unlocked.
     out(pi).append(recipes_frame_.data, recipes_frame_.len);
     send_permission_level(pi);  // its permission level, and the commands it may use
+    // "Steve joined the game", to those who are here: vanilla says it before the newcomer is
+    // one of the players it speaks to.
+    broadcast_system(Text::translatable("multiplayer.player.joined").arg(display_name(pi)).color(text::Color::kYellow), pi);
 
     p.teleport_id = 1;
     p.awaiting_teleport = true;
@@ -441,7 +453,6 @@ void Game::finish_join(u32 ri, const InHeader& h, const net::JoinTransport& t, J
     apply_view(pi, pcx_[pi], pcz_[pi], pview_[pi]);
     // ServerPlayer.initInventoryMenu: the whole menu.
     p.menu.send_all(out(pi), p.threshold);
-    send(pi, cb::SystemChat{"Welcome, " + players_[pi].name + "!"});
 }
 
 void Game::on_leave(u32 ri, const InHeader& h) {
@@ -471,6 +482,8 @@ void Game::remove_player(u32 pi) {
     Player& p = players_[pi];
     const Uuid uuid = p.uuid;
     slot_to_player_[p.reactor][p.slot] = kNone;
+    // removePlayerFromWorld: "Steve left the game" first.
+    broadcast_system(Text::translatable("multiplayer.player.left").arg(display_name(pi)).color(text::Color::kYellow), pi);
     // PlayerList.remove: the player is saved, then taken out of the level - and Player.remove
     // takes its menus away: what was on a cursor or in a crafting grid falls where it stood,
     // and a chest loses an opener.
@@ -500,6 +513,8 @@ void Game::remove_player(u32 pi) {
         pview_[pi] = pview_[last];
         senders_[pi] = senders_[last];
         ack_[pi] = ack_[last];
+        chat_index_[pi] = chat_index_[last];
+        chat_visibility_[pi] = chat_visibility_[last];
         dirty_[pi] = dirty_[last];
         out_[pi] = out_[last];
         slot_to_player_[players_[pi].reactor][players_[pi].slot] = pi;
@@ -510,6 +525,8 @@ void Game::remove_player(u32 pi) {
     pview_.pop_back();
     senders_.pop_back();
     ack_.pop_back();
+    chat_index_.pop_back();
+    chat_visibility_.pop_back();
     dirty_.pop_back();
     out_.pop_back();
     online_.store(static_cast<u32>(players_.size()), std::memory_order_relaxed);
@@ -671,10 +688,25 @@ HOT void Game::on_packet(u32 pi, const u8* body, u32 n) {
         case sbid::kChatCommand:
         case sbid::kChatCommandSigned: {
             const auto c = id == sbid::kChatCommand ? sb::ChatCommand::decode(rd) : sb::ChatCommand::decode_signed(rd);
-            // A copy: running it may send large packets, and the command is a view into the inflate buffer.
-            if (rd.done()) on_chat_command(pi, std::string(c.command));  // (may kick: nothing of `p` after this)
+            if (rd.done()) on_chat_command(pi, c);  // (may kick: nothing of `p` after this)
             break;
         }
+        case sbid::kChat: {
+            const auto c = sb::Chat::decode(rd);
+            if (rd.done()) on_chat(pi, c);  // (may kick)
+            break;
+        }
+        case sbid::kChatAck: {
+            const auto a = sb::ChatAck::decode(rd);
+            if (rd.done()) on_chat_ack(pi, a.offset);  // (may kick)
+            break;
+        }
+        case sbid::kChatSessionUpdate:
+            // handleChatSessionUpdate, on a server that has no Services key to check a player's
+            // key with: "Ignoring chat session ... due to missing Services public key". Its
+            // messages then count as unsigned, here as there.
+            sb::ChatSessionUpdate::decode(rd);
+            break;
         case sbid::kPunch:  // handlePunch: not held back until the client has loaded, unlike the actions
             sb::Punch::decode(rd);
             if (rd.done()) on_punch(pi);

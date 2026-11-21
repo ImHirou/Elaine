@@ -10,7 +10,8 @@
 //   Entity / Player / ItemStack.getDisplayName, CommandResponseTracker,
 //   and net.minecraft.server.commands: StopCommand, SetBlockCommand, FillCommand,
 //   TeleportCommand, GiveCommand, PlaySoundCommand, StopSoundCommand, SummonCommand, KillCommand,
-//   ListPlayersCommand, KickCommand, OpCommand, DeOpCommands, HelpCommand.
+//   ListPlayersCommand, KickCommand, OpCommand, DeOpCommands, HelpCommand, and the ones that
+//   talk: EmoteCommands, MsgCommand, SayCommand, TeamMsgCommand (MessageArgument).
 // What each says, and to whom, was compared with a vanilla 26.3 server
 // (tools/vanilla/command_probe.py).
 //
@@ -21,7 +22,7 @@
 //   * /give: no components; /summon: no NBT, and what is summoned has no brain - a mob falls
 //     to the ground and stands where it was put;
 //   * /kill: entities vanish at once (no death animation), and players cannot die yet;
-//   * /kick: the reason is plain text (selectors in it are not resolved);
+//   * /teammsg: there are no teams, so it answers what vanilla answers someone who is in none;
 //   * /op, /deop: a player who is not online is found by name only in offline mode.
 #include <algorithm>
 #include <cmath>
@@ -47,7 +48,6 @@ using world::BlockState;
 namespace {
 
 constexpr u8 kEventPermissionLevel = 24;       // EntityEvent.PERMISSION_LEVEL_ALL; + the level
-constexpr u32 kCommandSpamStep = 20;           // commandSpamThrottler: TickThrottler(20, 20 * command-spam-threshold-seconds)
 constexpr i32 kMaxBlockModifications = 32768;  // GameRules.MAX_BLOCK_MODIFICATIONS
 constexpr i32 kGiveMaxStacks = 100;            // GiveCommand.MAX_ALLOWED_ITEMSTACKS
 constexpr u8 kCreativeMode = 1;                // GameType.CREATIVE: what everyone is
@@ -57,17 +57,6 @@ constexpr u32 kRelX = 1, kRelY = 2, kRelZ = 4, kRelYRot = 8, kRelXRot = 16, kRel
 constexpr std::string_view kSoundSources = "master|music|record|weather|block|hostile|neutral|player|ambient|voice|ui";
 
 Text tr(std::string_view key) { return Text::translatable(key); }
-
-// StringUtil.isAllowedChatCharacter for every character of a line: no control characters, no
-// section sign.
-bool chat_allowed(std::string_view s) {
-    for (usize i = 0; i < s.size(); ++i) {
-        const u8 c = static_cast<u8>(s[i]);
-        if (c < 0x20 || c == 0x7F) return false;
-        if (c == 0xC2 && i + 1 < s.size() && static_cast<u8>(s[i + 1]) == 0xA7) return false;
-    }
-    return true;
-}
 
 // String.equalsIgnoreCase, for names (which are ASCII).
 bool same_name(std::string_view a, std::string_view b) {
@@ -120,11 +109,13 @@ u32 Game::player_of(const cmd::Source& source) const {
     return row < players_.size() ? row : kNone;
 }
 
-// ServerPlayer.sendSystemMessage
-void Game::system_message(u32 pi, const Text& message) {
+// ServerPlayer.sendSystemMessage: nothing for someone who has the chat hidden, but for what goes
+// above the hotbar (acceptsSystemMessages).
+void Game::system_message(u32 pi, const Text& message, bool overlay) {
+    if (chat_visibility_[pi] == sb::ClientInformation::kChatHidden && !overlay) return;
     text_scratch_.clear();
     message.encode(text_scratch_);
-    send(pi, cb::SystemChatComponent{{text_scratch_.data, text_scratch_.len}});
+    send(pi, cb::SystemChatComponent{{text_scratch_.data, text_scratch_.len}, overlay});
 }
 
 // CommandSourceStack.sendSuccess: the source is told; with `broadcast`, so are the other
@@ -144,7 +135,8 @@ void Game::command_success(const cmd::Source& source, const Text& message, bool 
     scratch_.clear();
     write_packet(scratch_, s_.compression_threshold, cb::SystemChatComponent{{text_scratch_.data, text_scratch_.len}});
     for (u32 i = 0; i < players_.size(); ++i)
-        if (i != pi && find_op(players_[i].uuid) != kNone) out(i).append(scratch_.data, scratch_.len);
+        if (i != pi && chat_visibility_[i] != sb::ClientInformation::kChatHidden && find_op(players_[i].uuid) != kNone)
+            out(i).append(scratch_.data, scratch_.len);
     if (source.player != cmd::kNone) LOG_INFO("%s", admin.plain().c_str());
 }
 
@@ -225,26 +217,44 @@ void Game::run_command(const cmd::Source& source, std::string_view line) {
     parsed.run(in);
 }
 
-// handleChatCommand / handleSignedChatCommand -> tryHandleChat, performUnsignedChatCommand,
-// detectCommandRateSpam.
-void Game::on_chat_command(u32 pi, std::string_view line) {
-    if (!chat_allowed(line)) {
+// handleChatCommand / handleSignedChatCommand -> tryHandleChat, performUnsignedChatCommand /
+// performSignedChatCommand, detectCommandRateSpam.
+void Game::on_chat_command(u32 pi, const sb::ChatCommand& c) {
+    if (c.is_signed && !chat_seen(pi, c.last_seen)) return;
+    if (!chat_allowed(c.command)) {
         kick(pi, tr("multiplayer.disconnect.illegal_characters"));
         return;
     }
     const entity::Handle who = ents_.handle(pi);
-    LOG_DEBUG("%s: /%.*s", players_[pi].name.c_str(), static_cast<int>(line.size()), line.data());
-    run_command(source_of(pi), line);
+    // A copy: running it may send large packets, and the command is a view into the inflate buffer.
+    const std::string line(c.command);
+    LOG_DEBUG("%s: /%s", players_[pi].name.c_str(), line.c_str());
+    cmd::Source source = source_of(pi);
+    source.signs = c.is_signed;
+    // collectSignedArguments: a client with a key signs every message argument of its line and
+    // says which - those and no others, or nothing is run. (What it signed is not looked at:
+    // without chat sessions SignedMessageChain.Decoder.unsigned takes the text as it is.)
+    bool matches = true;
+    if (c.signatures) {
+        cmd::Parsed parsed;
+        commands_.parse(line, source.level, parsed);
+        if (parsed.run) {
+            u32 named = 0, expected = 0;
+            for (const cmd::Parsed::Step& s : parsed.steps) {
+                if (!s.has_value || s.value.type != cmd::Type::kMessage) continue;
+                ++expected;
+                for (u32 i = 0; i < c.signatures; ++i) named += c.signed_names[i] == commands_.node_name(s.node);
+            }
+            matches = named == expected && c.signatures == expected;
+        }
+    }
+    if (matches)
+        run_command(source, line);
+    else  // handleMessageDecodeFailure
+        system_message(pi, Text().append(tr("chat.disabled.invalid_command_signature")).color(Color::kRed));
     // The command may have removed players - this one among them.
     pi = ents_.resolve(who);
-    if (pi >= players_.size()) return;
-    Player& p = players_[pi];
-    p.command_spam -=
-        static_cast<u32>(std::min<u64>(p.command_spam, tick_ - p.command_spam_tick));  // TickThrottler.tick, caught up
-    p.command_spam_tick = tick_;
-    p.command_spam += kCommandSpamStep;
-    if (p.command_spam >= kCommandSpamStep * s_.command_spam_threshold && find_op(p.uuid) == kNone)
-        kick(pi, tr("disconnect.spam"));
+    if (pi < players_.size()) detect_spam(pi, false);
 }
 
 // DedicatedServer.handleConsoleInputs: what was typed on stdin since the last tick.
@@ -987,12 +997,88 @@ struct Game::Commands {
         return static_cast<i32>(n);
     }
 
+    // ---- what is said: /say, /me, /msg (/tell, /w), /teammsg (/tm)
+    // MessageArgument.Message.toComponent: the text, with every selector in it replaced by the
+    // names of whom it finds - for a source that may use selectors; the others had none read.
+    static Text message_component(Invocation& in, std::string_view name) {
+        Game& g = in.game;
+        const cmd::Value& v = *in.value(name);
+        const std::string_view text = v.text;
+        if (v.parts.empty()) return Text::literal(text);
+        Text out = Text::literal(text.substr(0, v.parts[0].start));
+        u32 read_to = v.parts[0].start;
+        std::vector<u32> slots;
+        for (const cmd::MessagePart& part : v.parts) {
+            g.select(part.selector, in.source, false, slots);  // Part.toComponent: EntitySelector.joinNames(findEntities)
+            if (read_to < part.start) out.append(text.substr(read_to, part.start - read_to));
+            out.append(g.join_names(slots));
+            read_to = part.end;
+        }
+        if (read_to < text.size()) out.append(text.substr(read_to));
+        return out;
+    }
+    // MessageArgument.resolveChatMessage: the player's own words where its client vouched for
+    // them (a signed command line), somebody's otherwise - the console's, or a line that came
+    // as a plain chat_command.
+    static ChatMessage chat_message(Invocation& in, std::string_view name) {
+        Game& g = in.game;
+        const cmd::Value& v = *in.value(name);
+        ChatMessage m;
+        const u32 pi = g.player_of(in.source);
+        if (in.source.signs && pi != kNone) m.sender = g.players_[pi].uuid;
+        m.content = v.text;
+        // withUnsignedContent: only what differs from the text as it was typed.
+        m.decorated = !v.parts.empty();
+        if (m.decorated) m.shown = message_component(in, name);
+        return m;
+    }
+    // CommandSourceStack.getDisplayName
+    static Text source_name(const Invocation& in) {
+        const u32 pi = in.game.player_of(in.source);
+        return pi != kNone ? in.game.display_name(pi) : Text::literal(in.source.name);
+    }
+    static i32 say(Invocation& in) {
+        in.game.broadcast_chat(chat_message(in, "message"), reg::chat_type::kSayCommand, source_name(in));
+        return 1;
+    }
+    static i32 me(Invocation& in) {
+        in.game.broadcast_chat(chat_message(in, "action"), reg::chat_type::kEmoteCommand, source_name(in));
+        return 1;
+    }
+    static i32 msg(Invocation& in) {
+        Game& g = in.game;
+        std::vector<u32> slots;
+        if (!players(in, "targets", slots)) return 0;
+        const ChatMessage m = chat_message(in, "message");
+        const Text name = source_name(in);
+        const entity::Handle from = in.source.entity;
+        for (const u32 slot : slots) {
+            const u32 to = g.ents_.by_slot(slot);
+            const Text target = g.display_name(to);
+            // CommandSourceStack.sendChatMessage: a player is sent its own words back as
+            // "You whisper to ...", the console is told them.
+            if (const u32 pi = in.source.player != cmd::kNone ? g.ents_.resolve(from) : kNone; pi < g.players_.size())
+                g.send_chat(pi, m, reg::chat_type::kMsgCommandOutgoing, name, &target);
+            else if (in.source.player == cmd::kNone)
+                LOG_INFO("%s",
+                         decorate_chat(reg::chat_type::kMsgCommandOutgoing, name, &target, chat_content(m)).plain().c_str());
+            g.send_chat(to, m, reg::chat_type::kMsgCommandIncoming, name, nullptr);
+        }
+        return static_cast<i32>(slots.size());
+    }
+    // There are no teams: the source is an entity that is in none, or no entity at all.
+    static i32 teammsg(Invocation& in) {
+        u32 slot;
+        if (!self(in, slot)) return 0;
+        return in.fail(tr("commands.teammsg.failed.noteam"));
+    }
+
     // ---- /kick <targets> [<reason>]
     static i32 kick(Invocation& in) {
         Game& g = in.game;
         std::vector<u32> slots;
         if (!players(in, "targets", slots)) return 0;
-        const Text reason = in.has("reason") ? Text::literal(in.string("reason")) : tr("multiplayer.disconnect.kicked");
+        const Text reason = in.has("reason") ? message_component(in, "reason") : tr("multiplayer.disconnect.kicked");
         for (const u32 slot : slots) {
             const u32 pi = g.ents_.by_slot(slot);
             const Text who = g.display_name(pi);
@@ -1088,6 +1174,7 @@ void Game::init_commands() {
     cmd::Registry& r = commands_;
     const std::string sources = "(" + std::string(kSoundSources) + ")";
 
+    r.add("me <action:message>", cmd::kAll, &C::me);
     r.add("fill <from:block_pos> <to:block_pos> <block:block_state> [(outline|hollow|destroy|strict)]", cmd::kGamemasters,
           &C::fill);
     r.add(
@@ -1100,14 +1187,20 @@ void Game::init_commands() {
     r.add("kick <targets:players> [<reason:message>]", cmd::kAdmins, &C::kick);
     r.add("kill [<targets:entities>]", cmd::kGamemasters, &C::kill);
     r.add("list [uuids]", cmd::kAll, &C::list);
+    r.add("msg <targets:players> <message:message>", cmd::kAll, &C::msg);
+    r.alias("tell", "msg", cmd::kAll);
+    r.alias("w", "msg", cmd::kAll);
     r.add("playsound <sound:sound> [" + sources +
               " [<targets:players> [<pos:vec3> [<volume:float(0)> [<pitch:float(0,2)> "
               "[<minVolume:float(0,1)>]]]]]]",
           cmd::kGamemasters, &C::playsound);
+    r.add("say <message:message>", cmd::kGamemasters, &C::say);
     r.add("setblock <pos:block_pos> <block:block_state> [(destroy|keep|replace|strict)]", cmd::kGamemasters, &C::setblock);
     r.add("stopsound <targets:players> [* <sound:sound>]", cmd::kGamemasters, &C::stopsound);
     r.add("stopsound <targets:players> " + sources + " [<sound:sound>]", cmd::kGamemasters, &C::stopsound);
     r.add("summon <entity:summonable> [<pos:vec3>]", cmd::kGamemasters, &C::summon);
+    r.add("teammsg <message:message>", cmd::kAll, &C::teammsg);
+    r.alias("tm", "teammsg", cmd::kAll);
     r.add("teleport <location:vec3>", cmd::kGamemasters, &C::teleport_cmd);
     r.add("teleport <destination:entity>", cmd::kGamemasters, &C::teleport_cmd);
     r.add("teleport <targets:entities> <location:vec3> [<rotation:rotation>]", cmd::kGamemasters, &C::teleport_cmd);

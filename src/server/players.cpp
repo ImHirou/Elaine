@@ -81,6 +81,7 @@ void Game::on_player_command(u32 pi, const sb::PlayerCommand& c) {
 void Game::on_client_information(u32 pi, const sb::ClientInformation& info) {
     ents_.set_skin_parts(pi, info.skin_parts);
     ents_.set_main_hand(pi, info.main_hand == entity::kMainHandRight ? entity::kMainHandRight : entity::kMainHandLeft);
+    chat_visibility_[pi] = sb::ClientInformation::visibility(info.chat_visibility);
     apply_view(pi, pcx_[pi], pcz_[pi], std::clamp<i32>(info.view_distance, 2, static_cast<i32>(s_.view_distance)));
 }
 

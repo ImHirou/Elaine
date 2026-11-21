@@ -72,6 +72,24 @@ ALWAYS_INLINE void frame_end(base::ByteBuf& out, i32 threshold, FrameMark m, con
 // Frame an already-encoded body (id + payload), e.g. the generated registry/tag blobs.
 void frame_raw(base::ByteBuf& out, i32 threshold, std::span<const u8> body);
 
+// One frame of a packet that is the same for all its recipients but for a number in front: the
+// id, that number as a VarInt, then `tail`. The frame is stored, never deflated, whatever its
+// size - a length of 0 means "not compressed" to CompressionDecoder, which holds only deflated
+// frames against the threshold. Deflating is per frame; here that would be per recipient.
+inline void frame_stored(base::ByteBuf& out, i32 threshold, u32 id, u32 head, std::span<const u8> tail) {
+    const u32 marker = threshold >= 0 ? 1u : 0u;
+    u8* const start = out.reserve(3 + 1 + 2 * kVarIntMaxBytes + tail.size());
+    u8* p = start + 3 + marker;
+    p = put_varint(p, id);
+    p = put_varint(p, head);
+    std::memcpy(p, tail.data(), tail.size());
+    p += tail.size();
+    DCHECK(static_cast<u32>(p - (start + 3)) <= kMaxFrame);
+    put_varint3(start, static_cast<u32>(p - (start + 3)));
+    if (marker) start[3] = 0;
+    out.commit(p);
+}
+
 // A packet type P provides:  static constexpr u32 kId;  usize bound() const;  u8* encode(u8*) const;
 template <class P>
 ALWAYS_INLINE void write_packet(base::ByteBuf& out, i32 threshold, const P& pkt) {

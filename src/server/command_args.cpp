@@ -573,6 +573,7 @@ bool SelectorParser::selector(Error& err) {
     sel.uses_selector = true;
     if (!r.can_read()) {
         err = here(r, tr("argument.entity.selector.missing"));
+        err.kind = Error::kNoSelectorType;
         return false;
     }
     const u32 start = r.at;
@@ -605,6 +606,7 @@ bool SelectorParser::selector(Error& err) {
             std::string shown("@");
             shown += kind;
             err = here(r, tr("argument.entity.selector.unknown").arg(shown));
+            err.kind = Error::kNoSelectorType;
             return false;
         }
     }

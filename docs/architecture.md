@@ -1629,15 +1629,92 @@ None of it is touched unless a command runs.
   as in vanilla.
 - `/kill`: the entity is gone at once - no death animation, no drops - and a player cannot be
   killed: there is no health and no respawn.
-- `/kick <reason>`, like every `message` argument: plain text; selectors inside it are not
-  resolved, and a signed command's signatures are read past (no secure chat).
+- `/teammsg` answers what vanilla answers a player who is in no team: there are no teams.
+  `/tellraw` waits for the SNBT reader.
 - `/op` of someone who is not online works by name only in offline mode (the name is its own
   profile); in online mode Mojang would have to be asked.
 - Suggestions the server would have to compute (`ask_server`): `/op` and `/deop` leave their
   argument to the client's own completion of player names.
-- Every command about something that does not exist: chat (`say`, `msg`, `me`, `tellraw`),
-  time and weather, game modes, effects, experience, scoreboards and teams, `execute`, `data`,
+- Every command about something that does not exist: time and weather, game modes, effects, experience, scoreboards and teams, `execute`, `data`,
   `clear` (the inventory can do it; its item predicates are the work), bans and the whitelist.
+
+## Chat (src/server/chat.cpp)
+
+What a player types reaches the others as vanilla sends the message of a player **without a
+chat session** - and that is every player here. A chat session is a key pair Mojang signed for
+the player; a server takes one (`chat_session_update`) only if it can check that signature,
+which needs Mojang's Services keys. This server has not got them yet. Vanilla knows that state -
+offline mode, or a server that could not fetch the keys - and what it does then is what is done
+here: `login` says `enforcesSecureChat = false`, `chat_session_update` is read and ignored
+("Ignoring chat session ... due to missing Services public key"), and a message is
+`PlayerChatMessage.unsigned`: `player_chat` with no signature, index 0, the server's own time,
+salt 0 and an empty list of what its sender had seen - whatever signature, time and salt the
+client sent along (`SignedMessageChain.Decoder.unsigned` does not look). A client shows such a
+message with a "Not Secure" tag, and not at all if it is set to show secure chat only; one that
+has the server in its list is told once that chat here cannot be verified. `enforce-secure-profile`
+is read and, in online mode, answered in the log: it cannot be honoured.
+
+**In** (`Game::on_chat`, in `handleChat`'s order): what the sender says it has seen
+(`LastSeenMessages.Update`), the characters, whether the sender shows chat at all, the message,
+the rate. A client acknowledges the *signed* messages it was sent; none ever is, so the
+validator is the one of an empty window - offset 0, no bit, a checksum of 0 or 1 - and anything
+else (also in `chat_command_signed`, and an offset in `chat_ack`) is a client out of step,
+which is put out with vanilla's `chat_validation_failed`. A control character or a section
+sign puts its sender out too; a sender with the chat hidden is told so in red and read by
+nobody; ten messages at once (`chat-spam-threshold-seconds`, `TickThrottler`) are one too many
+for anyone who is not an operator.
+
+**Out**, to those whose `ChatVisiblity` is "full" (`client_information`; "system" still gets
+system messages, "hidden" only what goes above the hotbar - `Game::system_message` asks, so a
+command's answer does not reach them either). `player_chat` begins with a number the server
+counts per recipient (`nextChatIndex`, from 0) and the client counts along - it leaves on the
+first disagreement - so the packet cannot be one buffer for all. Everything behind that number
+is: `PlayerChatTail` is encoded once per message and `proto::frame_stored` writes each
+recipient's frame as its count and a copy of the tail. That frame is stored, never deflated,
+whatever its size: deflating is per frame, which would be per recipient here, and a client
+takes a stored frame of any length (`CompressionDecoder`: a length of 0 is "not compressed" and
+is not held against the threshold). The two columns this reads for every recipient of every
+message - the count and the visibility - are arrays beside the other per-player columns, not
+fields of the cold `Player`.
+
+**Commands that talk** (`say`, `me`, `msg` / `tell` / `w`, `teammsg` / `tm`) take a `message`
+argument: `MessageArgument` - at most 256 characters, and for a source of permission level 2 or
+more the selectors in it are read (an `@` that begins none is a character; any other mistake in
+one is the line's) and become the names of whom they find when the command runs, with vanilla's
+grey commas. `/kick`'s reason is one too. Whose words they are depends on how the line came,
+as in vanilla: as `chat_command_signed` - how a client sends any line with a message argument,
+with a signature per such argument if it has a key - they are the player's (`player_chat`, with
+what the selectors became as its "unsigned content"); as a plain `chat_command`, or from the
+console, they are nobody's (`disguised_chat`, the text as shown and no sender). The signatures
+are not checked, their names are: they must be the line's message arguments, all of them and
+no others, or the line is not run (`collectSignedArguments`).
+
+"Steve joined the game" and "left the game" are system messages to everyone but Steve - vanilla
+says the first before it counts him among its players. The log has what vanilla's has:
+`[Not Secure] <Steve> hello`, `[Not Secure] [Server] ...`, `You whisper to Steve: ...` - a
+client decorates a message by its chat type itself, the server does it for the log
+(`Game::decorate_chat`, from the chat types' own data).
+
+### Compared with vanilla
+
+`tools/vanilla/command_probe.py` types into the chat and runs the talking commands on both
+servers - signed and not, by an operator and by somebody who is none, from the console, with
+selectors, too long, to nobody, with the chat shown, cut down and hidden, and with a third bot
+that joins, says a word and leaves - and compares every `player_chat`, `disguised_chat` and
+`system_chat` field by field (a message's time, the server's own, as "now"). The first
+recording found that the count in `player_chat` starts at 0, not 1 (`nextChatIndex++`, which
+the pseudo-code of the jar shows as a pre-increment); with that, nothing differs.
+
+### Not there
+
+- **Secure chat.** Fetching Mojang's Services keys, checking a session's key
+  (`RemoteChatSession.Data.validate`) and every message's signature, the chain of a session's
+  messages, telling everyone of a session (`player_info_update`: `INITIALIZE_CHAT`), and per
+  recipient a `MessageSignatureCache` and the window of what it has been sent
+  (`LastSeenMessagesValidator`, `chat_ack`). Until then `enforcesSecureChat` is false, honestly.
+- Text filtering (`FilterMask`: everything passes), `/tellraw`, teams.
+- A packet that is no chat packet - a message of more than 256 characters - is skipped; vanilla
+  disconnects its sender.
 
 ## Wire format handling
 
@@ -1720,5 +1797,5 @@ Roughly in dependency order:
    something to stand on. Then fluids - with them fluid ticks, ice, waterlogging - redstone,
    the other block entities. And what the first four still lack: experience orbs.
 8. **Commands**: an SNBT reader (block entity data, item components, `/summon`'s tag, `nbt=`),
-   `facing`, then the commands that wait for their subject - chat first.
+   `facing`, then the commands that wait for their subject. **Chat**: signed (see "Chat").
 9. Lua plugin host.

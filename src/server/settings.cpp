@@ -70,6 +70,10 @@ bool set_key(Settings& s, std::string_view k, std::string_view v, std::string& e
         ok = parse_num(v, s.op_permission_level, 0, 4);
     else if (k == "command-spam-threshold-seconds")
         ok = parse_num(v, s.command_spam_threshold, 0, 1000000);
+    else if (k == "chat-spam-threshold-seconds")
+        ok = parse_num(v, s.chat_spam_threshold, 0, 1000000);
+    else if (k == "enforce-secure-profile")
+        ok = parse_bool(v, s.enforce_secure_profile);
     else if (k == "ops-file")
         s.ops_file = std::string(v);
     else if (k == "level-name")

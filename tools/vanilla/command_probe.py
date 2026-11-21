@@ -13,7 +13,10 @@ it has not seen looks it up at Mojang, and ops the account of that name instead 
 A types commands, right ones and wrong ones; B watches, is given things, teleported, opped,
 deopped and in the end kicked. Per step everything either of them is told is logged: system
 messages (their text components, byte for byte), block changes, teleports, sounds, entities
-that appear, the command tree. `diff` lines two recordings up step by step.
+that appear, the command tree - and chat: what the two type and what the commands that talk say
+(player_chat and disguised_chat, field by field; a message's time is its server's own and is
+compared as "now"), with the chat shown, cut down to system messages and hidden, and a third
+bot that joins, says a word and leaves. `diff` lines two recordings up step by step.
 
 The reference is the vanilla server, run under the rules in AGENTS.md (gamemode=creative,
 level-type=flat, spawn-protection=0):
@@ -35,7 +38,7 @@ Reading the diff:
     ours must be vanilla's (type, parser and its properties, runs or not, suggestions); what
     vanilla has more is listed, not counted (-v prints it).
   * Left out: the death of what /kill kills (ours vanishes at once; the messages are the
-    same), "made the advancement" and "left the game" messages, grass that turns to dirt under
+    same), "made the advancement" messages, grass that turns to dirt under
     a block a command put on it (a random tick, whenever it falls), and the particles and sound
     of a block that /setblock destroy breaks (level_event: block_probe.py records those). An
     entity a command made is listed at the end of its step: vanilla shows it at once, ours with
@@ -58,11 +61,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mcproto as mc  # noqa: E402
 from inventory_probe import Actor  # noqa: E402
 
-LOGGED = {"system_chat", "block_update", "section_blocks_update", "player_position", "sound", "stop_sound", "add_entity",
+LOGGED = {"system_chat", "player_chat", "disguised_chat", "block_update", "section_blocks_update", "player_position", "sound", "stop_sound", "add_entity",
           "remove_entities", "entity_event", "commands", "disconnect", "set_entity_data", "container_set_slot",
           "set_player_inventory", "take_item_entity"}
 UUID_RX = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 ROOT = Path(__file__).resolve().parents[2]
+
+
+NOTHING_SEEN = b"\x00\x00\x00\x00\x00"   # LastSeenMessages.Update: no offset, no bit, no checksum
 
 
 class Prober(Actor):
@@ -71,9 +77,24 @@ class Prober(Actor):
     def say(self, command: str) -> None:
         self.c.send("chat_command", mc.mc_str(command))
 
+    def say_signed(self, command: str) -> None:
+        """As a client sends a line with a message argument: chat_command_signed - without
+        signatures, as from a client that has no key (offline mode)."""
+        self.c.send("chat_command_signed", mc.mc_str(command) + struct.pack(">qq", int(time.time() * 1000), 0) +
+                    mc.varint(0) + NOTHING_SEEN)
+
+    def chat(self, message: str) -> None:
+        self.c.send("chat", mc.mc_str(message) + struct.pack(">qq", int(time.time() * 1000), 0) + b"\x00" + NOTHING_SEEN)
+
+    def chat_visibility(self, visibility: int) -> None:
+        """client_information as the options screen sends it: ChatVisiblity 0 full, 1 system, 2 hidden."""
+        self.c.send("client_information", mc.mc_str("en_us") + struct.pack(">b", 10) + mc.varint(visibility) + b"\x01" +
+                    b"\x7f" + mc.varint(1) + b"\x00\x01" + mc.varint(0))
+
 
 def record(port: int, out_path: str, name_a: str, name_b: str, console: str | None = None) -> None:
     steps: list[dict] = []
+    name_c = (name_a + "C")[:16]     # a third, who only comes by
     a, b = Prober(port, name_a), Prober(port, name_b)
     for bot in (a, b):
         bot.join()
@@ -226,6 +247,72 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str | No
     run("stopsound @a * minecraft:block.note_block.harp")
     run(f"stopsound {name_b} block block.note_block.harp")
 
+    # ---- talking: what is typed into the chat, and the commands that say something
+    def says(text: str, bot=a):
+        step(("" if bot is a else "B ") + "says: " + text[:40], lambda: bot.chat(text))
+
+    def signed(command: str, bot=a):
+        step(("" if bot is a else "B: ") + "/" + command[:60] + " (as a client sends it)", lambda: bot.say_signed(command))
+
+    def on_console(line: str):
+        mark_a, mark_b = len(a.log), len(b.log)
+        type_on_console(line)
+        steps.append({"step": "console: " + line, "A": a.log[mark_a:], "B": b.log[mark_b:]})
+
+    says("hello")
+    says("hello back", b)
+    says("x" * 256)
+    says("a \u00e4 \u4e16 \U0001F600 z")
+    signed("me waves")
+    run("me waves")                                   # a plain chat_command: said for A, by nobody
+    signed("me waves at @a", b)                       # B may not use selectors
+    signed("say hello @s and @a")
+    run("say hello @s and @a")
+    signed("say a@b @ @x @")
+    signed("say hi @e[type=nothing]")
+    signed("say hi @e[type=armor_stand,distance=..2]")   # nobody: an empty name
+    signed("say " + "x" * 257)
+    signed("say " + "x" * 256)
+    run("say hi", b)                                  # not a command to B
+    signed(f"msg {name_b} psst")
+    signed(f"tell {name_a} what", b)
+    signed("w @a all of you")
+    run(f"msg {name_b} not signed")
+    signed("msg Nobody hi")
+    signed("msg @s")
+    signed("teammsg hi")
+    signed("tm hi", b)
+    on_console("say console here, @a")
+    on_console("me yawns")
+    on_console(f"msg {name_b} you there?")
+    on_console("teammsg hi")
+    # B shows system messages only, then nothing, then everything again.
+    step("B: system messages only", lambda: b.chat_visibility(1))
+    says("can B read this?")
+    says("B says this", b)
+    run("list", b)
+    step("B: chat hidden", lambda: b.chat_visibility(2))
+    says("and this?")
+    says("B says that", b)
+    run("list", b)
+    signed(f"msg {name_b} hidden?")
+    step("B: chat shown", lambda: b.chat_visibility(0))
+    says("B is back")
+    # Somebody comes and goes: what the others read, and what it reads itself.
+    mark_a, mark_b = len(a.log), len(b.log)
+    c = Prober(port, name_c)
+    c.join()
+    c.pump(1.0)
+    for bot in (a, b):
+        pump(bot, 0.3)
+    c.chat("just passing")
+    c.pump(0.5)
+    c.c.close()
+    for _ in range(4):
+        for bot in (a, b):
+            pump(bot, 0.25)
+    steps.append({"step": "C joins, says something and leaves", "A": a.log[mark_a:], "B": b.log[mark_b:], "C": c.log})
+
     # ---- what is not a command, and who may run what
     run("nonsense")
     run("")
@@ -244,7 +331,7 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str | No
 
     type_on_console(f"deop {name_a}")
     a.c.close()
-    Path(out_path).write_text(json.dumps({"origin": origin, "names": [name_a, name_b], "steps": steps}))
+    Path(out_path).write_text(json.dumps({"origin": origin, "names": [name_a, name_b, name_c], "recorded": int(time.time() * 1000), "steps": steps}))
     print(f"wrote {out_path}")
 
 
@@ -353,6 +440,20 @@ def _text(v, bots: set):
     return v
 
 
+def _chat_type(r, bots: set) -> str:
+    """ChatType.Bound: the type's id, the sender's name, the target's."""
+    holder = r.varint()
+    assert holder > 0, "a chat type spelled out in the packet"
+    name = mc.snbt(_text(r.nbt(), bots))
+    target = mc.snbt(_text(r.nbt(), bots)) if r.bool() else None
+    return f"type {mc.load_registry('chat_type')[holder - 1]} name {name} target {target}"
+
+
+def rec_time(st: dict, rec: dict) -> int:
+    """About when a recording was made, in ms: a message's time is its server's, and "now"."""
+    return rec.get("recorded", 0)
+
+
 def _plain(v) -> str:
     """Enough of Component.getString to recognise a line: literal text and the children."""
     if isinstance(v, str):
@@ -370,14 +471,31 @@ def _normalise(rec: dict, who: str, commands: set | None) -> tuple[dict[str, lis
     for st in rec["steps"]:
         rows, appeared = [], []
         blocks = {}
-        for name, hexdata in st[who]:
+        for name, hexdata in st.get(who, []):
             r = mc.Reader(bytes.fromhex(hexdata))
-            if name == "system_chat":
+            if name == "player_chat":
+                # The count of player_chat packets this client was sent (compared: both servers
+                # count from 0), the sender, and a message without a session: index 0, no
+                # signature, the server's own time, salt 0, nothing seen.
+                count, sender, index = r.varint(), r.uuid(), r.varint()
+                signature = r.take(256).hex() if r.bool() else None
+                content, stamp, salt = r.str(), r.i64(), r.i64()
+                seen = [r.take(256).hex() if (packed := r.varint()) == 0 else packed - 1 for _ in range(r.varint())]
+                unsigned = _text(r.nbt(), bots) if r.bool() else None
+                mask = r.varint()
+                rows.append((name, f"#{count} from {sender} index {index} signature {signature} {content!r} "
+                                   f"time {'now' if abs(stamp - rec_time(st, rec)) < 600_000 else stamp} salt {salt} seen {seen} "
+                                   f"unsigned {mc.snbt(unsigned) if unsigned is not None else None} mask {mask} {_chat_type(r, bots)}"))
+                r.done()
+            elif name == "disguised_chat":
+                rows.append((name, f"{mc.snbt(_text(r.nbt(), bots))} {_chat_type(r, bots)}"))
+                r.done()
+            elif name == "system_chat":
                 value = _text(r.nbt(), bots)
                 overlay = r.bool()
                 line = _plain(value)
                 key = value.get("translate", "") if isinstance(value, dict) else ""
-                if key.startswith("chat.type.advancement") or key.startswith("multiplayer.player."):
+                if key.startswith("chat.type.advancement"):
                     rows.append(("  (not compared)", key))
                     continue
                 if st["step"].endswith("/help") or st["step"].endswith("B: /help"):   # one line per command: only those both have
@@ -434,7 +552,11 @@ def _normalise(rec: dict, who: str, commands: set | None) -> tuple[dict[str, lis
                 rows.append(("  (not compared)", f"a command tree: {sorted(tree['children'])}"))
         if blocks:
             rows.append(("blocks", str(sorted(blocks.items()))))
-        out[st["step"]] = rows + appeared
+        key, again = st["step"], 1
+        while key in out:            # a step that is taken more than once is told apart by its turn
+            again += 1
+            key = f'{st["step"]} ({again})'
+        out[key] = rows + appeared
     return out, tree
 
 
@@ -442,7 +564,7 @@ def diff(path_ref: str, path_ours: str) -> int:
     ref, ours = json.load(open(path_ref)), json.load(open(path_ours))
     different = 0
     verbose = "-v" in sys.argv
-    for who in ("A", "B"):
+    for who in ("A", "B", "C"):
         right, tree_ours = _normalise(ours, who, None)
         commands = set(tree_ours["children"]) if tree_ours else set()
         left, tree_ref = _normalise(ref, who, commands)
@@ -450,6 +572,8 @@ def diff(path_ref: str, path_ours: str) -> int:
         print(f"################ what {who} is told (left: {path_ref}, right: {path_ours})")
         for step in left:
             x, y = left[step], right.get(step, [])
+            if who == "C" and not x and not y:      # (C is there for one step)
+                continue
             notes = [r[1] for r in x + y if r[0] == "  (not compared)"]
             x = [r for r in x if r[0] != "  (not compared)"]
             y = [r for r in y if r[0] != "  (not compared)"]

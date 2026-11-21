@@ -165,10 +165,10 @@ class MockSessionServer:
 
 # ----------------------------------------------------------------------------- shared flows
 
-def join(c: Client, name: str, online: bool = False, view: int = 10) -> dict:
+def join(c: Client, name: str, online: bool = False, view: int = 10, chat: int = 0) -> dict:
     """Login + configuration + the whole join burst. Returns everything observed."""
     out = {"profile": c.login(name, online)}
-    out["config"] = c.configure(view_distance=view)
+    out["config"] = c.configure(view_distance=view, chat=chat)
     out["login"] = mc.parse_login(c.expect("login"))
     c.entity_id = out["login"]["entity_id"]
     r = c.expect("player_abilities")
@@ -204,17 +204,14 @@ def join(c: Client, name: str, online: bool = False, view: int = 10) -> dict:
         elif got == "game_event":
             out["game_event"] = (r.u8(), r.f32())
             r.done()
-        elif got == "system_chat":
-            out["chat"] = (r.nbt_text(), r.bool())
-            r.done()
-            break
+            break      # (what follows - the view's centre, the chunks, the menu - is the client's model's)
         else:
             raise AssertionError(f"unexpected play packet {got}")
     # The chunks come batch by batch from the end of the join's tick on (PlayerChunkSender): the
     # client's own cache (c.chunks) takes them; here the view is waited for.
-    assert c.chunk_center is not None, "no set_chunk_cache_center before the first chunk"
     out["view"] = min(max(view, 2), out["login"]["view_distance"])
     c.sync_chunks(out["view"])
+    assert c.chunk_log[0][0] == "center", "no set_chunk_cache_center before the first chunk"
     # A client says where it is every tick, at the least once a second. A server looks again at
     # who sees whom on each such packet (ChunkMap.move) - which is when what stands in the chunks
     # that have just come is shown.
@@ -248,7 +245,6 @@ def check_join(j: dict, name: str, view: int = 10, online: bool = False) -> None
     assert j["teleport"]["pos"] == (8.5, -60.0, 8.5), j["teleport"]["pos"]
     assert j["abilities"][0] == 0x01 | 0x04 | 0x08, j["abilities"]  # invulnerable, may fly, instabuild - not flying
     assert j["game_event"] == (13, 0.0)
-    assert j["chat"] == (f"Welcome, {name}!", False)
 
     cx, cz = j["center"]
     assert j["first_chunk"] == (cx, cz), "the player's own chunk must be sent first"
@@ -2519,6 +2515,7 @@ def run_command(c: Client, line: str, ticks: int = 3) -> dict:
     teleport is accepted, the chunks of a new view are taken. Entities, sounds and menus go
     into the client's model as always."""
     out = {"said": [], "blocks": {}, "teleports": []}
+    mark = len(c.chat)
     c.send("chat_command", mc.mc_str(line))
     for i in range(ticks):
         token = 0xC0DE00 + i
@@ -2528,11 +2525,7 @@ def run_command(c: Client, line: str, ticks: int = 3) -> dict:
             if name == "pong_response":
                 assert r.i64() == token
                 break
-            if name == "system_chat":
-                out["said"].append(r.nbt())
-                assert r.bool() is False     # not the action bar
-                r.done()
-            elif name == "player_position":
+            if name == "player_position":
                 tp = {"id": r.varint(), "pos": (r.f64(), r.f64(), r.f64()), "delta": (r.f64(), r.f64(), r.f64()),
                       "rot": (r.f32(), r.f32()), "relative": r.i32()}
                 r.done()
@@ -2549,6 +2542,9 @@ def run_command(c: Client, line: str, ticks: int = 3) -> dict:
                 assert name in ("block_changed_ack", "light_update", "player_info_update", "player_info_remove", "set_chunk_cache_center",
                                 "chunk_batch_start", "level_chunk_with_light", "chunk_batch_finished", "forget_level_chunk"), \
                     f"unexpected {name} after /{line}"
+    assert all(m[0] != "system" or m[2] is False for m in c.chat[mark:])     # nothing on the action bar
+    out["said"] = c.said(mark)
+    c.mark_chat_read()
     return out
 
 
@@ -2615,8 +2611,9 @@ def command_tree_and_operators(srv: Server):
         cl.send("player_loaded")
     settle(a, b)
 
-    # Nobody is an operator: level 0, and a tree of the two commands anyone may use.
-    assert a.permission_level == 0 and sorted(a.commands["children"]) == ["help", "list"], a.commands["children"].keys()
+    # Nobody is an operator: level 0, and a tree of the commands anyone may use.
+    assert a.permission_level == 0 and sorted(a.commands["children"]) == ["help", "list", "me", "msg", "teammsg", "tell", "tm", "w"], \
+        a.commands["children"].keys()
     lst = a.commands["children"]["list"]
     assert lst["executable"] and not lst["restricted"] and list(lst["children"]) == ["uuids"] and lst["children"]["uuids"]["executable"]
     assert a.commands["children"]["help"]["children"]["command"]["properties"] == {"type": "greedy"}
@@ -2626,13 +2623,14 @@ def command_tree_and_operators(srv: Server):
     assert got["said"] == [failure(tr("command.unknown.command")), here(line, 0)] and not got["blocks"], got
     assert run_command(a, "list")["said"] == [tr("commands.list.players", 2, 500, {"text": "", "extra": [
         player_name("Alice"), {"text": ", ", "color": "gray"}, player_name("Bob")]})]
-    assert run_command(a, "help")["said"] == ["/help [<command>]", "/list [uuids]"]
+    assert run_command(a, "help")["said"] == ["/me <action>", "/help [<command>]", "/list [uuids]", "/msg <targets> <message>",
+                                              "/tell -> msg", "/w -> msg", "/teammsg <message>", "/tm -> teammsg"]
 
     # The console makes Alice an operator: entity event 28, the whole tree, a line in ops.json.
     make_op(srv, a, "Alice")
     tree = a.commands["children"]
-    assert sorted(tree) == ["deop", "fill", "give", "help", "kick", "kill", "list", "op", "playsound", "setblock", "stop",
-                            "stopsound", "summon", "teleport", "tp"], sorted(tree)
+    assert sorted(tree) == ["deop", "fill", "give", "help", "kick", "kill", "list", "me", "msg", "op", "playsound", "say",
+                            "setblock", "stop", "stopsound", "summon", "teammsg", "teleport", "tell", "tm", "tp", "w"], sorted(tree)
     assert tree["setblock"]["restricted"] and not tree["setblock"]["executable"] and not tree["list"]["restricted"]
     pos = tree["setblock"]["children"]["pos"]
     assert pos["parser"] == "kBlockPos" and not pos["executable"]
@@ -2656,7 +2654,7 @@ def command_tree_and_operators(srv: Server):
     dashed = mc.offline_uuid("Alice")
     dashed = "-".join((dashed[:8], dashed[8:12], dashed[12:16], dashed[16:20], dashed[20:]))
     assert ops == [{"uuid": dashed, "name": "Alice", "level": 4, "bypassesPlayerLimit": False}], ops
-    assert b.permission_level == 0 and sorted(b.commands["children"]) == ["help", "list"]
+    assert b.permission_level == 0 and sorted(b.commands["children"]) == ["help", "list", "me", "msg", "teammsg", "tell", "tm", "w"]
 
     # Alice ops Bob: both read it - Alice as the answer, Bob as what an operator did.
     got = run_command(a, "op Bob")
@@ -2676,7 +2674,7 @@ def command_tree_and_operators(srv: Server):
     # /deop: back to level 0 and the small tree; a third time there is nobody to deop.
     assert run_command(a, "deop Bob")["said"] == [tr("commands.deop.success", "Bob")]
     settle(b)
-    assert b.permission_level == 0 and sorted(b.commands["children"]) == ["help", "list"]
+    assert b.permission_level == 0 and sorted(b.commands["children"]) == ["help", "list", "me", "msg", "teammsg", "tell", "tm", "w"]
     assert run_command(a, "deop Bob")["said"] == [failure(tr("commands.deop.failed"))]
     assert [o["name"] for o in json.load(open(srv.ops_file))] == ["Alice"]
     # A name nobody has: in offline mode it is a profile all the same (and can be opped ahead of joining).
@@ -3114,12 +3112,8 @@ def command_sounds_kick_stop(srv: Server):
     # Twelve commands in a row are two too many for someone who is not an operator.
     for _ in range(12):
         b.send("chat_command", mc.mc_str("list"))
-    while True:
-        name, r = b.recv()
-        if name == "disconnect":
-            assert r.nbt() == tr("disconnect.spam")
-            break
-        assert name == "system_chat", name
+    name, r = b.recv()
+    assert name == "disconnect" and r.nbt() == tr("disconnect.spam"), name
     b.expect_closed()
     for _ in range(12):                                   # an operator may
         a.send("chat_command", mc.mc_str("list"))
@@ -3154,17 +3148,286 @@ def command_sounds_kick_stop(srv: Server):
     assert kicked(e) == tr("multiplayer.disconnect.illegal_characters")
 
     # /stop: said, logged, done - the server ends by itself, cleanly.
+    mark = len(a.chat)
     a.send("chat_command", mc.mc_str("stop"))
-    said = []
-    while True:
-        name, r = a.recv()
-        if name == "system_chat":
-            said.append(r.nbt())
-        elif name == "disconnect":
-            break
-    assert said == [tr("commands.stop.stopping")], said
+    while a.recv()[0] != "disconnect":
+        pass
+    assert a.said(mark) == [tr("commands.stop.stopping")], a.said(mark)
     assert srv.proc.wait(timeout=5) == 0
     assert "[Alice: Stopping the server]" in srv.read_log()
+
+
+# ----------------------------------------------------------------------------- chat
+
+CHAT_TYPE = {name.split(":")[1]: i for i, name in enumerate(mc.load_registry("chat_type"))}
+A_SIGNATURE = bytes(range(256))
+
+
+def last_seen(offset: int = 0, bits: int = 0, checksum: int = 0) -> bytes:
+    """LastSeenMessages.Update: how far the window moved, which of its 20 were seen, a checksum."""
+    return varint(offset) + bits.to_bytes(3, "little") + bytes([checksum])
+
+
+def chat_body(message: str, signature: bytes | None = None, seen: bytes | None = None, stamp: int = 5, salt: int = 7) -> bytes:
+    """ServerboundChatPacket: the message, when it was typed, a salt, a signature or none, what was seen."""
+    return mc.mc_str(message) + struct.pack(">qq", stamp, salt) + (b"\x01" + signature if signature else b"\x00") + \
+        (last_seen() if seen is None else seen)
+
+
+def signed_command(line: str, signatures: dict | None = None, seen: bytes | None = None) -> bytes:
+    """ServerboundChatCommandSignedPacket: the line, time and salt, a signature for each message
+    argument a client with a key signed, what was seen."""
+    sigs = signatures or {}
+    return mc.mc_str(line) + struct.pack(">qq", 5, 7) + varint(len(sigs)) + \
+        b"".join(mc.mc_str(k) + v for k, v in sigs.items()) + (last_seen() if seen is None else seen)
+
+
+def announced(what: str, name: str) -> tuple:
+    """"Steve joined the game" / "Steve left the game", as it stands in a client's chat."""
+    return ("system", {"translate": "multiplayer.player." + what, "with": [player_name(name)], "color": "yellow"}, False)
+
+
+def spoken(c: Client, since: int = 0) -> list:
+    """What was said - by players and for them - in c.chat[since:], without the time it was said
+    at (the server's own: checked here to be now)."""
+    out = []
+    for kind, m in ((e[0], e[1]) for e in c.chat[since:] if e[0] != "system"):
+        m = dict(m)
+        if kind == "player":
+            assert abs(m.pop("timestamp") - time.time() * 1000) < 60_000, "a message carries the server's time"
+        out.append((kind, m))
+    return out
+
+
+def by_player(name: str, content: str, kind: str = "chat", unsigned=None, target=None) -> tuple:
+    """A message as its sender typed it: PlayerChatMessage.unsigned - the sender, no signature,
+    the first of no session, nothing seen."""
+    return ("player", {"sender": mc.offline_uuid(name), "index": 0, "signature": None, "content": content, "salt": 0,
+                       "last_seen": [], "unsigned": unsigned, "type": CHAT_TYPE[kind], "name": player_name(name),
+                       "target": target})
+
+
+def disguised(name, message, kind: str, target=None) -> tuple:
+    """A message that is nobody's: what the console says, what a command says for a player."""
+    return ("disguised", {"message": message, "type": CHAT_TYPE[kind], "name": name, "target": target})
+
+
+@test()
+def chat(srv: Server):
+    """What one player types, the others read - those who show the chat: it goes out as vanilla
+    sends the message of a player without a chat session. Who comes and who goes is said to
+    everyone. What does not belong in chat puts its sender out."""
+    a, b, c, d = srv.client(), srv.client(), srv.client(), srv.client()
+    join(a, "Alice")
+    assert a.chat == []                              # nobody is told that it has come itself
+    join(b, "Bob")
+    join(c, "Carol", chat=1)                         # system messages only
+    join(d, "Dave", chat=2)                          # nothing at all
+    skip_tab_updates(a, 3)
+    skip_tab_updates(b, 2)
+    skip_tab_updates(c, 1)
+    settle(a, b, c, d)
+    assert a.chat == [announced("joined", n) for n in ("Bob", "Carol", "Dave")], a.chat
+    assert b.chat == [announced("joined", n) for n in ("Carol", "Dave")] and c.chat == [announced("joined", "Dave")]
+    assert d.chat == []
+    log = srv.read_log()
+    assert "Bob joined the game" in log, log[-600:]
+
+    def say(who: Client, *args, **kw) -> list:
+        """Send a chat packet; what everyone was then sent of chat, by client."""
+        marks = [len(x.chat) for x in (a, b, c, d)]
+        who.send("chat", chat_body(*args, **kw))
+        settle(a, b, c, d)
+        return [x.chat[m:] and spoken(x, m) + [e for e in x.chat[m:] if e[0] == "system"] for x, m in zip((a, b, c, d), marks)]
+
+    # ---- a message: to the two who show chat, the sender among them; the first, index 0, for both.
+    hello = by_player("Alice", "hello there")
+    assert say(a, "hello there") == [[hello], [hello], [], []]
+    assert a.chat_index == 1 and b.chat_index == 1 and c.chat_index == 0
+    assert "[Not Secure] <Alice> hello there" in srv.read_log()
+    # A signature, a time and a salt of the client's own change nothing: there is no session to
+    # check them against, and the message goes out as unsigned as the first.
+    signed = by_player("Bob", "мир, 世界 & \U0001F600")
+    assert say(b, "мир, 世界 & \U0001F600", signature=A_SIGNATURE, stamp=123456789, salt=-1) == [[signed], [signed], [], []]
+    # 256 characters are a message.
+    long = by_player("Alice", "x" * 256)
+    assert say(a, "x" * 256) == [[long], [long], [], []]
+    # Carol does not show what players say - nor what she says herself. The others read her.
+    carol = by_player("Carol", "anyone?")
+    assert say(c, "anyone?") == [[carol], [carol], [], []]
+    # Dave has the chat off: he is told so, in red, and nobody reads him.
+    off = ("system", {"translate": "chat.disabled.options", "color": "red"}, False)
+    assert say(d, "hello?") == [[], [], [], [off]]
+    # ...and nothing a command answers reaches him either.
+    assert run_command(d, "list")["said"] == [] and len(run_command(b, "list")["said"]) == 1
+    # He turns it on (client_information in play): now he reads, and his count begins.
+    d.send("client_information", mc.mc_str("en_us") + struct.pack(">b", 10) + varint(0) + b"\x01" + b"\x7f" + varint(1) +
+           b"\x00\x01" + varint(0))
+    dave = by_player("Dave", "there you are")
+    assert say(d, "there you are") == [[dave], [dave], [], [dave]]
+    assert (a.chat_index, b.chat_index, c.chat_index, d.chat_index) == (5, 5, 0, 1)
+
+    # ---- what a client says about what it has seen: nothing, as nothing it is sent is signed.
+    # The checksum of nothing is 1, and 0 is "not checked"; a chat_ack of 0 moves nothing.
+    b.send("chat_ack", varint(0))
+    b.send("chat_session_update", bytes(16) + struct.pack(">q", 1 << 41) + varint(294) + bytes(294) + varint(512) + bytes(512))
+    fine = by_player("Bob", "fine")
+    assert say(b, "fine", seen=last_seen(0, 0, 1)) == [[fine], [fine], [], [fine]]
+    # Anything else is out of step with a server that keeps no window - and is put out.
+    for i, (name, packet) in enumerate([("chat", chat_body("x", seen=last_seen(1, 0, 0))),
+                                        ("chat", chat_body("x", seen=last_seen(0, 1 << 19, 0))),
+                                        ("chat", chat_body("x", seen=last_seen(0, 1 << 20, 0))),
+                                        ("chat", chat_body("x", seen=last_seen(0, 0, 2))),
+                                        ("chat_command_signed", signed_command("list", seen=last_seen(3, 0, 0))),
+                                        ("chat_ack", varint(1))]):
+        mark = len(a.chat)
+        e = srv.client()
+        join(e, f"Eve{i}")
+        e.send(name, packet)
+        got, r = e.recv()
+        assert got == "disconnect" and r.nbt() == tr("multiplayer.disconnect.chat_validation_failed"), (name, got)
+        e.expect_closed()
+        skip_tab_updates(a, 1)
+        a.expect("player_info_remove")
+        assert a.chat[mark:] == [announced("joined", f"Eve{i}"), announced("left", f"Eve{i}")], a.chat[mark:]   # and nothing it said
+    for cl in (b, c, d):
+        cl.ignore = {"player_info_update", "player_info_remove"}
+    # A section sign, a control character: out.
+    e = srv.client()
+    join(e, "Mallory")
+    e.send("chat", chat_body("a §c b"))
+    got, r = e.recv()
+    assert got == "disconnect" and r.nbt() == tr("multiplayer.disconnect.illegal_characters"), got
+    e.expect_closed()
+    skip_tab_updates(a, 1)
+    a.expect("player_info_remove")
+    settle(a, b, c, d)
+    assert c.chat[-2:] == [announced("joined", "Mallory"), announced("left", "Mallory")], c.chat[-2:]
+    assert d.chat[-2:] == [announced("joined", "Mallory"), announced("left", "Mallory")]
+    assert "Mallory left the game" in srv.read_log()
+
+    # ---- ten messages at once are one too many for someone who is not an operator: the tenth
+    # still goes out, then its sender does.
+    mark = len(a.chat)
+    b.send_together(*[("chat", chat_body(f"spam {i}")) for i in range(12)])
+    got, r = b.recv()
+    assert got == "disconnect" and r.nbt() == tr("disconnect.spam"), got
+    b.expect_closed()
+    a.expect("player_info_remove")
+    settle(a)
+    assert spoken(a, mark) == [by_player("Bob", f"spam {i}") for i in range(10)], spoken(a, mark)
+    make_op(srv, a, "Alice")
+    mark = len(a.chat)
+    a.send_together(*[("chat", chat_body(f"news {i}")) for i in range(12)])
+    settle(a, d)
+    assert spoken(a, mark) == [by_player("Alice", f"news {i}") for i in range(12)]
+    assert spoken(d)[-1] == by_player("Alice", "news 11")
+
+
+@test()
+def chat_commands(srv: Server):
+    """/say, /me, /msg and its other names, /teammsg: a player's own words where its client
+    vouches for the line (chat_command_signed), somebody's otherwise; selectors in them are
+    names for who may use selectors."""
+    a, b, c = srv.client(), srv.client(), srv.client()
+    join(a, "Alice")
+    join(b, "Bob")
+    join(c, "Carol")
+    skip_tab_updates(a, 2)
+    skip_tab_updates(b, 1)
+    for cl in (a, b, c):
+        cl.send("player_loaded")
+    settle(a, b, c)
+    make_op(srv, a, "Alice")
+    alice, bob, carol = player_name("Alice"), player_name("Bob"), player_name("Carol")
+
+    def typed(who: Client, line: str, signed: bool = True, **kw) -> list:
+        """A command line as a client sends one with message arguments; what all three read."""
+        marks = [len(x.chat) for x in (a, b, c)]
+        who.send("chat_command_signed", signed_command(line, **kw)) if signed else who.send("chat_command", mc.mc_str(line))
+        settle(a, b, c)
+        return [spoken(x, m) + [e[1] for e in x.chat[m:] if e[0] == "system"] for x, m in zip((a, b, c), marks)]
+
+    # ---- /me: anyone may. From a client the action is the player's own; a line that came as a
+    # plain chat_command is said for it, by nobody.
+    waves = by_player("Bob", "waves", "emote_command")
+    assert typed(b, "me waves") == [[waves]] * 3
+    for_bob = disguised(bob, "waves", "emote_command")
+    assert typed(b, "me waves", signed=False) == [[for_bob]] * 3
+    log = srv.read_log()
+    assert "[Not Secure] * Bob waves" in log, log[-600:]
+    # Bob may not use selectors: his "@a" is two characters.
+    at = by_player("Bob", "greets @a", "emote_command")
+    assert typed(b, "me greets @a") == [[at]] * 3
+    # ...and not /say: it is not a command to him.
+    assert typed(b, "say hi")[1] == [failure(tr("command.unknown.command")), here("say hi", 0)]
+
+    # ---- /say, by an operator: selectors become names - shown in place of what was typed.
+    shown = {"text": "hello ", "extra": [alice, "!"]}
+    says = by_player("Alice", "hello @s!", "say_command", unsigned=shown)
+    assert typed(a, "say hello @s!") == [[says]] * 3
+    everyone = {"text": "", "extra": [alice, {"text": ", ", "color": "gray"}, bob, {"text": ", ", "color": "gray"}, carol]}
+    all_of_you = by_player("Alice", "@a: tea?", "say_command", unsigned={"text": "", "extra": [everyone, ": tea?"]})
+    assert typed(a, "say @a: tea?") == [[all_of_you]] * 3
+    plain = by_player("Alice", "just this", "say_command")
+    assert typed(a, "say just this") == [[plain]] * 3
+    assert typed(a, "say hello @s!", signed=False) == [[disguised(alice, shown, "say_command")]] * 3
+    # A selector that is wrong is the line's mistake; an '@' that is none is a character.
+    line = "say hi @e[type=nothing]"
+    got = typed(a, line)[0]
+    assert got == [failure(tr("argument.entity.options.type.invalid", "minecraft:nothing")), here(line, 15)], got
+    assert typed(a, "say a@b @ @x") == [[by_player("Alice", "a@b @ @x", "say_command")]] * 3
+    # More than 256 characters are no message.
+    assert typed(a, "say " + "x" * 257)[0] == [failure(tr("argument.message.too_long", 257, 256))]
+    assert typed(a, "say " + "x" * 256)[2] == [by_player("Alice", "x" * 256, "say_command")]
+
+    # ---- a client with a key signs its message arguments and names them: those and no others.
+    assert typed(a, "say signed", signatures={"message": A_SIGNATURE}) == [[by_player("Alice", "signed", "say_command")]] * 3
+    bad = {"text": "", "extra": [tr("chat.disabled.invalid_command_signature")], "color": "red"}
+    assert typed(a, "say signed", signatures={"reason": A_SIGNATURE}) == [[bad], [], []]
+    assert typed(a, "say signed", signatures={"message": A_SIGNATURE, "other": A_SIGNATURE}) == [[bad], [], []]
+    assert typed(a, "list", signatures={"message": A_SIGNATURE}) == [[bad], [], []]
+
+    # ---- /msg, /tell, /w: the one it is for reads it, the one who wrote it reads it back.
+    for word in ("msg", "tell", "w"):
+        got = typed(b, f"{word} Alice psst")
+        assert got == [[by_player("Bob", "psst", "msg_command_incoming")],
+                       [by_player("Bob", "psst", "msg_command_outgoing", target=alice)], []], got
+    got = typed(a, "msg @a all of you")      # to each of three: three echoes, hers among what she is sent
+    out = [by_player("Alice", "all of you", "msg_command_outgoing", target=t) for t in (alice, bob, carol)]
+    into = by_player("Alice", "all of you", "msg_command_incoming")
+    assert got == [[out[0], into, out[1], out[2]], [into], [into]], got
+    assert typed(b, "msg Nobody hi")[1] == [failure(tr("argument.entity.notfound.player"))]
+    assert typed(b, "msg Alice", signed=False)[1][0] == failure(tr("command.unknown.command"))
+    assert typed(b, "msg Carol pst", signed=False) == [[], [disguised(bob, "pst", "msg_command_outgoing", target=carol)],
+                                                       [disguised(bob, "pst", "msg_command_incoming")]]
+
+    # ---- /teammsg: there are no teams to be in.
+    assert typed(b, "teammsg hello")[1] == [failure(tr("commands.teammsg.failed.noteam"))]
+    assert typed(b, "tm hello")[1] == [failure(tr("commands.teammsg.failed.noteam"))]
+
+    # ---- the console: nobody's words, under the name "Server".
+    marks = [len(x.chat) for x in (a, b, c)]
+    srv.console("say backup in five @a")
+    srv.wait_log("[Not Secure] [Server] backup in five Alice, Bob, Carol")
+    srv.console("me yawns")
+    srv.wait_log("[Not Secure] * Server yawns")
+    srv.console("msg Bob you there?")
+    srv.wait_log("You whisper to Bob: you there?")
+    srv.console("teammsg hi")
+    srv.wait_log("An entity is required to run this command here")
+    settle(a, b, c)
+    backup = disguised("Server", {"text": "backup in five ", "extra": [everyone]}, "say_command")
+    yawns = disguised("Server", "yawns", "emote_command")
+    assert spoken(a, marks[0]) == [backup, yawns] and spoken(c, marks[2]) == [backup, yawns]
+    assert spoken(b, marks[1]) == [backup, yawns, disguised("Server", "you there?", "msg_command_incoming")]
+
+    # ---- /kick's reason is a message too: with names for selectors.
+    mark = len(a.chat)
+    a.send("chat_command_signed", signed_command("kick Carol enough, says @s"))
+    got, r = c.recv()
+    assert got == "disconnect" and r.nbt() == {"text": "enough, says ", "extra": [alice]}, got
+    c.expect_closed()
 
 
 def join_many(srv: Server, n: int, view: int, online: bool = False) -> list:

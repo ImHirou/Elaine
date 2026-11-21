@@ -172,6 +172,7 @@ add_library(core STATIC
   src/server/explosion.cpp
   src/server/physics.cpp
   src/server/players.cpp
+  src/server/chat.cpp
   src/server/command.cpp
   src/server/command_args.cpp
   src/server/commands.cpp
@@ -212,6 +213,7 @@ if(MC_TESTS)
       tests/unit/inventory_test.cpp
       tests/unit/container_test.cpp
       tests/unit/command_test.cpp
+      tests/unit/chat_test.cpp
     )
     target_link_libraries(unit_tests PRIVATE core GTest::gtest_main OpenSSL::Crypto)
     mc_needs_generated(unit_tests)

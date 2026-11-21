@@ -115,6 +115,11 @@ What was read there for 26.3 (DFU 10.0.21), and then seen to hold on a running v
 captured variables, not in the order of the enclosing method's parameters (`ExtraCodecs.orCompressed` reads as
 if its arguments were swapped). When the order matters, look at the `aload` order in `javap --full`.
 
+`pseudo` also shows `x++` used as a value as an increment followed by a read (`this.nextChatIndex =
+this.nextChatIndex + 1; send(new Packet(this.nextChatIndex, ...))` is `new Packet(this.nextChatIndex++, ...)`
+in the source: the first `player_chat` carries 0, which a recording of the vanilla server showed and the
+pseudo-code did not). Where a counter's first value matters, read the `dup_x1` in `javap --full` - or record it.
+
 ## Other things the jar answers
 
 - **Packet ids**: registration order in `*Protocols` classes; `mcgen.py packets` extracts it. Never hardcode an id.

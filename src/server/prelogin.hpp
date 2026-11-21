@@ -23,8 +23,9 @@ struct JoinInfo {
     std::string name;
     std::vector<Property> props;
     u8 view_distance = 10;
-    u8 skin_parts = 0;  // displayed model parts (cape, jacket, ...), a bit set
-    u8 main_hand = 1;   // HumanoidArm id: 0 left, 1 right
+    u8 skin_parts = 0;       // displayed model parts (cape, jacket, ...), a bit set
+    u8 main_hand = 1;        // HumanoidArm id: 0 left, 1 right
+    u8 chat_visibility = 0;  // ChatVisiblity id: 0 full, 1 system messages only, 2 hidden
     std::string remote;
 };
 void encode_join(base::ByteBuf& out, const JoinInfo& j);

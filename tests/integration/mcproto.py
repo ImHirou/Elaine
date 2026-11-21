@@ -426,6 +426,13 @@ class Client:
         self.permission_level = None           # entity event 24 + level about the player itself
         self.commands = None                   # the last `commands` packet, as parse_commands() returns it
         self.stopped_sounds: list[tuple] = []  # stop_sound: (source or None, sound name or None)
+        # What the chat has shown, kept by recv() like the rest: ("system", component, overlay),
+        # ("player", {...}) and ("disguised", {...}) in arrival order. chat_index is the client's
+        # own count of the player_chat packets it was sent (ClientPacketListener.nextChatIndex):
+        # the index it expects the next one to carry.
+        self.chat: list[tuple] = []
+        self.chat_index = 0
+        self._chat_read = 0                    # recv_pending_chat(): how far self.chat has been handed out
 
     def close(self) -> None:
         self.sock.close()
@@ -474,8 +481,44 @@ class Client:
                 self.apply_menu_packet(name, r)
             elif name in CHUNK_PACKETS:
                 self.apply_chunk_packet(name, r)
+            elif name in CHAT_PACKETS:
+                self.apply_chat_packet(name, r)
             elif name not in self.ignore:
                 return name, r
+
+    def apply_chat_packet(self, name: str, r: Reader) -> None:
+        """handleSystemChat / handlePlayerChat / handleDisguisedChat, as far as a client checks
+        what it is sent before it shows anything."""
+        if name == "system_chat":
+            self.chat.append(("system", r.nbt(), r.bool()))
+        elif name == "disguised_chat":
+            self.chat.append(("disguised", {"message": r.nbt(), **read_chat_type(r)}))
+        else:
+            # A client counts the player_chat packets it gets, from 0; a server that counts
+            # otherwise is left at once (multiplayer.disconnect.bad_chat_index).
+            index = r.varint()
+            assert index == self.chat_index, f"player_chat with global index {index}, the client is at {self.chat_index}"
+            self.chat_index += 1
+            m = {"sender": r.uuid(), "index": r.varint(), "signature": r.take(256) if r.bool() else None,
+                 "content": r.str(), "timestamp": r.i64(), "salt": r.i64()}
+            assert len(m["content"].encode("utf-16-le")) // 2 <= 256, "content longer than SignedMessageBody takes"
+            seen = r.varint()
+            assert seen <= 20, f"{seen} last seen messages"
+            m["last_seen"] = [r.take(256) if (packed := r.varint()) == 0 else packed - 1 for _ in range(seen)]
+            m["unsigned"] = r.nbt() if r.bool() else None
+            mask = r.varint()                  # FilterMask: 0 passes everything
+            assert mask == 0, f"filter mask type {mask}"
+            m.update(read_chat_type(r))
+            self.chat.append(("player", m))
+        r.done()
+
+    def mark_chat_read(self) -> None:
+        """Everything in self.chat has been looked at: recv_pending_chat() begins after it."""
+        self._chat_read = len(self.chat)
+
+    def said(self, since: int = 0) -> list:
+        """The system messages in self.chat[since:], without the ones about who came and went."""
+        return [m[1] for m in self.chat[since:] if m[0] == "system" and not is_announcement(m[1])]
 
     def apply_chunk_packet(self, name: str, r: Reader) -> None:
         """What ClientPacketListener does with the packets that bring and take chunks."""
@@ -567,29 +610,27 @@ class Client:
                     self.apply_menu_packet(name, r)
                 elif name in CHUNK_PACKETS:
                     self.apply_chunk_packet(name, r)
+                elif name in CHAT_PACKETS:
+                    self.apply_chat_packet(name, r)
                 elif name == "keep_alive":
                     self.send("keep_alive", r.take(8))
         finally:
             self.sock.settimeout(old)
 
     def recv_pending_chat(self) -> list:
-        """The system messages among what has been received and not read yet: their text
-        components. Block changes and the tab list are passed over; whatever else is waiting is an
-        error."""
-        said = []
+        """The system messages that have come since this was last asked - their text components,
+        without the ones about who came and went. Block changes and the tab list are passed
+        over; whatever else is waiting is an error."""
         self.send("ping_request", struct.pack(">q", 0x5A1D))
         while True:
             name, r = self.recv()
             if name == "pong_response":
                 assert r.i64() == 0x5A1D
+                said = self.said(self._chat_read)
+                self.mark_chat_read()
                 return said
-            if name in ("block_update", "section_blocks_update", "light_update", "block_changed_ack", "player_info_update",
-                        "player_info_remove"):
-                continue
-            assert name == "system_chat", f"expected only system_chat, got {name}"
-            said.append(r.nbt())
-            r.bool()
-            r.done()
+            assert name in ("block_update", "section_blocks_update", "light_update", "block_changed_ack", "player_info_update",
+                            "player_info_remove"), f"expected only chat, got {name}"
 
     def recv_any(self) -> tuple[str, Reader]:
         while True:
@@ -617,7 +658,11 @@ class Client:
             if usize == 0:
                 self.stored += 1
                 body = frame[r.i:]
-                assert len(body) < self.threshold, f"stored body of {len(body)} bytes >= threshold {self.threshold}"
+                # A vanilla client takes a stored frame of any size (CompressionDecoder); a vanilla
+                # server never sends one that reaches the threshold, and neither does ours - but
+                # for player_chat, each recipient's own frame of one message, which it leaves as it is.
+                assert len(body) < self.threshold or (self.state == "play" and body[0] == IDS["play"]["cb"]["player_chat"]), \
+                    f"stored body of {len(body)} bytes >= threshold {self.threshold}"
             else:
                 self.deflated += 1
                 assert usize >= self.threshold, f"deflated body of {usize} bytes < threshold {self.threshold}"
@@ -691,8 +736,9 @@ class Client:
         self.state = "configuration"
         return info
 
-    def configure(self, view_distance: int = 10, known_packs: list | None = None) -> dict:
-        """Run the configuration phase. Returns what the server sent."""
+    def configure(self, view_distance: int = 10, known_packs: list | None = None, chat: int = 0) -> dict:
+        """Run the configuration phase. Returns what the server sent. `chat`: ChatVisiblity - 0
+        everything, 1 system messages only, 2 nothing."""
         cfg: dict = {"registries": {}, "tags": None}
         r = self.expect("custom_payload")
         assert r.str() == "minecraft:brand"
@@ -705,7 +751,7 @@ class Client:
         cfg["known_packs"] = [(r.str(), r.str(), r.str()) for _ in range(r.varint())]
         r.done()
 
-        self.send("client_information", mc_str("en_us") + struct.pack(">b", view_distance) + varint(0) + b"\x01" +
+        self.send("client_information", mc_str("en_us") + struct.pack(">b", view_distance) + varint(chat) + b"\x01" +
                   b"\x7f" + varint(1) + b"\x00\x01" + varint(0))
         self.send("custom_payload", mc_str("minecraft:brand") + mc_str("vanilla"))
         packs = cfg["known_packs"] if known_packs is None else known_packs
@@ -755,6 +801,20 @@ ENTITY_PACKETS = {"bundle_delimiter", "add_entity", "remove_entities", "set_enti
                   "set_equipment", "take_item_entity", "swing_animation", "entity_event", "teleport_entity"}
 CHUNK_PACKETS = {"set_chunk_cache_center", "chunk_batch_start", "level_chunk_with_light", "chunk_batch_finished",
                  "forget_level_chunk"}
+CHAT_PACKETS = {"system_chat", "player_chat", "disguised_chat"}
+
+
+def read_chat_type(r: "Reader") -> dict:
+    """ChatType.Bound: the type as a holder (its id in minecraft:chat_type + 1; a type spelled out
+    in the packet is nothing a vanilla server sends), the sender's name, a target's if any."""
+    holder = r.varint()
+    assert holder > 0, "a chat type that is not a registry entry"
+    return {"type": holder - 1, "name": r.nbt(), "target": r.nbt() if r.bool() else None}
+
+
+def is_announcement(component) -> bool:
+    """"Steve joined the game", "Steve left the game": said to everyone, whatever they are doing."""
+    return isinstance(component, dict) and str(component.get("translate", "")).startswith("multiplayer.player.")
 
 
 def view_chunks(cx: int, cz: int, distance: int) -> set:

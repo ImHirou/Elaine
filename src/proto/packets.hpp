@@ -346,6 +346,66 @@ struct SystemChatComponent {
     u8* encode(u8* p) const { return put_bool(put_bytes(p, component.data(), component.size()), overlay); }
 };
 
+// ChatType.Bound, as the last fields of player_chat and disguised_chat: the chat type as a
+// holder (its id in minecraft:chat_type + 1; 0 would be a type spelled out), the sender's name,
+// and for a whisper the name of whom it goes to. `name` and `target` are components' tags;
+// an empty `target` is none.
+struct ChatTypeBound {
+    u32 chat_type;
+    std::span<const u8> name;
+    std::span<const u8> target = {};
+    usize bound() const { return kVarIntMaxBytes + name.size() + 1 + target.size(); }
+    u8* encode(u8* p) const {
+        p = put_varint(p, chat_type + 1);
+        p = put_bytes(p, name.data(), name.size());
+        p = put_bool(p, !target.empty());
+        if (!target.empty()) p = put_bytes(p, target.data(), target.size());
+        return p;
+    }
+};
+
+// player_chat without its first field. ClientboundPlayerChatPacket is: globalIndex (a VarInt,
+// counted per recipient - which is why it is not in here: proto::frame_stored puts it in front
+// of these bytes for each of them), sender, index, an optional 256-byte signature,
+// SignedMessageBody.Packed (content of at most 256 chars, timestamp in ms, salt, a list of at
+// most 20 packed signatures of what the sender last saw), an optional component for what the
+// server made of the content, FilterMask (a VarInt type: 0 passes everything), ChatType.Bound.
+//
+// This is the message of a player without a chat session - all there are here
+// (PlayerChatMessage.unsigned): index 0, no signature, salt 0, nothing seen.
+struct PlayerChatTail {
+    static constexpr u32 kId = ids::play::cb::kPlayerChat;
+    Uuid sender;
+    std::string_view content;
+    i64 timestamp;                         // Instant.now() of the server, in milliseconds
+    std::span<const u8> unsigned_content;  // a component's tag; empty: the content is all there is
+    ChatTypeBound type;
+    usize bound() const { return 16 + 1 + 1 + str_bound(content) + 8 + 8 + 1 + 1 + unsigned_content.size() + 1 + type.bound(); }
+    u8* encode(u8* p) const {
+        p = put_uuid(p, sender);
+        p = put_varint(p, 0);    // SignedMessageLink.index
+        p = put_bool(p, false);  // no signature
+        p = put_str(p, content);
+        p = put_be64(p, static_cast<u64>(timestamp));
+        p = put_be64(p, 0);    // salt
+        p = put_varint(p, 0);  // LastSeenMessages.Packed: no entries
+        p = put_bool(p, !unsigned_content.empty());
+        if (!unsigned_content.empty()) p = put_bytes(p, unsigned_content.data(), unsigned_content.size());
+        p = put_varint(p, 0);  // FilterMask.PASS_THROUGH
+        return type.encode(p);
+    }
+};
+
+// A chat message that is nobody's: what the console says, what a command says for a player that
+// did not sign it. The client shows `message` decorated by the chat type, without a sender.
+struct DisguisedChat {
+    static constexpr u32 kId = ids::play::cb::kDisguisedChat;
+    std::span<const u8> message;  // a component's tag
+    ChatTypeBound type;
+    usize bound() const { return message.size() + type.bound(); }
+    u8* encode(u8* p) const { return type.encode(put_bytes(p, message.data(), message.size())); }
+};
+
 struct PlayPong {  // answer to serverbound ping_request (F3 ping graph)
     static constexpr u32 kId = ids::play::cb::kPongResponse;
     u64 time;
@@ -973,6 +1033,9 @@ struct ClientInformation {
     bool text_filtering;
     bool allows_listing;
     u32 particle_status;
+    // ChatVisiblity.BY_ID (ByIdMap, WRAP): an id that is none of the three wraps around.
+    static constexpr u8 kChatFull = 0, kChatSystem = 1, kChatHidden = 2;
+    static u8 visibility(u32 id) { return static_cast<u8>(((static_cast<i32>(id) % 3) + 3) % 3); }
     static ClientInformation decode(Reader& r) {
         ClientInformation c;
         c.language = r.str(16 * 3);
@@ -1160,27 +1223,105 @@ struct PickItemFromBlock {
     }
 };
 
-// A command typed into the chat, without its slash. chat_command when nothing in it is signed;
-// chat_command_signed when the client signed its message arguments (a kick's reason) - the
-// signatures are read past, not checked: this server does not enforce secure chat.
+// LastSeenMessages.Update: how far the client's window over the signed messages it was sent has
+// moved since it last said, which of the 20 in the window it has seen (FixedBitSet(20): three
+// bytes, bit i in byte i / 8), and a checksum of those - 0 for "do not check".
+struct LastSeenUpdate {
+    u32 offset = 0;
+    u32 acknowledged = 0;  // the three bytes, little-endian: bits 20..23 are no message
+    u8 checksum = 0;
+    static LastSeenUpdate decode(Reader& r) {
+        LastSeenUpdate u;
+        u.offset = r.varint();
+        const auto bits = r.bytes(3);
+        if (bits.size() == 3) u.acknowledged = bits[0] | static_cast<u32>(bits[1]) << 8 | static_cast<u32>(bits[2]) << 16;
+        u.checksum = r.u8v();
+        return u;
+    }
+};
+
+// What a player typed into the chat. ServerboundChatPacket: the message (256 chars), when it
+// was typed (ms), a salt, an optional 256-byte signature over all of it, what the sender has seen.
+// The signature is read past: without chat sessions nothing can be checked against it
+// (SignedMessageChain.Decoder.unsigned).
+struct Chat {
+    static constexpr u32 kMaxChars = 256;
+    std::string_view message;
+    i64 timestamp = 0;
+    i64 salt = 0;
+    bool has_signature = false;
+    LastSeenUpdate last_seen;
+    static Chat decode(Reader& r) {
+        Chat c;
+        c.message = r.str(kMaxChars * 3);
+        if (utf16_length(c.message) > kMaxChars) r.ok = false;
+        c.timestamp = static_cast<i64>(r.be64());
+        c.salt = static_cast<i64>(r.be64());
+        c.has_signature = r.boolean();
+        if (c.has_signature) r.bytes(256);
+        c.last_seen = LastSeenUpdate::decode(r);
+        return c;
+    }
+};
+
+// A command typed into the chat, without its slash. chat_command when nothing in it can be
+// signed; chat_command_signed when it has message arguments (a /say's text, a kick's reason) -
+// with a signature for each of them from a client that has a chat session, with none from one
+// that has not. The signatures are read past, their names kept: which arguments the client
+// meant is checked (handleSignedChatCommand), what it signed cannot be.
 struct ChatCommand {
     static constexpr u32 kMaxBytes = 32767 * 3;  // readUtf(): 32767 chars
+    static constexpr u32 kMaxSignatures = 8;     // ArgumentSignatures
     std::string_view command;
-    static ChatCommand decode(Reader& r) { return {r.str(kMaxBytes)}; }
-    // ServerboundChatCommandSignedPacket: command, timestamp, salt, up to 8 (argument name,
-    // 256-byte signature), then LastSeenMessages.Update: an offset, 20 bits, a checksum byte.
+    bool is_signed = false;  // came as chat_command_signed
+    u32 signatures = 0;
+    std::string_view signed_names[kMaxSignatures];
+    LastSeenUpdate last_seen;
+    static ChatCommand decode(Reader& r) {
+        ChatCommand c;
+        c.command = r.str(kMaxBytes);
+        return c;
+    }
+    // ServerboundChatCommandSignedPacket: command, timestamp, salt, up to 8 (argument name of 16
+    // chars, 256-byte signature), then LastSeenMessages.Update.
     static ChatCommand decode_signed(Reader& r) {
-        ChatCommand c{r.str(kMaxBytes)};
+        ChatCommand c;
+        c.command = r.str(kMaxBytes);
+        c.is_signed = true;
         r.be64();
         r.be64();
-        const u32 signatures = r.varint();
-        if (signatures > 8) r.ok = false;
-        for (u32 i = 0; i < signatures && r.ok; ++i) {
-            r.str(16 * 3);
+        c.signatures = r.varint();
+        if (c.signatures > kMaxSignatures) {
+            r.ok = false;
+            c.signatures = 0;
+        }
+        for (u32 i = 0; i < c.signatures && r.ok; ++i) {
+            c.signed_names[i] = r.str(16 * 3);
             r.bytes(256);
         }
-        r.varint();
-        r.bytes(3 + 1);
+        c.last_seen = LastSeenUpdate::decode(r);
+        return c;
+    }
+};
+
+// chat_ack: the client's window has moved by this much, said between two messages of its own.
+struct ChatAck {
+    u32 offset;
+    static ChatAck decode(Reader& r) { return {r.varint()}; }
+};
+
+// chat_session_update - RemoteChatSession.Data: a session id, and ProfilePublicKey.Data: when
+// the key expires (ms), the key (X.509, at most 512 bytes), Mojang's signature of both (at most
+// 4096). Read to be known well-formed; this server keeps none of it (no secure chat).
+struct ChatSessionUpdate {
+    Uuid session;
+    i64 expires_at;
+    static ChatSessionUpdate decode(Reader& r) {
+        ChatSessionUpdate c;
+        c.session = r.uuid();
+        c.expires_at = static_cast<i64>(r.be64());
+        r.byte_array(512);
+        r.byte_array(4096);
         return c;
     }
 };

@@ -11,6 +11,7 @@ Emitted files (all deterministic; none is in git - their lock is, see "the lock"
   blocks.hpp          default block state id per block, by name
   items.hpp           item id per item, by name; data component type ids
   dimension_types.hpp height / skylight per dimension type, in network id order
+  chat_types.hpp      the translation and its arguments for each chat type, in network id order
   entities.hpp        entity type ids + tracking parameters, entity-data serializer / accessor ids, poses
   block_data.hpp      HOT per-state tables (#embed of state_*.bin) + the light occlusion matrix
   state_*.bin         one table per file, indexed by block state id
@@ -1148,6 +1149,40 @@ struct Type {
     return "".join(out)
 
 
+def emit_chat_types(v: dict, regs: list[tuple[str, list[str]]], vanilla: "VanillaData") -> str:
+    """ChatType.chat of every chat type: the translation a message of that type is shown through,
+    and what goes into it. A client decorates the messages it is sent by itself; a server needs
+    this for what it prints (MinecraftServer.logChatMessage) and tells the console."""
+    entries = dict(regs)["chat_type"]
+    params = {"sender": "kSender", "target": "kTarget", "content": "kContent"}
+    out = [HEADER.format(id=v["id"], proto=v["protocol_version"]), """
+#include <string_view>
+
+// How a chat message of each type reads, in network id order (reg::chat_type). From
+// data/minecraft/chat_type/*.json in the vanilla datapack: ChatTypeDecoration.
+namespace proto::gen::chat_type {
+
+enum Param : unsigned char { kSender, kTarget, kContent };  // ChatTypeDecoration.Parameter
+
+struct Decoration {
+    std::string_view translation_key;
+    unsigned char count;
+    Param params[3];  // the translation's arguments, in order
+};
+
+"""]
+    out.append(f"inline constexpr Decoration kChat[{len(entries)}] = {{\n")
+    for name in entries:
+        chat = json.loads(vanilla.zip.read(f"data/minecraft/chat_type/{name.split(':', 1)[1]}.json"))["chat"]
+        given = chat["parameters"]
+        if len(given) > 3 or any(p not in params for p in given):
+            die(f"{name}: chat parameters {given} - ChatTypeDecoration.Parameter has changed")
+        row = ", ".join(params[p] for p in given)
+        out.append(f'    {{"{chat["translation_key"]}", {len(given)}, {{{row}}}}},  // {name}\n')
+    out.append("};\n\n}  // namespace proto::gen::chat_type\n")
+    return "".join(out)
+
+
 # ----------------------------------------------------------------------------- entities
 
 def pseudo_of(version: str, classes: list[str], method_rx: str | None) -> str:
@@ -1401,6 +1436,7 @@ def generate_into(version: str, out: Path, reports: Path | None = None) -> dict:
     save("registry_data.bin", registry_data_blob(packets, regs))
     save("blobs.hpp", emit_blobs(v))
     save("dimension_types.hpp", emit_dimension_types(v, regs, data))
+    save("chat_types.hpp", emit_chat_types(v, regs, data))
 
     tag_tables: list[tuple[str, dict[str, list[int]]]] = []
     stats = {"registries": len(regs), "entries": sum(len(e) for _, e in regs), "tags": 0, "packets": packets_src}

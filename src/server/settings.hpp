@@ -25,7 +25,12 @@ struct Settings {
     std::string brand = "vanilla";                                    // server-brand: shown on the client's F3 screen
     bool debug = false;                                               // debug: verbose logging
     u32 op_permission_level = 4;                                      // op-permission-level: what /op gives
-    u32 command_spam_threshold = 10;    // command-spam-threshold-seconds: commands in a row that get a player thrown out
+    u32 command_spam_threshold = 10;  // command-spam-threshold-seconds: commands in a row that get a player thrown out
+    u32 chat_spam_threshold = 10;     // chat-spam-threshold-seconds: ...and chat messages
+    // enforce-secure-profile: vanilla's default. Read and not acted on: a server enforces secure
+    // chat only when it can check players' keys (DedicatedServer.enforceSecureProfile), and this
+    // one cannot yet - the log says so at startup.
+    bool enforce_secure_profile = true;
     std::string ops_file = "ops.json";  // ops-file: the operators (vanilla's ops.json)
     // level-name: the world's directory (server/world_info.hpp). Empty: the world is not kept -
     // nothing is written and no chunk leaves memory.

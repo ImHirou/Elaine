@@ -17,7 +17,7 @@ players in one place are an ordinary evening.
 finished - compared with a real vanilla server, byte for byte where that is possible - before the
 next begins. Today a vanilla client can join, build in creative mode in a world that is kept on disk
 or imported from vanilla, open chests, smelt, craft, light TNT and watch sand fall. There is no
-survival mode, no mob AI, no terrain generator and no chat yet: **it is not ready to host players.**
+survival mode, no mob AI and no terrain generator yet: **it is not ready to host players.**
 
 What exists is listed under [Goals](#goals); how it works and why, in
 [docs/architecture.md](docs/architecture.md).
@@ -136,7 +136,8 @@ cost per entity.*
 - [x] Join and leave, the tab list; players see each other move, sneak, sprint, hold, wear and swing
 - [x] Creative mode
 - [ ] Game modes; survival - health, hunger, death, respawn, experience
-- [ ] Chat, signed as vanilla signs it
+- [x] Chat: what players type, `say`, `me`, `msg`, who came and who went - unsigned, as vanilla sends it without a chat session
+- [ ] Chat signed as vanilla signs it (secure chat)
 - [x] A player's data kept: position, inventory
 - [ ] Movement checks: vanilla's
 - [ ] Advancements, statistics, the recipe book
@@ -157,7 +158,7 @@ cost per entity.*
 *Every vanilla command, read by Brigadier's rules and answered in vanilla's words.*
 
 - [x] Brigadier's tree, its parsing and its errors; answers in vanilla's text components
-- [x] `stop`, `setblock`, `fill`, `teleport`, `give`, `playsound`, `stopsound`, `summon`, `kill`, `list`, `kick`, `op`, `deop`, `help`
+- [x] `stop`, `setblock`, `fill`, `teleport`, `give`, `playsound`, `stopsound`, `summon`, `kill`, `list`, `kick`, `op`, `deop`, `help`, `say`, `me`, `msg`, `teammsg`
 - [x] Coordinates, entity selectors, block states and tags, items
 - [ ] NBT in commands (SNBT)
 - [ ] `execute`, `gamemode`, `time`, `weather`, `gamerule`, `effect`, `scoreboard`, `data` and the rest
