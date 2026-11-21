@@ -99,7 +99,7 @@ if [ $DEPS -eq 1 ] && [ $family != none ]; then
     echo "      $pkgs"
 elif [ $DEPS -eq 1 ]; then
     echo "  - install NO packages: this distribution is not one install.sh knows. What a build needs:"
-    echo "      a C++23 compiler with #embed (GCC 15+ or Clang 19+; Elaine is developed with GCC 16), CMake 3.25+, Ninja,"
+    echo "      a C++23 compiler with #embed (GCC 15 or newer, or a recent Clang; Elaine is developed with GCC 16), CMake 3.25+, Ninja,"
     echo "      pkg-config, Python 3, JDK ${JDK_MAJOR}+, liburing 2.4+, libdeflate, OpenSSL, libcurl, yyjson, GoogleTest"
 fi
 echo "  - download the Minecraft server jar from Mojang (piston-data.mojang.com, sha1-checked) into .cache/ and run"
@@ -155,8 +155,8 @@ int main() { return kOne[0] == 'x' ? 0 : 1; }
 EOF
 if ! "$cxx" -std=gnu++23 -march=x86-64-v3 -maes -mpclmul -o "$probe/probe" "$probe/probe.cpp" 2>"$probe/err"; then
     sed 's/^/    /' "$probe/err" | head -5 >&2
-    die "$("$cxx" --version | head -1) cannot compile '#embed' for x86-64-v3. GCC 15+ or Clang 19+ is needed
-            (Elaine is developed with GCC 16); set CXX to a newer compiler and run this again."
+    die "$("$cxx" --version | head -1) cannot compile '#embed' for x86-64-v3. GCC 15 or newer is needed, or a
+            recent Clang (Elaine is developed with GCC 16); set CXX to such a compiler and run this again."
 fi
 "$probe/probe" || die "the compiler's '#embed' gives wrong bytes."
 "$cxx" --version | head -1

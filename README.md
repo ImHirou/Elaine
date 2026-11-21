@@ -198,8 +198,8 @@ that does not run a whole game yet.
 ## Getting started
 
 You need Linux (kernel 6.0 or newer) on x86-64 with AVX2 and AES-NI - any Intel since Haswell, any
-AMD since Zen - and a recent compiler: GCC 15 or newer, or Clang 19 or newer (Elaine is developed
-with GCC 16).
+AMD since Zen - and a compiler that knows `#embed`: GCC 15 or newer, or a recent Clang (Elaine is
+developed with GCC 16 and built with Clang 23 as well).
 
 ```sh
 git clone https://github.com/ImHirou/elaine
@@ -207,11 +207,21 @@ cd elaine
 ./install.sh
 ```
 
-`install.sh` asks once, then installs the packages a build needs (Arch, Fedora, Debian and Ubuntu
-are known to it; elsewhere it tells you what to install), downloads the Minecraft server jar from
-Mojang, generates the protocol tables from it and builds. The tables are Mojang's data, so they are
-not in this repository: every clone makes its own. By running it you download Mojang's software
-under [Mojang's terms](https://aka.ms/MinecraftEULA).
+`install.sh` asks once, then installs the packages a build needs, downloads the Minecraft server
+jar from Mojang, generates the protocol tables from it and builds. The tables are Mojang's data, so
+they are not in this repository: every clone makes its own. By running it you download Mojang's
+software under [Mojang's terms](https://aka.ms/MinecraftEULA).
+
+Where it was run from a bare system image to a server that passes all its tests (November 2026):
+
+| Distribution | Compiler | |
+|---|---|---|
+| Arch Linux | GCC 16.2, Clang 23 | works |
+| Fedora 45 | GCC 16.2 | works |
+| Ubuntu 26.04 LTS | GCC 15.2 | works |
+| Debian 13 | GCC 14.2 | stops: the compiler has no `#embed`. With a newer one in `CXX`, `./install.sh` goes on |
+
+On a distribution it does not know, `install.sh` lists what to install and carries on from there.
 
 ```sh
 build/release/elaine --online-mode=false    # a local test server: join localhost with a Minecraft 26.3 client
