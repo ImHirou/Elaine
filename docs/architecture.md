@@ -1658,31 +1658,30 @@ LuaJIT, one state, tick thread only. The intended shape:
 
 Roughly in dependency order:
 
-1. **Mojang reports** (`mcgen.py reports`) → real tags and block ids. Until then vanilla clients cannot join.
-2. **World**: chunks are stored, lit, cached as frames, loaded, saved and unloaded (see "The world's
+1. **World**: chunks are stored, lit, cached as frames, loaded, saved and unloaded (see "The world's
    life cycle"). Next: a terrain generator - and with it the first lighting of a chunk on a worker -
    players' data, the update tags of the block entities that are kept as tags, export to Anvil.
-3. **Entities**: the table, the tracker and physics exist (see "Entities", "Physics"). Next:
+2. **Entities**: the table, the tracker and physics exist (see "Entities", "Physics"). Next:
    attributes, the inferred jump, then mobs - spawning, AI; fluids. Known headroom in the tracker at 20 000 mobs: a
    summary bitmap over each row (the fan-out and the "what do I see" walk scan 320 mostly-zero words
    per player: 17 % and part of 53 % of that tick).
-4. (Chunk pacing is there: `PlayerChunkSender`.)
-5. Network follow-ups, none needed for correctness: `SEND_ZC` for chunk bursts, VAES (4 streams per
+3. (Chunk pacing is there: `PlayerChunkSender`.)
+4. Network follow-ups, none needed for correctness: `SEND_ZC` for chunk bursts, VAES (4 streams per
    zmm) for `cfb8_encrypt_batch` on AVX-512 machines, per-connection rate limits, thread pinning, proxy
    forwarding (Velocity modern forwarding), IPv6 dual-stack by default.
-6. **Encryption off the tick thread.** Needed, not optional, for crowds in online mode: 500 players
+5. **Encryption off the tick thread.** Needed, not optional, for crowds in online mode: 500 players
    in one place cost 8 - 25 ms of AES per tick there (see "What a tick of this costs"). Encrypt on
    the reactors, or split the flush across workers.
-7. **Items**: the component hashes of `container_click`, the rest of the components (stacks in
+6. **Items**: the component hashes of `container_click`, the rest of the components (stacks in
    stacks, the behaviour components), the crafting recipes that compute their result. Survival
    needs none of that first, only a game mode.
    Text: selectors and the other contents that are not read. (The server's own components are
    built with `text::Text`.)
-8. **Blocks**: `docs/blocks-roadmap.md`. Neighbour updates, scheduled ticks and random ticks
+7. **Blocks**: `docs/blocks-roadmap.md`. Neighbour updates, scheduled ticks and random ticks
    are there (see "Block updates"), so a block class is its own hooks now and no longer a
    missing system: slabs, stairs, fences and the other shapes, plants and what else needs
    something to stand on. Then fluids - with them fluid ticks, ice, waterlogging - redstone,
    the other block entities. And what the first four still lack: experience orbs.
-9. **Commands**: an SNBT reader (block entity data, item components, `/summon`'s tag, `nbt=`),
+8. **Commands**: an SNBT reader (block entity data, item components, `/summon`'s tag, `nbt=`),
    `facing`, then the commands that wait for their subject - chat first.
-10. Lua plugin host.
+9. Lua plugin host.
