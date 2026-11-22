@@ -3,15 +3,19 @@
 """What does a server make of the text and NBT in an item's components? Record it, on vanilla
 and on ours, and diff.
 
-    component_probe.py record <port> <out.json> [nameA nameB]
+    component_probe.py record <port> <out.json> [nameA nameB [console]] [--only=word,...]
     component_probe.py diff <vanilla.json> <ours.json>
+    tools/vanilla/compare.py component_probe [-k word ...]      # both servers at once, and the diff
 
 A text component has many spellings and a server passes none of them on: it decodes what a
 client sent and encodes it again. `record` joins two bots (creative): B puts one stack after
 another into its hand, each with one component spelled one way - sensible, odd or wrong; A
 writes down the stack it is then shown in B's hand (set_equipment), which is the server's own
 encoding. A stack B is thrown out for is written down as that, and B comes back under another
-name. `diff` compares two recordings case by case and exits 0 if nothing is wrong.
+name. With `console` - a FIFO that is the server's stdin - A is made an operator and also asks
+`/data get entity B SelectedItem.components` of every stack: the component as its Codec writes
+it into a tag, which is the form a command takes and a world keeps. There the cases go on past
+text, with a value or two of every component the server reads. `diff` compares two recordings case by case and exits 0 if nothing is wrong.
 
 The reference is the vanilla server, run under the rules in AGENTS.md (see entity_probe.py for
 the properties it needs; gamemode=creative matters here):
@@ -30,9 +34,10 @@ Reading the diff - per case one of:
                     component this server does not read yet, or more than a stack may carry here
   refused here      vanilla threw the player out, ours only refused the stack: harmless
   default kept      vanilla dropped the component because it says what the item says anyway (an
-                    empty lore); a patch is not held against the item's defaults here - a known
-                    difference, see docs/architecture.md
+                    empty lore) and ours kept it: a component whose default this server cannot
+                    read, or a bug in item::sanitized
   DIFFERENT         the bug this probe is for: other bytes, or one took what the other threw out
+  DIFFERENT TAG     the same on the wire, but `/data get` shows the component otherwise
 
 Without names the bots get random ones: vanilla saves players, and one it knows comes back
 holding what it held.
@@ -338,8 +343,70 @@ def cases() -> list[tuple[str, str, bytes]]:
     return out
 
 
-def record(port: int, out_path: str, name_a: str, name_b: str) -> None:
+def more_cases() -> list[tuple]:
+    """(what it shows, component, the value as a client sends it, the item): a value or two of
+    every component this server reads that is not text or a tag - for the form its Codec gives
+    it (`/data get`). The bytes are the components' StreamCodecs, written out by hand."""
+    out: list[tuple] = []
+    C = mc.COMPONENT
+
+    def add(label: str, component: str, value: bytes, item: str = "kStone") -> None:
+        out.append((label, component, value, item))
+
+    def f32(v: float) -> bytes:
+        return struct.pack(">f", v)
+
+    add("damage", "kDamage", varint(3), "kDiamondSword")
+    add("max damage", "kMaxDamage", varint(100), "kDiamondSword")
+    add("max stack size", "kMaxStackSize", varint(16))
+    add("unbreakable", "kUnbreakable", b"", "kDiamondSword")
+    add("repair cost", "kRepairCost", varint(5))
+    add("glint override", "kEnchantmentGlintOverride", b"\x01")
+    add("rarity", "kRarity", varint(3))
+    add("dyed color", "kDyedColor", struct.pack(">i", 0xFF8000), "kLeatherHelmet")
+    add("map id", "kMapId", varint(7), "kFilledMap")
+    add("ominous bottle amplifier", "kOminousBottleAmplifier", varint(2), "kOminousBottle")
+    add("minimum attack charge", "kMinimumAttackCharge", f32(0.5))
+    add("potion duration scale", "kPotionDurationScale", f32(2.5))
+    add("item model", "kItemModel", utf8("minecraft:stick"))
+    add("tooltip style", "kTooltipStyle", utf8("probe:style"))
+    add("note block sound", "kNoteBlockSound", utf8("minecraft:entity.pig.ambient"), "kPlayerHead")
+    add("base color", "kBaseColor", varint(3), "kShield")
+    add("glider", "kGlider", b"")
+    add("enchantments", "kEnchantments", varint(2) + varint(0) + varint(1) + varint(5) + varint(3), "kDiamondSword")
+    add("stored enchantments", "kStoredEnchantments", varint(1) + varint(2) + varint(1), "kEnchantedBook")
+    add("tooltip display", "kTooltipDisplay", b"\x01" + varint(2) + varint(C["kLore"]) + varint(C["kDamage"]))
+    add("tooltip display: nothing hidden", "kTooltipDisplay", b"\x00" + varint(0))
+    add("potion", "kPotionContents", b"\x01" + varint(5) + b"\x00" + varint(0) + b"\x00", "kPotion")
+    # an effect: id, then amplifier, duration, ambient, show particles, show icon, no hidden effect
+    effect = varint(0) + varint(2) + varint(600) + b"\x01\x00\x01\x00"
+    plain_effect = varint(3) + varint(0) + varint(0) + b"\x00\x01\x01\x00"
+    add("potion: colour, effects, a name", "kPotionContents",
+        b"\x00" + b"\x01" + struct.pack(">i", 0x123456) + varint(2) + effect + plain_effect + b"\x01" + utf8("probe"), "kPotion")
+    hidden = varint(1) + varint(1) + varint(10) + b"\x00\x01\x00\x01" + varint(0) + varint(5) + b"\x00\x01\x01\x00"
+    add("potion: an effect over a hidden one", "kPotionContents", b"\x00\x00" + varint(1) + hidden + b"\x00", "kPotion")
+    # (another amplifier than the case before: a stack that equals the one before it is not shown again)
+    longer = varint(1) + varint(2) + varint(10) + b"\x00\x01\x00\x01" + varint(0) + varint(500) + b"\x01\x00\x00\x00"
+    add("potion: an effect over a hidden one that lasts longer", "kPotionContents", b"\x00\x00" + varint(1) + longer + b"\x00", "kPotion")
+    add("suspicious stew", "kSuspiciousStewEffects", varint(2) + varint(0) + varint(160) + varint(1) + varint(7), "kSuspiciousStew")
+    explosion = varint(2) + varint(2) + struct.pack(">ii", 0xFF0000, 0x00FF00) + varint(1) + struct.pack(">i", 0xFFFFFF) + b"\x01\x00"
+    add("firework explosion", "kFireworkExplosion", explosion, "kFireworkStar")
+    add("firework explosion: bare", "kFireworkExplosion", varint(0) + varint(0) + varint(0) + b"\x00\x00", "kFireworkStar")
+    add("fireworks", "kFireworks", varint(2) + varint(1) + explosion, "kFireworkRocket")
+    add("fireworks: none", "kFireworks", varint(0) + varint(0), "kFireworkRocket")
+    add("instrument", "kInstrument", varint(1), "kGoatHorn")
+    add("painting", "kPaintingVariant", varint(3), "kPainting")
+    add("banner patterns", "kBannerPatterns", varint(2) + varint(1) + varint(14) + varint(3) + varint(0), "kWhiteBanner")
+    add("block state", "kBlockState", varint(2) + utf8("lit") + utf8("true") + utf8("facing") + utf8("north"), "kFurnace")
+    add("waxed", "kWaxed", b"", "kOakSign")
+    add("sheep color", "kSheepColor", varint(14))
+    return out
+
+
+def record(port: int, out_path: str, name_a: str, name_b: str, console: str | None = None, only: set | None = None) -> None:
+    """`only`: the cases to play - those whose name or component holds one of the words."""
     a = Actor(port, name_a)
+    a.logged = Actor.logged | {"system_chat"}
     a.join()
     a.pump(1.5)
     a.c.send("player_loaded")
@@ -352,11 +419,17 @@ def record(port: int, out_path: str, name_a: str, name_b: str) -> None:
         nonlocal joined
         b = Actor(port, name_b if joined == 0 else f"{name_b[:12]}{joined}")
         joined += 1
+        mark = len(a.log)
         b.join()
-        b.pump(1.0)
+        # B is there when A is shown it - and it comes back some eighty times, once for every
+        # stack it is thrown out for: waiting a fixed while each time was most of a recording.
+        end = time.time() + 3.0
+        while time.time() < end and not any(kind == "add_entity" for kind, _ in a.log[mark:]):
+            b.pump(0.03)
+            a.pump(0.03)
         b.c.send("player_loaded")
         b.tick_end()
-        for _ in range(10):
+        for _ in range(3):
             b.pump(0.05)
             a.pump(0.05)
         return b
@@ -369,37 +442,78 @@ def record(port: int, out_path: str, name_a: str, name_b: str) -> None:
                 return data[2 * len(head):]
         return None
 
+    def on_console(line: str) -> None:
+        with open(console, "w") as f:
+            f.write(line + "\n")
+        a.pump(0.5)
+
+    def asked(holder: str) -> str:
+        """What `/data get` shows of the components of the stack in `holder`'s hand - or the
+        key of the answer, if that is none (the item's own components are no patch)."""
+        mark = len(a.log)
+        a.c.send("chat_command", mc.mc_str(f"data get entity {holder} SelectedItem.components"))
+        for _ in range(8):
+            a.tick_end()
+            a.pump(0.05)
+            for kind, data in a.log[mark:]:
+                if kind == "system_chat":
+                    said = mc.Reader(bytes.fromhex(data)).nbt()
+                    if isinstance(said, dict) and said.get("translate") == "commands.data.entity.query":
+                        return _plain(said["with"][-1])
+                    return mc.snbt(said)
+        return "(no answer)"
+
+    if console:
+        on_console(f"op {name_a}")
     b = join_b()
     results = []
     items = ("kStone", "kDirt")   # in turn, so that every stack differs from the one before it
-    for i, (label, component, value) in enumerate(cases()):
+    every = [(*c, None) for c in cases()] + (more_cases() if console else [])
+    if only:
+        every = [c for c in every if any(word.lower() in (c[0] + " " + c[1]).lower() for word in only)]
+    for i, (label, component, value, item) in enumerate(every):
         mark_a, mark_b = len(a.log), len(b.log)
-        b.give(36, items[i % 2], 1, {component: value})
+        b.give(36, item or items[i % 2], 1, {component: value})
         kicked = False
         try:
+            # Five ticks at most: an answer - the stack in B's hand as A is shown it, the slot
+            # sent back, a kick - ends the wait, and only a stack that changes nothing takes all.
             for _ in range(5):
                 b.tick_end()
-                b.pump(0.05)
-                a.pump(0.01)
+                b.pump(0.04)
+                a.pump(0.02)
+                if shown(mark_a, b.entity_id) is not None or any(kind in ("container_set_slot", "disconnect") for kind, _ in b.log[mark_b:]):
+                    break
         except (OSError, EOFError, AssertionError, struct.error):
             kicked = True
         kicked = kicked or any(kind == "disconnect" for kind, _ in b.log[mark_b:])
-        a.pump(0.1)
+        a.pump(0.05)
         result = {"case": label, "component": component, "sent": value.hex()}
         if kicked:
             result["kicked"] = True
             b.c.close()
-            a.pump(0.3)
+            a.pump(0.1)
             b = join_b()
         else:
             result["stack"] = shown(mark_a, b.entity_id)
             result["sent_back"] = any(kind == "container_set_slot" for kind, _ in b.log[mark_b:])
+            if console:
+                result["tag"] = asked(b.name)
         results.append(result)
         print(f"{label}: {'kicked' if kicked else result['stack'] or ('sent back' if result['sent_back'] else 'nothing')}")
     with open(out_path, "w") as f:
         json.dump(results, f, indent=1)
+    if console:
+        on_console(f"deop {name_a}")
     b.c.close()
     a.c.close()
+
+
+def _plain(v) -> str:
+    """Component.getString of literal text: a text and its children."""
+    if isinstance(v, str):
+        return v
+    return str(v.get("text", "")) + "".join(_plain(x) for x in v.get("extra", []))
 
 
 def diff(path_ref: str, path_ours: str) -> int:
@@ -431,11 +545,18 @@ def diff(path_ref: str, path_ours: str) -> int:
                 verdict = "default kept"
             else:
                 verdict = "DIFFERENT"
+        if verdict in ("same", "same value") and v.get("tag") != o.get("tag"):
+            # The same entries in another order: names that share a bucket of vanilla's HashMap
+            # come out in the order they went in, which a tag kept sorted does not know.
+            verdict = "same value" if sorted(v.get("tag") or "") == sorted(o.get("tag") or "") else "DIFFERENT TAG"
         counts[verdict] = counts.get(verdict, 0) + 1
         if verdict == "same":
             continue
-        wrong += verdict == "DIFFERENT"
+        wrong += verdict in ("DIFFERENT", "DIFFERENT TAG")
         print(f"{verdict}: {v['case']} [{v['component']}]")
+        if verdict == "DIFFERENT TAG":
+            print(f"    vanilla {v.get('tag')}")
+            print(f"    ours    {o.get('tag')}")
         if verdict in ("DIFFERENT", "same value", "default kept"):
             print(f"    sent    {v['sent']}")
             print(f"    vanilla {'kicked' if v.get('kicked') else v['stack']}")
@@ -445,10 +566,12 @@ def diff(path_ref: str, path_ours: str) -> int:
 
 
 def main() -> int:
+    only = {word for arg in sys.argv if arg.startswith("--only=") for word in arg[len("--only="):].split(",") if word}
+    sys.argv = [arg for arg in sys.argv if not arg.startswith("--only=")]
     if len(sys.argv) >= 4 and sys.argv[1] == "record":
         tail = "".join(random.choices(string.ascii_lowercase, k=5))
         names = (sys.argv[4], sys.argv[5]) if len(sys.argv) >= 6 else (f"Watch{tail}", f"Hold{tail}")
-        record(int(sys.argv[2]), sys.argv[3], *names)
+        record(int(sys.argv[2]), sys.argv[3], *names, sys.argv[6] if len(sys.argv) >= 7 else None, only or None)
         return 0
     if len(sys.argv) == 4 and sys.argv[1] == "diff":
         return diff(sys.argv[2], sys.argv[3])

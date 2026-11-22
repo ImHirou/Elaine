@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "item/codec.hpp"
 #include "nbt_bytes.hpp"
 #include "proto/gen/current.hpp"
 #include "proto/packets.hpp"
@@ -466,9 +467,32 @@ TEST(CommandArguments, ItemsAndTags) {
     ASSERT_TRUE(cmd::parse_item("minecraft:diamond 3", cursor, false, item, err));
     EXPECT_EQ(cursor, 17u);
     EXPECT_EQ(item.item, world::find_item("minecraft:diamond"));
-    cursor = 0;
-    EXPECT_FALSE(cmd::parse_item("diamond[damage=1]", cursor, false, item, err));
-    EXPECT_EQ(err.cursor, 7);
+    // ItemParser.readComponents: what the item carries, and what of its own it gives up.
+    const auto with = [&](std::string_view text) -> std::string {
+        cursor = 0;
+        if (!cmd::parse_item(text, cursor, false, item, err)) return err.message.plain() + " @" + std::to_string(err.cursor);
+        std::string made = "ok " + std::to_string(cursor) + ":";
+        if (!item.stack.patch()) return made;
+        for (const item::Patches::Entry& e : item::patches().entries(item.stack.patch()))
+            made += std::string(e.removed ? " !" : " ") + std::string(item::component_name(e.type).substr(10));
+        return made;
+    };
+    EXPECT_EQ(with("diamond[damage=1]"), "ok 17: damage");
+    EXPECT_EQ(with("diamond[ damage = 1 , !minecraft:lore ] 3"), "ok 39: damage !lore");
+    EXPECT_EQ(with("diamond[]"), "ok 9:");
+    EXPECT_EQ(with("diamond[custom_name='x',lore=[\"a\"],unbreakable={}]"), "ok 50: unbreakable custom_name lore");
+    EXPECT_EQ(with("diamond[damage=1,damage=2]"),
+              "Item component 'minecraft:damage' was repeated, but only one value can be specified @-1");
+    EXPECT_EQ(with("diamond[nonsense=1]"), "Unknown item component 'minecraft:nonsense' @8");
+    EXPECT_EQ(with("diamond[creative_slot_lock={}]"), "Unknown item component 'minecraft:creative_slot_lock' @8");
+    EXPECT_EQ(with("diamond[damage 1]"), "Expected '=' @15");
+    EXPECT_EQ(with("diamond[damage=1"), "Expected ']' @16");
+    EXPECT_EQ(with("diamond[damage=1,"), "Expected item component @17");
+    EXPECT_EQ(with("diamond["), "Expected ']' @8");
+    EXPECT_EQ(with("diamond[damage=]"), "Expected a valid unquoted string @15");
+    EXPECT_EQ(with("diamond[damage=-1]"), "Malformed 'minecraft:damage' component: 'Not a valid value of this component' @15");
+    EXPECT_EQ(with("diamond[food={}]"), "Items with the component minecraft:food are not supported by this server yet @8");
+    item = {};
     cursor = 0;
     ASSERT_TRUE(cmd::parse_item("#minecraft:planks", cursor, true, item, err));
     EXPECT_TRUE(item.test(world::find_item("minecraft:oak_planks")));

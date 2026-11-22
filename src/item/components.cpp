@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "item/components.hpp"
 
+#include "item/codec.hpp"
+
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
@@ -176,16 +178,23 @@ Verdict t_identifier(Reader& in, Out& out) {
 // MobEffectInstance.Details.STREAM_CODEC: amplifier, duration, ambient, show particles, show
 // icon, then optionally the same again for the effect hidden beneath. The MobEffectInstance
 // constructor clamps the amplifier to 0..255.
+// The hidden effect is read and not kept: a vanilla 26.3 server that is sent one in an item's
+// potion contents - by a client or in a command's tag - holds the effect without it from then
+// on (tools/vanilla/component_probe.py, command_probe.py; observed, the code that drops it was
+// not found in the jar).
 Verdict t_effect_details(Reader& in, Out& out) {
     for (u32 depth = 0;; ++depth) {
-        out.varint(static_cast<u32>(std::clamp(vint(in), 0, 255)));
-        out.varint(in.varint());
-        out.u8v(in.u8v() != 0);
-        out.u8v(in.u8v() != 0);
-        out.u8v(in.u8v() != 0);
-        const bool hidden = in.u8v() != 0;
+        const u32 amplifier = static_cast<u32>(std::clamp(vint(in), 0, 255)), duration = in.varint();
+        const bool ambient = in.u8v() != 0, particles = in.u8v() != 0, icon = in.u8v() != 0, hidden = in.u8v() != 0;
         if (!in.ok) return Verdict::kMalformed;
-        out.u8v(hidden);
+        if (depth == 0) {
+            out.varint(amplifier);
+            out.varint(duration);
+            out.u8v(ambient);
+            out.u8v(particles);
+            out.u8v(icon);
+            out.u8v(0);
+        }
         if (!hidden) return Verdict::kOk;
         if (depth == kMaxEffectDepth) return Verdict::kUnsupported;
     }
@@ -252,20 +261,23 @@ Verdict t_enchantments(Reader& in, Out& out) {
     return Verdict::kOk;
 }
 
-// TooltipDisplay.STREAM_CODEC: hide_tooltip, then a set of component types - written by id.
+// TooltipDisplay.STREAM_CODEC: hide_tooltip, then a set of component types. The set keeps the
+// order they came in (a ReferenceLinkedOpenHashSet), each once.
 Verdict t_tooltip_display(Reader& in, Out& out) {
     out.u8v(in.u8v() != 0);
     u32 n;
     if (!read_count(in, INT32_MAX, n)) return Verdict::kMalformed;
     bool hidden[component::kCount] = {};
+    u8 order[component::kCount];
+    u32 distinct = 0;
     for (u32 i = 0; i < n; ++i) {
         const u32 type = in.varint();
         if (!in.ok || type >= component::kCount) return Verdict::kMalformed;
+        if (!hidden[type]) order[distinct++] = static_cast<u8>(type);
         hidden[type] = true;
     }
-    out.varint(static_cast<u32>(std::count(std::begin(hidden), std::end(hidden), true)));
-    for (u32 type = 0; type < component::kCount; ++type)
-        if (hidden[type]) out.varint(type);
+    out.varint(distinct);
+    for (u32 i = 0; i < distinct; ++i) out.varint(order[i]);
     return Verdict::kOk;
 }
 
@@ -361,15 +373,27 @@ Verdict t_block_state(Reader& in, Out& out) {
 // tags; text components, which a codec reads out of one (text/component.hpp).
 
 // The tag being read. One at a time: a decoder is done with it before the next tag is parsed.
-nbt::Doc the_tag;
+// One a level: a text component may show an item (a hover event) whose components are values
+// again, read while the tag around them is still in use.
+constexpr u32 kMaxTagLevels = 8;
+struct TagLevel {
+    static inline nbt::Doc docs[kMaxTagLevels];
+    static inline u32 depth = 0;
+    const bool ok = depth < kMaxTagLevels;
+    nbt::Doc& doc = docs[ok ? depth : 0];
+    TagLevel() { ++depth; }
+    ~TagLevel() { --depth; }
+    TagLevel(const TagLevel&) = delete;
+};
 
 // A value this much longer than a whole patch may be is not looked at: it could only shrink to
 // fit by being mostly things vanilla drops, and it is the tick thread that would do the reading.
 constexpr u32 kMaxTagInput = 16 * kMaxPatchBytes;
 
 // ByteBufCodecs.TAG: one tag in the network form, under NbtAccounter.defaultQuota().
-Verdict read_tag(Reader& in) {
-    if (in.remaining() > kMaxTagInput) return Verdict::kUnsupported;
+Verdict read_tag(Reader& in, TagLevel& level) {
+    nbt::Doc& the_tag = level.doc;
+    if (!level.ok || in.remaining() > kMaxTagInput) return Verdict::kUnsupported;
     const nbt::Error error = the_tag.parse({in.p, in.remaining()});
     if (error == nbt::Error::kTooBig) return Verdict::kUnsupported;  // counted a little high: see nbt::Error
     if (error != nbt::Error::kNone) return Verdict::kMalformed;
@@ -387,7 +411,9 @@ Verdict read_tag(Reader& in) {
 // but the Codec also takes a string of SNBT in its place (TagParser.FLATTENED_CODEC), which no
 // client sends and nothing here parses.
 Verdict t_compound(Reader& in, Out& out, bool or_snbt = false) {
-    if (const Verdict v = read_tag(in); v != Verdict::kOk) return v;
+    TagLevel level;
+    if (const Verdict v = read_tag(in, level); v != Verdict::kOk) return v;
+    nbt::Doc& the_tag = level.doc;
     const nbt::Tag root = the_tag.root();
     if (or_snbt && root.type == nbt::kString) return Verdict::kUnsupported;
     if (root.type != nbt::kCompound) return Verdict::kMalformed;
@@ -410,8 +436,9 @@ Verdict t_typed_data(Reader& in, Out& out, u32 types, u32 fallback) {
 
 // ComponentSerialization.STREAM_CODEC: a tag, read by the component codec and written by it.
 Verdict t_text(Reader& in, Out& out) {
-    if (const Verdict v = read_tag(in); v != Verdict::kOk) return v;
-    switch (text::transcode(the_tag.root(), out.b)) {
+    TagLevel level;
+    if (const Verdict v = read_tag(in, level); v != Verdict::kOk) return v;
+    switch (text::transcode(level.doc.root(), out.b)) {
         case text::Result::kOk: return Verdict::kOk;
         case text::Result::kInvalid: return Verdict::kMalformed;
         default: return Verdict::kUnsupported;
@@ -567,7 +594,11 @@ Patches the_patches;
 
 Patches& patches() { return the_patches; }
 
-Patches::Patches() : slots_(1, nullptr), table_(64, 0) {}
+Patches::Patches() : slots_(1, nullptr), table_(64, 0) {
+    // The store is there before any stack is: with it, the text codec learns to read the
+    // components of a stack that a hover event shows.
+    text::set_item_components(&hover_components);
+}
 
 Patches::~Patches() {
     // Every stack is gone by now; a patch still held is a reference somebody did not give back.
@@ -585,10 +616,7 @@ Verdict Patches::read_untrusted(Reader& r, PatchId& out) {
 
     // Entries land in a map on vanilla's side: of two for one type the later wins, and a removal
     // (they are read after the values) beats a value.
-    struct Slot {
-        u8 state;  // 0 absent, 1 set, 2 removed
-        u32 off, len;
-    } slot[component::kCount] = {};
+    Slot slot[component::kCount] = {};
     Verdict verdict = Verdict::kOk;
     values_.clear();
     Out values{values_};
@@ -615,21 +643,29 @@ Verdict Patches::read_untrusted(Reader& r, PatchId& out) {
         slot[type] = {2, 0, 0};
     }
     if (verdict != Verdict::kOk) return verdict;
+    return assemble(slot, {values_.data, values_.len}, out);
+}
 
+Verdict Patches::assemble(const Slot* slot, std::span<const u8> values, PatchId& out) {
+    out = 0;
     // DataComponentPatch.STREAM_CODEC: both counts, the added entries, the removed types. The
     // order within each is free on the wire; by type here, so that equal patches are equal bytes.
     Entry index[component::kCount];
-    u32 n = 0, set = 0;
-    for (const Slot& s : slot) set += s.state == 1;
+    u32 n = 0, set = 0, removed = 0;
+    for (u32 type = 0; type < component::kCount; ++type) {
+        set += slot[type].state == 1;
+        removed += slot[type].state == 2;
+    }
+    if (set + removed == 0) return Verdict::kOk;
     wire_.clear();
     Out wire{wire_};
     wire.varint(set);
-    wire.varint(static_cast<u32>(std::count_if(std::begin(slot), std::end(slot), [](const Slot& s) { return s.state == 2; })));
+    wire.varint(removed);
     for (u32 type = 0; type < component::kCount; ++type) {
         if (slot[type].state != 1) continue;
         wire.varint(type);
         index[n++] = {static_cast<u16>(type), false, wire_.len, slot[type].len};
-        wire.bytes({values_.data + slot[type].off, slot[type].len});
+        wire.bytes(values.subspan(slot[type].off, slot[type].len));
     }
     for (u32 type = 0; type < component::kCount; ++type) {
         if (slot[type].state != 2) continue;
@@ -640,6 +676,35 @@ Verdict Patches::read_untrusted(Reader& r, PatchId& out) {
     out = intern({index, n}, {wire_.data, wire_.len});
     return Verdict::kOk;
 }
+
+Verdict check_value(u32 type, std::span<const u8> value, base::ByteBuf& out) {
+    if (type >= component::kCount) return Verdict::kMalformed;
+    Reader in(value);
+    Out to{out};
+    const Verdict v = transcode(type, in, to);
+    return v == Verdict::kOk && !in.ok ? Verdict::kMalformed : v;
+}
+
+PatchBuilder::PatchBuilder(PatchId base) {
+    if (!base) return;
+    for (const Patches::Entry& e : patches().entries(base)) {
+        if (e.removed) {
+            remove(e.type);
+        } else {
+            set(e.type, patches().wire(base).subspan(e.off, e.len));
+        }
+    }
+}
+void PatchBuilder::set(u32 type, std::span<const u8> value) {
+    slots_[type] = {1, values_.len, static_cast<u32>(value.size())};
+    values_.append(value.data(), value.size());
+}
+void PatchBuilder::remove(u32 type) { slots_[type] = {2, 0, 0}; }
+void PatchBuilder::erase(u32 type) { slots_[type] = {}; }
+bool PatchBuilder::empty() const {
+    return std::all_of(std::begin(slots_), std::end(slots_), [](const Patches::Slot& s) { return s.state == 0; });
+}
+Verdict PatchBuilder::build(PatchId& out) { return patches().assemble(slots_, {values_.data, values_.len}, out); }
 
 Patches::Found Patches::find(PatchId id, u32 type) const {
     const Patch& p = *slots_[id];

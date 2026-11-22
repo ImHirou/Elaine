@@ -63,6 +63,16 @@ void Text::write(Loose& l) const {
                 }
             }
         }
+    } else if (!raw_.empty()) {
+        // A tag that is a component already: its entries - or, of plain text, the text.
+        nbt::Doc doc;
+        if (doc.parse(raw_, nbt::Form::kNameless, nbt::kTrusted) == nbt::Error::kNone && doc.root().type == nbt::kCompound) {
+            for (const nbt::Tag e : doc.root().entries()) w.put_raw(e.name(), e.type, e.bytes());
+        } else if (doc.root().type == nbt::kString) {
+            w.put_string_raw("text", doc.root().str());
+        } else {
+            w.put_string("text", "");
+        }
     } else {
         w.put_string("text", text_);
     }
@@ -95,6 +105,7 @@ void Text::write(Loose& l) const {
         w.put_string("action", "show_item");
         w.put_string("id", hover_id_);
         w.put_int("count", static_cast<i32>(hover_count_));
+        if (hover_components_.size() > 1) w.put_raw("components", nbt::kCompound, std::span(hover_components_).subspan(1));
         w.end_compound();
     }
     w.end_compound();
@@ -122,8 +133,29 @@ void Text::encode(base::ByteBuf& out) const {
 
 // TranslatableContents.decompose: "%s" and "%1$s" take arguments, "%%" is a percent sign, and
 // anything else makes the whole format its own text.
+namespace {
+
+// Component.getString of a component that is a tag: the text, a translation's English (its
+// arguments left where they stand), and the children.
+void plain_of(nbt::Tag t, std::string& out) {
+    if (t.type == nbt::kString) {
+        out += t.str();
+        return;
+    }
+    if (t.type != nbt::kCompound) return;
+    if (const nbt::Tag text = t.get("text"); text.type == nbt::kString) out += text.str();
+    if (const nbt::Tag key = t.get("translate"); key.type == nbt::kString) out += lang(key.str());
+    if (const nbt::Tag extra = t.get("extra"); extra.type == nbt::kList)
+        for (const nbt::Tag child : extra.elements()) plain_of(child, out);
+}
+
+}  // namespace
+
 void Text::plain(std::string& out) const {
-    if (!translate_) {
+    if (!raw_.empty()) {
+        nbt::Doc doc;
+        if (doc.parse(raw_, nbt::Form::kNameless, nbt::kTrusted) == nbt::Error::kNone) plain_of(doc.root(), out);
+    } else if (!translate_) {
         out += text_;
     } else {
         const std::string_view fmt = lang(text_);

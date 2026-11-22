@@ -24,5 +24,6 @@ void build_config_burst(base::ByteBuf& out, i32 threshold) {
 }
 
 std::span<const u8> tags_body() { return {gen::kTagsBlob, sizeof gen::kTagsBlob}; }
+std::span<const u8> item_defaults() { return {gen::kItemDefaultsBlob, sizeof gen::kItemDefaultsBlob}; }
 
 }  // namespace proto

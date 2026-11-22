@@ -16,4 +16,8 @@ void build_config_burst(base::ByteBuf& out, i32 threshold);
 // their members): the tags as every client was told them, for whoever asks what "#logs" is.
 std::span<const u8> tags_body();
 
+// The components every item has of its own, as tags: per item, in id order, [varint n] then
+// n x ([varint component][varint length][a nameless tag]) - for item/codec.cpp.
+std::span<const u8> item_defaults();
+
 }  // namespace proto

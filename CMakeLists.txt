@@ -154,6 +154,7 @@ add_library(core STATIC
   src/world/collide.cpp
   src/phys/physics.cpp
   src/item/components.cpp
+  src/item/codec.cpp
   src/item/stack.cpp
   src/item/recipes.cpp
   src/entity/store.cpp

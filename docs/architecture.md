@@ -335,8 +335,11 @@ read), and in a text the parts listed under "Text components".
 
 Knowing differences from vanilla:
 
-- a patch is not "sanitized" against the item's defaults (a modified client can make a stone with
-  `max_stack_size=64` that will not merge with plain stone - a vanilla client never sends that);
+- a patch is held against the item's own components as vanilla holds it
+  (`PatchedDataComponentMap`): an entry that says what the item says anyway, or takes away what
+  it does not have, is dropped (`item::sanitized`; the items' defaults are a generated table of
+  tags, read at first use by the code that reads a command's `stone[...]`) - but only for the
+  components this server reads: a default it does not read cannot be compared with;
 - a patch is capped at 1 KiB (vanilla's only limit is the packet; a stack is copied to every
   viewer of its holder). Names, lore and custom data fit; **a book of more than a page or two
   does not** and is refused like an unread component - the cap was set before there was text,
@@ -347,6 +350,47 @@ Knowing differences from vanilla:
   colour by name and the same colour by number, two NaNs - and such stacks merge there, not here;
 - strings that are not well-formed UTF-8 (or, inside a tag, not what Java itself writes) are
   refused. Vanilla reads them with replacement characters and passes on what it made of them.
+
+### A component has two forms (`item/codec.*`)
+
+On the wire a component is the bytes of its `StreamCodec` - that is what a patch is stored as.
+In a tag it is what its `Codec` makes of it: `damage` an int, `rarity` a name, `enchantments` a
+map of names to levels, a book its pages as `{raw: ...}`. The second form is what a command
+spells (`diamond_sword[damage=3,!lore]`), what `/data get` shows of a stack, what a world keeps
+and what a text component carries of the item it shows.
+
+- **Tag to wire** (`value_from_nbt`) reads a tag the way the Codec over `NbtOps` does - a
+  number of any type where it wants one, a field left out for its default, a potion as its
+  name or as a record - and writes the value's wire bytes. Whether the value is one the
+  component may have is not decided twice: the result goes through the decoder a client's bytes
+  go through (`check_value`: the Codec's ranges, vanilla's re-encoding).
+- **Wire to tag** (`value_to_nbt`) writes a stored value as the Codec encodes it: a default
+  left out, a list of colours as a list of ints.
+- Around them `ItemStack.CODEC` (`stack_from_nbt` / `stack_to_nbt`: id, count, components)
+  and `DataComponentPatch.CODEC` (`"minecraft:damage": 3`, `"!minecraft:lore": {}`), and
+  `PatchBuilder`, by which the server makes a patch of its own.
+- **In a text component** a stack with components is a hover event (`show_item`). The text
+  codec sits below the items, so the item layer hands it a function (`text::set_item_components`)
+  that reads `components` and writes the compound vanilla writes - which a client compares
+  byte for byte, so its entries, and those of every compound in it, go out in the order of
+  vanilla's `HashMap` (`nbt::write_map_order`). The components hold text components of their
+  own: the text codec and the tag reader of the component decoders each work a level at a time.
+
+Compared with a vanilla 26.3 server by `tools/vanilla/component_probe.py`: with the server's
+console it also asks `/data get entity <holder> SelectedItem.components` of every stack, and
+goes on past text with a value or two of every component that is read - some 275 stacks. What
+`/give item[...]` answers, hover event included, is compared by `command_probe.py`. Left:
+names that share a bucket of the HashMap come out in the order they went in, which a tag kept
+sorted (custom data) does not know; why a value is refused is said in words of our own, where
+vanilla quotes DataFixerUpper; a registry entry written out in place of its name (an
+instrument, a painting) is not read. The probe also showed what the wire decoder had wrong:
+the hidden components of `tooltip_display` keep the order they came in, and an effect in an
+item's potion contents does not keep the effect hidden beneath it - a vanilla server that is
+sent one, on the wire or in a command's tag, holds the effect without it.
+
+Both probes are recorded on both servers at once by `tools/vanilla/compare.py`, which starts
+and stops the two; `-k` plays a part of a probe (a section of the command probe, the cases of
+one component) while a change is worked on.
 
 ### The inventory and its menu (`server::Inventory`, `server::Menu`)
 
@@ -1887,7 +1931,7 @@ None of it is touched unless a command runs.
   chest). `attributes` are a fresh entity's - its speed, and a mob's follow range with the
   bonus `Mob.finalizeSpawn` draws, made of its UUID here instead of kept. A mob is never
   left-handed (one in twenty is). A player's `Motion` is zero where vanilla's stands under one
-  tick of gravity. A stack with components cannot be written as a tag yet: the command says so.
+  tick of gravity.
 - `/tellraw`: a component this server does not read (see "A text component is read by a codec")
   is refused; why a tag is no component is said in words of our own, where vanilla quotes
   DataFixerUpper.
@@ -2145,7 +2189,7 @@ Roughly in dependency order:
    answer a click - doors, trapdoors, fence gates. Then fluids - with them fluid ticks, ice,
    water that leaves a waterlogged block - redstone, the other block entities. And what the
    first four still lack: experience orbs.
-8. **Commands**: tags into the world - block entity data, item components, `/summon`'s tag
+8. **Commands**: tags into the world - block entity data, `/summon`'s tag
    (the SNBT reader is there) - `facing`, then the commands that wait for their subject. **Chat**: signed (see "Chat").
    **Time**: the weather, game rules.
 9. Lua plugin host.

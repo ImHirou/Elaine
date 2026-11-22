@@ -55,6 +55,43 @@ from mcgen import ROOT, die, javap, jar_for, vdir, version_info
 # ----------------------------------------------------------------------------- wire helpers
 
 
+def nbt_of_json(v) -> bytes:
+    """A JSON value as a nameless NBT tag (type, payload), the way JsonOps' values convert: a
+    whole number an int (a long if it has to be), another a double, true and false bytes, a list
+    of values that differ as ListTag.write wraps them."""
+    import struct
+
+    def mutf8(s: str) -> bytes:
+        out = bytearray()
+        for unit in struct.unpack(f"<{len(s.encode('utf-16-le')) // 2}H", s.encode("utf-16-le")):
+            if 0 < unit < 0x80:
+                out.append(unit)
+            elif unit < 0x800:
+                out += bytes((0xC0 | unit >> 6, 0x80 | unit & 0x3F))
+            else:
+                out += bytes((0xE0 | unit >> 12, 0x80 | unit >> 6 & 0x3F, 0x80 | unit & 0x3F))
+        return struct.pack(">H", len(out)) + bytes(out)
+
+    if isinstance(v, bool):
+        return bytes((1, int(v)))
+    if isinstance(v, int):
+        return b"\x03" + struct.pack(">i", v) if -2**31 <= v < 2**31 else b"\x04" + struct.pack(">q", v)
+    if isinstance(v, float):
+        return b"\x06" + struct.pack(">d", v)
+    if isinstance(v, str):
+        return b"\x08" + mutf8(v)
+    if isinstance(v, list):
+        tags = [nbt_of_json(x) for x in v]
+        kinds = {t[0] for t in tags}
+        if len(kinds) <= 1:
+            return bytes((9, kinds.pop() if kinds else 0)) + struct.pack(">i", len(tags)) + b"".join(t[1:] for t in tags)
+        wrapped = [t[1:] if t[0] == 10 else t[:1] + b"\x00\x00" + t[1:] + b"\x00" for t in tags]
+        return bytes((9, 10)) + struct.pack(">i", len(tags)) + b"".join(wrapped)
+    if isinstance(v, dict):
+        return b"\x0a" + b"".join(t[:1] + mutf8(k) + t[1:] for k, x in v.items() for t in [nbt_of_json(x)]) + b"\x00"
+    die(f"a JSON value that is no tag: {v!r}")
+
+
 def varint(n: int) -> bytes:
     n &= 0xFFFFFFFF
     out = bytearray()
@@ -332,6 +369,12 @@ inline constexpr unsigned char kTagsBlob[] = {
 // One play update_recipes packet body (packet id + payload): the recipe property sets.
 inline constexpr unsigned char kUpdateRecipesBlob[] = {
 #embed "update_recipes.bin"
+};
+
+// The default components of every item, as tags: per item [varint n], n x ([varint component]
+// [varint length][a nameless tag]).
+inline constexpr unsigned char kItemDefaultsBlob[] = {
+#embed "item_defaults.bin"
 };
 
 }  // namespace proto::gen
@@ -1357,7 +1400,7 @@ namespace proto::gen {
 
     # ---- items.hpp: ids by name (the test client and future commands address items by name)
     comp_ids = {name: e["protocol_id"] for name, e in static_regs["minecraft:data_component_type"]["entries"].items()}
-    it = [hdr, "\n// Item registry ids.\nnamespace proto::gen::item {\n\n"]
+    it = [hdr, "\n#include <string_view>\n\n// Item registry ids.\nnamespace proto::gen::item {\n\n"]
     seen: dict[str, str] = {}
     for name in sorted(item_ids, key=item_ids.get):
         cid = ident(name)
@@ -1369,15 +1412,40 @@ namespace proto::gen {
               "// Data component type ids (the keys of an item stack's component patch).\nnamespace proto::gen::component {\n\n")
     for name in sorted(comp_ids, key=comp_ids.get):
         it.append(f"inline constexpr unsigned {ident(name)} = {comp_ids[name]};\n")
-    it.append(f"\ninline constexpr unsigned kCount = {len(comp_ids)};\n\n}}  // namespace proto::gen::component\n")
+    it.append(f"\ninline constexpr unsigned kCount = {len(comp_ids)};\n\n"
+              "// Their names: the keys of a patch as a tag, what `stone[...]` spells out.\n"
+              "inline constexpr std::string_view kNames[kCount] = {\n")
+    it.extend(f'    "{name}",\n' for name in sorted(comp_ids, key=comp_ids.get))
+    it.append("};\n\n}  // namespace proto::gen::component\n")
     # Sizes of the static registries a component value can point into: an id past the end makes a
     # client's decoder throw (Registry.byIdOrThrow), so the server has to check before passing one on.
     it.append("\n// Entry counts of static registries that component values refer to by id.\n"
               "namespace proto::gen::static_registry {\n\n")
     for key in ("potion", "mob_effect", "sound_event", "block_entity_type"):
         it.append(f"inline constexpr unsigned {ident(key)}Count = {len(static_regs['minecraft:' + key]['entries'])};\n")
+    # ...and the names of those a component's Codec names its entries by.
+    for key in ("potion", "mob_effect"):
+        entries = static_regs["minecraft:" + key]["entries"]
+        it.append(f"\ninline constexpr std::string_view {ident(key)}Names[{len(entries)}] = {{\n")
+        it.extend(f'    "{name}",\n' for name in sorted(entries, key=lambda n: entries[n]["protocol_id"]))
+        it.append("};\n")
     it.append("\n}  // namespace proto::gen::static_registry\n")
     files["items.hpp"] = "".join(it)
+
+    # ---- item_defaults.bin: the components every item has of its own (Item.components()), each
+    # as the tag its Codec reads - the report is that Codec's JSON. Per item, in id order:
+    # [varint n] then n x ([varint component][varint length][a nameless tag]). The server reads
+    # them at startup through the same code that reads a command's `stone[...]` (item/codec.cpp).
+    defaults = bytearray()
+    for name in sorted(item_ids, key=item_ids.get):
+        comps = {} if name == "minecraft:air" and not (comp_dir / "air.json").exists() else item_default_components(name)
+        defaults += varint(len(comps))
+        for comp in sorted(comps, key=comp_ids.get):
+            if comp not in comp_ids:
+                die(f"{name}: a default component {comp} that is no data component type")
+            tag = nbt_of_json(comps[comp])
+            defaults += varint(comp_ids[comp]) + varint(len(tag)) + tag
+    files["item_defaults.bin"] = bytes(defaults)
 
     entity_ids = {n.split(":", 1)[1]: e["protocol_id"] for n, e in static_regs["minecraft:entity_type"]["entries"].items()}
     physics = gen_physics.emit(hdr, v["id"], ext_blocks, st, shapes, data.get("collision_grids", []), game, tagged, placeable_names, entity_ids, cfloat32)

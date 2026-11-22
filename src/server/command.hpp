@@ -42,6 +42,7 @@
 
 #include "base/buf.hpp"
 #include "base/types.hpp"
+#include "item/stack.hpp"
 #include "nbt/ops.hpp"
 #include "nbt/snbt.hpp"
 #include "text/text.hpp"
@@ -77,7 +78,7 @@ enum class Type : u8 {
     kRotation,        // rotation: yaw and pitch
     kBlockState,      // block_state: stone, oak_stairs[facing=east]
     kBlockPredicate,  // block_predicate: the same, or #tag
-    kItem,            // item: stone (components in [] are not read yet)
+    kItem,            // item: stone, diamond_sword[damage=3,!lore]
     kItemPredicate,   // item_predicate: stone, #tag, *
     kIdentifier,      // identifier: namespace:path
     kSound,           // sound: an identifier the client completes from the sounds it has
@@ -159,6 +160,9 @@ struct ItemArg {
     u32 item = 0;
     bool any = false, is_tag = false;
     std::vector<u16> tag_items;
+    // An item (not a predicate): one of it with the components that were spelled out,
+    // "diamond_sword[damage=3,!lore]" - ItemInput's item and patch.
+    item::ItemStack stack;
     bool test(u32 item_id) const;
 };
 

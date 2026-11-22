@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "item/stack.hpp"
 
+#include "item/codec.hpp"
+
 namespace item {
 
 Verdict read_untrusted(proto::Reader& r, ItemStack& out) {
@@ -13,7 +15,9 @@ Verdict read_untrusted(proto::Reader& r, ItemStack& out) {
     PatchId patch = 0;
     if (const Verdict v = patches().read_untrusted(r, patch); v != Verdict::kOk) return v;
     // The stack owns the patch from here: every way out below gives the reference back.
-    ItemStack stack(item, std::min<u32>(static_cast<u32>(count), kMaxCount), patch);
+    // (PatchedDataComponentMap keeps of a patch what differs from the item: so that a stack is
+    // equal to another that says the same.)
+    ItemStack stack(item, std::min<u32>(static_cast<u32>(count), kMaxCount), item ? sanitized(item, patch) : patch);
     if (item == 0) return Verdict::kOk;  // air is an empty stack whatever else it says, and is not validated
     // validatedStreamCodec encodes what it read with ItemStack.CODEC, whose count is intRange(1, 99).
     if (static_cast<u32>(count) > kMaxCount) return Verdict::kMalformed;

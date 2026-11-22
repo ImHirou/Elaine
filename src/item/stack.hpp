@@ -111,6 +111,12 @@ class ItemStack {
         return has(component::kMaxDamage, world::item_flag::kHasMaxDamage) &&
                has(component::kDamage, world::item_flag::kHasDamage) && !has(component::kUnbreakable, 0);
     }
+    // ItemStack.validateComponents: what can be worn down is one to a stack.
+    bool damageable_and_stackable() const {
+        const bool wears = patch_ ? has(component::kMaxDamage, world::item_flag::kHasMaxDamage)
+                                  : (info().flags & world::item_flag::kHasMaxDamage) != 0;
+        return wears && max_stack() > 1;
+    }
     // isDamaged: no item is damaged by default, so only a patch can say so.
     bool damaged() const {
         if (LIKELY(!patch_) || !damageable()) return false;

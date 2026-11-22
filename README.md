@@ -166,7 +166,8 @@ cost per entity.*
 - [x] `stop`, `setblock`, `fill`, `teleport`, `give`, `playsound`, `stopsound`, `summon`, `kill`, `list`, `kick`, `op`, `deop`, `help`, `say`, `me`, `msg`, `teammsg`, `time`, `tellraw`, `data get`
 - [x] Coordinates, entity selectors, block states and tags, items
 - [x] Tags as text (SNBT) with vanilla's errors, NBT paths, `nbt=` in selectors
-- [ ] Tags into the world: block entity data, item components, `/summon`'s tag; `data merge` / `modify` / `remove`
+- [x] Item components in commands: `give @s diamond_sword[damage=3,!lore]`
+- [ ] Tags into the world: block entity data, `/summon`'s tag; `data merge` / `modify` / `remove`
 - [x] Suggestions a client asks the server for (time markers, timelines)
 - [ ] `execute`, `gamemode`, `weather`, `gamerule`, `effect`, `scoreboard` and the rest
 

@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """What does a server answer to commands? Record it, on vanilla and on ours, and diff.
 
-    command_probe.py record <port> <out.json> [nameA nameB [console]]
+    command_probe.py record <port> <out.json> [nameA nameB [console]] [--only=section,...]
     command_probe.py diff <vanilla.json> <ours.json> [-v]
+    tools/vanilla/compare.py command_probe [-k section ...]     # both servers at once, and the diff
 
 `record` joins two bots (tests/integration/mcproto.py, offline mode, creative). A has to be an
 operator and B must not be: once both are in, type `op <nameA>` on the server's console when
@@ -99,8 +100,23 @@ class Prober(Actor):
                     b"\x7f" + mc.varint(1) + b"\x00\x01" + mc.varint(0))
 
 
-def record(port: int, out_path: str, name_a: str, name_b: str, console: str | None = None) -> None:
+SECTIONS = ("basics", "blocks", "give", "moving", "entities", "nbt", "tellraw", "sounds", "talking", "time", "permissions")
+
+
+def record(port: int, out_path: str, name_a: str, name_b: str, console: str | None = None, only: set | None = None) -> None:
+    """`only`: the sections to play (SECTIONS; a part of a name will do). The beginning - joining,
+    the operator, the spot - is always played; a recording of some sections is compared with
+    another of the same ones."""
     steps: list[dict] = []
+    current = ["setup"]
+
+    def section(name: str) -> None:
+        assert name in SECTIONS
+        current[0] = name
+
+    def wanted() -> bool:
+        return not only or current[0] == "setup" or any(word in current[0] for word in only)
+
     name_c = (name_a + "C")[:16]     # a third, who only comes by
     a, b = Prober(port, name_a), Prober(port, name_b)
     for bot in (a, b):
@@ -133,16 +149,28 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str | No
                 pump(bot, 0.5)
 
     def step(name: str, action=None, ticks: int = 5):
+        """Does `action` and takes what the bots are sent for it. A step lasts `ticks` ticks at
+        most; one of the usual five is over as soon as something has come and two ticks have
+        then passed without anything more - an answer is there in a tick or two, and waiting
+        out the rest for each of four hundred lines is most of what a recording takes."""
+        if not wanted():
+            return
         t0 = time.time()
         mark_a, mark_b = len(a.log), len(b.log)
+        seen, quiet = 0, 0
         for i in range(ticks):
             if i == 0 and action:
                 action()
             for bot in (a, b):
                 pump(bot, 0.001)
             time.sleep(max(0.0, t0 + (i + 1) * 0.05 - time.time()))
-        pump(a, 0.15)
-        pump(b, 0.05)
+            now = len(a.log) - mark_a + len(b.log) - mark_b
+            quiet = quiet + 1 if now == seen else 0
+            seen = now
+            if ticks == 5 and seen and quiet >= 2:
+                break
+        pump(a, 0.03)
+        pump(b, 0.01)
         steps.append({"step": name, "A": a.log[mark_a:], "B": b.log[mark_b:]})
         print(f"{name}: A {len(a.log) - mark_a}, B {len(b.log) - mark_b} packets")
 
@@ -163,6 +191,7 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str | No
     step("...and fetches B", lambda: a.say(f"tp {name_b} {ox + 2} {oy} {oz}"), ticks=30)
     origin = (ox, oy, oz)
 
+    section("basics")
     run("list")
     run("list uuids")
     run("list", b)
@@ -173,6 +202,7 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str | No
     run("help nonsense")
 
     # ---- blocks
+    section("blocks")
     run("setblock ~ ~ ~2 stone")
     run("setblock ~ ~ ~2 stone")                      # nothing changes: failed
     run("setblock ~ ~ ~2 minecraft:glowstone keep")   # not air: failed
@@ -203,6 +233,7 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str | No
     run("fill ~ ~ ~3 ~ ~ ~3 air destroy")             # the TNT comes out as an item
 
     # ---- items
+    section("give")
     run("give @s diamond")
     run("give @s minecraft:stone 3")
     run(f"give {name_b} oak_planks 64")
@@ -212,8 +243,40 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str | No
     run("give @s nonsense")
     run("give Nobody stone")
     run("give @e stone")
+    # ...with components: `item[type=value,!type]`, each value a tag read by the component's Codec
+    run("give @s diamond_sword[damage=3]")
+    run("give @s stone[custom_name=\"Named\",lore=[\"a\",{text:\"b\",color:\"red\"}]]")
+    run("give @s diamond_sword[enchantments={sharpness:5},unbreakable={}] 1")
+    run("give @s stone[rarity=epic,!lore]")
+    run("give @s stone[item_name={translate:\"block.minecraft.dirt\"}]")
+    run("give @s stone[max_stack_size=16] 20")
+    run("give @s stone[ damage = 3 , !lore ]")
+    run("give @s stone[!damage]")
+    run("give @s stone[]")
+    run("give @s written_book[written_book_content={title:\"T\",author:\"A\",pages:[\"one\",{text:\"two\",bold:true}]}]")
+    run("give @s potion[potion_contents=\"swiftness\"]")
+    run("give @s firework_rocket[fireworks={flight_duration:2b,explosions:[{shape:\"star\",colors:[I;255,65280]}]}]")
+    run("give @s stone[custom_data={b:1,a:\"x\"}]")
+    run("give @s potion[potion_contents={custom_effects:[{id:\"slowness\",amplifier:1b,duration:10,hidden_effect:{duration:500}}]}]")
+    run("give @s stone[max_stack_size=64,rarity=common,!damage]")   # all as the item is: no components
+    run("give @s shield[base_color=red]")
+    run("give @s potion")
+    run("give @s diamond_sword[max_stack_size=16]")   # what wears down cannot be stacked
+    run("give @s stone[damage=3,damage=4]")
+    run("give @s stone[nonsense=1]")
+    run("give @s stone[creative_slot_lock={}]")       # a component that only travels
+    run("give @s stone[damage=]")
+    run("give @s stone[damage=-1]")
+    run("give @s stone[rarity=legendary]")
+    run("give @s stone[damage 3]")
+    run("give @s stone[damage=3")
+    run("give @s stone[damage=3,]")
+    run("give @s stone[")
+    run("give @s stone[!")
+    run("give @s stone[damage=3]x")
 
     # ---- moving
+    section("moving")
     run("tp ~ ~5 ~")
     run(f"tp @s {ox}.5 {oy} {oz}.5 90 45")
     run("tp @s ~ ~ ~ ~10 ~")
@@ -231,6 +294,7 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str | No
     run(f"tp @a[name={name_b},distance=..10] ~ ~ ~")
 
     # ---- entities
+    section("entities")
     run("summon armor_stand ~ ~ ~3")
     run("summon minecraft:armor_stand ~1 ~ ~3")
     run("kill @e[type=armor_stand,distance=..10,limit=1,sort=nearest]")
@@ -244,6 +308,10 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str | No
 
     # ---- NBT: what `/data get` shows of a block entity, an entity, a storage; paths; tags as
     # text (SNBT) where a command takes one - right ones, and wrong ones for the error and its place
+    section("nbt")
+    # (What A carries by now depends on which of the dropped items flew its way: what it holds
+    # from here on is put there.)
+    step("A takes a diamond in hand, three stones beside it", lambda: (a.give(36, "kDiamond", 1), a.give(37, "kStone", 3), a.select(0)))
     run("setblock ~ ~ ~2 chest")
     run("data get block ~ ~ ~2")
     run("data get block ~ ~ ~2 Items")
@@ -322,6 +390,7 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str | No
     run("tp @a[nbt={},limit=1] ~ ~ ~")
     run("tp @s[nbt=5] ~ ~ ~")
     run("tp @s[nbt={a:}] ~ ~ ~")
+    section("tellraw")
     run("tellraw @s \"quoted\"")
     run("tellraw @s 'single'")
     run("tellraw @s bare")
@@ -344,6 +413,7 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str | No
         run("tellraw @s " + wrong)
 
     # ---- sounds
+    section("sounds")
     run("playsound minecraft:block.note_block.harp")
     run("playsound block.note_block.harp block @a ~ ~ ~ 0.5 2")
     run(f"playsound some:thing voice {name_b} ~ ~500 ~")            # too far
@@ -356,6 +426,7 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str | No
     run(f"stopsound {name_b} block block.note_block.harp")
 
     # ---- talking: what is typed into the chat, and the commands that say something
+    section("talking")
     def says(text: str, bot=a):
         step(("" if bot is a else "B ") + "says: " + text[:40], lambda: bot.chat(text))
 
@@ -363,6 +434,8 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str | No
         step(("" if bot is a else "B: ") + "/" + command[:60] + " (as a client sends it)", lambda: bot.say_signed(command))
 
     def on_console(line: str):
+        if not wanted():
+            return
         mark_a, mark_b = len(a.log), len(b.log)
         type_on_console(line)
         steps.append({"step": "console: " + line, "A": a.log[mark_a:], "B": b.log[mark_b:]})
@@ -407,20 +480,22 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str | No
     step("B: chat shown", lambda: b.chat_visibility(0))
     says("B is back")
     # Somebody comes and goes: what the others read, and what it reads itself.
-    mark_a, mark_b = len(a.log), len(b.log)
-    c = Prober(port, name_c)
-    c.join()
-    c.pump(1.0)
-    for bot in (a, b):
-        pump(bot, 0.3)
-    c.chat("just passing")
-    c.pump(0.5)
-    c.c.close()
-    for _ in range(4):
+    if wanted():
+        mark_a, mark_b = len(a.log), len(b.log)
+        c = Prober(port, name_c)
+        c.join()
+        c.pump(1.0)
         for bot in (a, b):
-            pump(bot, 0.25)
-    steps.append({"step": "C joins, says something and leaves", "A": a.log[mark_a:], "B": b.log[mark_b:], "C": c.log})
+            pump(bot, 0.3)
+        c.chat("just passing")
+        c.pump(0.5)
+        c.c.close()
+        for _ in range(4):
+            for bot in (a, b):
+                pump(bot, 0.25)
+        steps.append({"step": "C joins, says something and leaves", "A": a.log[mark_a:], "B": b.log[mark_b:], "C": c.log})
 
+    section("time")
     # ---- the time: the world's clocks. The overworld's is stopped first, so that it is where
     # each command puts it; the end's runs on.
     run("time pause")
@@ -475,6 +550,7 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str | No
     run("time resume")
 
     # ---- what is not a command, and who may run what
+    section("permissions")
     run("nonsense")
     run("")
     run("list all of them")
@@ -737,6 +813,9 @@ def _normalise(rec: dict, who: str, commands: set | None) -> tuple[dict[str, lis
                     # Why it is none: DataFixerUpper's words on vanilla, this server's on ours.
                     rows.append((name, "argument.component.invalid (the reason is each server's own)"))
                     continue
+                if isinstance(failed, dict) and failed.get("translate") == "arguments.item.component.malformed":
+                    rows.append((name, f"arguments.item.component.malformed {failed['with'][0]} (the reason is each server's own)"))
+                    continue
                 if key == "commands.data.entity.query" and re.fullmatch(r"/data get entity \S+", st["step"]):
                     # An entity as a whole: the entries this server writes are compared, the others listed.
                     # (A player's Motion: vanilla's stands under one tick of gravity, ours is not moved by the server.)
@@ -753,7 +832,8 @@ def _normalise(rec: dict, who: str, commands: set | None) -> tuple[dict[str, lis
                 changed = dict([mc.parse_block_update(r)]) if name == "block_update" else mc.parse_section_blocks_update(r)
                 for pos, state in changed.items():
                     rel = tuple(p - o for p, o in zip(pos, origin))
-                    if rel[1] == -1 and state in (mc.BLOCK["kDirt"], mc.BLOCK["kGrassBlock"]):   # the ground: a random tick's doing
+                    # The ground: a random tick's doing. (C stands where it joined, on ground of another height.)
+                    if (rel[1] == -1 or who == "C") and state in (mc.BLOCK["kDirt"], mc.BLOCK["kGrassBlock"]):
                         rows.append(("  (not compared)", f"grass and dirt at {rel}"))
                     else:
                         blocks[rel] = state
@@ -761,6 +841,9 @@ def _normalise(rec: dict, who: str, commands: set | None) -> tuple[dict[str, lis
                 r.varint()
                 pos, delta = (r.f64(), r.f64(), r.f64()), (r.f64(), r.f64(), r.f64())
                 rot, flags = (r.f32(), r.f32()), r.i32()
+                if who == "C":      # where one joins: vanilla picks a spot around the world's spawn, ours the spawn
+                    rows.append(("  (not compared)", f"C joins at {pos}"))
+                    continue
                 rows.append((name, f"pos {pos} delta {delta} rot {rot} relative {flags:#x}"))
             elif name == "sound":
                 holder = r.varint()
@@ -833,6 +916,11 @@ def diff(path_ref: str, path_ours: str) -> int:
                 print("   not compared: " + "; ".join(notes)[:300])
         if tree_ours and tree_ref:
             problems, extra = compare_trees(tree_ours, tree_ref)
+            # Known, and in docs/architecture.md: vanilla completes /op and /deop itself.
+            known = [p for p in problems if p in ("/op targets: suggestions is None, vanilla's 'minecraft:ask_server'",
+                                                  "/deop targets: suggestions is None, vanilla's 'minecraft:ask_server'")]
+            problems = [p for p in problems if p not in known]
+            extra = extra + ["(known) " + p for p in known]
             print(f"== the command tree {who} has at the end: {'same, as far as ours goes' if not problems else 'DIFFERENT'} "
                   f"({len(tree_ours['children'])} commands of vanilla's {len(tree_ref['children'])}; "
                   f"{len(extra)} nodes of theirs are not in ours)")
@@ -847,9 +935,14 @@ def diff(path_ref: str, path_ours: str) -> int:
 
 
 def main() -> int:
+    only = {word for arg in sys.argv if arg.startswith("--only=") for word in arg[len("--only="):].split(",") if word}
+    sys.argv = [arg for arg in sys.argv if not arg.startswith("--only=")]
+    if only and not any(word in name for name in SECTIONS for word in only):    # (a word may be another probe's)
+        print(f"--only names no section; there are: {', '.join(SECTIONS)}")
+        return 2
     if len(sys.argv) >= 4 and sys.argv[1] == "record":
         names = (sys.argv[4], sys.argv[5]) if len(sys.argv) >= 6 else ("ProbeE", "ProbeF")
-        record(int(sys.argv[2]), sys.argv[3], *names, sys.argv[6] if len(sys.argv) >= 7 else None)
+        record(int(sys.argv[2]), sys.argv[3], *names, sys.argv[6] if len(sys.argv) >= 7 else None, only or None)
         return 0
     if len(sys.argv) >= 4 and sys.argv[1] == "diff":   # -v: every row, and what is not compared
         return 1 if diff(sys.argv[2], sys.argv[3]) else 0

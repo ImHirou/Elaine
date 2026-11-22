@@ -33,6 +33,7 @@
 #include "base/java_number.hpp"
 #include "base/log.hpp"
 #include "crypto/auth.hpp"
+#include "item/codec.hpp"
 #include "server/game.hpp"
 #include "text/nbt_text.hpp"
 
@@ -184,15 +185,38 @@ Text Game::display_name(u32 row) const {
     return std::move(shown).hover_entity(type, uuid, std::move(name)).insertion(text::uuid_string(uuid));
 }
 
-// ItemStack.getDisplayName, for a stack without components: "[Stone]" in the colour of its
-// rarity, showing the stack when pointed at.
+// ItemStack.getDisplayName: "[Stone]" - its custom name in italics, if it has one - in the
+// colour of its rarity, showing the stack when pointed at.
 Text Game::item_display_name(const ItemStack& stack) {
     static constexpr Color kRarity[] = {Color::kWhite, Color::kYellow, Color::kAqua, Color::kLightPurple};  // Rarity.color
-    Text shown = tr("chat.square_brackets").arg(Text().append(tr(world::item_text_key(stack.item()))));
+    namespace component = item::component;
+    const item::Patches& store = item::patches();
+    const auto patched = [&](u32 type) { return stack.patch() ? store.find(stack.patch(), type) : item::Patches::Found{}; };
+    // getHoverName: the custom name - a written book's title is one - or the item's (Item.getName:
+    // its ITEM_NAME component, or what its class makes of the stack).
+    const auto custom = patched(component::kCustomName), named = patched(component::kItemName);
+    const bool has_custom = custom.state == item::Patches::State::kSet;
+    const std::string title = has_custom ? std::string() : item::book_title(stack);
+    const std::string computed = item::computed_name_key(stack);
+    Text name = has_custom                                      ? Text::encoded(custom.value)
+                : !title.empty()                                ? Text::literal(title)
+                : !computed.empty()                             ? tr(computed)
+                : named.state == item::Patches::State::kSet     ? Text::encoded(named.value)
+                : named.state == item::Patches::State::kRemoved ? Text()
+                                                                : tr(world::item_text_key(stack.item()));
+    Text hover = Text().append(std::move(name));
+    if (has_custom) hover.italic();
+    Text shown = tr("chat.square_brackets").arg(std::move(hover));
     if (stack.empty()) return shown;
-    return std::move(shown)
-        .color(kRarity[world::item_rarity(stack.item())])
-        .hover_item(world::item_name(stack.item()), stack.count());
+    // getRarity: the component, raised by an enchantment.
+    u32 rarity = world::item_rarity(stack.item());
+    if (const auto r = patched(component::kRarity); r.state == item::Patches::State::kSet) rarity = r.value[0];
+    if (stack.enchanted()) rarity = rarity < 2 ? 2 : rarity == 2 ? 3 : rarity;
+    shown.color(kRarity[rarity]);
+    if (!stack.patch()) return std::move(shown).hover_item(world::item_name(stack.item()), stack.count());
+    base::ByteBuf components;
+    item::patch_to_wire_nbt(stack.patch(), components);
+    return std::move(shown).hover_item(world::item_name(stack.item()), stack.count(), {components.data, components.len});
 }
 
 void Game::kick(u32 pi, const Text& reason) {
@@ -848,9 +872,12 @@ struct Game::Commands {
         Game& g = in.game;
         std::vector<u32> slots;
         if (!players(in, "targets", slots)) return 0;
-        const u32 item = in.value("item")->item.item;
         const i32 count = in.integer("count", 1);
-        const ItemStack prototype(item, 1);
+        // ItemInput.createItemStack(1): the item with the components that were spelled out.
+        const ItemStack& prototype = in.value("item")->item.stack;
+        // ItemStack.validateStrict (validateComponents).
+        if (prototype.damageable_and_stackable())
+            return in.fail(tr("arguments.item.malformed").arg("Item cannot be both damageable and stackable"));
         // An empty stack (air) reports the default size, as ItemStack.getMaxStackSize does.
         const i32 max_stack = prototype.empty() ? 64 : static_cast<i32>(prototype.max_stack());
         if (count > max_stack * kGiveMaxStacks)
@@ -863,7 +890,7 @@ struct Game::Commands {
             for (i32 remaining = count; remaining > 0 && !prototype.empty();) {
                 const i32 size = std::min(max_stack, remaining);
                 remaining -= size;
-                ItemStack stack(item, static_cast<u32>(size));
+                ItemStack stack = prototype.with_count(static_cast<u32>(size));
                 // Everyone is creative: what does not fit is swallowed, and the stack counts as
                 // given - the branch of vanilla's that shows an item flying into the player.
                 if (!p.menu.inv.add(-1, stack, true) || !stack.empty()) continue;
@@ -1215,18 +1242,13 @@ struct Game::Commands {
             u32 slot;
             if (!entity(in, "target", slot)) return 0;
             const u32 row = g.ents_.by_slot(slot);
-            if (g.save_entity(row, saved) != Saved::kOk)
-                return in.fail(Text::literal("This entity holds an item with components, which this server cannot show yet"));
+            g.save_entity(row, saved);
             kind = "entity";
             entity_name = g.display_name(row);
         } else if (in.has("block")) {
             if (!loaded_block_pos(in, "target", pos)) return 0;
-            switch (g.save_block_entity(pos.x, pos.y, pos.z, saved)) {
-                case Saved::kNone: return in.fail(tr("commands.data.block.invalid"));
-                case Saved::kUnsupported:
-                    return in.fail(Text::literal("This block holds an item with components, which this server cannot show yet"));
-                case Saved::kOk: break;
-            }
+            if (g.save_block_entity(pos.x, pos.y, pos.z, saved) == Saved::kNone)
+                return in.fail(tr("commands.data.block.invalid"));
             kind = "block";
         } else {  // CommandStorage.get: of a storage nobody wrote to, an empty compound - and nothing writes one here
             const u8 empty[] = {nbt::kCompound, nbt::kEnd};

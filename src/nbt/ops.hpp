@@ -34,6 +34,11 @@ u32 utf16_length(std::string_view mutf8);
 // becomes a tree in Java and may come out otherwise; no tag of vanilla's has such names.)
 void map_order(Tag compound, std::vector<Tag>& out);
 
+// The payload of `tag` as vanilla writes the tag it holds: every compound in it with its
+// entries in map_order(), lists as ListTag.write writes them. For a tag that a client compares
+// byte for byte - a component inside a text component - where Doc::write's sorted names will not do.
+void write_map_order(Tag tag, base::ByteBuf& out);
+
 // NbtPathArgument.NbtPath, read: a list of nodes, each naming some of the tags the one before
 // it found.
 struct Path {

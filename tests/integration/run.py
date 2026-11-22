@@ -2648,7 +2648,8 @@ def torches(srv: Server):
     settle(a, b)
     for cl in (a, b):
         dropped = items_of(cl, "kTorch")
-        assert len(dropped) == 4 and all(e.data[D_ITEM][1] == plain("kTorch", 1) for e in dropped), [e.data for e in dropped]
+        # Four torches - in how many stacks depends on how long this took: two that lie close merge.
+        assert sum(e.data[D_ITEM][1][1] for e in dropped) == 4 and all(e.data[D_ITEM][1][2] == {} for e in dropped), [e.data for e in dropped]
     # The one on the grass stands until the grass goes.
     dig(a, (8, -61, 14), seq=10)
     assert shows(collect(a), {(8, -61, 14): AIR, (8, -60, 14): AIR})
@@ -3604,14 +3605,15 @@ def command_blocks(srv: Server):
     assert a.window and a.window["type"] == "kGeneric9x6"
     menu_click(a, 54 + 27, 0, QUICK_MOVE)
     settle(a)
-    items = len(of_type(b, "kItem"))
     mark = len(a.menu_log)
     got = run_command(a, "fill 8 -60 11 8 -60 12 air")
     assert got["said"] == [tr("commands.fill.success", 2)] and got["blocks"] == {at: AIR, (8, -60, 12): AIR}, got
     settle(a)
     collect(b)
     assert a.window is None and ("container_close", 1) in a.menu_log[mark:]    # the screen closes with its chest
-    assert len(of_type(b, "kItem")) == items
+    # (Not a count of the items lying about: the chests the commands above broke are among them,
+    # and whether Bob has walked into one of those by now is chance.)
+    assert not [e for e in of_type(b, "kItem").values() if e.data[D_ITEM][0] == STACK and e.data[D_ITEM][1][0] == I["kStone"]]
 
     # What is not a block, what a block does not have, what this server cannot simulate yet.
     line = "setblock 8 -60 11 nonsense"
@@ -3731,11 +3733,16 @@ def command_data_and_tellraw(srv: Server):
     for part in ("Health: 20.0f", "Air: 300s", "playerGameType: 1", 'Dimension: "minecraft:overworld"',
                  "SelectedItemSlot: 0", 'Inventory: [{count: 3, Slot: 0b, id: "minecraft:diamond"}]', "Brain: {memories: {}}"):
         assert part in whole, (part, whole)
-    # A stack with components has no tag yet: said, not shown wrong.
-    a.send("set_creative_mode_slot", struct.pack(">h", 37) + mc.item_stack(I["kStone"], 1, {"kCustomName": mc.nbt("Named")}))
+    # A stack with components: each as its Codec writes it, under its name.
+    a.send("set_creative_mode_slot", struct.pack(">h", 37) + mc.item_stack(I["kStone"], 1, {
+        "kCustomName": mc.nbt({"text": "Named", "color": "red"}), "kDamage": varint(3), "kUnbreakable": b""}))
     settle(a)
-    assert run_command(a, "data get entity @s Inventory")["said"] == [
-        failure("This entity holds an item with components, which this server cannot show yet")]
+    assert data("data get entity @s Inventory[{Slot:1b}]")[2] == (
+        '{components: {"minecraft:damage": 3, "minecraft:unbreakable": {}, "minecraft:custom_name": {color: "red", text: "Named"}}, '
+        'count: 1, Slot: 1b, id: "minecraft:stone"}')
+    assert data("data get entity @s Inventory[{components:{\"minecraft:damage\":3}}].id")[2] == '"minecraft:stone"'
+    assert run_command(a, "kill @e[nbt={Inventory:[{components:{\"minecraft:damage\":4}}]}]")["said"] == [
+        failure(tr("argument.entity.notfound.entity"))]
     a.send("set_creative_mode_slot", struct.pack(">h", 37) + mc.item_stack(0, 0))
     settle(a)
 
@@ -3852,8 +3859,28 @@ def command_teleport_give_summon(srv: Server):
     assert got["said"] == [failure(tr("commands.give.failed.toomanyitems", 1600, item_name("ender_pearl")))]
     line = "give @s stone 0"
     assert run_command(a, line)["said"] == [failure(tr("argument.integer.low", 1, 0)), here(line, 14)]
-    line = "give @s diamond[damage=1]"
-    assert run_command(a, line)["said"] == [failure("Item components in commands are not supported by this server yet"), here(line, 15)]
+    # With components: each a tag as text, read by the component's Codec. The answer shows the
+    # stack as it is - its own name in italics, the colour of its rarity (an enchantment raises
+    # it), and under the pointer the item with its components, in the order of vanilla's HashMap.
+    got = run_command(a, "give @s diamond_sword[custom_name='Sting',enchantments={sharpness:5},damage=7]")
+    shown = got["said"][0]["with"][1]
+    assert got["said"][0]["translate"] == "commands.give.success.single" and shown["color"] == "aqua", got
+    assert shown["with"] == [{"text": "", "extra": ["Sting"], "italic": mc.Byte(1)}], shown
+    assert shown["hover_event"] == {"action": "show_item", "id": "minecraft:diamond_sword", "components": {
+        "minecraft:damage": 7, "minecraft:enchantments": {"minecraft:sharpness": 5}, "minecraft:custom_name": "Sting"}}, shown
+    settle(a)
+    sword = next(s for s in a.slots if s and s[0] == I["kDiamondSword"])
+    assert set(sword[2]) == {"kCustomName", "kEnchantments", "kDamage"} and mc.nbt(sword[2]["kCustomName"]) == mc.nbt("Sting"), sword
+    line = "give @s diamond[damage=-1]"
+    assert run_command(a, line)["said"] == [
+        failure(tr("arguments.item.component.malformed", "minecraft:damage", "Not a valid value of this component")), here(line, 23)]
+    line = "give @s diamond[damage=1,damage=2]"
+    assert run_command(a, line)["said"] == [failure(tr("arguments.item.component.repeated", "minecraft:damage"))]
+    line = "give @s diamond[food={}]"
+    assert run_command(a, line)["said"] == [
+        failure("Items with the component minecraft:food are not supported by this server yet"), here(line, 16)]
+    assert run_command(a, "give @s diamond_sword[max_stack_size=16]")["said"] == [
+        failure(tr("arguments.item.malformed", "Item cannot be both damageable and stackable"))]
     assert run_command(a, "give Nobody stone")["said"] == [failure(tr("argument.entity.notfound.player"))]
 
     # /summon: an entity like any other - shown, selected, killed. It has no mind of its own:

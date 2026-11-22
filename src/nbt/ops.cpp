@@ -150,6 +150,50 @@ void map_order(Tag compound, std::vector<Tag>& out) {
     for (const Slot& s : slots) out.push_back(s.tag);
 }
 
+void write_map_order(Tag tag, base::ByteBuf& out) {
+    Writer w(out);
+    if (tag.type == kCompound) {
+        std::vector<Tag> entries;
+        map_order(tag, entries);
+        for (const Tag e : entries) {
+            w.entry(e.type, e.name());
+            write_map_order(e, out);
+        }
+        w.end_compound();
+    } else if (tag.type == kList) {
+        // ListTag.write: the elements' one type, or compounds - what is not one wrapped, and a
+        // compound that would itself be read back as a wrapper wrapped too.
+        Type of = kEnd;
+        for (const Tag e : tag.elements()) {
+            if (of == kEnd) {
+                of = e.type;
+            } else if (of != e.type) {
+                of = kCompound;
+                break;
+            }
+            if (e.flat) break;
+        }
+        w.begin_list(of, tag.size());
+        if (tag.size() && kFixedSize[of] && tag.element_type() == of) {  // numbers, as they are stored
+            const auto raw = tag.bytes();
+            out.append(raw.data() + 5, raw.size() - 5);
+            return;
+        }
+        for (const Tag e : tag.elements()) {
+            if (of == kCompound && (e.type != kCompound || e.wrapper())) {
+                w.entry(e.type, "");
+                write_map_order(e, out);
+                w.end_compound();
+            } else {
+                write_map_order(e, out);
+            }
+        }
+    } else {
+        const auto raw = tag.bytes();
+        out.append(raw.data(), raw.size());
+    }
+}
+
 // ---------------------------------------------------------------------------- paths
 
 namespace {

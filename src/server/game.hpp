@@ -399,16 +399,12 @@ class Game {
     // ---- what the game holds, as the tags vanilla saves it as (server/saved_tags.cpp)
     enum class Saved : u8 {
         kOk,
-        kNone,         // nothing there to save
-        kUnsupported,  // it holds something this server cannot write as a tag yet
+        kNone,  // nothing there to save
     };
     // BlockEntity.saveWithFullMetadata of the block entity at a block: appended in the network form.
     Saved save_block_entity(i32 x, i32 y, i32 z, base::ByteBuf& out);
     // NbtPredicate.getEntityTagToCompare: Entity.saveWithoutId, and what a player holds as SelectedItem.
     Saved save_entity(u32 row, base::ByteBuf& out);
-    // ItemStack.CODEC's entries into the compound that is open: id, count. False for a stack
-    // with components.
-    static bool put_stack(nbt::Writer& w, const ItemStack& stack);
     void remove_entity(u32 slot);
     bool destroy_block_with_drops(proto::BlockPos pos);
     bool place_block_input(proto::BlockPos pos, const cmd::BlockArg& block, u32 flags);

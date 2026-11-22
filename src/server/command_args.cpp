@@ -5,13 +5,14 @@
 //
 // What is NOT read, and answered with an error of this server's own instead of vanilla's
 // "expected ...":
-//   * a block's `{...}` and an item's `[component=value]`;
+//   * a block's `{...}`, and the `[...]` of an item predicate (an item's own is read);
 //   * the selector options that ask what does not exist here: scores, advancements, predicate.
 // A selector's `tag` and `team` are read and compared with what every entity has: none.
 #include <algorithm>
 #include <charconv>
 #include <cstdlib>
 
+#include "item/codec.hpp"
 #include "proto/gen/current.hpp"
 #include "proto/identifier.hpp"
 #include "proto/static_data.hpp"
@@ -837,6 +838,94 @@ bool parse_block(std::string_view line, u32& cursor, bool predicate, BlockArg& o
 }
 
 // ItemParser.parse / ItemPredicateArgument: the item (for a predicate also a tag, or '*').
+namespace {
+
+// ItemParser.State.readComponents: "[type=value,!type]" - a value is a tag as text, read by the
+// component's Codec. `r` stands on the '['.
+bool item_components(Reader& r, item::PatchId& out, Error& err) {
+    const auto expect = [&](char c) {  // StringReader.expect
+        if (r.can_read() && r.peek() == c) {
+            ++r.at;
+            return true;
+        }
+        err = here(r, tr("parsing.expected").arg(std::string_view(&c, 1)));
+        return false;
+    };
+    ++r.at;
+    item::PatchBuilder patch;
+    bool seen[item::component::kCount] = {};
+    while (r.can_read() && r.peek() != ']') {
+        r.skip_whitespace();
+        const bool removed = r.can_read() && r.peek() == '!';
+        if (removed) ++r.at;
+        // readComponentType
+        if (!r.can_read()) {
+            err = here(r, tr("arguments.item.component.expected"));
+            return false;
+        }
+        const u32 name_at = r.at;
+        std::string id;
+        if (!read_identifier(r, id, err)) return false;
+        const u32 type = item::find_component(id);
+        // (Three components have no Codec in vanilla either - they only travel: no such component, to a command.)
+        const bool transient = type == item::component::kCreativeSlotLock || type == item::component::kAdditionalTradeCost ||
+                               type == item::component::kMapPostProcessing;
+        if (type == item::kNoComponent || transient) {
+            err = at(name_at, tr("arguments.item.component.unknown").arg(id));
+            return false;
+        }
+        if (seen[type]) {
+            err = {tr("arguments.item.component.repeated").arg(id), -1};  // (create: no place)
+            return false;
+        }
+        seen[type] = true;
+        if (removed) {
+            patch.remove(type);
+            r.skip_whitespace();
+        } else if (!item::has_codec(type)) {  // a component vanilla has and this server does not read
+            err = at(name_at, unsupported("Items with the component " + id));
+            return false;
+        } else {
+            r.skip_whitespace();
+            if (!expect('=')) return false;
+            r.skip_whitespace();
+            const u32 value_at = r.at;
+            std::vector<u8> tag;
+            if (!parse_nbt(r.s, r.at, false, tag, err)) return false;
+            nbt::Doc doc;
+            base::ByteBuf value;
+            const item::Verdict v = doc.parse(tag, nbt::Form::kNameless, nbt::kTrusted) != nbt::Error::kNone
+                                        ? item::Verdict::kMalformed
+                                        : item::value_from_nbt(type, doc.root(), value);
+            if (v != item::Verdict::kOk) {
+                // Vanilla says what its Codec missed, in DataFixerUpper's words; those are not ours to repeat.
+                err = at(value_at, tr("arguments.item.component.malformed")
+                                       .arg(id)
+                                       .arg(v == item::Verdict::kMalformed ? "Not a valid value of this component"
+                                                                           : "A value this server does not read yet"));
+                return false;
+            }
+            patch.set(type, {value.data, value.len});
+            r.skip_whitespace();
+        }
+        if (!r.can_read() || r.peek() != ',') break;
+        ++r.at;
+        r.skip_whitespace();
+        if (!r.can_read()) {
+            err = here(r, tr("arguments.item.component.expected"));
+            return false;
+        }
+    }
+    if (!expect(']')) return false;
+    if (patch.build(out) != item::Verdict::kOk) {
+        err = here(r, Text::literal("These components are more than a stack may carry on this server"));
+        return false;
+    }
+    return true;
+}
+
+}  // namespace
+
 bool parse_item(std::string_view line, u32& cursor, bool predicate, ItemArg& out, Error& err) {
     Reader r{line, cursor};
     out = {};
@@ -861,10 +950,15 @@ bool parse_item(std::string_view line, u32& cursor, bool predicate, ItemArg& out
             return false;
         }
     }
+    item::PatchId patch = 0;
     if (r.can_read() && r.peek() == '[') {
-        err = here(r, unsupported(predicate ? "Item predicates with components" : "Item components in commands"));
-        return false;
+        if (predicate) {
+            err = here(r, unsupported("Item predicates with components"));
+            return false;
+        }
+        if (!item_components(r, patch, err)) return false;
     }
+    if (!predicate) out.stack = item::ItemStack(out.item, out.item ? 1 : 0, item::sanitized(out.item, patch));
     cursor = r.at;
     return true;
 }

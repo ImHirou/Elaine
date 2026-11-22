@@ -10,6 +10,7 @@
 //
 // Of an entity, what the server does not keep is written as the value vanilla gives a fresh one
 // (Fire, Air, PortalCooldown...).
+#include "item/codec.hpp"
 #include "nbt/nbt.hpp"
 #include "nbt/ops.hpp"
 #include "server/game.hpp"
@@ -63,13 +64,6 @@ void put_kept(nbt::Writer& w, std::span<const u8> kept) {
 
 }  // namespace
 
-bool Game::put_stack(nbt::Writer& w, const ItemStack& stack) {
-    if (stack.patch() != 0) return false;
-    w.put_string("id", world::item_name(stack.item()));
-    w.put_int("count", static_cast<i32>(stack.count()));
-    return true;
-}
-
 // ---------------------------------------------------------------------------- block entities
 
 Game::Saved Game::save_block_entity(i32 x, i32 y, i32 z, base::ByteBuf& out) {
@@ -81,10 +75,8 @@ Game::Saved Game::save_block_entity(i32 x, i32 y, i32 z, base::ByteBuf& out) {
         return Saved::kOk;
     }
     const u32 kind = world::block_info_of(world_.block(x, y, z)).kind;
-    const u32 mark = out.len;
     nbt::Writer w(out);
     w.root(nbt::kCompound);
-    bool ok = true;
     // ContainerHelper.saveAllItems: the slots that hold something.
     const auto items = [&](const ItemStack* stacks, u32 n) {
         u32 held = 0;
@@ -93,7 +85,7 @@ Game::Saved Game::save_block_entity(i32 x, i32 y, i32 z, base::ByteBuf& out) {
         for (u32 i = 0; i < n; ++i) {
             if (stacks[i].empty()) continue;
             w.put_byte("Slot", static_cast<i8>(i));
-            ok &= put_stack(w, stacks[i]);
+            item::stack_to_nbt(stacks[i], w);
             w.end_compound();
         }
     };
@@ -124,10 +116,6 @@ Game::Saved Game::save_block_entity(i32 x, i32 y, i32 z, base::ByteBuf& out) {
     w.put_int("y", y);
     w.put_int("z", z);
     w.end_compound();
-    if (!ok) {
-        out.len = mark;
-        return Saved::kUnsupported;
-    }
     return Saved::kOk;
 }
 
@@ -135,12 +123,10 @@ Game::Saved Game::save_block_entity(i32 x, i32 y, i32 z, base::ByteBuf& out) {
 
 Game::Saved Game::save_entity(u32 row, base::ByteBuf& out) {
     const u32 slot = ents_.slot[row], type = ents_.type[row];
-    const u32 mark = out.len;
     const bool is_player = row < players_.size();
     const phys::Body* body = slot < movers_.size() && movers_[slot].kind != gp::kMoverNone ? &movers_[slot].body : nullptr;
     nbt::Writer w(out);
     w.root(nbt::kCompound);
-    bool ok = true;
     // ---- Entity.saveWithoutId
     w.begin_list("Pos", nbt::kDouble, 3);
     w.put_double(ents_.x[row]);
@@ -168,7 +154,7 @@ Game::Saved Game::save_entity(u32 row, base::ByteBuf& out) {
     const bool is_falling = slot < falling_.size() && falling_[slot].alive;
     const auto stack = [&](std::string_view name, const ItemStack& s) {
         w.begin_compound(name);
-        ok &= put_stack(w, s);
+        item::stack_to_nbt(s, w);
         w.end_compound();
     };
     if (info.living) {  // ---- LivingEntity.addAdditionalSaveData
@@ -290,7 +276,7 @@ Game::Saved Game::save_entity(u32 row, base::ByteBuf& out) {
         for (u32 i = 0; i < inv::kItems; ++i) {
             if (inv.items[i].empty()) continue;
             w.put_byte("Slot", static_cast<i8>(i));
-            ok &= put_stack(w, inv.items[i]);
+            item::stack_to_nbt(inv.items[i], w);
             w.end_compound();
         }
         w.put_int("SelectedItemSlot", inv.selected);
@@ -309,10 +295,6 @@ Game::Saved Game::save_entity(u32 row, base::ByteBuf& out) {
         if (!inv.selected_item().empty()) stack("SelectedItem", inv.selected_item());
     }
     w.end_compound();
-    if (!ok) {
-        out.len = mark;
-        return Saved::kUnsupported;
-    }
     return Saved::kOk;
 }
 

@@ -15,6 +15,7 @@
 // A cold path: a Text owns its strings and allocates. Nothing per tick builds one.
 #pragma once
 
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -57,6 +58,14 @@ class Text {
         Text t;
         t.translate_ = true;
         t.text_ = key;
+        return t;
+    }
+
+    // A component that is a tag already (type, payload), as text::transcode wrote it: an
+    // item's custom name. What is set on it after is laid over what it brings.
+    static Text encoded(std::span<const u8> tag) {
+        Text t;
+        t.raw_.assign(tag.begin(), tag.end());
         return t;
     }
 
@@ -144,6 +153,16 @@ class Text {
         return std::move(hover_entity(type, uuid, std::move(name)));
     }
     Text&& hover_item(std::string_view item, u32 count) && { return std::move(hover_item(item, count)); }
+    // ...and for one with components: the compound of them (type, payload), as
+    // DataComponentPatch.CODEC writes it.
+    Text& hover_item(std::string_view item, u32 count, std::span<const u8> components) & {
+        hover_item(item, count);
+        hover_components_.assign(components.begin(), components.end());
+        return *this;
+    }
+    Text&& hover_item(std::string_view item, u32 count, std::span<const u8> components) && {
+        return std::move(hover_item(item, count, components));
+    }
 
     // Appends the component's tag as vanilla writes it: type byte and payload, no name.
     // Tick thread only (transcode's scratch space).
@@ -179,6 +198,7 @@ class Text {
     std::vector<Arg> args_;
     std::vector<Text> extra_;
     std::vector<Text> hover_text_;
+    std::vector<u8> raw_, hover_components_;
 };
 
 // The en_us text of a translation key; the key itself where there is none (Language.getOrDefault).

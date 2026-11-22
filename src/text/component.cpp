@@ -80,13 +80,14 @@ struct Style {
     Click click{};  // click_event: the action...
     u32 rgb = 0;
     i32 shadow = 0;
-    i32 page = 0;                      // ...and its page, or
-    Tag click_value;                   // ...its url / command / value
-    Hover hover_kind{};                // hover_event: the action...
-    u32 hover = kNone;                 // ...show_text: the component; show_entity: its name, if it has one
-    u32 hover_id = 0;                  // ...show_entity: the entity type; show_item: the item
-    i32 hover_uuid[4] = {0, 0, 0, 0};  // ...show_entity: UUIDUtil.uuidToIntArray
-    i32 hover_count = 1;               // ...show_item
+    i32 page = 0;                                        // ...and its page, or
+    Tag click_value;                                     // ...its url / command / value
+    Hover hover_kind{};                                  // hover_event: the action...
+    u32 hover = kNone;                                   // ...show_text: the component; show_entity: its name, if it has one
+    u32 hover_id = 0;                                    // ...show_entity: the entity type; show_item: the item
+    i32 hover_uuid[4] = {0, 0, 0, 0};                    // ...show_entity: UUIDUtil.uuidToIntArray
+    i32 hover_count = 1;                                 // ...show_item
+    u32 hover_components = 0, hover_components_len = 0;  // ...and its components: a compound's payload, in side_
     Tag insertion;
     Tag font;
 };
@@ -194,11 +195,14 @@ bool plain_url(std::string_view s) {
     return i == s.size();
 }
 
+ItemComponents item_components = nullptr;
+
 class Transcoder {
   public:
     Result run(Tag in, base::ByteBuf& out) {
         comps_.clear();
         args_.clear();
+        side_.clear();
         u32 root;
         if (const Result r = resolve(in, 0, root); r != Result::kOk) return r;
         nbt::Writer w(out);
@@ -523,10 +527,16 @@ class Transcoder {
                 if (!count.numeric() || count.as_int() < 1 || count.as_int() > 99) return Result::kInvalid;
                 s.hover_count = count.as_int();
             }
-            // A stack with components: each one's Codec would have to be read, and none is yet.
+            // A stack with components: DataComponentPatch.CODEC, which is the item layer's to read.
             if (const Tag components = t.get("components")) {
                 if (components.type != nbt::kCompound) return Result::kInvalid;
-                if (components.size() != 0) return Result::kUnsupported;
+                if (components.size() != 0) {
+                    if (!item_components) return Result::kUnsupported;
+                    const u32 at = side_.len;
+                    if (const Result r = item_components(components, side_); r != Result::kOk) return r;
+                    s.hover_components = at;
+                    s.hover_components_len = side_.len - at;
+                }
             }
             return Result::kOk;
         }
@@ -665,7 +675,11 @@ class Transcoder {
                 w.put_string_raw("id", world::entity_type_name(s.hover_id));
                 w.put_int_array("uuid", s.hover_uuid);
                 break;
-            case kShowItem:  // count (unless 1), action, id
+            case kShowItem:                        // components (if it has any), count (unless 1), action, id
+                if (s.hover_components_len > 1) {  // (more than the end of an empty compound)
+                    w.entry(nbt::kCompound, "components");
+                    w.put_raw({side_.data + s.hover_components, s.hover_components_len});
+                }
                 if (s.hover_count != 1) w.put_int("count", s.hover_count);
                 w.put_string_raw("action", "show_item");
                 w.put_string_raw("id", world::item_name(s.hover_id));
@@ -692,6 +706,7 @@ class Transcoder {
 
     std::vector<Comp> comps_;
     std::vector<Arg> args_;
+    base::ByteBuf side_;  // what the item layer wrote for the components of the stacks that are shown
 };
 
 // "action" before the field of every click and hover event: emit_click and emit rely on it.
@@ -700,17 +715,25 @@ static_assert(bucket16("action") < bucket16("url") && bucket16("action") < bucke
               bucket16("action") < bucket16("page") && bucket16("action") < bucket16("value"));
 // ...and the fields of show_entity and show_item, as emit_hover writes them.
 static_assert(bucket16("name") < bucket16("action") && bucket16("action") < bucket16("id") && bucket16("id") < bucket16("uuid") &&
-              bucket16("count") < bucket16("action"));
+              bucket16("count") < bucket16("action") && bucket16("components") < bucket16("count"));
 
-Transcoder transcoder;
+// One a level: the components of an item that a hover event shows hold text components of
+// their own, read while the one around them is.
+constexpr u32 kMaxLevels = 4;
+Transcoder transcoders[kMaxLevels];
+u32 level = 0;
 
 }  // namespace
+
+void set_item_components(ItemComponents codec) { item_components = codec; }
 
 Result transcode(nbt::Tag tag, base::ByteBuf& out) {
     // Names and strings are compared and copied as bytes: that is only right for the bytes Java
     // itself writes (see nbt::Doc::plain_strings).
-    if (!tag.doc || !tag.doc->plain_strings()) return Result::kUnsupported;
-    return transcoder.run(tag, out);
+    if (!tag.doc || !tag.doc->plain_strings() || level == kMaxLevels) return Result::kUnsupported;
+    const Result r = transcoders[level++].run(tag, out);
+    --level;
+    return r;
 }
 
 }  // namespace text

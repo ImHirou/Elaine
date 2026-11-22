@@ -8,7 +8,9 @@
 #include <string>
 #include <vector>
 
+#include "item/codec.hpp"
 #include "item/stack.hpp"
+#include "nbt/snbt.hpp"
 #include "nbt_bytes.hpp"
 #include "proto/packets.hpp"
 
@@ -397,10 +399,11 @@ TEST(Components, PotionContents) {
     // A potion id, no colour, no custom effects, no name: what the creative inventory sends.
     expect_kept(comp::kPotionContents, Bytes{1} + vi(7) + Bytes{0} + vi(0) + Bytes{0},
                 Bytes{1} + vi(7) + Bytes{0} + vi(0) + Bytes{0});
-    // Everything set: colour, one effect with a hidden effect below it, a name.
+    // Everything set: colour, one effect with a hidden effect below it, a name. The hidden
+    // effect is read and dropped, as a vanilla server was seen to (component_probe.py).
     const Bytes effect = vi(3) /* effect */ + vi(300) /* amplifier, clamped */ + vi(600) + Bytes{1, 1, 0} +
                          Bytes{1} /* hidden */ + vi(1) + vi(0xFFFFFFFF) /* infinite */ + Bytes{0, 9, 1} + Bytes{0};
-    const Bytes kept = vi(3) + vi(255) + vi(600) + Bytes{1, 1, 0} + Bytes{1} + vi(1) + vi(0xFFFFFFFF) + Bytes{0, 1, 1} + Bytes{0};
+    const Bytes kept = vi(3) + vi(255) + vi(600) + Bytes{1, 1, 0} + Bytes{0};
     expect_kept(comp::kPotionContents, Bytes{0} + Bytes{1} + be32(0x00FF8800) + vi(1) + effect + Bytes{1} + str("Brew"),
                 Bytes{0} + Bytes{1} + be32(0x00FF8800) + vi(1) + kept + Bytes{1} + str("Brew"));
     EXPECT_EQ(read_value(comp::kPotionContents, Bytes{1} + vi(sreg::kPotionCount) + Bytes{0} + vi(0) + Bytes{0}),
@@ -430,9 +433,10 @@ TEST(Components, StewFireworksAndLists) {
     EXPECT_EQ(read_value(comp::kFireworks, vi(1) + vi(257)), Verdict::kMalformed);  // at most 256 explosions
     EXPECT_EQ(read_value(comp::kFireworkExplosion, vi(0) + vi(3) + be32(1)), Verdict::kMalformed);  // three colours promised
 
-    // tooltip_display: the hidden components are a set.
+    // tooltip_display: the hidden components are a set that keeps the order they came in
+    // (what a vanilla server sent back: tools/vanilla/component_probe.py).
     expect_kept(comp::kTooltipDisplay, Bytes{1} + vi(3) + vi(comp::kLore) + vi(comp::kDamage) + vi(comp::kLore),
-                Bytes{1} + vi(2) + vi(comp::kDamage) + vi(comp::kLore));
+                Bytes{1} + vi(2) + vi(comp::kLore) + vi(comp::kDamage));
     EXPECT_EQ(read_value(comp::kTooltipDisplay, Bytes{0} + vi(1) + vi(comp::kCount)), Verdict::kMalformed);
 }
 
@@ -728,4 +732,246 @@ TEST(ItemWire, TrustedStack) {
     const ItemStack worn = with_patch(it::kDiamondSword, 1, untrusted_patch({{comp::kDamage, vi(300)}}, {comp::kLore}));
     EXPECT_EQ(put(worn), vi(1) + vi(it::kDiamondSword) + trusted_patch({{comp::kDamage, vi(300)}}, {comp::kLore}));
     EXPECT_EQ(item_bound(item::view(ItemStack(it::kStone, 64))), 4u);  // tight: it decides the frame header
+}
+
+// ---------------------------------------------------------------------------- components as tags
+//
+// The Codec side (item/codec.hpp). A value is given as the SNBT a command would carry - read by
+// the SNBT reader, which has tests of its own - and compared with what comes back out of the
+// store: Codec in, StreamCodec kept, Codec out. What a vanilla server writes for the same
+// values is compared by tools/vanilla/component_probe.py (`data get ... SelectedItem`).
+
+namespace {
+
+// The component as its Codec writes it after reading `snbt`; "malformed" / "unsupported".
+std::string through(u32 type, std::string_view snbt) {
+    base::ByteBuf tag, wire, back;
+    nbt::SnbtError why;
+    EXPECT_TRUE(nbt::read_snbt_fully(snbt, tag, why)) << snbt;
+    nbt::Doc doc;
+    EXPECT_EQ(doc.parse({tag.data, tag.len}, nbt::Form::kNameless, nbt::kTrusted), nbt::Error::kNone);
+    const Verdict v = item::value_from_nbt(type, doc.root(), wire);
+    if (v != Verdict::kOk) return v == Verdict::kMalformed ? "malformed" : "unsupported";
+    nbt::Writer w(back);
+    w.root(nbt::kCompound);
+    item::value_to_nbt(type, {wire.data, wire.len}, w, "v");
+    w.end_compound();
+    nbt::Doc out;
+    EXPECT_EQ(out.parse({back.data, back.len}, nbt::Form::kNameless, nbt::kTrusted), nbt::Error::kNone);
+    std::string text;
+    nbt::print_snbt(out.root().get("v"), text);
+    return text;
+}
+
+}  // namespace
+
+TEST(ComponentCodec, NumbersNamesAndUnits) {
+    EXPECT_EQ(through(comp::kDamage, "3"), "3");
+    EXPECT_EQ(through(comp::kDamage, "3b"), "3");    // Codec.INT takes any number
+    EXPECT_EQ(through(comp::kDamage, "3.9f"), "3");  // ...as Number.intValue()
+    EXPECT_EQ(through(comp::kDamage, "-1"), "malformed");
+    EXPECT_EQ(through(comp::kDamage, "\"3\""), "malformed");
+    EXPECT_EQ(through(comp::kMaxStackSize, "99"), "99");
+    EXPECT_EQ(through(comp::kMaxStackSize, "100"), "malformed");
+    EXPECT_EQ(through(comp::kUnbreakable, "{}"), "{}");
+    EXPECT_EQ(through(comp::kUnbreakable, "{a:1}"), "{}");
+    EXPECT_EQ(through(comp::kUnbreakable, "1b"), "malformed");
+    EXPECT_EQ(through(comp::kEnchantmentGlintOverride, "true"), "1b");
+    EXPECT_EQ(through(comp::kEnchantmentGlintOverride, "256"), "0b");  // Number.byteValue()
+    EXPECT_EQ(through(comp::kMinimumAttackCharge, "0.5"), "0.5f");
+    EXPECT_EQ(through(comp::kMinimumAttackCharge, "1.5f"), "malformed");
+    EXPECT_EQ(through(comp::kRarity, "epic"), "\"epic\"");
+    EXPECT_EQ(through(comp::kRarity, "\"legendary\""), "malformed");
+    EXPECT_EQ(through(comp::kBaseColor, "light_blue"), "\"light_blue\"");
+    EXPECT_EQ(through(comp::kItemModel, "\"stick\""), "\"minecraft:stick\"");
+    EXPECT_EQ(through(comp::kItemModel, "\"Not An Id\""), "malformed");
+    EXPECT_EQ(through(comp::kDyedColor, "16711680"), "16711680");
+    EXPECT_EQ(through(comp::kDyedColor, "[1.0f,0.5f,0.0f]"), "-33024");  // ARGB.colorFromFloat(1, r, g, b)
+    EXPECT_EQ(through(comp::kFood, "{}"), "unsupported");
+}
+
+TEST(ComponentCodec, TextAndTags) {
+    EXPECT_EQ(through(comp::kCustomName, "\"hi\""), "\"hi\"");
+    EXPECT_EQ(through(comp::kCustomName, "{text:\"hi\",color:\"red\",unknown:1}"), "{color:\"red\",text:\"hi\"}");
+    EXPECT_EQ(through(comp::kCustomName, "5"), "malformed");
+    EXPECT_EQ(through(comp::kLore, "[\"a\",{text:\"b\",bold:true}]"), "[\"a\",{bold:1b,text:\"b\"}]");
+    EXPECT_EQ(through(comp::kLore, "[]"), "[]");
+    EXPECT_EQ(through(comp::kCustomData, "{b:1,a:{c:2}}"), "{a:{c:2},b:1}");
+    EXPECT_EQ(through(comp::kCustomData, "\"{a:1b}\""), "{a:1b}");  // its SNBT in a string
+    EXPECT_EQ(through(comp::kCustomData, "5"), "malformed");
+    EXPECT_EQ(through(comp::kEntityData, "{id:\"pig\",Health:5f}"), "{Health:5.0f,id:\"minecraft:pig\"}");
+    EXPECT_EQ(through(comp::kEntityData, "{Health:5f}"), "malformed");  // no type
+    EXPECT_EQ(through(comp::kBlockEntityData, "{id:\"minecraft:chest\",Items:[]}"), "{Items:[],id:\"minecraft:chest\"}");
+    EXPECT_EQ(through(comp::kBlockEntityData, "{id:\"nothing\"}"), "malformed");
+}
+
+TEST(ComponentCodec, Records) {
+    EXPECT_EQ(through(comp::kEnchantments, "{sharpness:5,\"minecraft:unbreaking\":3}"),
+              "{\"minecraft:sharpness\":5,\"minecraft:unbreaking\":3}");
+    EXPECT_EQ(through(comp::kEnchantments, "{sharpness:0}"), "malformed");
+    EXPECT_EQ(through(comp::kEnchantments, "{nothing:1}"), "malformed");
+    EXPECT_EQ(through(comp::kTooltipDisplay, "{}"), "{}");
+    EXPECT_EQ(through(comp::kTooltipDisplay, "{hide_tooltip:1b,hidden_components:[\"damage\",\"minecraft:lore\"]}"),
+              "{hidden_components:[\"minecraft:damage\",\"minecraft:lore\"],hide_tooltip:1b}");
+    EXPECT_EQ(through(comp::kPotionContents, "\"swiftness\""), "{potion:\"minecraft:swiftness\"}");
+    EXPECT_EQ(
+        through(
+            comp::kPotionContents,
+            "{custom_color:255,custom_effects:[{id:\"speed\",amplifier:2b,duration:100,show_particles:0b}],custom_name:\"x\"}"),
+        "{custom_color:255,custom_effects:[{amplifier:2b,duration:100,id:\"minecraft:speed\",show_icon:0b,show_particles:0b}],"
+        "custom_name:\"x\"}");
+    EXPECT_EQ(through(comp::kSuspiciousStewEffects, "[{id:\"blindness\"},{id:\"speed\",duration:5}]"),
+              "[{id:\"minecraft:blindness\"},{duration:5,id:\"minecraft:speed\"}]");
+    EXPECT_EQ(through(comp::kFireworkExplosion, "{shape:\"star\",colors:[I;1,2],has_trail:1b}"),
+              "{colors:[1,2],has_trail:1b,shape:\"star\"}");
+    EXPECT_EQ(through(comp::kFireworkExplosion, "{shape:\"cube\"}"), "malformed");
+    EXPECT_EQ(through(comp::kFireworks, "{flight_duration:2b,explosions:[{shape:\"burst\",colors:[5]}]}"),
+              "{explosions:[{colors:[5],shape:\"burst\"}],flight_duration:2b}");
+    EXPECT_EQ(through(comp::kBannerPatterns, "[{pattern:\"creeper\",color:\"red\"}]"),
+              "[{color:\"red\",pattern:\"minecraft:creeper\"}]");
+    EXPECT_EQ(through(comp::kBlockState, "{lit:\"true\",facing:\"north\"}"), "{facing:\"north\",lit:\"true\"}");
+    EXPECT_EQ(through(comp::kBlockState, "{lit:1b}"), "malformed");
+    EXPECT_EQ(through(comp::kWritableBookContent, "{pages:[\"one\",{raw:\"two\",filtered:\"2\"}]}"),
+              "{pages:[{raw:\"one\"},{filtered:\"2\",raw:\"two\"}]}");
+    EXPECT_EQ(through(comp::kWritableBookContent, "{}"), "{}");
+    EXPECT_EQ(through(comp::kWrittenBookContent, "{title:\"T\",author:\"A\",pages:[\"p\",{text:\"q\",bold:1b}],resolved:1b}"),
+              "{author:\"A\",pages:[{raw:\"p\"},{raw:{bold:1b,text:\"q\"}}],resolved:1b,title:{raw:\"T\"}}");
+    EXPECT_EQ(through(comp::kWrittenBookContent, "{title:\"T\"}"), "malformed");  // no author
+    EXPECT_EQ(through(comp::kSignTextFront, "{messages:[\"a\",\"b\",\"\",\"\"],color:\"red\"}"),
+              "{color:\"red\",has_glowing_text:0b,messages:[\"a\",\"b\",\"\",\"\"]}");
+    EXPECT_EQ(through(comp::kSignTextFront, "{messages:[\"a\"]}"), "malformed");
+    EXPECT_EQ(through(comp::kInstrument, "\"ponder_goat_horn\""), "\"minecraft:ponder_goat_horn\"");
+    EXPECT_EQ(through(comp::kInstrument, "{sound_event:\"x\"}"), "unsupported");  // an instrument of its own
+}
+
+TEST(ComponentCodec, StacksAndPatches) {
+    const u32 held = item::patches().live();  // (the recipes keep a few stacks with components)
+    const auto stack = [](std::string_view snbt) -> std::string {
+        base::ByteBuf tag, back;
+        nbt::SnbtError why;
+        EXPECT_TRUE(nbt::read_snbt_fully(snbt, tag, why)) << snbt;
+        nbt::Doc doc;
+        EXPECT_EQ(doc.parse({tag.data, tag.len}, nbt::Form::kNameless, nbt::kTrusted), nbt::Error::kNone);
+        ItemStack s;
+        const Verdict v = item::stack_from_nbt(doc.root(), s);
+        if (v != Verdict::kOk) return v == Verdict::kMalformed ? "malformed" : "unsupported";
+        nbt::Writer w(back);
+        w.root(nbt::kCompound);
+        item::stack_to_nbt(s, w);
+        w.end_compound();
+        nbt::Doc out;
+        EXPECT_EQ(out.parse({back.data, back.len}, nbt::Form::kNameless, nbt::kTrusted), nbt::Error::kNone);
+        std::string text;
+        nbt::print_snbt(out.root(), text);
+        return text;
+    };
+    EXPECT_EQ(stack("{id:\"stone\"}"), "{count:1,id:\"minecraft:stone\"}");
+    EXPECT_EQ(stack("{id:\"minecraft:stone\",count:64}"), "{count:64,id:\"minecraft:stone\"}");
+    EXPECT_EQ(stack("{id:\"stone\",count:5,components:{damage:3,\"!minecraft:lore\":{},\"minecraft:unbreakable\":{}}}"),
+              "{components:{\"!minecraft:lore\":{},\"minecraft:damage\":3,\"minecraft:unbreakable\":{}},count:5,id:\"minecraft:"
+              "stone\"}");
+    EXPECT_EQ(stack("{id:\"stone\",components:{}}"), "{count:1,id:\"minecraft:stone\"}");
+    EXPECT_EQ(stack("{id:\"air\"}"), "malformed");
+    EXPECT_EQ(stack("{id:\"nothing\"}"), "malformed");
+    EXPECT_EQ(stack("{id:\"stone\",count:0}"), "malformed");
+    EXPECT_EQ(stack("{id:\"stone\",count:100}"), "malformed");
+    EXPECT_EQ(stack("{count:1}"), "malformed");
+    EXPECT_EQ(stack("{id:\"stone\",components:{nothing:1}}"), "malformed");
+    EXPECT_EQ(stack("{id:\"stone\",components:{damage:-1}}"), "malformed");
+    EXPECT_EQ(stack("{id:\"stone\",components:{food:{}}}"), "unsupported");
+    EXPECT_EQ(item::patches().live(), held);
+
+    // The names of components: with the namespace or without.
+    EXPECT_EQ(item::find_component("damage"), comp::kDamage);
+    EXPECT_EQ(item::find_component("minecraft:damage"), comp::kDamage);
+    EXPECT_EQ(item::find_component("other:damage"), item::kNoComponent);
+    EXPECT_EQ(item::component_name(comp::kDamage), "minecraft:damage");
+    EXPECT_TRUE(item::has_codec(comp::kDamage) && item::has_codec(comp::kUnbreakable) && !item::has_codec(comp::kFood));
+
+    // A patch the server makes: over another one, a value set, one removed, one put back.
+    PatchId base = 0;
+    {
+        base::ByteBuf tag;
+        nbt::SnbtError why;
+        ASSERT_TRUE(nbt::read_snbt_fully("{damage:3,max_damage:10,\"!lore\":{}}", tag, why));
+        nbt::Doc doc;
+        ASSERT_EQ(doc.parse({tag.data, tag.len}, nbt::Form::kNameless, nbt::kTrusted), nbt::Error::kNone);
+        ASSERT_EQ(item::patch_from_nbt(doc.root(), base), Verdict::kOk);
+    }
+    item::PatchBuilder b(base);
+    const u8 seven[] = {7};
+    b.set(comp::kDamage, seven);
+    b.remove(comp::kMaxDamage);
+    b.erase(comp::kLore);
+    PatchId made = 0;
+    ASSERT_EQ(b.build(made), Verdict::kOk);
+    EXPECT_EQ(item::patches().find(made, comp::kDamage).value[0], 7);
+    EXPECT_EQ(item::patches().find(made, comp::kMaxDamage).state, item::Patches::State::kRemoved);
+    EXPECT_EQ(item::patches().find(made, comp::kLore).state, item::Patches::State::kInherit);
+    item::patches().release(made);
+    item::patches().release(base);
+    EXPECT_EQ(item::patches().live(), held);
+}
+
+// What an item has of its own: the generated table of default components, read by the same
+// code that reads a command's `stone[...]` - so every default of vanilla's is a test of it.
+TEST(ComponentCodec, DefaultsAndWhatAPatchNeedNotSay) {
+    const u32 held = item::patches().live();
+    EXPECT_EQ(item::unread_defaults(), 0u);  // every default of a component that is read here is read
+    const item::Default size = item::default_of(it::kStone, comp::kMaxStackSize);
+    ASSERT_TRUE(size.has && size.read);
+    EXPECT_EQ(Bytes(size.value.begin(), size.value.end()), vi(64));
+    EXPECT_TRUE(item::default_of(it::kDiamondSword, comp::kTool).has);  // a component that is not read: known to be there
+    EXPECT_FALSE(item::default_of(it::kDiamondSword, comp::kTool).read);
+    EXPECT_FALSE(item::default_of(it::kStone, comp::kDamage).has);
+
+    const auto stack = [](std::string_view snbt) {
+        base::ByteBuf tag;
+        nbt::SnbtError why;
+        EXPECT_TRUE(nbt::read_snbt_fully(snbt, tag, why)) << snbt;
+        nbt::Doc doc;
+        EXPECT_EQ(doc.parse({tag.data, tag.len}, nbt::Form::kNameless, nbt::kTrusted), nbt::Error::kNone);
+        ItemStack s;
+        EXPECT_EQ(item::stack_from_nbt(doc.root(), s), Verdict::kOk) << snbt;
+        return s;
+    };
+    // PatchedDataComponentMap: what the item says anyway is no part of a patch, nor is taking
+    // away what it does not have.
+    EXPECT_EQ(stack("{id:\"stone\",components:{max_stack_size:64,lore:[],rarity:\"common\"}}").patch(), 0u);
+    EXPECT_EQ(stack("{id:\"stone\",components:{\"!damage\":{}}}").patch(), 0u);
+    EXPECT_NE(stack("{id:\"stone\",components:{max_stack_size:16}}").patch(), 0u);
+    EXPECT_NE(stack("{id:\"stone\",components:{\"!lore\":{}}}").patch(), 0u);
+    EXPECT_NE(stack("{id:\"diamond_sword\",components:{\"!tool\":{}}}").patch(), 0u);
+    {
+        const ItemStack worn = stack("{id:\"diamond_sword\",components:{damage:0,max_damage:1561,unbreakable:{}}}");
+        ASSERT_NE(worn.patch(), 0u);
+        ASSERT_EQ(item::patches().entries(worn.patch()).size(), 1u);  // the two it has anyway are gone
+        EXPECT_EQ(item::patches().entries(worn.patch())[0].type, comp::kUnbreakable);
+        EXPECT_EQ(item::effective(worn, comp::kMaxDamage).value.size(), vi(1561).size());
+    }
+    // A stack a client sends is held against its item the same way.
+    {
+        const Bytes sent =
+            vi(1) + vi(it::kStone) + untrusted_patch({{comp::kMaxStackSize, vi(64)}, {comp::kRarity, vi(0)}}, {comp::kDamage});
+        proto::Reader r(sent.data(), sent.size());
+        ItemStack s;
+        ASSERT_EQ(item::read_untrusted(r, s), Verdict::kOk);
+        EXPECT_EQ(s.patch(), 0u);
+    }
+
+    // The items that name themselves by what they hold.
+    EXPECT_EQ(item::computed_name_key(stack("{id:\"potion\"}")), "item.minecraft.potion.effect.empty");
+    EXPECT_EQ(item::computed_name_key(stack("{id:\"potion\",components:{potion_contents:\"long_swiftness\"}}")),
+              "item.minecraft.potion.effect.swiftness");
+    EXPECT_EQ(item::computed_name_key(stack("{id:\"tipped_arrow\",components:{potion_contents:{potion:\"strong_healing\"}}}")),
+              "item.minecraft.tipped_arrow.effect.healing");
+    EXPECT_EQ(item::computed_name_key(stack("{id:\"splash_potion\",components:{potion_contents:{custom_effects:[{id:\"speed\","
+                                            "hidden_effect:{duration:5}}],custom_name:\"x\"}}}")),
+              "item.minecraft.splash_potion.effect.x");
+    EXPECT_EQ(item::computed_name_key(stack("{id:\"shield\",components:{base_color:\"red\"}}")), "item.minecraft.shield.red");
+    EXPECT_EQ(item::computed_name_key(stack("{id:\"shield\"}")), "");
+    EXPECT_EQ(item::computed_name_key(stack("{id:\"stone\"}")), "");
+    EXPECT_EQ(item::book_title(stack("{id:\"written_book\",components:{written_book_content:{title:\"T\",author:\"A\"}}}")), "T");
+    EXPECT_EQ(item::book_title(stack("{id:\"written_book\",components:{written_book_content:{title:\"  \",author:\"A\"}}}")), "");
+    EXPECT_EQ(item::patches().live(), held);
 }

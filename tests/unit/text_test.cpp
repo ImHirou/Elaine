@@ -366,7 +366,19 @@ TEST(TextComponent, HoverEvents) {
     EXPECT_EQ(hover({s("action", "show_item"), s("id", "not an id")}), kInvalid);
     EXPECT_EQ(hover({s("action", "show_item"), s("id", "minecraft:nonsense")}), kInvalid);
     EXPECT_EQ(hover({s("action", "show_item"), s("id", "minecraft:air")}), kInvalid);
-    EXPECT_EQ(hover({s("action", "show_item"), s("id", "minecraft:stone"), c("components", {i("minecraft:damage", 1)})}),
+    // ...or with them: read by the item layer (DataComponentPatch.CODEC), written first - the
+    // bucket of "components" in the event's HashMap - and each compound in that order within.
+    EXPECT_EQ(hover({s("action", "show_item"), s("id", "minecraft:stone"), c("components", {i("damage", 1)})}),
+              kept({c("components", {i("minecraft:damage", 1)}), s("action", "show_item"), s("id", "minecraft:stone")}));
+    EXPECT_EQ(hover({s("action", "show_item"), s("id", "minecraft:stone"),
+                     c("components", {s("minecraft:custom_name", "n"), c("!minecraft:lore", {}), b("minecraft:damage", 3)})}),
+              kept({c("components", {i("minecraft:damage", 3), s("minecraft:custom_name", "n"), c("!minecraft:lore", {})}),
+                    s("action", "show_item"), s("id", "minecraft:stone")}));
+    EXPECT_EQ(hover({s("action", "show_item"), s("id", "minecraft:stone"), c("components", {i("minecraft:damage", -1)})}),
+              kInvalid);
+    EXPECT_EQ(hover({s("action", "show_item"), s("id", "minecraft:stone"), c("components", {i("minecraft:nonsense", 1)})}),
+              kInvalid);
+    EXPECT_EQ(hover({s("action", "show_item"), s("id", "minecraft:stone"), c("components", {c("minecraft:food", {})})}),
               kUnsupported);
 
     // show_entity: the type, the UUID as four ints (however it was spelled), a name if there is one.

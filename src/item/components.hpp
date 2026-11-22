@@ -9,8 +9,9 @@
 //   * "same item, same components" - the test behind every merge - is one integer compare;
 //   * sending a stack to a client copies bytes that are already in wire form.
 //
-// A patch only ever comes from a client (set_creative_mode_slot), and what a client sends is
-// shown to other clients: as equipment, as a dropped item. A value another client's decoder
+// A patch comes from a client (set_creative_mode_slot), from a tag (item/codec.hpp: a command's
+// `stone[...]`, a saved stack) or from the server itself (PatchBuilder), and what a client sends
+// is shown to other clients: as equipment, as a dropped item. A value another client's decoder
 // throws on would disconnect everyone in sight of whoever holds it. So nothing is stored that
 // has not been read by a decoder of its own, written from the component's vanilla codecs
 // (StreamCodec for the layout, Codec for the value ranges) - and what is stored is that
@@ -18,10 +19,11 @@
 // whole stack kUnsupported: the server refuses it rather than hold a stack it cannot vouch for
 // (the same rule as for blocks it cannot simulate). The list is in components.cpp.
 //
+// A patch says only what differs from its item: what makes a stack out of one (read_untrusted,
+// stack_from_nbt) drops an entry that sets a component to the item's own value, as
+// PatchedDataComponentMap does (item::sanitized).
+//
 // Where this differs from vanilla, knowingly:
-//   * a patch is not "sanitized" against the item's defaults (PatchedDataComponentMap drops an
-//     entry that sets a component to its default value). A vanilla client never sends such an
-//     entry; from a modified one it makes a stack that does not merge with its plain twin;
 //   * patches are capped at kMaxPatchBytes; vanilla's only limit is the packet size.
 //
 // Tick thread only: ids are reference-counted without atomics.
@@ -91,6 +93,15 @@ class Patches {
 
     u32 live() const { return live_; }  // distinct patches held by at least one stack
 
+    // What a patch is put together from: per component type nothing, a value, or its removal.
+    struct Slot {
+        u8 state = 0;          // 0 absent, 1 set, 2 removed
+        u32 off = 0, len = 0;  // the value, in the bytes handed along
+    };
+    // The patch of these slots (0 for an empty one); the caller owns one reference.
+    // kUnsupported: it is larger than a patch may be.
+    Verdict assemble(const Slot* slots, std::span<const u8> values, PatchId& out);
+
   private:
     struct Patch {  // followed by Entry[entries] (sorted by type), then u8[wire_len]
         u32 refs;
@@ -117,5 +128,26 @@ class Patches {
 
 // The store of the tick thread (and of a test's only thread).
 Patches& patches();
+
+// One value of component `type` as a client sent it (the bytes its StreamCodec reads), read
+// and appended as vanilla would write the value it decoded - the decoders of components.cpp, the
+// one place that knows what a value may be. kUnsupported: a component, or a value, that is not read.
+Verdict check_value(u32 type, std::span<const u8> value, base::ByteBuf& out);
+
+// A patch the server makes: another patch with components set, removed, or put back to the
+// item's own. The values are in the form check_value() writes. Tick thread, a cold path.
+class PatchBuilder {
+  public:
+    explicit PatchBuilder(PatchId base = 0);
+    void set(u32 type, std::span<const u8> value);
+    void remove(u32 type);  // "!type": the item's default is taken away
+    void erase(u32 type);   // neither: the item's default stands
+    bool empty() const;
+    Verdict build(PatchId& out);  // as Patches::assemble
+
+  private:
+    Patches::Slot slots_[component::kCount];
+    base::ByteBuf values_;
+};
 
 }  // namespace item
