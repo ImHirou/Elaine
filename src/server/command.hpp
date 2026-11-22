@@ -42,6 +42,8 @@
 
 #include "base/buf.hpp"
 #include "base/types.hpp"
+#include "nbt/ops.hpp"
+#include "nbt/snbt.hpp"
 #include "text/text.hpp"
 #include "world/block.hpp"
 
@@ -86,6 +88,11 @@ enum class Type : u8 {
     kClock,           // clock: a world clock (minecraft:world_clock)
     kTimeline,        // timeline: a timeline (minecraft:timeline); the server suggests them
     kTimeMarker,      // time_marker: an identifier; the server suggests a clock's time markers
+    kNbtCompound,     // nbt_compound: {a:1b} - a compound tag as text (CompoundTagArgument)
+    kNbtTag,          // nbt_tag: any tag as text (NbtTagArgument)
+    kNbtPath,         // nbt_path: Items[{Slot:0b}].id
+    kComponent,       // component: a text component as SNBT - "hi", {text:"hi",color:"red"}
+    kStorage,         // storage: the identifier of a command storage; the server suggests those there are
 };
 
 // "~1": relative to where the source is; "^1": along where it looks (all three or none).
@@ -110,11 +117,12 @@ struct Range {
 struct Selector {
     enum Order : u8 { kArbitrary, kNearest, kFurthest, kRandom };
     struct Test {
-        enum Kind : u8 { kName, kType, kTypeTag, kGamemode, kTag, kTeam, kAlive } kind;
+        enum Kind : u8 { kName, kType, kTypeTag, kGamemode, kTag, kTeam, kAlive, kNbt } kind;
         bool inverted = false;
         u32 id = 0;            // kType: the entity type. kGamemode: the GameType id
         std::string text;      // kName, kTag, kTeam
         std::vector<u16> ids;  // kTypeTag: the entity types of the tag
+        std::vector<u8> nbt;   // kNbt: the compound the entity's tag is to hold, in the network form
     };
     i32 max_results = 0;
     bool includes_entities = false;  // may name something that is not a player
@@ -172,6 +180,10 @@ struct Value {
     BlockArg block;
     ItemArg item;
     std::vector<MessagePart> parts;  // a message's selectors, for a source that may use them
+    // A tag in the network form (type, payload): what an nbt argument read, and a component as
+    // text::transcode wrote it.
+    std::vector<u8> tag;
+    nbt::Path path;
 };
 
 // A parser's complaint: CommandSyntaxException. `cursor` is where in the line (createWithContext),
@@ -358,6 +370,10 @@ bool parse_coordinates(std::string_view line, u32& cursor, Type type, Coordinate
 bool parse_selector(std::string_view line, u32& cursor, Type type, bool allow_selectors, Selector& out, Error& err);
 bool parse_block(std::string_view line, u32& cursor, bool predicate, BlockArg& out, Error& err);
 bool parse_item(std::string_view line, u32& cursor, bool predicate, ItemArg& out, Error& err);
+// NbtPathArgument.parse: up to the next space.
+bool parse_nbt_path(std::string_view line, u32& cursor, nbt::Path& out, Error& err);
+// TagParser.parseAsArgument / parseCompoundAsArgument, the tag appended to `out`.
+bool parse_nbt(std::string_view line, u32& cursor, bool compound, std::vector<u8>& out, Error& err);
 
 // SharedSuggestionProvider.filterResources: does what is typed (lower case) lead to this
 // identifier? With a ':' in it, it must begin the identifier or a part of it (after '.', '_' or

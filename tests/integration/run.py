@@ -2207,8 +2207,9 @@ def barrel(srv: Server):
     # Broken, it spills what it holds.
     dig(b, pos, seq=2)
     assert collect(a)[pos] == AIR
-    spilled = [e for e in of_type(a, "kItem").values() if e.data[D_ITEM] == (STACK, plain("kStone", 20))]
-    assert len(spilled) == 1, [e.data for e in of_type(a, "kItem").values()]
+    # (Containers.dropItemStack throws a stack out in pieces of 10 to 30: twenty stones are one item or two.)
+    spilled = [e.data[D_ITEM][1] for e in of_type(a, "kItem").values() if e.data[D_ITEM][0] == STACK]
+    assert spilled and all(s[0] == I["kStone"] and s[2] == {} for s in spilled) and sum(s[1] for s in spilled) == 20, spilled
     d = srv.client()
     jd = join(d, "Dave", view=2)
     assert jd["chunks"][(0, 0)]["block_entities"] == [((10, -60, 9), mc.BLOCK_ENTITY["kBarrel"], None)]
@@ -3494,8 +3495,8 @@ def command_tree_and_operators(srv: Server):
     # The console makes Alice an operator: entity event 28, the whole tree, a line in ops.json.
     make_op(srv, a, "Alice")
     tree = a.commands["children"]
-    assert sorted(tree) == ["deop", "fill", "give", "help", "kick", "kill", "list", "me", "msg", "op", "playsound", "say",
-                            "setblock", "stop", "stopsound", "summon", "teammsg", "teleport", "tell", "time", "tm", "tp", "w"], sorted(tree)
+    assert sorted(tree) == ["data", "deop", "fill", "give", "help", "kick", "kill", "list", "me", "msg", "op", "playsound", "say",
+                            "setblock", "stop", "stopsound", "summon", "teammsg", "teleport", "tell", "tellraw", "time", "tm", "tp", "w"], sorted(tree)
     assert tree["setblock"]["restricted"] and not tree["setblock"]["executable"] and not tree["list"]["restricted"]
     pos = tree["setblock"]["children"]["pos"]
     assert pos["parser"] == "kBlockPos" and not pos["executable"]
@@ -3665,6 +3666,111 @@ def command_blocks(srv: Server):
     run_command(a, "kill @e[type=tnt]")
     collect(b)
     assert not of_type(a, "kTnt") and not of_type(b, "kTnt")
+
+
+def shown(component) -> str:
+    """Component.getString of literal text: a text and its children."""
+    if isinstance(component, str):
+        return component
+    return str(component.get("text", "")) + "".join(shown(x) for x in component.get("extra", []))
+
+
+@test()
+def command_data_and_tellraw(srv: Server):
+    """Tags as text, out and in: /data get of a block entity, an entity and a storage, with a
+    path and a scale; an entity selector's nbt=; /tellraw. (What a vanilla server answers to the
+    same lines is compared by tools/vanilla/command_probe.py.)"""
+    a, b = srv.client(), srv.client()
+    join(a, "Alice")
+    join(b, "Bob")
+    a.expect("player_info_update")
+    for cl in (a, b):
+        cl.send("player_loaded")
+    settle(a, b)
+    make_op(srv, a, "Alice")
+    alice = player_name("Alice")
+
+    def data(line: str):
+        """A /data get that works: its key, the arguments in front of the tag, the tag as it reads."""
+        said = run_command(a, line)["said"]
+        assert len(said) == 1 and "with" in said[0], said
+        return said[0]["translate"], said[0]["with"][:-1], shown(said[0]["with"][-1])
+
+    # A block entity: what it saves, its entries in the order of vanilla's HashMap.
+    run_command(a, "setblock 8 -60 12 chest")
+    assert data("data get block 8 -60 12") == ("commands.data.block.query", [8, -60, 12],
+                                               '{components: {}, x: 8, y: -60, Items: [], z: 12, id: "minecraft:chest"}')
+    # ...shown token by token: names aqua, numbers gold, strings green between plain quotes.
+    tag = run_command(a, "data get block 8 -60 12")["said"][0]["with"][3]
+    assert tag["extra"][:6] == ["{", "", {"text": "components", "color": "aqua"}, ":", " ", "{"], tag["extra"][:6]
+    assert {"text": "-60", "color": "gold"} in tag["extra"] and {"text": "minecraft:chest", "color": "green"} in tag["extra"]
+    run_command(a, "setblock 8 -60 12 furnace")
+    assert data("data get block 8 -60 12")[2] == (
+        '{lit_total_time: 0, components: {}, cooking_time_spent: 0, speed_multiplier: 1.0f, x: 8, y: -60, cooking_total_time: 0, '
+        'Items: [], z: 12, id: "minecraft:furnace", lit_time_remaining: 0, RecipesUsed: {}}')
+    # A path names one tag in it; with a scale, a number times it, floored ("%.2f" of the scale).
+    assert data("data get block 8 -60 12 id") == ("commands.data.block.query", [8, -60, 12], '"minecraft:furnace"')
+    assert run_command(a, "data get block 8 -60 12 z 2.5")["said"] == [tr("commands.data.block.get", "z", 8, -60, 12, "2.50", 30)]
+    assert run_command(a, "data get block 8 -60 12 y 0.125")["said"] == [tr("commands.data.block.get", "y", 8, -60, 12, "0.13", -8)]
+    assert run_command(a, "data get block 8 -60 12 id 2")["said"] == [failure(tr("commands.data.get.invalid", "id"))]
+    assert run_command(a, "data get block 8 -60 12 Items[0]")["said"] == [failure(tr("arguments.nbtpath.nothing_found", "Items[0]"))]
+    assert run_command(a, "data get block 8 -60 12 nope.deeper")["said"] == [failure(tr("arguments.nbtpath.nothing_found", "nope"))]
+    assert run_command(a, "data get block 8 -60 13")["said"] == [failure(tr("commands.data.block.invalid"))]
+    run_command(a, "setblock 8 -60 12 air")
+
+    # An entity: a player's place, what it holds, what it has - by path, by index, by what an element holds.
+    run_command(a, "give @s diamond 3")
+    assert data("data get entity @s Pos") == ("commands.data.entity.query", [alice], "[8.5d, -60.0d, 8.5d]")
+    assert data("data get entity @s SelectedItem") == ("commands.data.entity.query", [alice], '{count: 3, id: "minecraft:diamond"}')
+    assert data("data get entity @s Inventory[{Slot:0b}].count")[2] == "3"
+    assert data("data get entity @s UUID[0]")[2] == str(struct.unpack(">i", bytes.fromhex(mc.offline_uuid("Alice"))[:4])[0])
+    assert run_command(a, "data get entity @s Pos[1] 10")["said"] == [tr("commands.data.entity.get", "Pos[1]", alice, "10.00", -600)]
+    assert run_command(a, "data get entity @s Pos[]")["said"] == [failure(tr("commands.data.get.multiple"))]
+    assert run_command(a, "data get entity @a")["said"][0] == failure(tr("argument.entity.toomany"))
+    whole = data("data get entity @s")[2]
+    for part in ("Health: 20.0f", "Air: 300s", "playerGameType: 1", 'Dimension: "minecraft:overworld"',
+                 "SelectedItemSlot: 0", 'Inventory: [{count: 3, Slot: 0b, id: "minecraft:diamond"}]', "Brain: {memories: {}}"):
+        assert part in whole, (part, whole)
+    # A stack with components has no tag yet: said, not shown wrong.
+    a.send("set_creative_mode_slot", struct.pack(">h", 37) + mc.item_stack(I["kStone"], 1, {"kCustomName": mc.nbt("Named")}))
+    settle(a)
+    assert run_command(a, "data get entity @s Inventory")["said"] == [
+        failure("This entity holds an item with components, which this server cannot show yet")]
+    a.send("set_creative_mode_slot", struct.pack(">h", 37) + mc.item_stack(0, 0))
+    settle(a)
+
+    # A storage: nothing writes one here, and one nobody wrote to is empty.
+    assert data("data get storage some:where") == ("commands.data.storage.query", ["some:where"], "{}")
+    assert run_command(a, "data get storage some:where a.b")["said"] == [failure(tr("arguments.nbtpath.nothing_found", "a"))]
+
+    # nbt= in a selector: who saves what the tag asks for.
+    run_command(a, "summon armor_stand 10 -60 10")
+    run_command(b, "list")      # (takes the block changes Bob was sent meanwhile)
+    settle(a, b)
+    stand = [e for e in a.entities.values() if e.type == mc.ENTITY_TYPE["kArmorStand"]]
+    assert len(stand) == 1
+    assert run_command(a, "kill @e[type=armor_stand,nbt={Small:1b}]")["said"] == [failure(tr("argument.entity.notfound.entity"))]
+    assert run_command(a, "kill @e[nbt={Small:0b,Pose:{}},nbt=!{Invisible:1b}]")["said"][0]["translate"] == "commands.kill.success.single"
+    assert run_command(a, "tp @s[nbt={SelectedItem:{id:\"minecraft:diamond\",count:3}}] ~ ~ ~")["said"][0]["translate"] == \
+        "commands.teleport.success.location.single"
+    assert run_command(a, "tp @s[nbt={SelectedItem:{count:4}}] ~ ~ ~")["said"] == [failure(tr("argument.entity.notfound.entity"))]
+    line = "tp @s[nbt={Pos:[1.0d,}] ~ ~ ~"   # read by three ways of writing /tp, wrong in each: no one error
+    assert run_command(a, line)["said"] == [failure(tr("command.unknown.argument")), here(line, 3)]
+
+    # /tellraw: a component as SNBT, in vanilla's form to whoever is named.
+    mark = len(b.chat)
+    assert run_command(a, "tellraw @a {text:'hi',color:\"red\",extra:[{text:\" there\",bold:true},\"!\"]}")["said"] == [
+        {"text": "hi", "color": "red", "extra": [{"text": " there", "bold": mc.Byte(1)}, "!"]}]
+    settle(a, b)
+    assert b.said(mark) == [{"text": "hi", "color": "red", "extra": [{"text": " there", "bold": mc.Byte(1)}, "!"]}]
+    assert run_command(a, "tellraw @s plain")["said"] == ["plain"]
+    assert run_command(a, "tellraw Nobody \"x\"")["said"] == [failure(tr("argument.entity.notfound.player"))]
+    line = "tellraw @s [300b]"
+    assert run_command(a, line)["said"] == [
+        failure(tr("snbt.parser.number_parse_failure", 'Value out of range. Value:"300" Radix:10')), here(line, 16)]
+    line = "tellraw @s {text:\"a\""
+    assert run_command(a, line)["said"] == [failure(tr("argument.literal.incorrect", ",")), here(line, 20)]
+    assert run_command(b, "tellraw @s \"x\"")["said"][0] == failure(tr("command.unknown.command"))   # not an operator's
 
 
 @test()

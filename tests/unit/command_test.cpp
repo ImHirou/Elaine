@@ -383,7 +383,11 @@ TEST(CommandArguments, EntitySelectors) {
     EXPECT_EQ(selector("@e[distance=5..1]", T::kEntities), "Min cannot be bigger than max @12");
     EXPECT_EQ(selector("@e[sort=sideways]", T::kEntities), "Invalid or unknown sort type 'sideways' @8");
     EXPECT_EQ(selector("@a[gamemode=hard]", T::kPlayers), "Invalid or unknown game mode 'hard' @12");
-    EXPECT_EQ(selector("@e[nbt={}]", T::kEntities), "Selectors with 'nbt' are not supported by this server yet @3");
+    EXPECT_EQ(selector("@e[nbt={}]", T::kEntities), "ok 10");
+    EXPECT_EQ(selector("@e[nbt=!{a:1b},nbt={b:[1,2]}]", T::kEntities), "ok 29");  // any number of them
+    EXPECT_EQ(selector("@e[nbt=5]", T::kEntities), "Expected compound tag @8");
+    EXPECT_EQ(selector("@e[nbt={a:}]", T::kEntities), "Expected a valid unquoted string @10");
+    EXPECT_EQ(selector("@e[scores={}]", T::kEntities), "Selectors with 'scores' are not supported by this server yet @3");
     EXPECT_EQ(selector("", T::kEntity), "Invalid name or UUID @0");
     EXPECT_EQ(selector("ThisNameIsFarTooLong", T::kEntity), "Invalid name or UUID @0");
     EXPECT_EQ(selector("@e", T::kEntity), "Only one entity is allowed, but the provided selector allows more than one @0");
@@ -477,6 +481,52 @@ TEST(CommandArguments, ItemsAndTags) {
     EXPECT_TRUE(cmd::tag_members("minecraft:block", "minecraft:snow", members));
     EXPECT_FALSE(members.empty());
     EXPECT_FALSE(cmd::tag_members("minecraft:block", "minecraft:nonsense", members));
+}
+
+namespace {
+
+// A path as its nodes: kind letters and what each holds, or the error.
+std::string path(std::string_view text) {
+    nbt::Path p;
+    cmd::Error err;
+    u32 cursor = 0;
+    if (!cmd::parse_nbt_path(text, cursor, p, err)) return err.message.plain() + " @" + std::to_string(err.cursor);
+    std::string out;
+    for (const nbt::Path::Node& n : p.nodes) {
+        static constexpr std::string_view kKinds[] = {"child", "object", "root", "index", "all", "element"};
+        out += kKinds[n.kind];
+        if (!n.name.empty()) out += " " + n.name;
+        if (n.kind == nbt::Path::Node::kIndex) out += " " + std::to_string(n.index);
+        if (!n.pattern.empty()) out += " +" + std::to_string(n.pattern.size());
+        out += " <" + p.text.substr(0, n.end) + ">; ";
+    }
+    return out + "ends " + std::to_string(cursor);
+}
+
+}  // namespace
+
+// NbtPathArgument.parse: nodes up to the next space, each remembering how much of the text it
+// ends (what "found no elements matching ..." names). The errors are what a vanilla 26.3
+// server answers (tools/vanilla/command_probe.py).
+TEST(CommandArguments, NbtPaths) {
+    EXPECT_EQ(path("a"), "child a <a>; ends 1");
+    EXPECT_EQ(path("a.b rest"), "child a <a>; child b <a.b>; ends 3");
+    EXPECT_EQ(path("a[0][-1][]"), "child a <a>; index 0 <a[0]>; index -1 <a[0][-1]>; all <a[0][-1][]>; ends 10");
+    EXPECT_EQ(path("Items[{Slot:0b}].id"),
+              "child Items <Items>; element +10 <Items[{Slot:0b}]>; child id <Items[{Slot:0b}].id>; ends 19");
+    EXPECT_EQ(path("a{b:1}.c"), "object a +10 <a{b:1}>; child c <a{b:1}.c>; ends 8");
+    EXPECT_EQ(path("{a:1}.b"), "root +10 <{a:1}>; child b <{a:1}.b>; ends 7");
+    EXPECT_EQ(path("\"a key\".'b'"), "child a key <\"a key\">; child b <\"a key\".'b'>; ends 11");
+    EXPECT_EQ(path("[0]"), "index 0 <[0]>; ends 3");
+    EXPECT_EQ(path(""), "ends 0");
+    EXPECT_EQ(path("a..b"), "Invalid NBT path element @2");
+    EXPECT_EQ(path("a.{b:1}"), "Invalid NBT path element @2");
+    EXPECT_EQ(path("a[x]"), "Expected integer @2");
+    EXPECT_EQ(path("a[1"), "Expected ']' @3");
+    EXPECT_EQ(path("a[1]b"), "Expected '.' @4");
+    EXPECT_EQ(path("{a:1"), "Expected literal . @4");
+    // The path ends where vanilla looks at one character more: its exception, word for word.
+    EXPECT_EQ(path("a["), "Could not parse command: Index 2 out of bounds for length 2 @2");
 }
 
 TEST(CommandArguments, NamesAreLookedUp) {

@@ -242,6 +242,107 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str | No
     run("summon nonsense")
     run("summon armor_stand 0 30000000 0")
 
+    # ---- NBT: what `/data get` shows of a block entity, an entity, a storage; paths; tags as
+    # text (SNBT) where a command takes one - right ones, and wrong ones for the error and its place
+    run("setblock ~ ~ ~2 chest")
+    run("data get block ~ ~ ~2")
+    run("data get block ~ ~ ~2 Items")
+    run("data get block ~ ~ ~2 x")
+    run("data get block ~ ~ ~2 x 2.5")
+    run("data get block ~ ~ ~2 y 0.125")
+    run("data get block ~ ~ ~2 id")
+    run("data get block ~ ~ ~2 Items[0]")             # nothing there
+    run("data get block ~ ~ ~2 nope.deeper")
+    run("data get block ~ ~ ~2 id 2")                 # not a number
+    run("data get block ~ ~ ~2 {x:1}")                # the root does not match
+    run("data get block ~ ~ ~2 {components:{}}.id")
+    run("data get block ~ ~ ~3")                      # no block entity
+    run("data get block ~ 5000 ~")
+    run("setblock ~ ~ ~2 furnace")
+    run("data get block ~ ~ ~2")
+    run("data get block ~ ~ ~2 speed_multiplier 3")
+    run("data get block ~ ~ ~2 RecipesUsed")
+    run("setblock ~ ~ ~2 air")
+    run("data get entity @s Pos")
+    run("data get entity @s Pos[0] 2")
+    run("data get entity @s Pos[-1]")
+    run("data get entity @s Pos[]")                   # more than one
+    run("data get entity @s Pos[3]")
+    run("data get entity @s Rotation")
+    run("data get entity @s OnGround")
+    run("data get entity @s UUID")
+    run("data get entity @s UUID[1]")
+    run("data get entity @s SelectedItem")
+    run("data get entity @s SelectedItem.id")
+    run("data get entity @s SelectedItem.count 0.5")
+    run("data get entity @s Inventory[0]")
+    run("data get entity @s Inventory[{Slot:1b}].id")
+    run("data get entity @s {OnGround:1b}.Air")
+    run("data get entity @s foo.bar")
+    run("data get entity @a")
+    run("data get entity Nobody")
+    run(f"data get entity {name_b} Pos")
+    run("summon armor_stand ~ ~ ~3")
+    run("data get entity @e[type=armor_stand,distance=..10,limit=1]")          # whole: compared by its keys
+    run("data get entity @e[type=armor_stand,distance=..10,limit=1] Pos")
+    run("kill @e[type=armor_stand,distance=..10]")
+    run("summon pig ~ ~ ~3")
+    run("data get entity @e[type=pig,distance=..10,limit=1]")
+    run("kill @e[type=pig,distance=..10]")
+    run("data get entity @s")
+    run("summon tnt ~ ~ ~3")                          # (its fuse is a matter of when one asks)
+    run("data get entity @e[type=tnt,distance=..10,limit=1] block_state")
+    run("kill @e[type=tnt,distance=..10]")
+    run("summon falling_block ~ ~40 ~3")              # sand, on its way down for two seconds
+    run("data get entity @e[type=falling_block,distance=..50,limit=1] BlockState")
+    run("data get entity @e[type=falling_block,distance=..50,limit=1] DropItem")
+    run("data get entity @e[type=falling_block,distance=..50,limit=1] FallHurtMax 0.5")
+    run("kill @e[type=falling_block,distance=..50]")
+    run("data get storage probe:nothing")
+    run("data get storage probe:nothing a")
+    run("data get storage nothing")
+    run("data get storage Bad:Id")
+    run("data get storage probe:nothing a..b")
+    run("data get storage probe:nothing a[")
+    run("data get storage probe:nothing a[x]")
+    run("data get storage probe:nothing a[1")
+    run("data get storage probe:nothing a.{b:1}")
+    run("data get storage probe:nothing a{b:1}.c")
+    run("data get storage probe:nothing \"a key\".'b'[{c:1}][0][]")
+    run("data get storage probe:nothing {a:1")
+    run("data get storage probe:nothing {} 1")
+    run("data get")
+    run("data get block")
+    run("tp @s[nbt={OnGround:1b}] ~ ~ ~")
+    run("tp @s[nbt={OnGround:0b}] ~ ~ ~")             # nobody
+    run("tp @s[nbt=!{OnGround:0b}] ~ ~ ~")
+    run("tp @s[nbt={Pos:[]}] ~ ~ ~")                  # an empty list asks for an empty one
+    run(f"tp @s[nbt={{Pos:[{oy}.0d]}}] ~ ~ ~")        # a list asks for its elements, anywhere
+    run("tp @s[nbt={SelectedItem:{id:\"minecraft:diamond\"}}] ~ ~ ~")
+    run("tp @a[nbt={},limit=1] ~ ~ ~")
+    run("tp @s[nbt=5] ~ ~ ~")
+    run("tp @s[nbt={a:}] ~ ~ ~")
+    run("tellraw @s \"quoted\"")
+    run("tellraw @s 'single'")
+    run("tellraw @s bare")
+    run("tellraw @a {text:\"to all\",color:\"red\"}")
+    run("tellraw @s [\"a\",{text:\"b\",bold:true},{text:'c',italic:1b}]")
+    run("tellraw @s {translate:\"chat.type.text\",with:[\"x\",{text:\"y\",color:\"#12AB34\"}]}")
+    run("tellraw @s {text:\"\\u0041\\x42\\U00000043\\s\\\"\\'\\\\\"}")
+    run("tellraw @s {text : 'spaced' , }")
+    run("tellraw @s {\"text\":\"json too\"}")
+    run(f"tellraw {name_b} \"for B\"")
+    run("tellraw Nobody \"x\"")
+    run("tellraw @s")
+    for wrong in ("{text:\"a\"", "\"abc", "'abc", "\"a\\qb\"", "\"\\u12\"", "\"\\U00110000\"", "\"\\N{nope}\"",
+                  "[300b]", "[70000s]", "[2147483648]", "[9223372036854775808L]", "[0x1FFFFFFFF]", "[0x1FFFFFFFFi]",
+                  "[256ub]", "[65536us]", "[4294967296ui]", "[18446744073709551616uL]", "[-1ub]", "[-0x1i]",
+                  "[0x100000000si]", "[1__0]", "[_1]", "[1_]", "[0x]", "[0b]", "[0b2]", "007", "[1e999]", "[1e999f]",
+                  "[.]", "-", "+", "{\"\":\"x\"}", "{a:1,}x", "{a:}", "{:1}", "{a 1}", "[1,,2]", "[B;1s]", "[I;1L]",
+                  "[L;a]", "[B;1.5]", "bool(a)", "uuid(zz)", "uuid(1)", "nope(1,2)", "bool()", "{a:1}}", "[1 2]",
+                  "{a:[1,{b:\"c}]}"):
+        run("tellraw @s " + wrong)
+
     # ---- sounds
     run("playsound minecraft:block.note_block.harp")
     run("playsound block.note_block.harp block @a ~ ~ ~ 0.5 2")
@@ -523,6 +624,46 @@ def _plain(v) -> str:
     return ""
 
 
+# Commands of which this server has some of the ways to write them: their line of `help` is another.
+PARTLY = {"data"}   # `data get` alone: no merge, modify, remove
+
+# What an entity saves, of the entries this server writes too (server/saved_tags.cpp) - but for
+# those that are chance on vanilla (a mob is left-handed one time in twenty, its attributes come
+# in the order of a map of objects, with a bonus drawn at random) or each server's own (the UUID
+# of what was summoned).
+ENTITY_KEYS = {"Pos", "Motion", "Rotation", "fall_distance", "Fire", "Air", "OnGround", "Invulnerable", "PortalCooldown",
+               "Health", "HurtTime", "DeathTime", "AbsorptionAmount", "current_impulse_context_reset_grace_time", "FallFlying",
+               "Brain", "CanPickUpLoot", "PersistenceRequired", "Age", "ForcedAge", "AgeLocked", "Invisible", "Small",
+               "ShowArms", "DisabledSlots", "NoBasePlate", "Pose", "Inventory", "SelectedItemSlot", "abilities",
+               "playerGameType", "Dimension", "SelectedItem", "equipment", "NoGravity"}
+
+
+def _entries(shown: str) -> dict[str, str]:
+    """The entries of a compound as `/data get` shows it: "{a: 1b, b: [x, y], c: {d: "e, f"}}"."""
+    assert shown.startswith("{") and shown.endswith("}"), shown
+    out, depth, quote, start, body = {}, 0, None, 0, shown[1:-1]
+    parts = []
+    for i, ch in enumerate(body):
+        if quote:
+            if ch == quote and body[i - 1] != "\\":
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+        elif ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append(body[start:i])
+            start = i + 1
+    if body[start:].strip():
+        parts.append(body[start:])
+    for part in parts:
+        k, _, v = part.strip().partition(": ")
+        out[k] = v
+    return out
+
+
 def _normalise(rec: dict, who: str, commands: set | None) -> tuple[dict[str, list], dict]:
     origin = rec["origin"]
     bots = {mc.offline_uuid(n) for n in rec["names"]}
@@ -586,10 +727,24 @@ def _normalise(rec: dict, who: str, commands: set | None) -> tuple[dict[str, lis
                     rows.append(("  (not compared)", key))
                     continue
                 if st["step"].endswith("/help") or st["step"].endswith("B: /help"):   # one line per command: only those both have
-                    if commands is not None and line.split(" ")[0].lstrip("/") not in commands:
+                    if commands is not None and line.split(" ")[0].lstrip("/") not in commands - PARTLY:
                         continue
                 if key == "commands.time.query.gametime" or (key == "commands.time.query.absolute" and "the_end" in line):
                     rows.append((name, key + " (a count of ticks: each server's own)"))
+                    continue
+                failed = value["extra"][0] if isinstance(value, dict) and value.get("color") == "red" and value.get("extra") else None
+                if isinstance(failed, dict) and failed.get("translate") == "argument.component.invalid":
+                    # Why it is none: DataFixerUpper's words on vanilla, this server's on ours.
+                    rows.append((name, "argument.component.invalid (the reason is each server's own)"))
+                    continue
+                if key == "commands.data.entity.query" and re.fullmatch(r"/data get entity \S+", st["step"]):
+                    # An entity as a whole: the entries this server writes are compared, the others listed.
+                    # (A player's Motion: vanilla's stands under one tick of gravity, ours is not moved by the server.)
+                    # ...and what it carries depends on which of the dropped items flew its way.)
+                    compared = ENTITY_KEYS - ({"Motion", "Inventory"} if st["step"].endswith(" @s") else set())
+                    entries = _entries(_plain(value["with"][-1]))
+                    rows.append((name, key + " " + ", ".join(f"{k}: {v}" for k, v in sorted(entries.items()) if k in compared)))
+                    rows.append(("  (not compared)", "entries " + " ".join(sorted(k for k in entries if k not in compared))))
                     continue
                 rows.append((name, mc.snbt(value) + (" (overlay)" if overlay else "")))
             elif name == "disconnect":

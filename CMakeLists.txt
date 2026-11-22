@@ -124,13 +124,17 @@ endfunction()
 # ---------------------------------------------------------------------------- targets
 add_library(core STATIC
   src/base/log.cpp
+  src/base/java_number.cpp
   src/base/workers.cpp
   src/proto/wire.cpp
   src/proto/frame.cpp
   src/proto/static_data.cpp
   src/nbt/nbt.cpp
+  src/nbt/snbt.cpp
+  src/nbt/ops.cpp
   src/text/component.cpp
   src/text/text.cpp
+  src/text/nbt_text.cpp
   src/crypto/cfb8.cpp
   src/crypto/auth.cpp
   src/net/reactor.cpp
@@ -179,6 +183,7 @@ add_library(core STATIC
   src/server/command.cpp
   src/server/command_args.cpp
   src/server/commands.cpp
+  src/server/saved_tags.cpp
   src/server/console.cpp
   src/server/game.cpp
 )
@@ -201,6 +206,7 @@ if(MC_TESTS)
       tests/unit/varint_test.cpp
       tests/unit/wire_test.cpp
       tests/unit/nbt_test.cpp
+      tests/unit/snbt_test.cpp
       tests/unit/text_test.cpp
       tests/unit/frame_test.cpp
       tests/unit/crypto_test.cpp

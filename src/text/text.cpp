@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "text/text.hpp"
 
+#include "base/java_number.hpp"
+
 #include <charconv>
 #include <cmath>
 
@@ -194,47 +196,9 @@ std::string_view lang(std::string_view key) {
     return lo < std::size(kEntries) && kEntries[lo].key == key ? kEntries[lo].text : key;
 }
 
-std::string java_format_double(double v) {
-    if (v != v) return "NaN";
-    if (v - v != 0) return v < 0 ? "-Infinity" : "Infinity";
-    char buf[400];  // the longest fixed form of a double has 309 digits before the point
-    const auto r = std::to_chars(buf, buf + sizeof buf, v < 0 ? -v : v, std::chars_format::fixed);  // shortest digits
-    std::string digits(buf, r.ptr);
-    usize dot = digits.find('.');
-    if (dot == std::string::npos) {
-        dot = digits.size();
-        digits += '.';
-    }
-    constexpr usize kDecimals = 6;
-    const bool up = digits.size() > dot + 1 + kDecimals && digits[dot + 1 + kDecimals] >= '5';
-    digits.resize(dot + 1 + kDecimals, '0');
-    if (up) {
-        usize i = digits.size();
-        while (i-- > 0) {
-            if (digits[i] == '.') continue;
-            if (digits[i] != '9') {
-                ++digits[i];
-                break;
-            }
-            digits[i] = '0';
-            if (i == 0) digits.insert(digits.begin(), '1');
-        }
-    }
-    return std::signbit(v) ? "-" + digits : digits;
-}
-
-namespace {
-template <class T>
-std::string java_number(T v) {
-    char buf[64];
-    const auto r = std::to_chars(buf, buf + sizeof buf, v, std::chars_format::fixed);
-    std::string s(buf, r.ptr);
-    if (s.find('.') == std::string::npos) s += ".0";
-    return s;
-}
-}  // namespace
-std::string java_float(float v) { return java_number(v); }
-std::string java_double(double v) { return java_number(v); }
+std::string java_format_double(double v) { return base::java_format_fixed(v, 6); }
+std::string java_float(float v) { return base::java_float(v); }
+std::string java_double(double v) { return base::java_double(v); }
 
 std::string uuid_string(Uuid u) {
     static constexpr char kHex[] = "0123456789abcdef";

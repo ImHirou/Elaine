@@ -189,9 +189,7 @@ std::string_view lang(std::string_view key);
 std::string java_format_double(double v);
 // UUID.toString()
 std::string uuid_string(Uuid u);
-// Float.toString / Double.toString for the numbers a person types: the shortest digits that
-// read back as the same value, with ".0" on a whole number. (Not the exponent form Java
-// switches to below 0.001 and from ten million up.)
+// Float.toString / Double.toString (base/java_number.hpp).
 std::string java_float(float v);
 std::string java_double(double v);
 

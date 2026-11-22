@@ -290,6 +290,11 @@ class Writer {
     void begin_list(std::string_view name, Type element, u32 count);
     void begin_list(Type element, u32 count);
 
+    // The type and the name of an entry whose payload the caller writes next, with the methods
+    // that take no name: for a value whose type is only known as data. The name is modified
+    // UTF-8 already.
+    void entry(Type type, std::string_view name) { b_.commit(header(open(3 + name.size()), type, name)); }
+
     // A payload encoded elsewhere: a subtree out of a Doc, a stored blob.
     void put_raw(std::string_view name, Type type, std::span<const u8> payload);
     void put_raw(std::span<const u8> payload) { b_.append(payload.data(), payload.size()); }

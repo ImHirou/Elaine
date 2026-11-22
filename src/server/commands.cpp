@@ -30,9 +30,11 @@
 
 #include <yyjson.h>
 
+#include "base/java_number.hpp"
 #include "base/log.hpp"
 #include "crypto/auth.hpp"
 #include "server/game.hpp"
+#include "text/nbt_text.hpp"
 
 #include PROTO_GEN_PHYSICS_HPP
 #include PROTO_GEN_STATIC_IDS_HPP
@@ -170,7 +172,16 @@ Text Game::display_name(u32 row) const {
         key += type;
         std::replace(key.begin(), key.end(), ':', '.');
     }
-    return tr(key).hover_entity(type, uuid, tr(key)).insertion(text::uuid_string(uuid));
+    Text name = tr(key);
+    if (ents_.type[row] == entity_type::kFallingBlock) {
+        // FallingBlockEntity.getTypeName: "Falling %s", of the block it is (Block.getName).
+        std::string block = "block.";
+        block += world::block_name(world::block_of(ents_.block_state[row]));
+        std::replace(block.begin(), block.end(), ':', '.');
+        name = tr("entity.minecraft.falling_block_type").arg(tr(block));
+    }
+    Text shown = name;
+    return std::move(shown).hover_entity(type, uuid, std::move(name)).insertion(text::uuid_string(uuid));
 }
 
 // ItemStack.getDisplayName, for a stack without components: "[Stone]" in the colour of its
@@ -412,6 +423,15 @@ void Game::select(const cmd::Selector& sel, const cmd::Source& source, bool play
                 case cmd::Selector::Test::kTag:
                 case cmd::Selector::Test::kTeam: is = t.text.empty(); break;
                 case cmd::Selector::Test::kAlive: break;  // whatever is in the table is alive
+                case cmd::Selector::Test::kNbt: {         // NbtUtils.compareNbt(tag, what the entity saves as, true)
+                    base::ByteBuf saved;
+                    nbt::Doc asked, actual;
+                    is = save_entity(row, saved) == Saved::kOk &&
+                         asked.parse(t.nbt, nbt::Form::kNameless, nbt::kTrusted) == nbt::Error::kNone &&
+                         actual.parse({saved.data, saved.len}, nbt::Form::kNameless, nbt::kTrusted) == nbt::Error::kNone &&
+                         nbt::matches(asked.root(), actual.root(), true);
+                    break;
+                }
             }
             if (is == t.inverted) return false;
         }
@@ -1180,6 +1200,117 @@ struct Game::Commands {
     }
 
     // ---- /kick <targets> [<reason>]
+    // ---- /data get (entity <target> | block <target> | storage <target>) [<path> [<scale>]]
+    // DataCommands, the reading third of it: what something saves as, a tag in it, a number in
+    // it times a scale.
+    static i32 data_get(Invocation& in) {
+        Game& g = in.game;
+        base::ByteBuf saved;
+        // The answers name what was asked - "commands.data.<kind>.query" and ".get" - and begin
+        // with it: an entity by its name, a block by its three coordinates, a storage by its id.
+        std::string_view kind;
+        Text entity_name;
+        BlockPos pos{};
+        if (in.has("entity")) {
+            u32 slot;
+            if (!entity(in, "target", slot)) return 0;
+            const u32 row = g.ents_.by_slot(slot);
+            if (g.save_entity(row, saved) != Saved::kOk)
+                return in.fail(Text::literal("This entity holds an item with components, which this server cannot show yet"));
+            kind = "entity";
+            entity_name = g.display_name(row);
+        } else if (in.has("block")) {
+            if (!loaded_block_pos(in, "target", pos)) return 0;
+            switch (g.save_block_entity(pos.x, pos.y, pos.z, saved)) {
+                case Saved::kNone: return in.fail(tr("commands.data.block.invalid"));
+                case Saved::kUnsupported:
+                    return in.fail(Text::literal("This block holds an item with components, which this server cannot show yet"));
+                case Saved::kOk: break;
+            }
+            kind = "block";
+        } else {  // CommandStorage.get: of a storage nobody wrote to, an empty compound - and nothing writes one here
+            const u8 empty[] = {nbt::kCompound, nbt::kEnd};
+            saved.append(empty, sizeof empty);
+            kind = "storage";
+        }
+        nbt::Doc doc;
+        if (doc.parse({saved.data, saved.len}, nbt::Form::kNameless, nbt::kTrusted) != nbt::Error::kNone)
+            return in.fail(Text::literal("The saved tag could not be read"));
+        const auto answer = [&](std::string_view what) {
+            std::string key = "commands.data.";
+            key += kind;
+            key += '.';
+            key += what;
+            return tr(key);
+        };
+        const auto subject = [&](Text& t) {
+            if (kind == "entity") {
+                t.arg(entity_name);
+            } else if (kind == "block") {
+                t.arg(pos.x).arg(pos.y).arg(pos.z);
+            } else {
+                t.arg(in.string("target"));
+            }
+        };
+        // NbtUtils.toPrettyComponent of a tag one message can carry.
+        const auto shown = [&](nbt::Tag tag, Text& t) {
+            constexpr usize kMaxShown = 65536;
+            if (tag.bytes().size() > kMaxShown) return false;
+            t.arg(text::pretty_nbt(tag));
+            return true;
+        };
+        const cmd::Value* path = in.value("path");
+        if (!path) {
+            Text t = answer("query");
+            subject(t);
+            if (!shown(doc.root(), t)) return in.fail(Text::literal("The tag is too large to show"));
+            in.success(t, false);
+            return 1;
+        }
+        // getSingleTag
+        std::vector<nbt::Tag> found;
+        std::string_view missing;
+        if (!nbt::find(path->path, doc.root(), found, missing))
+            return in.fail(tr("arguments.nbtpath.nothing_found").arg(missing));
+        if (found.size() > 1) return in.fail(tr("commands.data.get.multiple"));
+        const nbt::Tag tag = found[0];
+        if (const cmd::Value* scale = in.value("scale")) {  // getNumeric
+            if (!tag.numeric()) return in.fail(tr("commands.data.get.invalid").arg(path->path.text));
+            const i32 result = floor_int(tag.as_double() * scale->number);
+            Text t = answer("get");
+            t.arg(path->path.text);
+            subject(t);
+            t.arg(base::java_format_fixed(scale->number, 2)).arg(result);
+            in.success(t, false);
+            return result;
+        }
+        // getData: a number, floored; how many a list, an array or a compound holds; how long a string is.
+        const i32 result = tag.numeric()              ? floor_int(tag.as_double())
+                           : tag.type == nbt::kString ? static_cast<i32>(nbt::utf16_length(tag.str()))
+                                                      : static_cast<i32>(tag.size());
+        Text t = answer("query");
+        subject(t);
+        if (!shown(tag, t)) return in.fail(Text::literal("The tag is too large to show"));
+        in.success(t, false);
+        return result;
+    }
+
+    // ---- /tellraw <targets> <message>
+    // (ComponentUtils.resolve fills in what a component asks the server for - selectors, scores,
+    // NBT; a component that holds such is not read here, so there is nothing to fill in.)
+    static i32 tellraw(Invocation& in) {
+        Game& g = in.game;
+        std::vector<u32> slots;
+        if (!players(in, "targets", slots)) return 0;
+        const std::vector<u8>& message = in.value("message")->tag;
+        for (const u32 slot : slots) {
+            const u32 pi = g.ents_.by_slot(slot);
+            if (g.chat_visibility_[pi] != sb::ClientInformation::kChatHidden)  // ServerPlayer.sendSystemMessage
+                g.send(pi, cb::SystemChatComponent{{message.data(), static_cast<u32>(message.size())}, false});
+        }
+        return static_cast<i32>(slots.size());
+    }
+
     static i32 kick(Invocation& in) {
         Game& g = in.game;
         std::vector<u32> slots;
@@ -1280,6 +1411,10 @@ void Game::init_commands() {
     cmd::Registry& r = commands_;
     const std::string sources = "(" + std::string(kSoundSources) + ")";
 
+    // DataCommands: of merge, get, modify and remove, the one that only reads. Its targets in
+    // the order of ALL_PROVIDERS.
+    for (const std::string_view target : {"entity <target:entity>", "block <target:block_pos>", "storage <target:storage>"})
+        r.add("data get " + std::string(target) + " [<path:nbt_path> [<scale:double>]]", cmd::kGamemasters, &C::data_get);
     r.add("me <action:message>", cmd::kAll, &C::me);
     r.add("fill <from:block_pos> <to:block_pos> <block:block_state> [(outline|hollow|destroy|strict)]", cmd::kGamemasters,
           &C::fill);
@@ -1312,6 +1447,7 @@ void Game::init_commands() {
     r.add("teleport <targets:entities> <location:vec3> [<rotation:rotation>]", cmd::kGamemasters, &C::teleport_cmd);
     r.add("teleport <targets:entities> <destination:entity>", cmd::kGamemasters, &C::teleport_cmd);
     r.alias("tp", "teleport", cmd::kGamemasters);
+    r.add("tellraw <targets:players> <message:component>", cmd::kGamemasters, &C::tellraw);
     // TimeCommand: the same nodes under "time" and under "time of <clock>" (addClockNodes), in
     // that order; "query gametime" is the level's and stands under the first alone.
     for (const std::string& at : {std::string("time"), std::string("time of <clock:clock>")}) {

@@ -16,6 +16,7 @@
 #include "proto/identifier.hpp"
 #include "proto/wire.hpp"
 #include "server/clock.hpp"
+#include "text/component.hpp"
 
 #include PROTO_GEN_COMMAND_DATA_HPP
 
@@ -196,6 +197,11 @@ constexpr TypeName kTypes[] = {
     {"clock", Type::kClock},
     {"timeline", Type::kTimeline},
     {"time_marker", Type::kTimeMarker},
+    {"nbt_compound", Type::kNbtCompound},
+    {"nbt_tag", Type::kNbtTag},
+    {"nbt_path", Type::kNbtPath},
+    {"component", Type::kComponent},
+    {"storage", Type::kStorage},
 };
 
 // The types that take bounds: the numbers, and a time its least.
@@ -522,8 +528,41 @@ bool Registry::parse_argument(const Node& n, std::string_view line, u32& cursor,
             }
             break;
         }
+        case Type::kStorage:
+            // Identifier.read takes what it finds of an identifier - nothing at all, too: the
+            // identifier with an empty path. What follows is then missing its space.
+            if (!r.can_read() || !((r.peek() >= 'a' && r.peek() <= 'z') || (r.peek() >= '0' && r.peek() <= '9') ||
+                                   r.peek() == '_' || r.peek() == ':' || r.peek() == '/' || r.peek() == '.' || r.peek() == '-')) {
+                out.text = "minecraft:";
+                break;
+            }
+            [[fallthrough]];
         case Type::kIdentifier:
         case Type::kSound: ok = read_identifier(r, out.text, err); break;
+        case Type::kNbtCompound:
+        case Type::kNbtTag: ok = parse_nbt(line, r.at, n.type == Type::kNbtCompound, out.tag, err); break;
+        case Type::kNbtPath: ok = parse_nbt_path(line, r.at, out.path, err); break;
+        case Type::kComponent: {  // ComponentArgument: a tag, then ComponentSerialization.CODEC over it
+            const u32 start = r.at;
+            std::vector<u8> tag;
+            if (!parse_nbt(line, r.at, false, tag, err)) return false;
+            nbt::Doc doc;
+            base::ByteBuf encoded;
+            const text::Result made = doc.parse(tag, nbt::Form::kNameless, nbt::kTrusted) != nbt::Error::kNone
+                                          ? text::Result::kInvalid
+                                          : text::transcode(doc.root(), encoded);
+            if (made != text::Result::kOk) {
+                // Vanilla names what the codec missed, in DataFixerUpper's words; those are not
+                // ours to repeat. A component this server does not read is said to be that.
+                r.at = start;
+                err = error_at(r, Text::translatable("argument.component.invalid")
+                                      .arg(made == text::Result::kUnsupported ? "Not a text component this server reads yet"
+                                                                              : "Not a valid text component"));
+                return false;
+            }
+            out.tag.assign(encoded.data, encoded.data + encoded.len);
+            break;
+        }
         case Type::kSummonable: {  // ResourceArgument.parse over minecraft:entity_type
             if (!read_identifier(r, out.text, err)) return false;
             const u32 type = world::find_entity_type(out.text);
@@ -760,12 +799,13 @@ void Registry::encode_tree(u8 level, base::ByteBuf& out) const {
         u8 flags = static_cast<u8>(n.kind);  // TYPE_ROOT, TYPE_LITERAL, TYPE_ARGUMENT
         if (n.run) flags |= 4;               // FLAG_EXECUTABLE
         if (n.redirect != kNone) flags |= 8;
-        const std::string_view suggestions = n.kind != Node::kArgument     ? std::string_view()
-                                             : n.type == Type::kSound      ? "minecraft:available_sounds"
-                                             : n.type == Type::kSummonable ? "minecraft:summonable_entities"
-                                             : n.type == Type::kTimeline || n.type == Type::kTimeMarker
-                                                 ? "minecraft:ask_server"  // (Registry::suggest answers)
-                                                 : std::string_view();
+        const std::string_view suggestions =
+            n.kind != Node::kArgument     ? std::string_view()
+            : n.type == Type::kSound      ? "minecraft:available_sounds"
+            : n.type == Type::kSummonable ? "minecraft:summonable_entities"
+            : n.type == Type::kTimeline || n.type == Type::kTimeMarker || n.type == Type::kStorage
+                ? "minecraft:ask_server"  // (Registry::suggest answers)
+                : std::string_view();
         if (!suggestions.empty()) flags |= 16;  // FLAG_CUSTOM_SUGGESTIONS
         if (n.level > kAll) flags |= 32;        // FLAG_RESTRICTED: not for a source without permissions
         u32 children = 0;
@@ -815,7 +855,12 @@ void Registry::encode_tree(u8 level, base::ByteBuf& out) const {
                 case Type::kItem: p = put_varint(p, argument::kItemStack); break;
                 case Type::kItemPredicate: p = put_varint(p, argument::kItemPredicate); break;
                 case Type::kIdentifier:
+                case Type::kStorage:
                 case Type::kSound: p = put_varint(p, argument::kResourceLocation); break;
+                case Type::kNbtCompound: p = put_varint(p, argument::kNbtCompoundTag); break;
+                case Type::kNbtTag: p = put_varint(p, argument::kNbtTag); break;
+                case Type::kNbtPath: p = put_varint(p, argument::kNbtPath); break;
+                case Type::kComponent: p = put_varint(p, argument::kComponent); break;
                 case Type::kSummonable: p = put_str(put_varint(p, argument::kResource), "minecraft:entity_type"); break;
                 case Type::kMessage: p = put_varint(p, argument::kMessage); break;
                 case Type::kAnchor: p = put_varint(p, argument::kEntityAnchor); break;

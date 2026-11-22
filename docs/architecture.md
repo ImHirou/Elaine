@@ -1607,6 +1607,51 @@ Strings are compared and copied as bytes. That is exact for the bytes Java write
 (`Doc::plain_strings`); a document that spells a character another way - a raw NUL, a letter in
 two bytes - only comes from a hand-made client, and callers refuse it rather than normalise it.
 
+### A tag as text (`nbt/snbt.*`, `nbt/ops.*`, `text/nbt_text.*`)
+
+SNBT is NBT written out: `{Items:[{Slot:0b,id:"minecraft:stone"}]}`. A command line carries
+tags that way, and `/data get` shows them that way.
+
+- **The reader** (`nbt::read_snbt`) is a port of `TagParser` and the grammar behind it
+  (`SnbtGrammar`, 26.3) *rule by rule* - every alternative in vanilla's order, every place it
+  gives up and goes back, every "cut" after which it does not try the next one. That is not
+  for the tags that are right: a simpler parser reads those as well. It is for the ones that
+  are wrong. Vanilla's parser keeps every reason it failed for at the furthest character it
+  got to and throws the first of them (`ErrorCollector.LongestOnly`), and which reason is first
+  is an accident of the order things were tried in: `{a:5` is answered "Expected literal ."
+  (a float was tried before the closing brace), `[70000s]` "Expected literal b|B" (a signed
+  type before the short it is too big for), `[2147483648]` "Expected literal ." where
+  `[2147483648i]` is told the number does not fit. A client shows that message under the line
+  being typed, so the order is the specification. Whitespace is skipped before every token,
+  inside a number too (`- 5 b` is a byte); `0x`, `0b`, `_`, the `u`/`s` prefixes of a type,
+  `bool(...)` and `uuid(...)`, lists of mixed types, the escapes of a string are 26.x's. A
+  number Java's parsers refuse is refused in their words (`Value out of range. Value:"300"
+  Radix:10`) - printed by the JDK and copied into the tests. The parser's cache of results is
+  left out: it changes no result and not which error was stored first.
+  A tag that was read becomes bytes in the network form, lists as `ListTag.write` writes them.
+- **Not vanilla's**: `\N{...}`, a character by its Unicode name, is never a name here (it would
+  take Java's table of them); a tag nests 512 deep at most (vanilla's parser has no limit but
+  its stack); a string over 65535 bytes is refused when read, where vanilla fails writing it.
+- **The printers**: `nbt::print_snbt` is `Tag.toString()` (entries sorted, strings quoted as
+  `StringTag.quoteAndEscape` quotes them), `text::pretty_nbt` is `NbtUtils.toPrettyComponent` -
+  the coloured tag of `/data get`, one component a token, folded after 128 elements and 64
+  levels. Its compounds come in the order of vanilla's `HashMap` (`nbt::map_order`:
+  `String.hashCode`, the table's size, bucket by bucket in the order of arrival), so the order
+  our own writers put entries in is vanilla's order of `put` (server/saved_tags.cpp). Floats are
+  `Float.toString` (`base/java_number.*`: the shortest digits that read back, two at least,
+  the exponent form below a thousandth and from ten million).
+- **Two tags** (`nbt/ops.*`): `equal` (`Tag.equals`), `matches` (`NbtUtils.compareNbt`: a
+  compound may hold more than is asked, a list too, in any order - what `nbt=` and a path's
+  `{...}` ask), `merge` (`CompoundTag.merge`). Nothing changes a tag where it lies; what makes
+  a new one writes it out.
+- **Paths** (`nbt::Path`, read by `cmd::parse_nbt_path` from `NbtPathArgument`): six kinds of
+  node, evaluated over the tape - a list's elements, an array's numbers - into views of the
+  tags they name. Only reading: `/data` has no `merge`, `modify` or `remove` here.
+
+Compared with a vanilla 26.3 server by `tools/vanilla/command_probe.py`: some 130 lines of
+`/data get`, `/tellraw` and `nbt=` - 50 of them tags that are wrong in a way of their own - with
+every answer and every error and its place the same. What differs is under "Commands".
+
 ### A text component is read by a codec, not by a layout (`text::transcode`)
 
 A component has no wire layout. It is a tag that `ComponentSerialization.CODEC` makes sense of -
@@ -1830,8 +1875,22 @@ None of it is touched unless a command runs.
 
 ### Not there
 
-- NBT in any argument: a block's `{...}`, an item's `[components]`, `/summon`'s tag, a
-  selector's `nbt=`. It needs an SNBT reader and, per component, its `Codec`.
+- NBT in a block's `{...}`, an item's `[components]` and `/summon`'s tag: each needs what it
+  describes to be read from a tag (a selector's `nbt=` is there).
+- `/data` reads only: `get`, of an entity, a block entity or a storage - and no command writes
+  a storage, so every one is the empty compound vanilla gives one nobody wrote to. What an
+  entity saves as (`Game::save_entity`) is what `Entity`, `LivingEntity`, `Mob` and
+  `AgeableMob` save, and in full an item's, a primed TNT's, a falling block's and an armor
+  stand's; of what the server does not keep, the value a fresh one has. Not written: the
+  entries of the classes below those (a pig's `variant`, an animal's `InLove`); of a player
+  everything about what does not exist here (food, experience, the recipe book, the ender
+  chest). `attributes` are a fresh entity's - its speed, and a mob's follow range with the
+  bonus `Mob.finalizeSpawn` draws, made of its UUID here instead of kept. A mob is never
+  left-handed (one in twenty is). A player's `Motion` is zero where vanilla's stands under one
+  tick of gravity. A stack with components cannot be written as a tag yet: the command says so.
+- `/tellraw`: a component this server does not read (see "A text component is read by a codec")
+  is refused; why a tag is no component is said in words of our own, where vanilla quotes
+  DataFixerUpper.
 - `/tp ... facing`, `/rotate`: the `player_look_at` packet and `Entity.lookAt`.
 - What is summoned has no brain: a mob falls to the ground, is pushed, and stands (see
   "Physics" for which kinds; what flies, swims or climbs is not moved at all). What no tick
@@ -1841,12 +1900,11 @@ None of it is touched unless a command runs.
 - `/kill`: the entity is gone at once - no death animation, no drops - and a player cannot be
   killed: there is no health and no respawn.
 - `/teammsg` answers what vanilla answers a player who is in no team: there are no teams.
-  `/tellraw` waits for the SNBT reader.
 - `/op` of someone who is not online works by name only in offline mode (the name is its own
   profile); in online mode Mojang would have to be asked.
 - Suggestions the server computes (`ask_server`) are answered for `/time` (see "Time"); `/op`
   and `/deop` still leave their argument to the client's own completion of player names.
-- Every command about something that does not exist: weather, game modes, effects, experience, scoreboards and teams, `execute`, `data`,
+- Every command about something that does not exist: weather, game modes, effects, experience, scoreboards and teams, `execute`,
   `clear` (the inventory can do it; its item predicates are the work), bans and the whitelist.
 
 ## Chat (src/server/chat.cpp)
@@ -2087,7 +2145,7 @@ Roughly in dependency order:
    answer a click - doors, trapdoors, fence gates. Then fluids - with them fluid ticks, ice,
    water that leaves a waterlogged block - redstone, the other block entities. And what the
    first four still lack: experience orbs.
-8. **Commands**: an SNBT reader (block entity data, item components, `/summon`'s tag, `nbt=`),
-   `facing`, then the commands that wait for their subject. **Chat**: signed (see "Chat").
+8. **Commands**: tags into the world - block entity data, item components, `/summon`'s tag
+   (the SNBT reader is there) - `facing`, then the commands that wait for their subject. **Chat**: signed (see "Chat").
    **Time**: the weather, game rules.
 9. Lua plugin host.

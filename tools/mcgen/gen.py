@@ -1600,7 +1600,7 @@ ENTITY_DATA_CLASSES = [
 LIVING = "net.minecraft.world.entity.LivingEntity"
 
 
-def emit_entities(v: dict, version: str, static_regs: dict) -> tuple[str, int]:
+def emit_entities(v: dict, version: str, static_regs: dict, d: Path) -> tuple[str, int]:
     ids = {n.split(":", 1)[1]: e["protocol_id"] for n, e in static_regs["minecraft:entity_type"]["entries"].items()}
     if sorted(ids.values()) != list(range(len(ids))):
         die("entity_type ids are not dense")
@@ -1644,9 +1644,42 @@ def emit_entities(v: dict, version: str, static_regs: dict) -> tuple[str, int]:
             interval = 0
         if not (0 <= tracking <= 255 and 0 <= interval <= 255):
             die(f"EntityTypes.{field}: tracking range / update interval out of range")
-        rows[ids[name]] = (name, width, height, eye, tracking, interval, ".dontTrackDeltas()" not in chain, is_living(decl[field]))
+        rows[ids[name]] = (name, width, height, eye, tracking, interval, ".dontTrackDeltas()" not in chain, is_living(decl[field]),
+                           decl[field])
     if sorted(rows) != list(range(len(ids))):
         die(f"EntityTypes: parsed {len(rows)} of {len(ids)} entity types - the static initializer changed shape")
+
+    # What a living entity saves beyond its own state (Entity.saveWithoutId and below): which of
+    # Mob's and AgeableMob's entries it has, and the attributes a fresh one has touched.
+    path = d / "gamedata" / "entities.json"
+    if not path.exists():
+        die("gamedata/entities.json is missing - run: mcgen.py gamedata")
+    game = {e["name"]: e for e in json.loads(path.read_text())["types"]}
+    MOB, AGEABLE = "net.minecraft.world.entity.Mob", "net.minecraft.world.entity.AgeableMob"
+
+    def chain(cls: str) -> list[str]:
+        up = [cls]
+        while up[-1] in parents:
+            up.append(parents[up[-1]])
+        return up
+
+    # AgeableMob.canBeABaby: true, but for the classes that say otherwise - they save no age.
+    below_ageable = sorted({c for r in rows.values() if AGEABLE in chain(r[8]) for c in chain(r[8])[:chain(r[8]).index(AGEABLE)]})
+    no_baby = set()
+    for cls in below_ageable:
+        body = pseudo_of(version, [cls], r"canBeABaby\(")
+        if "canBeABaby" not in body:
+            continue
+        if not re.search(r"canBeABaby\(\) \{\s+return 0;\s+\}", body):
+            die(f"{cls}.canBeABaby: not `return false` - read it, and teach emit_entities what it means")
+        no_baby.add(cls)
+    saved = {}
+    for i, r in rows.items():
+        up, attrs = chain(r[8]), game.get("minecraft:" + r[0], {}).get("attributes") or {}
+        if r[7] and "minecraft:max_health" not in attrs:
+            die(f"gamedata/entities.json: {r[0]} is a LivingEntity without attributes - run: mcgen.py gamedata")
+        saved[i] = (MOB in up, AGEABLE in up and not (no_baby & set(up)), attrs.get("minecraft:max_health", 0.0),
+                    attrs.get("minecraft:movement_speed", 0.0), attrs.get("minecraft:follow_range", 0.0))
 
     out = [HEADER.format(id=v["id"], proto=v["protocol_version"]), """
 #include <string_view>
@@ -1666,13 +1699,20 @@ struct Info {
     unsigned char update_interval;    // ticks between movement updates; 0 = never (noUpdateInterval)
     bool track_deltas;                // velocity changes are sent with movement
     bool living;                      // extends LivingEntity: movement is sent as stepped paths
+    bool mob;                         // extends Mob
+    bool ageable;                     // extends AgeableMob and can be a baby (AgeableMob.canBeABaby): it saves an age
+    float max_health;                 // the default of its max_health attribute: what a fresh one's Health is
+    double movement_speed;            // ...of movement_speed
+    double follow_range;              // ...of follow_range (a Mob's)
 };
 
 inline constexpr Info kInfo[kCount] = {
 """)
     for i in range(len(rows)):
-        name, width, height, eye, tracking, interval, deltas, living = rows[i]
-        out.append(f"    {{{cfloat32(width)}, {cfloat32(height)}, {cfloat32(eye)}, {tracking}, {interval}, {str(deltas).lower()}, {str(living).lower()}}},  // {name}\n")
+        name, width, height, eye, tracking, interval, deltas, living, _ = rows[i]
+        mob, ageable, health, speed, follow = saved[i]
+        out.append(f"    {{{cfloat32(width)}, {cfloat32(height)}, {cfloat32(eye)}, {tracking}, {interval}, {str(deltas).lower()}, "
+                   f"{str(living).lower()}, {str(mob).lower()}, {str(ageable).lower()}, {cfloat32(health)}, {speed!r}, {follow!r}}},  // {name}\n")
     out.append("};\n\ninline constexpr std::string_view kNames[kCount] = {\n")
     out.extend(f'    "minecraft:{rows[i][0]}",\n' for i in range(len(rows)))
     out.append("};\n\n}  // namespace proto::gen::entity_type\n")
@@ -1797,7 +1837,7 @@ def generate_into(version: str, out: Path, reports: Path | None = None) -> dict:
     tag_tables: list[tuple[str, dict[str, list[int]]]] = []
     stats = {"registries": len(regs), "entries": sum(len(e) for _, e in regs), "tags": 0, "packets": packets_src}
     static_regs = json.loads(reg_report.read_text())
-    entities, stats["entity_types"] = emit_entities(v, version, static_regs)
+    entities, stats["entity_types"] = emit_entities(v, version, static_regs, d)
     save("entities.hpp", entities)
     synced = {p: {e: i for i, e in enumerate(entries)} for p, entries in regs}
     for path in data.tag_dirs():

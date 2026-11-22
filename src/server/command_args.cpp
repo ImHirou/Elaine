@@ -5,7 +5,7 @@
 //
 // What is NOT read, and answered with an error of this server's own instead of vanilla's
 // "expected ...":
-//   * NBT: a block's `{...}`, an item's `[component=value]`, a selector's `nbt=`;
+//   * a block's `{...}` and an item's `[component=value]`;
 //   * the selector options that ask what does not exist here: scores, advancements, predicate.
 // A selector's `tag` and `team` are read and compared with what every entity has: none.
 #include <algorithm>
@@ -532,7 +532,12 @@ bool SelectorParser::option(std::string_view key, u32 key_start, Error& err) {
     } else if (key == "tag") {
         const bool inverted = eat('!');
         sel.tests.push_back({Selector::Test::kTag, inverted, 0, std::string(read_unquoted(r)), {}});
-    } else {  // nbt, scores, advancements, predicate
+    } else if (key == "nbt") {
+        const bool inverted = eat('!');
+        Selector::Test test{Selector::Test::kNbt, inverted, 0, {}, {}, {}};
+        if (!parse_nbt(r.s, r.at, true, test.nbt, err)) return false;
+        sel.tests.push_back(std::move(test));
+    } else {  // scores, advancements, predicate
         std::string what = "Selectors with '";
         what += key;
         what += "'";
@@ -860,6 +865,127 @@ bool parse_item(std::string_view line, u32& cursor, bool predicate, ItemArg& out
         err = here(r, unsupported(predicate ? "Item predicates with components" : "Item components in commands"));
         return false;
     }
+    cursor = r.at;
+    return true;
+}
+
+// ---------------------------------------------------------------------------- NBT
+
+bool parse_nbt(std::string_view line, u32& cursor, bool compound, std::vector<u8>& out, Error& err) {
+    base::ByteBuf tag;
+    nbt::SnbtError why;
+    const bool ok = compound ? nbt::read_snbt_compound(line, cursor, tag, why) : nbt::read_snbt(line, cursor, tag, why);
+    if (!ok) {
+        Text message = why.key.empty() ? Text::literal(why.arg) : tr(why.key);
+        if (why.has_arg) message.arg(why.arg);
+        err = at(why.cursor, std::move(message));
+        return false;
+    }
+    out.assign(tag.data, tag.data + tag.len);
+    return true;
+}
+
+namespace {
+
+// NbtPathArgument.isAllowedInUnquotedName
+bool in_path_name(char c) {
+    return c != ' ' && c != '"' && c != '\'' && c != '[' && c != ']' && c != '.' && c != '{' && c != '}';
+}
+
+// A Java string as the bytes a tag holds its names in.
+std::string mutf8(std::string_view utf8) {
+    std::string out(proto::mutf8_bound(utf8), '\0');
+    u8* const begin = reinterpret_cast<u8*>(out.data());
+    out.resize(static_cast<usize>(proto::put_mutf8(begin, utf8) - begin));
+    return out;
+}
+
+// NbtPathArgument.parseNode
+bool path_node(Reader& r, bool first, nbt::Path::Node& node, Error& err) {
+    using Node = nbt::Path::Node;
+    const auto invalid = [&] {
+        err = here(r, tr("arguments.nbtpath.node.invalid"));
+        return false;
+    };
+    const auto expect = [&](char c) {  // StringReader.expect
+        if (r.can_read() && r.peek() == c) {
+            ++r.at;
+            return true;
+        }
+        err = here(r, tr("parsing.expected").arg(std::string_view(&c, 1)));
+        return false;
+    };
+    const char next = r.peek();
+    if (next == '{') {
+        if (!first) return invalid();
+        node.kind = Node::kMatchRoot;
+        return parse_nbt(r.s, r.at, true, node.pattern, err);
+    }
+    if (next == '[') {
+        ++r.at;
+        // Vanilla peeks without looking whether there is anything left, and what the line gets
+        // for an answer is the exception of String.charAt (ArgumentCommandNode.parse wraps it).
+        if (!r.can_read()) {
+            const std::string n = std::to_string(r.s.size());
+            err = here(r, tr("command.exception").arg("Index " + n + " out of bounds for length " + n));
+            return false;
+        }
+        if (r.peek() == '{') {
+            node.kind = Node::kMatchElement;
+            return parse_nbt(r.s, r.at, true, node.pattern, err) && expect(']');
+        }
+        if (r.peek() == ']') {
+            ++r.at;
+            node.kind = Node::kAll;
+            return true;
+        }
+        node.kind = Node::kIndex;
+        return read_int(r, node.index, err) && expect(']');
+    }
+    std::string name;
+    if (next == '"' || next == '\'') {
+        if (!read_string(r, name, err)) return false;
+    } else {  // readUnquotedName
+        const u32 start = r.at;
+        while (r.can_read() && in_path_name(r.peek())) ++r.at;
+        if (r.at == start) return invalid();
+        name.assign(r.s.substr(start, r.at - start));
+    }
+    // readObjectNode
+    if (name.empty()) return invalid();
+    node.name = mutf8(name);
+    node.kind = Node::kChild;
+    if (r.can_read() && r.peek() == '{') {
+        node.kind = Node::kMatchObject;
+        return parse_nbt(r.s, r.at, true, node.pattern, err);
+    }
+    return true;
+}
+
+}  // namespace
+
+bool parse_nbt_path(std::string_view line, u32& cursor, nbt::Path& out, Error& err) {
+    Reader r{line, cursor};
+    out = {};
+    bool first = true;
+    while (r.can_read() && r.peek() != ' ') {
+        nbt::Path::Node node;
+        if (!path_node(r, first, node, err)) return false;
+        node.end = r.at - cursor;
+        out.nodes.push_back(std::move(node));
+        first = false;
+        if (r.can_read()) {
+            const char next = r.peek();
+            if (next != ' ' && next != '[' && next != '{') {
+                if (next != '.') {
+                    err = here(r, tr("parsing.expected").arg("."));
+                    return false;
+                }
+                ++r.at;
+            }
+        }
+    }
+    out.text.assign(line.substr(cursor, r.at - cursor));
     cursor = r.at;
     return true;
 }
