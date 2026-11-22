@@ -16,20 +16,24 @@ namespace server {
 Console::Console() : stop_fd_(eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK)) {}
 
 Console::~Console() {
-    if (thread_.joinable()) {
+    if (running_) {
         const u64 one = 1;
         if (write(stop_fd_, &one, sizeof one) < 0) {}  // wakes the poll
-        thread_.join();
+        pthread_join(thread_, nullptr);
     }
     if (stop_fd_ >= 0) close(stop_fd_);
 }
 
 void Console::start() {
     if (stop_fd_ < 0) return;
-    thread_ = std::thread([this] {
+    auto start = [](void* self) -> void* {
         pthread_setname_np(pthread_self(), "console");
-        run();
-    });
+        static_cast<Console*>(self)->run();
+        return nullptr;
+    };
+    const int err = pthread_create(&thread_, nullptr, start, this);
+    running_ = err == 0;
+    if (!running_) LOG_WARN("console: no thread to read it (%s); the server goes on without one", std::strerror(err));
 }
 
 void Console::run() {

@@ -48,7 +48,8 @@ ASAN_OPTIONS=detect_leaks=1 python3 tests/integration/run.py build/dev/elaine   
 
 build/release/unit_tests --gtest_filter='Cfb8*'            # one unit suite
 python3 tests/integration/run.py build/release/elaine -k join   # one scenario; --slow adds the timer tests (15 s .. 5 min);
-                                                           # -j 0: scenarios side by side (all of them: one minute, not five)
+                                                           # -j 0: sixteen side by side, the longest first (all of them:
+                                                           # 40 s, not five minutes); several binaries are one pool
 python3 tests/integration/run.py build/release/elaine -k crowd_500 --slow   # 500 bots in sight of each other: tick time, bytes
 build/release/bench [filter]                               # micro-benchmarks (release/native builds only); `bench tracker` = entities,
                                                            # `bench item` / `bench menu` / `bench pickup` = items, `bench nbt` / `bench text`,
@@ -360,7 +361,8 @@ Java plugin (Bukkit/Paper) compatibility is explicitly out of scope for now.
 - Scenarios run side by side (`run.py -j`, which ctest and `tools/check.py` use), each in a process of its own:
   a scenario shares nothing with another - no fixed port, no file outside its own world - and waits for events
   (`settle()`, `wait_log()`), not for an amount of time. One that measures the server's ticks or fills the cores
-  by itself is `@test(alone=True)` and runs after the rest.
+  by itself is `@test(alone=True)` and runs after the rest. A client joins with the smallest view (`join()`'s
+  default, 2): chunks are sent at the pace of ticks, and a scenario that is about the view asks for one.
 - Before calling work done: `ctest --preset release` passes **and** the integration suite is clean under
   the `dev` preset (ASan/UBSan/LSan) - `tools/check.py full` runs both. The server must exit with code 0 on SIGTERM.
 

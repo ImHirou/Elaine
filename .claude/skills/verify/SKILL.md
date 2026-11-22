@@ -27,9 +27,9 @@ timings go wrong, scenarios fail that would not have).
 2. **After a failure: only what failed.** `tools/check.py --failed` rebuilds and runs the scenarios that failed the
    last time (kept in `build/<preset>/integration-failed.txt`; a scenario leaves the list when it passes). Not the
    suite again - that is step 3, once.
-3. **Before "done": everything, once.** `tools/check.py full` - release build, unit tests, all scenarios, dev build
-   (ASan/UBSan/LSan), all scenarios again. That is the gate of AGENTS.md ("Testing rules"); `ctest --preset release`
-   is the same first half. If it fails: fix, `tools/check.py --failed` (add `--dev` if it was the dev half), then
+3. **Before "done": everything, once.** `tools/check.py full` - the release and the dev build (ASan/UBSan/LSan), then
+   the unit tests and every scenario on both builds, side by side. That is the gate of AGENTS.md ("Testing rules");
+   `ctest --preset release` is its release half. If it fails: fix, `tools/check.py --failed` (add `--dev` if it was the dev half), then
    `full` once more only if the fix went beyond the test that failed.
    Add `--slow` when the change touches what the slow scenarios wait for (keep-alive, items expiring, smelting,
    the crowds).
@@ -41,8 +41,14 @@ timings go wrong, scenarios fail that would not have).
   hand, do too. `bench` is built only when a benchmark is about to be run.
 - The dev preset is a second build tree: an edit is compiled twice. Leave it to step 3 unless the bug is one only
   a sanitizer shows (then `tools/check.py --dev -k <scenario>`).
-- All scenarios, eight at a time: about a minute on 8 cores (one by one: five). The ones marked `alone=True` (the
-  crowds, `many_players`) measure ticks and run after the rest, by themselves.
+- All scenarios, sixteen at a time and the longest first (as long as they took the last time:
+  `build/<preset>/integration-times.json`): 43 s on four cores (one by one: five minutes). A scenario waits for ticks,
+  not for a core, so `full` puts the release and the dev scenarios in one pool, beside the unit tests' shards: 80 s
+  for both. The ones marked `alone=True` (the crowds, `many_players`) measure ticks and run after the rest, by
+  themselves.
+- A file of the game (one that includes `server/game.hpp`) compiles in about a second with the precompiled header
+  (`MC_PCH`, on by default); an edit of a header under `game.hpp` rebuilds the header first (3 s), then every such
+  file.
 - `mcgen.py generate` rewrites only tables whose content changed; what includes them is recompiled.
 
 ## Reading a failure

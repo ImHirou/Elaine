@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "crypto/cfb8.hpp"
 
+#include <immintrin.h>
+
 namespace crypto {
 
 namespace {

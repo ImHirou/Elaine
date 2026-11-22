@@ -8,8 +8,9 @@
 // goes on without a console.
 #pragma once
 
+#include <pthread.h>
+
 #include <string>
-#include <thread>
 
 #include "base/spsc.hpp"
 
@@ -31,7 +32,8 @@ class Console {
     void run();
 
     base::SpscBytes lines_{1u << 17};
-    std::thread thread_;
+    pthread_t thread_{};  // (not a std::thread: <thread> is 0.9 s of every file that includes this one)
+    bool running_ = false;
     int stop_fd_ = -1;
 };
 

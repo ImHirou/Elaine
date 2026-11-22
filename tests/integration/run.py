@@ -2,11 +2,13 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """End-to-end tests: start the real server binary and talk to it with mcproto.Client.
 
-    python3 tests/integration/run.py build/release/elaine [-k substring]... [-j N] [--failed] [-q] [--slow] [--keep-log]
+    python3 tests/integration/run.py build/release/elaine [build/dev/elaine ...] [-k substring]... [-j N] [--failed] [-q] [--slow] [--keep-log]
 
 Each scenario gets a fresh server on a free port. --slow adds the tests that wait on real timers
-(keep-alive every 15 s). -j runs N scenarios at a time, each in a process of its own (0: one a core, eight at most); --failed runs the ones that
-failed the last time this binary was tested; -q prints what failed and the last line, nothing else.
+(keep-alive every 15 s). -j runs N scenarios at a time, each in a process of its own (0: two a core,
+sixteen at most), the ones that took longest the last time first; several binaries are tested side by
+side, in one pool. --failed runs the ones that failed the last time a binary was tested; -q prints
+what failed and the last line, nothing else.
 """
 from __future__ import annotations
 
@@ -184,8 +186,12 @@ class MockSessionServer:
 
 # ----------------------------------------------------------------------------- shared flows
 
-def join(c: Client, name: str, online: bool = False, view: int = 10, chat: int = 0) -> dict:
-    """Login + configuration + the whole join burst. Returns everything observed."""
+def join(c: Client, name: str, online: bool = False, view: int = 2, chat: int = 0) -> dict:
+    """Login + configuration + the whole join burst. Returns everything observed.
+
+    The view is the smallest a client may ask for: what is sent of it is paced by ticks
+    (PlayerChunkSender), and the default view of 10 is 473 chunks - half a second of waiting at each
+    join, for chunks most scenarios never look at. A scenario about the view asks for it."""
     out = {"profile": c.login(name, online)}
     out["config"] = c.configure(view_distance=view, chat=chat)
     out["login"] = mc.parse_login(c.expect("login"))
@@ -241,7 +247,7 @@ def join(c: Client, name: str, online: bool = False, view: int = 10, chat: int =
     return out
 
 
-def check_join(j: dict, name: str, view: int = 10, online: bool = False) -> None:
+def check_join(j: dict, name: str, view: int = 2, online: bool = False) -> None:
     cfg, login = j["config"], j["login"]
     assert cfg["features"] == ["minecraft:vanilla"], cfg["features"]
     assert cfg["known_packs"] == [("minecraft", "core", META["version"])], cfg["known_packs"]
@@ -317,21 +323,21 @@ def status_ping(srv: Server):
 @test(network_compression_threshold=-1)
 def join_offline_uncompressed(srv: Server):
     c = srv.client()
-    j = join(c, "Steve")
+    j = join(c, "Steve", view=10)     # (the default view of a vanilla server)
     assert j["profile"]["uuid"] == mc.offline_uuid("Steve") and j["profile"]["name"] == "Steve"
     assert c.threshold == -1 and not j["profile"]["encrypted"]
     assert j["config"]["brand"] == "vanilla"
-    check_join(j, "Steve")
+    check_join(j, "Steve", view=10)
     assert [t["name"] for t in j["tab"]] == ["Steve"]
 
 
 @test()
 def join_offline_compressed(srv: Server):
     c = srv.client()
-    j = join(c, "Alex")
+    j = join(c, "Alex", view=10)
     assert c.threshold == 256
     assert c.deflated > 0 and c.stored > 0, (c.deflated, c.stored)
-    check_join(j, "Alex")
+    check_join(j, "Alex", view=10)
 
 
 @test(view_distance=4)
@@ -348,7 +354,7 @@ def join_online_encrypted():
     srv = Server(EXE, online_mode="true", session_server=mock.url)
     try:
         c = srv.client()
-        j = join(c, "Notch", online=True)
+        j = join(c, "Notch", online=True, view=10)
         prof = j["profile"]
         assert prof["encrypted"] and prof["should_authenticate"] is True
         assert prof["uuid"] == "069a79f444e94726a5befca90e38aaf5" and prof["name"] == "Notch"
@@ -357,7 +363,7 @@ def join_online_encrypted():
         path, q = mock.requests[-1]
         assert path == "/session/minecraft/hasJoined"
         assert q["username"] == ["Notch"] and q["serverId"] == [prof["hash"]], (q, prof["hash"])
-        check_join(j, "Notch", online=True)
+        check_join(j, "Notch", view=10, online=True)
         assert j["tab"][0]["props"] == [("textures", "dGV4", "c2ln")]
 
         d = srv.client()
@@ -1209,7 +1215,7 @@ def malformed_item_stacks_disconnect(srv: Server):
     check_join(join(c, "Alice"), "Alice")
 
 
-@test(alone=True)     # (megabytes through the test client: it fills a core by itself)
+@test()     # (megabytes through the test client: it fills a core by itself - of the many that wait beside it)
 def heavy_stacks(srv: Server):
     """Stacks of up to a megabyte: kept, shown to others, there again when their holder is - sent slot by
     slot when no frame holds them all, and bounded: how fast a client may send them, how much of them it
@@ -2101,6 +2107,10 @@ def furnace(srv: Server):
     assert ("container_set_slot", 1, None) in log and c.window is None, log
     assert log.index(("container_set_slot", 1, None)) < log.index(("container_close", 1)) < log.index(("set_player_inventory", 1, plain("kCobblestone", 3))), log
     assert [e.data[D_ITEM][1] for e in of_type(c, "kItem").values()] == [plain("kOakPlanks", 1)]
+    # The plank flies off at random, and whether it lands within reach is chance: it is picked up
+    # (or not) once its pickup delay of ten ticks is over and it has come to rest - not while the
+    # server is asked for the menu below, whose answer would then not come alone.
+    settle(c, ticks=20)
     assert server_menu(c)[37] == plain("kCobblestone", 3)    # the cursor went back into the inventory: the slot it came from is the first free one
 
 
@@ -5669,14 +5679,22 @@ def chunks_leave_and_return(srv: Server):
     b.close()
     a.expect("player_info_remove")
 
-    for far, wait in ((16 * 40 + 8.5, 3.0), (16 * 80 + 8.5, 8.0)):
+    overworld = os.path.join(srv.world, "chunks", "minecraft", "overworld")
+    for far, from_file, seq in ((16 * 40 + 8.5, False, 13), (16 * 80 + 8.5, True, 18)):
         # Away, far beyond every chunk that was loaded - and until those have left.
+        mark = len(srv.read_log())
         walk_to_chunk(a, ja, far, 8.5, 3)
         settle(a)
         assert not of_type(a, "kItem")
-        a.pump(wait)                       # (keeps the connection alive)
-        log = srv.read_log()
-        assert "left the world" in log, log[-2000:]
+        deadline = time.time() + 20
+        while "left the world" not in srv.read_log()[mark:]:
+            assert time.time() < deadline, srv.read_log()[-2000:]
+            a.pump(0.05)                   # (keeps the connection alive)
+        # The first time round they come back from what waits to be written; the second time from
+        # the file - a region is written 100 ticks after the first of its chunks was saved.
+        if from_file:
+            settle(a, ticks=110)
+            assert os.path.isdir(overworld) and os.listdir(overworld), "no region was written"
         # Back: the same chunks, byte for byte, the stone where it lay, the chest with its stone.
         walk_to_chunk(a, ja, 8.5, 8.5, 3)
         settle(a, ticks=6)
@@ -5684,12 +5702,9 @@ def chunks_leave_and_return(srv: Server):
         differ = [pos for pos in before if before[pos] != after[pos]]
         assert set(after) == set(before) and not differ, f"chunks that came back different: {differ}"
         assert near(the_stone(a).pos, where), (the_stone(a).pos, where)
-        open_and_check_chest(a, made["chest"], 10 + int(wait))
-        # The first time round they came from what waited to be written - a region is written five
-        # seconds after the first of its chunks was saved; the second time from the file.
-        written = os.path.isdir(os.path.join(srv.world, "chunks", "minecraft", "overworld")) and \
-            os.listdir(os.path.join(srv.world, "chunks", "minecraft", "overworld"))
-        assert bool(written) == (wait > 5), (wait, written)
+        open_and_check_chest(a, made["chest"], seq)
+        written = os.path.isdir(overworld) and os.listdir(overworld)
+        assert bool(written) == from_file, (from_file, written)
 
 
 @test(level_name="", chunk_unload_seconds=1, view_distance=2)
@@ -5975,7 +5990,7 @@ def a_vanilla_world_is_imported():
         shutil.rmtree(world, ignore_errors=True)
 
 
-def run_one(fn, sargs: dict, keep_log: bool) -> bool:
+def run_one(fn, sargs: dict, keep_log: bool, label: str = "") -> bool:
     srv = None
     t0 = time.time()
     try:
@@ -5986,10 +6001,10 @@ def run_one(fn, sargs: dict, keep_log: bool) -> bool:
             assert code == 0, f"server exit code {code}"
         else:
             fn()
-        print(f"PASS {fn.__name__} ({time.time() - t0:.2f}s)")
+        print(f"PASS {label}{fn.__name__} ({time.time() - t0:.2f}s)")
         return True
     except Exception:  # noqa: BLE001
-        print(f"FAIL {fn.__name__}")
+        print(f"FAIL {label}{fn.__name__}")
         traceback.print_exc()
         if srv:
             srv.stop()
@@ -6003,102 +6018,141 @@ def run_one(fn, sargs: dict, keep_log: bool) -> bool:
             print(f"    log: {srv.log.name}")
 
 
-def run_apart(names: list[str], alone: list[str], jobs: int, quiet: bool, keep_log: bool) -> list[str]:
-    """Every scenario in a process of its own, `jobs` at a time, then the ones that want the machine
-    to themselves. What a scenario printed comes out in one piece when it is over. Returns who failed."""
-    failed = []
+def run_apart(pool: list[tuple[str, str]], alone: list[tuple[str, str]], jobs: int, quiet: bool, keep_log: bool,
+              label: dict[str, str]) -> tuple[list[tuple[str, str]], dict[tuple[str, str], float]]:
+    """Every scenario - (binary, name) - in a process of its own, `jobs` at a time and in the order
+    given, then the ones that want the machine to themselves. What a scenario printed comes out in
+    one piece when it is over. Returns who failed, and how long each of the others took."""
+    failed, took = [], {}
     claims = tempfile.mkdtemp(prefix="ports-")
     env = dict(os.environ, MC_TEST_PORT_CLAIMS=claims)
 
-    def one(name: str) -> tuple[str, bool, str]:
-        cmd = [sys.executable, os.path.abspath(__file__), EXE, "--one", name] + (["--keep-log"] if keep_log else [])
+    def one(job: tuple[str, str]) -> tuple[tuple[str, str], bool, str, float]:
+        exe, name = job
+        cmd = [sys.executable, os.path.abspath(__file__), exe, "--one", name, "--label", label[exe]] + (["--keep-log"] if keep_log else [])
+        t0 = time.time()
         try:
             p = subprocess.run(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=900)
-            return name, p.returncode == 0, p.stdout
+            return job, p.returncode == 0, p.stdout, time.time() - t0
         except subprocess.TimeoutExpired as e:
             out = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
-            return name, False, out + f"FAIL {name}: still running after 900 s\n"
+            return job, False, out + f"FAIL {label[exe]}{name}: still running after 900 s\n", time.time() - t0
 
-    def report(result: tuple[str, bool, str]) -> None:
-        name, ok, out = result
-        if not ok:
-            failed.append(name)
+    def report(result: tuple[tuple[str, str], bool, str, float]) -> None:
+        job, ok, out, seconds = result
+        if ok:
+            took[job] = seconds
+        else:
+            failed.append(job)
         if not ok or not quiet:
             sys.stdout.write(out)
             sys.stdout.flush()
 
     try:
-        with concurrent.futures.ThreadPoolExecutor(max(1, jobs)) as pool:
-            for done in concurrent.futures.as_completed([pool.submit(one, n) for n in names]):
+        with concurrent.futures.ThreadPoolExecutor(max(1, jobs)) as threads:
+            for done in concurrent.futures.as_completed([threads.submit(one, job) for job in pool]):
                 report(done.result())
-        for name in alone:
-            report(one(name))
+        for job in alone:
+            report(one(job))
     finally:
         shutil.rmtree(claims, ignore_errors=True)
-    return failed
+    return failed, took
 
 
 def main() -> int:
     global EXE
     ap = argparse.ArgumentParser()
-    ap.add_argument("exe")
+    ap.add_argument("exe", nargs="+", help="the server binary; several are tested side by side, in one pool")
     ap.add_argument("-k", action="append", default=[], help="only tests whose name contains this (may be given more than once)")
-    ap.add_argument("-j", type=int, default=1, help="scenarios at a time (0: one a core, eight at most)")
-    ap.add_argument("--failed", action="store_true", help="only the tests that failed the last time this binary was tested")
+    ap.add_argument("-j", type=int, default=1, help="scenarios at a time (0: two a core, sixteen at most)")
+    ap.add_argument("--failed", action="store_true", help="only the tests that failed the last time a binary was tested")
     ap.add_argument("-q", action="store_true", help="print only what failed, and the last line")
     ap.add_argument("--slow", action="store_true", help="include tests that wait on real timers")
     ap.add_argument("--keep-log", action="store_true")
-    ap.add_argument("--one", help=argparse.SUPPRESS)  # (a scenario by its whole name: what -j starts)
+    ap.add_argument("--one", help=argparse.SUPPRESS)    # (a scenario by its whole name: what -j starts)
+    ap.add_argument("--label", default="", help=argparse.SUPPRESS)  # (...and what it says before that name)
     args = ap.parse_args()
-    EXE = os.path.abspath(args.exe)
+    exes = [os.path.abspath(e) for e in args.exe]
 
     if args.one:
+        if len(exes) != 1:
+            ap.error("--one takes one binary")
+        EXE = exes[0]
         for fn, _, _, sargs in TESTS:
             if fn.__name__ == args.one:
-                return 0 if run_one(fn, sargs, args.keep_log) else 1
-        print(f"FAIL {args.one}: no such scenario")
+                return 0 if run_one(fn, sargs, args.keep_log, args.label) else 1
+        print(f"FAIL {args.label}{args.one}: no such scenario")
         return 1
 
-    # Who failed is kept beside the binary: a build directory is a preset, and each has its own.
-    failed_file = os.path.join(os.path.dirname(EXE), "integration-failed.txt")
-    before = set()
-    if os.path.exists(failed_file):
-        with open(failed_file) as f:
-            before = set(f.read().split())
+    # Who failed and how long each took are kept beside the binary: a build directory is a preset, and
+    # each has its own. With more than one binary, a scenario is named by its preset too.
+    label = {exe: (os.path.basename(os.path.dirname(exe)) + ":" if len(exes) > 1 else "") for exe in exes}
+    failed_file = {exe: os.path.join(os.path.dirname(exe), "integration-failed.txt") for exe in exes}
+    times_file = {exe: os.path.join(os.path.dirname(exe), "integration-times.json") for exe in exes}
+    before, times = {}, {}
+    for exe in exes:
+        before[exe] = set()
+        if os.path.exists(failed_file[exe]):
+            with open(failed_file[exe]) as f:
+                before[exe] = set(f.read().split())
+        times[exe] = {}
+        try:
+            with open(times_file[exe]) as f:
+                times[exe] = json.load(f)
+        except (OSError, ValueError):
+            pass
     chosen = []
-    for fn, slow, alone, sargs in TESTS:
-        name = fn.__name__
-        if args.failed:
-            if name not in before or (args.k and not any(k in name for k in args.k)):
+    for exe in exes:
+        for fn, slow, alone, sargs in TESTS:
+            name = fn.__name__
+            if args.failed:
+                if name not in before[exe] or (args.k and not any(k in name for k in args.k)):
+                    continue
+            elif (args.k and not any(k in name for k in args.k)) or (slow and not args.slow):
                 continue
-        elif (args.k and not any(k in name for k in args.k)) or (slow and not args.slow):
-            continue
-        chosen.append((fn, alone, sargs))
+            chosen.append((exe, fn, alone, sargs))
     if args.failed and not chosen:
         print("OK: nothing failed the last time")
         return 0
 
     t0 = time.time()
-    # A scenario mostly waits for ticks to pass: all of them, eight at a time on eight cores, take 58 s
-    # and a third of one core (four at a time: 94 s; one by one: 289 s).
-    jobs = args.j if args.j > 0 else max(1, min(8, os.cpu_count() or 1))
-    if jobs > 1 or args.q:
-        failed = run_apart([fn.__name__ for fn, alone, _ in chosen if not alone or jobs == 1],
-                           [fn.__name__ for fn, alone, _ in chosen if alone and jobs > 1], jobs, args.q, args.keep_log)
+    # A scenario mostly waits for ticks to pass, its client blocked in recv: all 67 of them, eight at a
+    # time on four cores with two threads each, took 78 s; sixteen at a time 58 s and 0.9 of a core,
+    # with each scenario as long as before (2026-11-22).
+    jobs = args.j if args.j > 0 else max(1, min(16, 2 * (os.cpu_count() or 1)))
+    if jobs > 1 or args.q or len(exes) > 1:
+        # Longest first (as long as they took the last time; one never timed counts as longest): the
+        # pool is over when its last scenario is, and a long one that starts last is all of the tail.
+        pool = sorted(((exe, fn.__name__) for exe, fn, alone, _ in chosen if not alone or jobs == 1),
+                      key=lambda job: -times[job[0]].get(job[1], math.inf))
+        apart = [(exe, fn.__name__) for exe, fn, alone, _ in chosen if alone and jobs > 1]
+        failed, took = run_apart(pool, apart, jobs, args.q, args.keep_log, label)
     else:
-        failed = [fn.__name__ for fn, _, sargs in chosen if not run_one(fn, sargs, args.keep_log)]
+        EXE = exes[0]
+        failed, took = [], {}
+        for exe, fn, _, sargs in chosen:
+            t1 = time.time()
+            if run_one(fn, sargs, args.keep_log):
+                took[(exe, fn.__name__)] = time.time() - t1
+            else:
+                failed.append((exe, fn.__name__))
 
-    still = (before - {fn.__name__ for fn, _, _ in chosen}) | set(failed)
-    try:
-        if still:
-            with open(failed_file, "w") as f:
-                f.write("\n".join(sorted(still)) + "\n")
-        elif os.path.exists(failed_file):
-            os.unlink(failed_file)
-    except OSError:  # (a binary somewhere that cannot be written to: there is no "last time" for it)
-        pass
+    for exe in exes:
+        still = (before[exe] - {fn.__name__ for e, fn, _, _ in chosen if e == exe}) | {name for e, name in failed if e == exe}
+        times[exe].update({name: round(seconds, 2) for (e, name), seconds in took.items() if e == exe})
+        try:
+            if still:
+                with open(failed_file[exe], "w") as f:
+                    f.write("\n".join(sorted(still)) + "\n")
+            elif os.path.exists(failed_file[exe]):
+                os.unlink(failed_file[exe])
+            with open(times_file[exe], "w") as f:
+                json.dump(dict(sorted(times[exe].items())), f, indent=0)
+        except OSError:  # (a binary somewhere that cannot be written to: there is no "last time" for it)
+            pass
     if failed:
-        print(f"FAILED: {len(failed)} failed of {len(chosen)} in {time.time() - t0:.0f}s: {' '.join(sorted(failed))}")
+        names = " ".join(sorted(label[exe] + name for exe, name in failed))
+        print(f"FAILED: {len(failed)} failed of {len(chosen)} in {time.time() - t0:.0f}s: {names}")
     else:
         print(f"OK: 0 failed of {len(chosen)} in {time.time() - t0:.0f}s")
     return 1 if failed else 0

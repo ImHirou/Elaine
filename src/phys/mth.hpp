@@ -11,12 +11,16 @@ namespace phys {
 
 // Mth.SIN: (float) Math.sin(i / 10430.378350470453). The C library's sine rounds to the same
 // floats as the JVM's for all of them (tests/unit/physics_test.cpp holds the table's checksum).
+// A function and not a lambda: a lambda is constexpr by itself, and GCC then runs all 65536 sines
+// at compile time to see whether the table could be a constant - 3.9 s of every file that includes
+// this one, before it gives up (gcc 16.2, 2026-11-22).
+inline float* make_sin_table() {
+    float* t = new float[65536];
+    for (u32 i = 0; i < 65536; ++i) t[i] = static_cast<float>(std::sin(static_cast<double>(i) / 10430.378350470453));
+    return t;
+}
 inline const float* sin_table() {
-    static const float* const table = [] {
-        float* t = new float[65536];
-        for (u32 i = 0; i < 65536; ++i) t[i] = static_cast<float>(std::sin(static_cast<double>(i) / 10430.378350470453));
-        return t;
-    }();
+    static const float* const table = make_sin_table();
     return table;
 }
 // Mth.sin(double), Mth.cos(double): (long) truncates, & 65535 wraps.

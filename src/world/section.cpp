@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "world/section.hpp"
 
+#include <immintrin.h>
+
 namespace world {
 
 // account() adds flag bits as integers.
@@ -27,7 +29,7 @@ usize SectionAllocator::live_blocks() const {
 
 namespace {
 
-// Same search as Section::find(), for a palette that is still being built on the stack.
+// A palette's slot of state s: Section::find(), and a palette that is still being built on the stack.
 ALWAYS_INLINE u32 find_in(const u16* pal, u32 n, u32 s) {
     const __m256i key = _mm256_set1_epi16(static_cast<short>(s));
     for (u32 i = 0; i < n; i += 16) {
@@ -37,6 +39,12 @@ ALWAYS_INLINE u32 find_in(const u16* pal, u32 n, u32 s) {
     }
     return Section::kNoSlot;
 }
+
+}  // namespace
+
+u32 Section::find(BlockState s) const { return find_in(palette, palette_len, s); }
+
+namespace {
 
 ALWAYS_INLINE u32 air_bit(BlockState s) { return flags_of(s) & state::kIsAir; }
 ALWAYS_INLINE u32 fluid_bit(BlockState s) { return (flags_of(s) & state::kHasFluid) != 0; }

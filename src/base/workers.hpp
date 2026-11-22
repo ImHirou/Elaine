@@ -16,9 +16,10 @@
 // so does anything that wants the pipeline without the timing.
 #pragma once
 
+#include <pthread.h>
+
 #include <atomic>
 #include <memory>
-#include <thread>
 #include <vector>
 
 #include "base/spsc.hpp"
@@ -61,7 +62,8 @@ class Workers {
         SpscRing<Task> in, out;
         CACHE_ALIGNED std::atomic<u32> signal{0};
         std::atomic<bool> stop{false};
-        std::thread thread;
+        pthread_t thread{};  // (not a std::thread: <thread> is 0.9 s of every file that includes this one)
+        u32 index = 0;
         u32 load = 0;  // weight out with this worker (owner's count)
         bool touched = false;
     };

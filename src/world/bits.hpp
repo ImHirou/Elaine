@@ -12,7 +12,7 @@
 // starts on a byte boundary).
 #pragma once
 
-#include <immintrin.h>
+#include <x86gprintrin.h>  // pdep/pext; <immintrin.h> is 0.7 s of every file that includes this one
 
 #include "base/types.hpp"
 

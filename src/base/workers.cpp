@@ -4,6 +4,8 @@
 #include <pthread.h>
 
 #include <cstdio>
+#include <cstdlib>
+#include <thread>
 
 #include "base/clock.hpp"
 
@@ -17,12 +19,20 @@ Workers::Workers(u32 threads) {
     for (u32 i = 0; i < threads; ++i) {
         workers_.push_back(std::make_unique<Worker>(kRing));
         Worker* w = workers_.back().get();
-        w->thread = std::thread([w, i] {
+        w->index = i;
+        auto start = [](void* arg) -> void* {
+            Worker& me = *static_cast<Worker*>(arg);
             char name[16];
-            std::snprintf(name, sizeof name, "work-%u", i);
+            std::snprintf(name, sizeof name, "work-%u", me.index);
             pthread_setname_np(pthread_self(), name);
-            run(*w);
-        });
+            run(me);
+            return nullptr;
+        };
+        // A thread that cannot start ends the server, as a std::thread does without exceptions.
+        if (const int err = pthread_create(&w->thread, nullptr, start, w); err != 0) {
+            std::fprintf(stderr, "cannot start worker thread %u: error %d\n", i, err);
+            std::abort();
+        }
     }
 }
 
@@ -32,7 +42,7 @@ Workers::~Workers() {
         w->signal.fetch_add(1, std::memory_order_release);
         w->signal.notify_one();
     }
-    for (auto& w : workers_) w->thread.join();
+    for (auto& w : workers_) pthread_join(w->thread, nullptr);
 }
 
 void Workers::run(Worker& w) {

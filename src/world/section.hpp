@@ -103,16 +103,9 @@ struct Section {
     void compact(SectionAllocator& a);
     void release(SectionAllocator& a);  // free the block; the section becomes uniform air
 
-    // Slot holding state s, or kNoSlot. Valid for bits 1..8.
-    ALWAYS_INLINE u32 find(BlockState s) const {
-        const __m256i key = _mm256_set1_epi16(static_cast<short>(s));
-        for (u32 i = 0; i < palette_len; i += 16) {
-            const __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(palette + i));
-            const u32 m = static_cast<u32>(_mm256_movemask_epi8(_mm256_cmpeq_epi16(v, key)));
-            if (m) return i + (static_cast<u32>(std::countr_zero(m)) >> 1);
-        }
-        return kNoSlot;
-    }
+    // Slot holding state s, or kNoSlot. Valid for bits 1..8. (In section.cpp, where it is called: its
+    // AVX2 would need <immintrin.h> here, 0.7 s of every file that includes this one.)
+    u32 find(BlockState s) const;
 
   private:
     void attach(SectionAllocator& a, u32 new_bits);  // allocate a block for new_bits and point data/palette into it

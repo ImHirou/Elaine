@@ -10,6 +10,7 @@ set(MC_ARCH "x86-64-v3" CACHE STRING
     "-march baseline. x86-64-v3 = AVX2+BMI2+FMA (Haswell/Zen1 and newer). 'native' = this machine only")
 option(MC_LTO "Link-time optimization in optimized builds" ON)
 option(MC_LTO_CACHE "Keep what LTO compiled between links (GCC 15+): a link redoes only what an edit reached" ON)
+option(MC_PCH "Precompiled headers: server/game.hpp for the files of the game, gtest for the unit tests" ON)
 option(MC_TESTS "Build unit tests" ON)
 option(MC_BENCH "Build micro-benchmarks" ON)
 option(MC_FRAME_POINTERS "Keep frame pointers (cheap, makes perf call graphs reliable)" OFF)
@@ -122,7 +123,33 @@ function(mc_needs_generated target)
 endfunction()
 
 # ---------------------------------------------------------------------------- targets
+# The files of the game itself, each of which includes server/game.hpp: two seconds of parsing (the
+# standard library, the generated tables, every part of the game's state) that MC_PCH makes once, as a
+# precompiled header - 2.7 s -> 1.1 s for chat.cpp, 2.1 s -> 0.5 s for time.cpp (gcc 16.2, 2026-11-22).
+# The other files of the core compile without it, as they would without the option.
+set(MC_GAME_SOURCES
+  src/server/block_actions.cpp
+  src/server/block_entities.cpp
+  src/server/block_shapes.cpp
+  src/server/block_updates.cpp
+  src/server/chat.cpp
+  src/server/chunks.cpp
+  src/server/commands.cpp
+  src/server/entity_tags.cpp
+  src/server/explosion.cpp
+  src/server/falling.cpp
+  src/server/game.cpp
+  src/server/inventory_actions.cpp
+  src/server/item_entities.cpp
+  src/server/persist.cpp
+  src/server/physics.cpp
+  src/server/players.cpp
+  src/server/saved_tags.cpp
+  src/server/signs.cpp
+  src/server/time.cpp
+)
 add_library(core STATIC
+  ${MC_GAME_SOURCES}
   src/base/log.cpp
   src/base/java_number.cpp
   src/base/workers.cpp
@@ -161,39 +188,26 @@ add_library(core STATIC
   src/entity/tracker.cpp
   src/server/prelogin.cpp
   src/server/block_entity.cpp
-  src/server/chunks.cpp
   src/server/import.cpp
-  src/server/persist.cpp
   src/server/files.cpp
   src/server/player_data.cpp
   src/server/world_setup.cpp
   src/server/inventory.cpp
-  src/server/inventory_actions.cpp
-  src/server/item_entities.cpp
-  src/server/block_actions.cpp
-  src/server/block_entities.cpp
-  src/server/block_updates.cpp
-  src/server/block_shapes.cpp
-  src/server/falling.cpp
-  src/server/explosion.cpp
-  src/server/physics.cpp
-  src/server/players.cpp
-  src/server/chat.cpp
   src/server/clock.cpp
-  src/server/time.cpp
   src/server/command.cpp
   src/server/command_args.cpp
-  src/server/commands.cpp
-  src/server/entity_tags.cpp
-  src/server/saved_tags.cpp
-  src/server/signs.cpp
   src/server/console.cpp
-  src/server/game.cpp
 )
 target_link_libraries(core
   PUBLIC mc_flags PkgConfig::URING Threads::Threads
   PRIVATE mc_core_flags PkgConfig::DEFLATE PkgConfig::YYJSON OpenSSL::Crypto CURL::libcurl)
 mc_needs_generated(core)
+if(MC_PCH)
+  target_precompile_headers(core PRIVATE ${CMAKE_SOURCE_DIR}/src/server/game.hpp)
+  get_target_property(mc_plain_sources core SOURCES)
+  list(REMOVE_ITEM mc_plain_sources ${MC_GAME_SOURCES})
+  set_source_files_properties(${mc_plain_sources} PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+endif()
 
 add_executable(server_exe src/main.cpp)
 set_target_properties(server_exe PROPERTIES OUTPUT_NAME ${MC_EXE})
@@ -229,6 +243,9 @@ if(MC_TESTS)
       tests/unit/time_test.cpp
     )
     target_link_libraries(unit_tests PRIVATE core GTest::gtest_main OpenSSL::Crypto)
+    if(MC_PCH)
+      target_precompile_headers(unit_tests PRIVATE <gtest/gtest.h>)  # a second of every test file
+    endif()
     mc_needs_generated(unit_tests)
     mc_lto_cache(unit_tests)
     add_test(NAME unit COMMAND unit_tests)

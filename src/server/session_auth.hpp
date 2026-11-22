@@ -3,12 +3,9 @@
 // worker pool, so reactor threads never wait on the network. Cold path (once per login).
 #pragma once
 
-#include <condition_variable>
-#include <deque>
 #include <functional>
-#include <mutex>
+#include <memory>
 #include <string>
-#include <thread>
 #include <vector>
 
 #include "base/types.hpp"
@@ -38,18 +35,10 @@ class SessionAuth {
     void verify(std::string username, std::string server_hash, std::function<void(AuthResult&&)> done);
 
   private:
-    struct Job {
-        std::string username, hash;
-        std::function<void(AuthResult&&)> done;
-    };
-    void worker();
-
-    std::string base_url_;
-    std::mutex mu_;
-    std::condition_variable cv_;
-    std::deque<Job> jobs_;
-    bool stop_ = false;
-    std::vector<std::thread> threads_;
+    // The threads, their queue and its lock - in session_auth.cpp: <thread>, <mutex> and
+    // <condition_variable> are a second of every file that includes this one.
+    struct Pool;
+    std::unique_ptr<Pool> pool_;
 };
 
 // Parses a hasJoined response body. Exposed for tests.

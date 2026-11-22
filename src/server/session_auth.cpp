@@ -4,6 +4,11 @@
 #include <curl/curl.h>
 #include <yyjson.h>
 
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <thread>
+
 #include "crypto/auth.hpp"
 
 namespace server {
@@ -43,45 +48,61 @@ bool parse_profile_json(const std::string& body, AuthResult& out) {
     return ok;
 }
 
-SessionAuth::SessionAuth(std::string base_url, unsigned threads) : base_url_(std::move(base_url)) {
+struct SessionAuth::Pool {
+    struct Job {
+        std::string username, hash;
+        std::function<void(AuthResult&&)> done;
+    };
+    void worker();
+
+    std::string base_url;
+    std::mutex mu;
+    std::condition_variable cv;
+    std::deque<Job> jobs;
+    bool stop = false;
+    std::vector<std::thread> threads;
+};
+
+SessionAuth::SessionAuth(std::string base_url, unsigned threads) : pool_(std::make_unique<Pool>()) {
     curl_global_init(CURL_GLOBAL_DEFAULT);
-    while (!base_url_.empty() && base_url_.back() == '/') base_url_.pop_back();
-    for (unsigned i = 0; i < threads; ++i) threads_.emplace_back([this] { worker(); });
+    pool_->base_url = std::move(base_url);
+    while (!pool_->base_url.empty() && pool_->base_url.back() == '/') pool_->base_url.pop_back();
+    for (unsigned i = 0; i < threads; ++i) pool_->threads.emplace_back([p = pool_.get()] { p->worker(); });
 }
 
 SessionAuth::~SessionAuth() {
     {
-        std::lock_guard<std::mutex> lk(mu_);
-        stop_ = true;
+        std::lock_guard<std::mutex> lk(pool_->mu);
+        pool_->stop = true;
     }
-    cv_.notify_all();
-    for (auto& t : threads_) t.join();
+    pool_->cv.notify_all();
+    for (auto& t : pool_->threads) t.join();
     curl_global_cleanup();
 }
 
 void SessionAuth::verify(std::string username, std::string server_hash, std::function<void(AuthResult&&)> done) {
     {
-        std::lock_guard<std::mutex> lk(mu_);
-        jobs_.push_back({std::move(username), std::move(server_hash), std::move(done)});
+        std::lock_guard<std::mutex> lk(pool_->mu);
+        pool_->jobs.push_back({std::move(username), std::move(server_hash), std::move(done)});
     }
-    cv_.notify_one();
+    pool_->cv.notify_one();
 }
 
-void SessionAuth::worker() {
+void SessionAuth::Pool::worker() {
     CURL* curl = curl_easy_init();  // reused: keeps the TLS connection to the session server warm
     for (;;) {
         Job job;
         {
-            std::unique_lock<std::mutex> lk(mu_);
-            cv_.wait(lk, [this] { return stop_ || !jobs_.empty(); });
-            if (stop_) break;
-            job = std::move(jobs_.front());
-            jobs_.pop_front();
+            std::unique_lock<std::mutex> lk(mu);
+            cv.wait(lk, [this] { return stop || !jobs.empty(); });
+            if (stop) break;
+            job = std::move(jobs.front());
+            jobs.pop_front();
         }
         AuthResult res;
         std::string body;
         char* esc = curl_easy_escape(curl, job.username.c_str(), static_cast<int>(job.username.size()));
-        const std::string url = base_url_ + "/session/minecraft/hasJoined?username=" + (esc ? esc : "") + "&serverId=" + job.hash;
+        const std::string url = base_url + "/session/minecraft/hasJoined?username=" + (esc ? esc : "") + "&serverId=" + job.hash;
         curl_free(esc);
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, on_body);

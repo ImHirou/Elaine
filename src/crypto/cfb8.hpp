@@ -9,7 +9,7 @@
 //     the AES unit's pipeline. This is what the tick flush uses.
 #pragma once
 
-#include <immintrin.h>
+#include <emmintrin.h>  // __m128i; the AES-NI intrinsics are cfb8.cpp's (<immintrin.h> is 0.7 s a file)
 
 #include <span>
 
