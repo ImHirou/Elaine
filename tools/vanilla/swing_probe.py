@@ -49,6 +49,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests" / "integrat
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mcproto as mc  # noqa: E402
 from inventory_probe import Actor  # noqa: E402
+from pace import TICK, ticks  # noqa: E402
+from pace import ticks as pace_ticks  # noqa: E402  (where a parameter is called ticks)
 from mcproto import varint  # noqa: E402
 
 ARM = {"swing_animation", "entity_event", "animate", "hurt_animation", "damage_event", "set_equipment"}
@@ -94,14 +96,14 @@ def record(port: int, out_path: str, name_a: str, name_b: str) -> None:
     steps: list[dict] = []
     a = Hands(port, name_a)
     a.join()
-    a.pump(1.5)
+    a.pump(ticks(30))
     a.c.send("player_loaded")
     a.tick_end()
-    a.pump(0.5)
+    a.pump(ticks(10))
     b = Hands(port, name_b)
 
     def step(name: str, actions=None, ticks: int = 8, b_alive: bool = True):
-        """`actions`: what B does at the start of which client tick (50 ms each) - one callable for
+        """`actions`: what B does at the start of which client tick - one callable for
         tick 0, or {tick: callable}. Then log what arrived."""
         if callable(actions):
             actions = {0: actions}
@@ -115,16 +117,16 @@ def record(port: int, out_path: str, name_a: str, name_b: str) -> None:
                 b.tick_end()
                 b.pump(0.001)
             a.pump(0.001)
-            time.sleep(max(0.0, t0 + (i + 1) * 0.05 - time.time()))
-        a.pump(0.15)
+            time.sleep(max(0.0, t0 + (i + 1) * TICK - time.time()))
+        a.pump(pace_ticks(3))
         if b_alive:
-            b.pump(0.05)
+            b.pump(pace_ticks(1))
         steps.append({"step": name, "A": a.log[mark_a:], "B": b.log[mark_b:]})
         print(f"{name}: A {len(a.log) - mark_a}, B {len(b.log) - mark_b} packets")
 
     def join_b():
         b.join()
-        b.pump(1.5)
+        b.pump(ticks(30))
         b.c.send("player_loaded")
 
     def stand_apart():
@@ -135,7 +137,7 @@ def record(port: int, out_path: str, name_a: str, name_b: str) -> None:
                 break
             b.move(dx=max(-2.0, min(2.0, dx)), dz=max(-2.0, min(2.0, dz)))
             b.tick_end()
-            b.pump(0.05)
+            b.pump(ticks(1))
             a.pump(0.001)
 
     def ground(dx: int, dz: int) -> tuple:

@@ -57,6 +57,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests" / "integrat
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mcproto as mc  # noqa: E402
 from inventory_probe import Actor, PICKUP, QUICK_MOVE  # noqa: E402
+from pace import TICK, ticks  # noqa: E402
+from pace import ticks as pace_ticks  # noqa: E402  (where a parameter is called ticks)
 from mcproto import ITEM, varint  # noqa: E402
 
 MENU = {"container_set_content", "container_set_slot", "set_cursor_item", "set_player_inventory", "container_close",
@@ -99,7 +101,7 @@ class Prober(Actor):
         body = varint(self.window) + varint(self.state_id) + struct.pack(">hb", slot, button) + varint(kind) + varint(0)
         self.c.send("container_click", body + mc.hashed_stack(None))
         self.tick_end()
-        self.pump(0.12)
+        self.pump(ticks(2.4))
 
     def close(self) -> None:
         self.c.send("container_close", varint(self.window))
@@ -111,10 +113,10 @@ def record(port: int, out_path: str, name_a: str, name_b: str) -> None:
     a, b = Prober(port, name_a), Prober(port, name_b)
     for bot in (a, b):
         bot.join()
-        bot.pump(1.5)
+        bot.pump(ticks(30))
         bot.c.send("player_loaded")
         bot.tick_end()
-        bot.pump(0.5)
+        bot.pump(ticks(10))
 
     def step(name: str, action=None, ticks: int = 6):
         t0 = time.time()
@@ -125,9 +127,9 @@ def record(port: int, out_path: str, name_a: str, name_b: str) -> None:
             for bot in (b, a):
                 bot.tick_end()
                 bot.pump(0.001)
-            time.sleep(max(0.0, t0 + (i + 1) * 0.05 - time.time()))
-        a.pump(0.15)
-        b.pump(0.05)
+            time.sleep(max(0.0, t0 + (i + 1) * TICK - time.time()))
+        a.pump(pace_ticks(3))
+        b.pump(pace_ticks(1))
         steps.append({"step": name, "A": a.log[mark_a:], "B": b.log[mark_b:]})
         print(f"{name}: A {len(a.log) - mark_a}, B {len(b.log) - mark_b} packets")
 
@@ -139,7 +141,7 @@ def record(port: int, out_path: str, name_a: str, name_b: str) -> None:
             bot.move(dx=max(-2.0, min(2.0, dx)), dz=max(-2.0, min(2.0, dz)))
             for other in (a, b):
                 other.tick_end()
-                other.pump(0.03)
+                other.pump(ticks(0.6))
 
     # A spot of its own for every pair of names, in the chunk the bots spawned in or the next.
     spot = zlib.crc32((name_a + name_b).encode()) % 49

@@ -63,6 +63,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests" / "integrat
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mcproto as mc  # noqa: E402
 from inventory_probe import Actor  # noqa: E402
+from pace import TICK, ticks  # noqa: E402
+from pace import ticks as pace_ticks  # noqa: E402  (where a parameter is called ticks)
 
 LOGGED = {"system_chat", "player_chat", "disguised_chat", "set_time", "command_suggestions", "block_update", "section_blocks_update", "player_position", "sound", "stop_sound", "add_entity",
           "remove_entities", "entity_event", "commands", "disconnect", "set_entity_data", "container_set_slot",
@@ -125,10 +127,10 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str | No
     a, b = Prober(port, name_a), Prober(port, name_b)
     for bot in (a, b):
         bot.join()
-        bot.pump(1.5)
+        bot.pump(ticks(30))
         bot.c.send("player_loaded")
         bot.tick_end()
-        bot.pump(0.5)
+        bot.pump(ticks(10))
 
 
     gone = set()   # the bots that were thrown out (B, at the end)
@@ -150,7 +152,7 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str | No
             print(f">>> type on the server's console now:  {line}")
         for _ in range(1 if console else 8):
             for bot in (a, b):
-                pump(bot, 0.5)
+                pump(bot, ticks(10))
 
     def step(name: str, action=None, ticks: int = 5):
         """Does `action` and takes what the bots are sent for it. A step lasts `ticks` ticks at
@@ -167,14 +169,14 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str | No
                 action()
             for bot in (a, b):
                 pump(bot, 0.001)
-            time.sleep(max(0.0, t0 + (i + 1) * 0.05 - time.time()))
+            time.sleep(max(0.0, t0 + (i + 1) * TICK - time.time()))
             now = len(a.log) - mark_a + len(b.log) - mark_b
             quiet = quiet + 1 if now == seen else 0
             seen = now
             if ticks == 5 and seen and quiet >= 2:
                 break
-        pump(a, 0.03)
-        pump(b, 0.01)
+        pump(a, pace_ticks(0.6))
+        pump(b, pace_ticks(0.2))
         steps.append({"step": name, "A": a.log[mark_a:], "B": b.log[mark_b:]})
         print(f"{name}: A {len(a.log) - mark_a}, B {len(b.log) - mark_b} packets")
 
@@ -640,15 +642,15 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str | No
         mark_a, mark_b = len(a.log), len(b.log)
         c = Prober(port, name_c)
         c.join()
-        c.pump(1.0)
+        c.pump(ticks(20))
         for bot in (a, b):
-            pump(bot, 0.3)
+            pump(bot, ticks(6))
         c.chat("just passing")
-        c.pump(0.5)
+        c.pump(ticks(10))
         c.c.close()
         for _ in range(4):
             for bot in (a, b):
-                pump(bot, 0.25)
+                pump(bot, ticks(5))
         steps.append({"step": "C joins, says something and leaves", "A": a.log[mark_a:], "B": b.log[mark_b:], "C": c.log})
 
     section("time")

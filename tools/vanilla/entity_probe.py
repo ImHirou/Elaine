@@ -38,7 +38,10 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests" / "integration"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mcproto as mc  # noqa: E402
+import pace  # noqa: E402
+from pace import TICK, ticks  # noqa: E402
 from mcproto import varint  # noqa: E402
 
 ENTITY = {"bundle_delimiter", "add_entity", "set_entity_data", "update_attributes", "set_equipment", "move_entity_pos",
@@ -141,14 +144,15 @@ def record(port: int, out_path: str, name_a: str, name_b: str) -> None:
     steps: list[dict] = []
     a = Bot(port, name_a)
     a.join()
-    a.pump(1.5)
+    a.pump(ticks(30))
     a.c.send("player_loaded")
     a.tick_end()
-    a.pump(0.5)
+    a.pump(ticks(10))
     b = Bot(port, name_b)
 
-    def step(name: str, actions, ticks: int = 1, settle: float = 0.25, bots=()):
-        """Run actions(i) once per 50 ms, then log what A (and `bots`) received meanwhile."""
+    def step(name: str, actions, ticks: int = 1, settle: float = 5, bots=()):
+        """Run actions(i) once a tick, then log what A (and `bots`) received meanwhile and in
+        `settle` ticks more."""
         t0 = time.time()
         got_a, got_other = [], {"B": []}
         for i in range(ticks):
@@ -156,16 +160,16 @@ def record(port: int, out_path: str, name_a: str, name_b: str) -> None:
             got_a += a.pump(0.001)
             for bot in bots:
                 got_other["B"] += bot.pump(0.001)
-            time.sleep(max(0.0, t0 + (i + 1) * 0.05 - time.time()))
-        got_a += a.pump(settle)
+            time.sleep(max(0.0, t0 + (i + 1) * TICK - time.time()))
+        got_a += a.pump(pace.ticks(settle))
         for bot in bots:
-            got_other["B"] += bot.pump(0.05)
+            got_other["B"] += bot.pump(pace.ticks(1))
         steps.append({"step": name, "A": got_a, **got_other})
         print(f"{name}: A got {len(got_a)} packets, {sum(1 for n, _ in got_a if n in ENTITY)} about entities")
 
     def join_b(_):
         b.join()
-        b.pump(1.5)
+        b.pump(ticks(30))
         b.c.send("player_loaded")
         b.tick_end()
 
@@ -180,7 +184,7 @@ def record(port: int, out_path: str, name_a: str, name_b: str) -> None:
             b.c.send("client_information", mc.mc_str("en_us") + struct.pack(">b", 10) + varint(0) + b"\x01" + b"\x7e" + varint(0) +
                      b"\x00\x01" + varint(0))
 
-    step("B joins", join_b, settle=1.0, bots=[b])
+    step("B joins", join_b, settle=20, bots=[b])
     step("B walks +x, 0.25 a tick, 8 ticks", tick(lambda i: b.move(dx=0.25)), ticks=8, bots=[b])
     step("B turns only, 6 ticks", tick(lambda i: b.look(10.0 * (i + 1), 5.0 * (i + 1))), ticks=6, bots=[b])
     step("B walks and turns, 6 ticks", tick(lambda i: b.move_rot(0.0, 0.25, 90.0 + 15.0 * i, -20.0)), ticks=6, bots=[b])
@@ -197,7 +201,7 @@ def record(port: int, out_path: str, name_a: str, name_b: str) -> None:
     step("B walks back, 4 a tick, 15 ticks", tick(lambda i: b.move(dx=-4.0)), ticks=15, bots=[b])
     step("A turns", lambda i: (a.look(45.0, 0.0), a.tick_end()), ticks=2, bots=[b])
     step("B changes options: cape off, left-handed", tick(options), ticks=4, bots=[b])
-    step("B disconnects", lambda i: b.c.close(), ticks=1, settle=1.0)
+    step("B disconnects", lambda i: b.c.close(), ticks=1, settle=20)
 
     with open(out_path, "w") as f:
         json.dump({"ids": {"A": a.entity_id, "B": b.entity_id}, "steps": steps}, f, indent=1)

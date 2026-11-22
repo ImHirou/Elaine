@@ -49,6 +49,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests" / "integrat
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mcproto as mc  # noqa: E402
 from entity_probe import Bot  # noqa: E402
+from pace import TICK, ticks  # noqa: E402
+from pace import ticks as pace_ticks  # noqa: E402  (where a parameter is called ticks)
 from mcproto import ITEM, varint  # noqa: E402
 
 MENU = {"container_set_content", "container_set_slot", "set_cursor_item", "set_player_inventory", "set_held_slot",
@@ -135,7 +137,7 @@ class Actor(Bot):
         body += varint(len(changed)) + b"".join(struct.pack(">h", s) + mc.hashed_stack(v) for s, v in changed.items())
         self.c.send("container_click", body + mc.hashed_stack(carried))
         self.tick_end()
-        self.pump(0.12)
+        self.pump(ticks(2.4))
 
     def drag(self, kind: int, slots: list[int]) -> None:
         self.click(OUTSIDE, 0 | kind << 2, QUICK_CRAFT)
@@ -148,14 +150,14 @@ def record(port: int, out_path: str, name_a: str, name_b: str) -> None:
     steps: list[dict] = []
     a = Actor(port, name_a)
     a.join()
-    a.pump(1.5)
+    a.pump(ticks(30))
     a.c.send("player_loaded")
     a.tick_end()
-    a.pump(0.5)
+    a.pump(ticks(10))
     b = Actor(port, name_b)
 
     def step(name: str, action=None, ticks: int = 6, b_alive: bool = True):
-        """Run `action` in the first of `ticks` client ticks (50 ms each), then log what arrived."""
+        """Run `action` in the first of `ticks` client ticks, then log what arrived."""
         t0 = time.time()
         mark_a, mark_b = len(a.log), len(b.log)
         for i in range(ticks):
@@ -165,16 +167,16 @@ def record(port: int, out_path: str, name_a: str, name_b: str) -> None:
                 b.tick_end()
                 b.pump(0.001)
             a.pump(0.001)
-            time.sleep(max(0.0, t0 + (i + 1) * 0.05 - time.time()))
-        a.pump(0.15)
+            time.sleep(max(0.0, t0 + (i + 1) * TICK - time.time()))
+        a.pump(pace_ticks(3))
         if b_alive:
-            b.pump(0.05)
+            b.pump(pace_ticks(1))
         steps.append({"step": name, "A": a.log[mark_a:], "B": b.log[mark_b:]})
         print(f"{name}: A {len(a.log) - mark_a}, B {len(b.log) - mark_b} packets")
 
     def join_b():
         b.join()
-        b.pump(1.5)
+        b.pump(ticks(30))
         b.c.send("player_loaded")
 
     def stand_apart():
@@ -187,7 +189,7 @@ def record(port: int, out_path: str, name_a: str, name_b: str) -> None:
                 break
             b.move(dx=max(-2.0, min(2.0, dx)), dz=max(-2.0, min(2.0, dz)))
             b.tick_end()
-            b.pump(0.05)
+            b.pump(ticks(1))
             a.pump(0.001)
 
     step("B joins", join_b, ticks=20)

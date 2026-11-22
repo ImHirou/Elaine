@@ -56,6 +56,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests" / "integrat
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mcproto as mc  # noqa: E402
 from inventory_probe import Actor  # noqa: E402
+from pace import ticks  # noqa: E402
 from mcproto import Byte, Double, Float, IntArray, Long, LongArray, Short, nbt, varint  # noqa: E402
 
 PIG, CHEST = mc.ENTITY_TYPE["kPig"], 1   # an entity type; a block entity type (any that exists)
@@ -517,10 +518,10 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str | No
     a = Actor(port, name_a)
     a.logged = Actor.logged | {"system_chat"}
     a.join()
-    a.pump(1.5)
+    a.pump(ticks(30))
     a.c.send("player_loaded")
     a.tick_end()
-    a.pump(0.5)
+    a.pump(ticks(10))
 
     joined = 0
 
@@ -532,15 +533,15 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str | No
         b.join()
         # B is there when A is shown it - and it comes back some eighty times, once for every
         # stack it is thrown out for: waiting a fixed while each time was most of a recording.
-        end = time.time() + 3.0
+        end = time.time() + ticks(60)
         while time.time() < end and not any(kind == "add_entity" for kind, _ in a.log[mark:]):
-            b.pump(0.03)
-            a.pump(0.03)
+            b.pump(ticks(0.6))
+            a.pump(ticks(0.6))
         b.c.send("player_loaded")
         b.tick_end()
         for _ in range(3):
-            b.pump(0.05)
-            a.pump(0.05)
+            b.pump(ticks(1))
+            a.pump(ticks(1))
         return b
 
     def shown(since: int, eid: int) -> str | None:
@@ -554,7 +555,7 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str | No
     def on_console(line: str) -> None:
         with open(console, "w") as f:
             f.write(line + "\n")
-        a.pump(0.5)
+        a.pump(ticks(10))
 
     def asked(holder: str) -> str:
         """What `/data get` shows of the components of the stack in `holder`'s hand - or the
@@ -563,7 +564,7 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str | No
         a.c.send("chat_command", mc.mc_str(f"data get entity {holder} SelectedItem.components"))
         for _ in range(8):
             a.tick_end()
-            a.pump(0.05)
+            a.pump(ticks(1))
             for kind, data in a.log[mark:]:
                 if kind == "system_chat":
                     said = mc.Reader(bytes.fromhex(data)).nbt()
@@ -589,19 +590,19 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str | No
             # sent back, a kick - ends the wait, and only a stack that changes nothing takes all.
             for _ in range(5):
                 b.tick_end()
-                b.pump(0.04)
-                a.pump(0.02)
+                b.pump(ticks(0.8))
+                a.pump(ticks(0.4))
                 if shown(mark_a, b.entity_id) is not None or any(kind in ("container_set_slot", "disconnect") for kind, _ in b.log[mark_b:]):
                     break
         except (OSError, EOFError, AssertionError, struct.error):
             kicked = True
         kicked = kicked or any(kind == "disconnect" for kind, _ in b.log[mark_b:])
-        a.pump(0.05)
+        a.pump(ticks(1))
         result = {"case": label, "component": component, "sent": value.hex()}
         if kicked:
             result["kicked"] = True
             b.c.close()
-            a.pump(0.1)
+            a.pump(ticks(2))
             b = join_b()
         else:
             result["stack"] = shown(mark_a, b.entity_id)

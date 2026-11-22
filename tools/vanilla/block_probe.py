@@ -88,6 +88,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mcproto as mc  # noqa: E402
 from container_probe import Prober  # noqa: E402
 from world_probe import PORT, SERVER_DIR, Vanilla  # noqa: E402
+import pace  # noqa: E402
+from pace import TICK  # noqa: E402
 
 PROBE_WORLD = "block-probe"     # in .cache/vanilla-server/: this probe's, removed and made anew by `vanilla`
 RANDOM_TICK_SPEED = 4096        # every cell of a section, on average, once a tick
@@ -119,10 +121,10 @@ def record(port: int, out_path: str, name_a: str, name_b: str, random_ticks=None
     a, b = Watcher(port, name_a), Watcher(port, name_b)
     for bot in (a, b):
         bot.join()
-        bot.pump(1.5)
+        bot.pump(pace.ticks(30))
         bot.c.send("player_loaded")
         bot.tick_end()
-        bot.pump(0.5)
+        bot.pump(pace.ticks(10))
 
     def step(name: str, action=None, ticks: int = 8, until=None, about=None, loose=False):
         """`until(blocks)`: go on (at most `ticks`) until the block changes B has seen in this
@@ -135,17 +137,17 @@ def record(port: int, out_path: str, name_a: str, name_b: str, random_ticks=None
                 action()
             for bot in (b, a):
                 bot.tick_end()
-            end = t0 + (i + 1) * 0.05
+            end = t0 + (i + 1) * TICK
             while time.time() < end:    # short turns: a packet is stamped within a few ms of its arrival
                 for bot in (b, a):
-                    bot.pump(0.003)
+                    bot.pump(min(0.003, TICK / 10))
             if until and until(_blocks(b.log[mark_b:])):
                 break
         else:
             if until:
                 print(f"!! {name}: it did not happen within {ticks} ticks")
         for bot in (a, b):
-            bot.pump(0.02)
+            bot.pump(pace.ticks(0.4))
         steps.append({"step": name, "about": [list(p) for p in about] if about is not None else None, "loose": loose,
                       "A": [(n, d, round((t - t0) * 1000)) for (n, d), t in zip(a.log[mark_a:], a.stamps[mark_a:])],
                       "B": [(n, d, round((t - t0) * 1000)) for (n, d), t in zip(b.log[mark_b:], b.stamps[mark_b:])]})
@@ -159,13 +161,13 @@ def record(port: int, out_path: str, name_a: str, name_b: str, random_ticks=None
             bot.move(dx=max(-2.0, min(2.0, dx)), dz=max(-2.0, min(2.0, dz)))
             for other in (a, b):
                 other.tick_end()
-                other.pump(0.03)
+                other.pump(pace.ticks(0.6))
 
     def idle(ticks: int) -> None:
         for _ in range(ticks):
             for bot in (a, b):
                 bot.tick_end()
-                bot.pump(0.025)
+                bot.pump(pace.ticks(0.5))
 
     # A spot of its own for every pair of names, in the chunk the bots spawned in or the next.
     spot = zlib.crc32((name_a + name_b).encode()) % 16
@@ -484,7 +486,8 @@ def record(port: int, out_path: str, name_a: str, name_b: str, random_ticks=None
 
     for bot in (a, b):
         bot.c.close()
-    Path(out_path).write_text(json.dumps({"origin": origin, "ids": {"A": a.entity_id, "B": b.entity_id}, "steps": steps}))
+    Path(out_path).write_text(json.dumps({"origin": origin, "ids": {"A": a.entity_id, "B": b.entity_id}, "tick_ms": TICK * 1000,
+                                          "steps": steps}))
     print(f"wrote {out_path}")
 
 
@@ -512,6 +515,7 @@ OF_BLOCKS = {"block", "level_event", "add_transient_block", "sound", "blocks in 
 
 def _normalise(rec: dict, who: str) -> dict[str, list]:
     origin = rec["origin"]
+    tick_ms = rec.get("tick_ms", 50.0)     # (a recording of before there was --tick-rate: vanilla's 50)
     kinds: dict[int, str] = {}     # entity id -> "tnt1", "falling2"
     counts = {"tnt": 0, "item": 0, "falling": 0}
     dropped: dict[int, tuple] = {}  # item entity -> the stack it was dropped as
@@ -534,7 +538,7 @@ def _normalise(rec: dict, who: str) -> dict[str, list]:
                 return
             if first is None:
                 first = ms
-            rows.append((kind, f"+{round((ms - first) / 50)}t {text}", *chunk))
+            rows.append((kind, f"+{round((ms - first) / tick_ms)}t {text}", *chunk))
 
         about = None if st.get("about") is None else {tuple(p) for p in st["about"]}
         if st.get("loose"):
@@ -717,6 +721,9 @@ def record_vanilla(out: str, name_a: str, name_b: str) -> None:
         v.until(r"Done \(")
         v.cmd("gamerule minecraft:spawn_mobs false")     # (kept in this probe's world, which is made anew)
         v.until(r"Game rule \S*spawn_mobs is now set to", timeout=20)
+        if pace.RATE != 20:
+            v.cmd(f"tick rate {pace.RATE:g}")
+            v.until(r"Set the target tick rate", timeout=20)
         record(PORT, out, name_a, name_b, rule, v.cmd)
     finally:
         v.stop()
@@ -729,7 +736,7 @@ def record_ours(exe: str, out: str, name_a: str, name_b: str) -> None:
     tmp = Path(tempfile.mkdtemp(prefix="block-probe-"))
     log = open(tmp / "server.log", "w")
     proc = subprocess.Popen([exe, "--server-ip=127.0.0.1", f"--server-port={port}", "--online-mode=false", "--view-distance=2",
-                             "--simulation-distance=2", f"--random-tick-speed={RANDOM_TICK_SPEED}", "--config=/nonexistent",
+                             "--simulation-distance=2", f"--random-tick-speed={RANDOM_TICK_SPEED}", "--config=/nonexistent", f"--tick-rate={pace.RATE:g}",
                              "--level-name=", f"--ops-file={tmp / 'ops.json'}"], stdin=subprocess.PIPE, stdout=log, stderr=log)
     try:
         end = time.time() + 30
