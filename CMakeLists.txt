@@ -184,6 +184,7 @@ add_library(core STATIC
   src/server/command.cpp
   src/server/command_args.cpp
   src/server/commands.cpp
+  src/server/entity_tags.cpp
   src/server/saved_tags.cpp
   src/server/signs.cpp
   src/server/console.cpp

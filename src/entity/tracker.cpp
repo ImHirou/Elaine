@@ -28,7 +28,8 @@ constexpr double kMotionTolerance = 1.0E-7;
 constexpr float kPlayerHealth = 20.0f;
 // The fixed-size values (the longest set is a player's six; a falling block's position fits in two of them); an
 // item stack comes on top.
-constexpr usize kDataEntriesMax = 6 * cb::kEntityDataEntryMax;
+// (An armor stand that was posed has the most: three of Entity's, its flags, six rotations of 14 bytes.)
+constexpr usize kDataEntriesMax = 8 * cb::kEntityDataEntryMax + 6 * 14;
 constexpr i32 kDefaultFuse = 80;  // PrimedTnt.defineSynchedData: DATA_FUSE_ID starts at DEFAULT_FUSE_TIME
 
 constexpr u32 bit_of(u32 accessor) { return 1u << accessor; }
@@ -225,6 +226,19 @@ u32 Tracker::non_default(u32 e) const {
     if (s_.shared_flags[e]) mask |= bit_of(ed::entity::kSharedFlags);
     if (s_.flags[e] & flag::kNoGravity) mask |= bit_of(ed::entity::kNoGravity);
     if (s_.pose[e] != pose::kStanding) mask |= bit_of(ed::entity::kPose);
+    if (const Cold* c = s_.cold(e); UNLIKELY(c != nullptr)) {  // what a tag said of it
+        if (!c->name.empty()) mask |= bit_of(ed::entity::kCustomName);
+        if (c->bits & cold::kNameVisible) mask |= bit_of(ed::entity::kCustomNameVisible);
+        if (c->bits & cold::kSilent) mask |= bit_of(ed::entity::kSilent);
+        if (c->ticks_frozen) mask |= bit_of(ed::entity::kTicksFrozen);
+        if (s_.type[e] == entity_type::kArmorStand) {
+            if (c->bits & (cold::kShowArms | cold::kNoBasePlate | cold::kMarker)) mask |= bit_of(ed::armor_stand::kClientFlags);
+            for (u32 i = 0; i < 6; ++i)
+                if (c->posed & (1u << i)) mask |= bit_of(ed::armor_stand::kHeadPose + i);
+        } else if (entity_type::kInfo[s_.type[e]].mob && (c->bits & (cold::kNoAi | cold::kLeftHanded))) {
+            mask |= bit_of(ed::mob::kMobFlags);
+        }
+    }
     if (e < s_.players()) {
         mask |= bit_of(ed::living_entity::kHealth);
         if (s_.main_hand[e] != kMainHandRight) mask |= bit_of(ed::avatar::kPlayerMainHand);
@@ -242,10 +256,37 @@ u32 Tracker::non_default(u32 e) const {
 // Entries in accessor order, as SynchedEntityData walks its items. Accessor ids continue down
 // the class hierarchy, so the ids past Entity's own mean different things for different types.
 u8* Tracker::put_data(u8* p, u32 e, u32 mask) const {
+    const Cold* const c = s_.cold(e);
     if (mask & bit_of(ed::entity::kSharedFlags)) p = cb::put_entity_byte(p, ed::entity::kSharedFlags, s_.shared_flags[e]);
+    if (UNLIKELY(c != nullptr)) {
+        if (mask & bit_of(ed::entity::kCustomName)) p = cb::put_entity_optional_component(p, ed::entity::kCustomName, c->name);
+        if (mask & bit_of(ed::entity::kCustomNameVisible))
+            p = cb::put_entity_bool(p, ed::entity::kCustomNameVisible, (c->bits & cold::kNameVisible) != 0);
+        if (mask & bit_of(ed::entity::kSilent)) p = cb::put_entity_bool(p, ed::entity::kSilent, (c->bits & cold::kSilent) != 0);
+    }
     if (mask & bit_of(ed::entity::kNoGravity))
         p = cb::put_entity_bool(p, ed::entity::kNoGravity, (s_.flags[e] & flag::kNoGravity) != 0);
     if (mask & bit_of(ed::entity::kPose)) p = cb::put_entity_varint(p, ed::entity::kPose, ed::serializer::kPose, s_.pose[e]);
+    if (UNLIKELY(c != nullptr)) {
+        if (mask & bit_of(ed::entity::kTicksFrozen))
+            p = cb::put_entity_varint(p, ed::entity::kTicksFrozen, ed::serializer::kInt, static_cast<u32>(c->ticks_frozen));
+        if (s_.type[e] == entity_type::kArmorStand) {  // ArmorStand.DATA_CLIENT_FLAGS: 4 arms, 8 no base plate, 16 marker
+            if (mask & bit_of(ed::armor_stand::kClientFlags))
+                p = cb::put_entity_byte(
+                    p, ed::armor_stand::kClientFlags,
+                    static_cast<u8>(((c->bits & cold::kShowArms) ? 4 : 0) | ((c->bits & cold::kNoBasePlate) ? 8 : 0) |
+                                    ((c->bits & cold::kMarker) ? 16 : 0)));
+            for (u32 i = 0; i < 6; ++i)
+                if (mask & bit_of(ed::armor_stand::kHeadPose + i))
+                    p = cb::put_entity_rotations(p, ed::armor_stand::kHeadPose + i, c->pose[i]);
+            return p;
+        }
+        if (mask & bit_of(ed::mob::kMobFlags) && e >= s_.players() &&
+            entity_type::kInfo[s_.type[e]].mob)  // 1 NoAI, 2 left-handed
+            return cb::put_entity_byte(
+                p, ed::mob::kMobFlags,
+                static_cast<u8>(((c->bits & cold::kNoAi) ? 1 : 0) | ((c->bits & cold::kLeftHanded) ? 2 : 0)));
+    }
     if (s_.type[e] == entity_type::kItem) {
         if (mask & bit_of(ed::item_entity::kItem)) p = cb::put_entity_item(p, ed::item_entity::kItem, item::view(s_.item[e]));
         return p;
@@ -270,7 +311,8 @@ u8* Tracker::put_data(u8* p, u32 e, u32 mask) const {
 
 void Tracker::write_data(u32 e, u32 mask, base::ByteBuf& to) {
     data_.clear();
-    u8* entries = data_.reserve(kDataEntriesMax + 2 + item_bound(item::view(s_.item[e])));
+    const Cold* const c = s_.cold(e);
+    u8* entries = data_.reserve(kDataEntriesMax + 2 + item_bound(item::view(s_.item[e])) + (c ? c->name.size() + 4 : 0));
     const u8* end = put_data(entries, e, mask);
     write_packet(to, threshold_, cb::SetEntityData{s_.net_id(e), {entries, static_cast<usize>(end - entries)}});
 }

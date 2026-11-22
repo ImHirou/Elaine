@@ -92,6 +92,11 @@ void Store::destroy(u32 ei, Moves& moved) {
     moved.n = 0;
     const u32 s = slot[ei];
     slot_dense_[s] = kNone;
+    if (s < cold_of_slot_.size() && cold_of_slot_[s]) {  // what a tag said of it goes with it
+        cold_[cold_of_slot_[s] - 1] = {};
+        cold_free_.push_back(cold_of_slot_[s]);
+        cold_of_slot_[s] = 0;
+    }
     slot_gen_[s] = (slot_gen_[s] + 1) & kGenMask;
     if (slot_gen_[s] == 0) slot_gen_[s] = 1;
     free_slots_.push_back(s);
@@ -105,6 +110,21 @@ void Store::destroy(u32 ei, Moves& moved) {
     const u32 last = --n_;
     if (hole != last) move_row(last, hole, moved);
     clear_row(last);
+}
+
+Cold& Store::make_cold(u32 ei) {
+    const u32 s = slot[ei];
+    if (s >= cold_of_slot_.size()) cold_of_slot_.resize(s + 1, 0);
+    if (!cold_of_slot_[s]) {
+        if (!cold_free_.empty()) {
+            cold_of_slot_[s] = cold_free_.back();
+            cold_free_.pop_back();
+        } else {
+            cold_.emplace_back();
+            cold_of_slot_[s] = static_cast<u32>(cold_.size());
+        }
+    }
+    return cold_[cold_of_slot_[s] - 1];
 }
 
 }  // namespace entity

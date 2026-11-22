@@ -1241,6 +1241,10 @@ def read_entity_data(r: Reader) -> dict[int, tuple]:
             value = r.varint()
         elif ser == SERIALIZER["kItemStack"]:
             value = read_item(r)
+        elif ser == SERIALIZER["kOptionalComponent"]:   # whether there is one, then the text component as a tag
+            value = r.nbt() if r.bool() else None
+        elif ser == SERIALIZER["kRotations"]:           # three floats: degrees about x, y, z
+            value = (r.f32(), r.f32(), r.f32())
         elif ser == SERIALIZER["kBlockPos"]:
             value = unpack_block_pos(r.u64())
         else:

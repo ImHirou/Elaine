@@ -736,6 +736,17 @@ ALWAYS_INLINE u8* put_entity_bool(u8* p, u32 accessor, bool v) {
     return p + 3;
 }
 // BLOCK_POS: `packed` is the position as pack_block_pos has it.
+// OPTIONAL_COMPONENT: whether there is one, and the text component as a tag (a custom name).
+ALWAYS_INLINE u8* put_entity_optional_component(u8* p, u32 accessor, std::span<const u8> tag) {
+    p = put_u8(put_u8(p, static_cast<u8>(accessor)), static_cast<u8>(entity_data::serializer::kOptionalComponent));
+    p = put_u8(p, !tag.empty());
+    return tag.empty() ? p : put_bytes(p, tag.data(), tag.size());
+}
+// ROTATIONS: three floats, degrees about x, y and z (an armor stand's pose).
+ALWAYS_INLINE u8* put_entity_rotations(u8* p, u32 accessor, const float* xyz) {
+    p = put_u8(put_u8(p, static_cast<u8>(accessor)), static_cast<u8>(entity_data::serializer::kRotations));
+    return put_f32(put_f32(put_f32(p, xyz[0]), xyz[1]), xyz[2]);
+}
 ALWAYS_INLINE u8* put_entity_block_pos(u8* p, u32 accessor, u64 packed) {
     p[0] = static_cast<u8>(accessor);
     p[1] = static_cast<u8>(entity_data::serializer::kBlockPos);

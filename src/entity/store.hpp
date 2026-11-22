@@ -25,6 +25,7 @@
 // Tick thread only.
 #pragma once
 
+#include <string>
 #include <vector>
 
 #include "base/types.hpp"
@@ -79,6 +80,29 @@ struct Columns {
     const u32* slot;
 };
 
+// What a tag can say of an entity, and few entities are told (Entity.load and the classes below
+// it): a name, whether it is heard, an armor stand's pose. `bits` are cold::k*.
+namespace cold {
+inline constexpr u16 kNameVisible = 1, kSilent = 2, kInvulnerable = 4;                 // Entity
+inline constexpr u16 kNoAi = 8, kPersistent = 16, kLeftHanded = 32, kPickUpLoot = 64;  // Mob
+inline constexpr u16 kAgeLocked = 128;                                                 // AgeableMob
+inline constexpr u16 kShowArms = 256, kNoBasePlate = 512, kMarker = 1024;              // ArmorStand
+}  // namespace cold
+struct Cold {
+    std::vector<u8> name;                       // CustomName: a text component as a tag (type, payload); empty: none
+    std::vector<u8> data;                       // `data`: a compound of anybody's (CustomData), type and payload; empty: none
+    std::vector<std::string> tags;              // Tags (Entity.getTags)
+    float health = -1.0f;                       // LivingEntity's; below 0: its type's maximum
+    item::ItemStack worn[item::equip::kCount];  // what a mob or an armor stand holds and wears, by EquipmentSlot
+    float pose[6][3] = {};        // an armor stand's Rotations: head, body, left arm, right arm, left leg, right leg
+    i32 age = 0, forced_age = 0;  // AgeableMob
+    i32 air = 300, portal_cooldown = 0, ticks_frozen = 0;
+    i32 disabled_slots = 0;  // ArmorStand
+    i16 fire = 0;
+    u16 bits = 0;
+    u8 posed = 0;  // which of the six poses a tag set (bit = index)
+};
+
 class Store {
   public:
     // Rows that changed their dense index during a create/destroy, for whoever keeps arrays in step.
@@ -104,6 +128,14 @@ class Store {
     void destroy(u32 ei, Moves& moved);
 
     // ---- identity
+    // ---- what few entities have: a name, tags, what a tag said of them (Cold). Kept by slot,
+    // away from the columns: nothing walks it, it is read when an entity is shown or saved.
+    const Cold* cold(u32 ei) const {
+        const u32 s = slot[ei];
+        return s < cold_of_slot_.size() && cold_of_slot_[s] ? &cold_[cold_of_slot_[s] - 1] : nullptr;
+    }
+    Cold& make_cold(u32 ei);
+
     Handle handle(u32 ei) const { return (static_cast<u64>(slot_gen_[slot[ei]]) << kSlotBits) | slot[ei]; }
     // The row a handle refers to, kNone if that entity is gone.
     u32 resolve(Handle h) const {
@@ -203,6 +235,8 @@ class Store {
     std::vector<u32> slot_dense_;  // slot -> dense index, kNone while free
     std::vector<u32> slot_gen_;    // slot -> generation, bumped when the slot is freed
     std::vector<u32> free_slots_;
+    std::vector<Cold> cold_;
+    std::vector<u32> cold_of_slot_, cold_free_;  // slot -> index into cold_ + 1, 0 for none
 };
 
 }  // namespace entity

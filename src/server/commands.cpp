@@ -183,6 +183,8 @@ Text Game::display_name(u32 row) const {
         std::replace(block.begin(), block.end(), ':', '.');
         name = tr("entity.minecraft.falling_block_type").arg(tr(block));
     }
+    // Entity.getName: its custom name, if a tag gave it one.
+    if (const entity::Cold* c = ents_.cold(row); c && !c->name.empty()) name = Text::encoded(c->name);
     Text shown = name;
     return std::move(shown).hover_entity(type, uuid, std::move(name)).insertion(text::uuid_string(uuid));
 }
@@ -450,8 +452,14 @@ void Game::select(const cmd::Selector& sel, const cmd::Source& source, bool play
                     if (!is_player) return false;
                     is = t.id == kCreativeMode;
                     break;
-                // Nothing has tags or a team: an empty name asks for exactly that.
-                case cmd::Selector::Test::kTag:
+                // tag=x: it has the tag; tag=: it has none (Entity.getTags, which only a tag of NBT fills).
+                case cmd::Selector::Test::kTag: {
+                    const entity::Cold* c = ents_.cold(row);
+                    is = t.text.empty() ? !c || c->tags.empty()
+                                        : c && std::find(c->tags.begin(), c->tags.end(), t.text) != c->tags.end();
+                    break;
+                }
+                // Nothing has a team: an empty name asks for exactly that.
                 case cmd::Selector::Test::kTeam: is = t.text.empty(); break;
                 case cmd::Selector::Test::kAlive: break;  // whatever is in the table is alive
                 case cmd::Selector::Test::kNbt: {         // NbtUtils.compareNbt(tag, what the entity saves as, true)
@@ -1031,6 +1039,19 @@ struct Game::Commands {
         double at[3] = {in.source.x, in.source.y, in.source.z};
         if (const cmd::Value* pos = in.value("pos")) position(in, pos->coords, at);
         if (!spawnable(at[0], at[1], at[2])) return in.fail(tr("commands.summon.invalidPosition"));
+        nbt::Doc doc;
+        nbt::Tag tag{};
+        if (const cmd::Value* nbt_value = in.value("nbt");
+            nbt_value && doc.parse(nbt_value->tag, nbt::Form::kNameless, nbt::kTrusted) == nbt::Error::kNone)
+            tag = doc.root();
+        if (tag) {  // SummonCommand.createEntity: the entity the tag describes, here
+            if (g.ents_.size() >= entity::kMaxEntities) return in.fail(tr("commands.summon.failed"));
+            std::string why;
+            const u32 slot = g.summon(type, at[0], at[1], at[2], tag, why);
+            if (slot == kNone) return in.fail(Text::literal(why + " are not supported by this server yet"));
+            in.success(tr("commands.summon.success").arg(g.display_name(g.ents_.by_slot(slot))));
+            return 1;
+        }
         if (type == entity_type::kItem) {
             // An item entity without a stack: vanilla adds it and its first tick discards it.
             // What is left to see is the answer, naming it after the stack it does not have.
@@ -1507,7 +1528,7 @@ void Game::init_commands() {
     r.add("setblock <pos:block_pos> <block:block_state> [(destroy|keep|replace|strict)]", cmd::kGamemasters, &C::setblock);
     r.add("stopsound <targets:players> [* <sound:sound>]", cmd::kGamemasters, &C::stopsound);
     r.add("stopsound <targets:players> " + sources + " [<sound:sound>]", cmd::kGamemasters, &C::stopsound);
-    r.add("summon <entity:summonable> [<pos:vec3>]", cmd::kGamemasters, &C::summon);
+    r.add("summon <entity:summonable> [<pos:vec3> [<nbt:nbt_compound>]]", cmd::kGamemasters, &C::summon);
     r.add("teammsg <message:message>", cmd::kAll, &C::teammsg);
     r.alias("tm", "teammsg", cmd::kAll);
     r.add("teleport <location:vec3>", cmd::kGamemasters, &C::teleport_cmd);

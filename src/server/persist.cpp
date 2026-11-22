@@ -19,7 +19,7 @@
 //                      kind 4 sign:    u8 flags (1 waxed, 2 allow_op_features), its front text and its
 //                                      back text (VarInt n + n bytes each: SignText.STREAM_CODEC, n = 0
 //                                      for an empty side), then a kept tag. Of any of the four signs
-//   entities         u8 version (2; 1 is the same without kind 4), then until the end
+//   entities         u8 version (3; 2 has no tag behind a record, 1 no kind 4 either), then until the end
 //                      u8 kind, VarInt entity type, uuid, 3 doubles position, 3 doubles velocity,
 //                      float yaw, pitch, head yaw, u8 flags (1 on the ground, 2 no gravity),
 //                      double fall distance
@@ -331,6 +331,15 @@ void Game::write_entities(u64 chunk, base::ByteBuf& out) {
         } else if (type == entity_type::kTnt) {
             out.commit(put_be16(out.reserve(2), static_cast<u16>(ents_.fuse[row])));
         }
+        // What a tag said of it, as a tag (write_cold_tag): VarInt n + n bytes, n = 0 for nothing.
+        base::ByteBuf told;
+        if (ents_.cold(row) || (ents_.shared_flags[row] & ((1u << 5) | (1u << 6)))) {
+            nbt::Writer w(told);
+            w.root(nbt::kCompound);
+            write_cold_tag(row, w);
+            w.end_compound();
+        }
+        put_counted(out, {told.data, told.len});
     }
 }
 
@@ -338,7 +347,8 @@ void Game::read_entities(world::Chunk& c, std::span<const u8> bytes) {
     c.saved_entities = !bytes.empty();
     if (bytes.empty()) return;
     Reader r(bytes.data(), bytes.size());
-    if (const u8 version = r.u8v(); version != kEntitiesVersion && version != 1) {
+    const u8 version = r.u8v();
+    if (version < 1 || version > kEntitiesVersion) {
         LOG_ERROR("chunk %d, %d: its entities are of a version this server does not read", c.x, c.z);
         return;
     }
@@ -368,6 +378,7 @@ void Game::read_entities(world::Chunk& c, std::span<const u8> bytes) {
         } else if (record != kOther) {
             r.ok = false;
         }
+        const std::span<const u8> told = version >= 3 ? r.bytes(r.varint()) : std::span<const u8>{};
         if (!r.ok || type >= entity_type::kCount || ents_.size() >= entity::kMaxEntities) break;
         // Numbers that are none put an entity nowhere: such a record is passed over (Entity.load
         // refuses a position that is not finite).
@@ -410,6 +421,16 @@ void Game::read_entities(world::Chunk& c, std::span<const u8> bytes) {
             }
         }
         if (slot == kNone) continue;
+        if (!told.empty()) {  // what a tag once said of it: read as a command's tag is
+            nbt::Doc doc;
+            EntityTag tag;
+            std::string why;
+            if (doc.parse(told, nbt::Form::kNameless, nbt::kTrusted) == nbt::Error::kNone &&
+                read_entity_tag(type, doc.root(), tag, why)) {
+                tag.item = {};  // (of the tag only what is cold: the rest has its record)
+                apply_entity_tag(slot, std::move(tag));
+            }
+        }
         const u32 row = ents_.by_slot(slot);
         if (flags & kOnGround) ents_.flags[row] |= entity::flag::kOnGround;
         if (slot < movers_.size() && movers_[slot].kind != gp::kMoverNone) {

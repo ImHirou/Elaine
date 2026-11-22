@@ -498,14 +498,40 @@ Game::Saved Game::save_entity(u32 row, base::ByteBuf& out) {
     w.put_float(ents_.yaw[row]);
     w.put_float(ents_.pitch[row]);
     w.put_double("fall_distance", body ? body->fall_distance : 0.0);
-    w.put_short("Fire", is_player ? -20 : 0);  // remainingFireTicks: a player's rest at -getFireImmuneTicks()
-    w.put_short("Air", 300);
+    // What a tag said of it (entity::Cold), where it said anything.
+    const entity::Cold none{};
+    const entity::Cold* const told = ents_.cold(row);
+    const entity::Cold& c = told ? *told : none;
+    namespace cold = entity::cold;
+    w.put_short("Fire", is_player ? -20 : c.fire);  // remainingFireTicks: a player's rest at -getFireImmuneTicks()
+    w.put_short("Air", static_cast<i16>(c.air));
     w.put_byte("OnGround", (ents_.flags[row] & entity::flag::kOnGround) != 0);
-    w.put_byte("Invulnerable", 0);
-    w.put_int("PortalCooldown", 0);
+    w.put_byte("Invulnerable", (c.bits & cold::kInvulnerable) != 0);
+    w.put_int("PortalCooldown", c.portal_cooldown);
     put_uuid(w, "UUID", ents_.uuid[row]);
+    if (!c.name.empty()) w.put_raw("CustomName", static_cast<nbt::Type>(c.name[0]), {c.name.data() + 1, c.name.size() - 1});
+    if (c.bits & cold::kNameVisible) w.put_byte("CustomNameVisible", 1);
+    if (c.bits & cold::kSilent) w.put_byte("Silent", 1);
     // (What stands still because nothing here moves it has the flag too; that is not vanilla's NoGravity.)
     if ((ents_.flags[row] & entity::flag::kNoGravity) && body) w.put_byte("NoGravity", 1);
+    if (ents_.shared_flags[row] & (1u << 6)) w.put_byte("Glowing", 1);
+    if (c.ticks_frozen > 0) w.put_int("TicksFrozen", c.ticks_frozen);
+    if (!c.tags.empty()) {
+        // Entity.tags is a HashSet: they are saved in the order of its buckets, which is the
+        // order of a HashMap's keys - asked of the code that knows it (nbt::map_order).
+        base::ByteBuf keys;
+        nbt::Writer kw(keys);
+        kw.root(nbt::kCompound);
+        for (const std::string& t : c.tags) kw.put_byte(t, 1);
+        kw.end_compound();
+        nbt::Doc doc;
+        std::vector<nbt::Tag> ordered;
+        if (doc.parse({keys.data, keys.len}, nbt::Form::kNameless, nbt::kTrusted) == nbt::Error::kNone)
+            nbt::map_order(doc.root(), ordered);
+        w.begin_list("Tags", nbt::kString, static_cast<u32>(ordered.size()));
+        for (const nbt::Tag t : ordered) w.put_string_raw(t.name());
+    }
+    if (!c.data.empty()) w.put_raw("data", nbt::kCompound, {c.data.data() + 1, c.data.size() - 1});
 
     const gen::entity_type::Info& info = gen::entity_type::kInfo[type];
     const bool is_item = slot < item_of_slot_.size() && item_of_slot_[slot] != kNone;
@@ -516,7 +542,7 @@ Game::Saved Game::save_entity(u32 row, base::ByteBuf& out) {
         w.end_compound();
     };
     if (info.living) {  // ---- LivingEntity.addAdditionalSaveData
-        w.put_float("Health", info.max_health);
+        w.put_float("Health", c.health >= 0.0f ? c.health : info.max_health);
         w.put_short("HurtTime", 0);
         w.put_short("DeathTime", 0);
         w.put_float("AbsorptionAmount", 0.0f);
@@ -580,17 +606,26 @@ Game::Saved Game::save_entity(u32 row, base::ByteBuf& out) {
             for (const auto& e : kWorn)
                 if (!inv.items[e.index].empty()) stack(e.name, inv.items[e.index]);
             w.end_compound();
+        } else if (std::any_of(std::begin(c.worn), std::end(c.worn), [](const ItemStack& s) { return !s.empty(); })) {
+            // ...and anybody else's only if there is something (EquipmentSlot's names, in its order).
+            static constexpr std::string_view kSlots[] = {"mainhand", "offhand", "feet", "legs",
+                                                          "chest",    "head",    "body", "saddle"};
+            w.begin_compound("equipment");
+            for (u32 slot_i = 0; slot_i < item::equip::kCount; ++slot_i)
+                if (!c.worn[slot_i].empty()) stack(kSlots[slot_i], c.worn[slot_i]);
+            w.end_compound();
         }
     }
     if (info.mob) {  // ---- Mob
-        w.put_byte("CanPickUpLoot", 0);
-        w.put_byte("PersistenceRequired", 0);
-        w.put_byte("LeftHanded", 0);
+        w.put_byte("CanPickUpLoot", (c.bits & cold::kPickUpLoot) != 0);
+        w.put_byte("PersistenceRequired", (c.bits & cold::kPersistent) != 0);
+        w.put_byte("LeftHanded", (c.bits & cold::kLeftHanded) != 0);
+        if (c.bits & cold::kNoAi) w.put_byte("NoAI", 1);
     }
     if (info.ageable) {  // ---- AgeableMob
-        w.put_int("Age", 0);
-        w.put_int("ForcedAge", 0);
-        w.put_byte("AgeLocked", 0);
+        w.put_int("Age", c.age);
+        w.put_int("ForcedAge", c.forced_age);
+        w.put_byte("AgeLocked", (c.bits & cold::kAgeLocked) != 0);
     }
     if (is_item) {  // ---- ItemEntity
         const u32 k = item_of_slot_[slot];
@@ -615,12 +650,20 @@ Game::Saved Game::save_entity(u32 row, base::ByteBuf& out) {
         w.put_short("fuse", static_cast<i16>(ents_.fuse[row]));
         put_block_state(w, "block_state", gen::block::kTnt);
     } else if (type == gen::entity_type::kArmorStand) {  // ---- ArmorStand
-        w.put_byte("Invisible", 0);
+        w.put_byte("Invisible", (ents_.shared_flags[row] & (1u << 5)) != 0);
         w.put_byte("Small", 0);
-        w.put_byte("ShowArms", 0);
-        w.put_int("DisabledSlots", 0);
-        w.put_byte("NoBasePlate", 0);
+        w.put_byte("ShowArms", (c.bits & cold::kShowArms) != 0);
+        w.put_int("DisabledSlots", c.disabled_slots);
+        w.put_byte("NoBasePlate", (c.bits & cold::kNoBasePlate) != 0);
+        // ArmorStandPose: the rotations that are not what a stand has by itself.
+        static constexpr float kDefault[6][3] = {{0, 0, 0}, {0, 0, 0}, {-10, 0, -10}, {-15, 0, 10}, {-1, 0, -1}, {1, 0, 1}};
+        static constexpr std::string_view kPose[6] = {"Head", "Body", "LeftArm", "RightArm", "LeftLeg", "RightLeg"};
         w.begin_compound("Pose");
+        for (u32 i = 0; i < 6; ++i) {
+            if (!(c.posed & (1u << i)) || std::equal(c.pose[i], c.pose[i] + 3, kDefault[i])) continue;
+            w.begin_list(kPose[i], nbt::kFloat, 3);
+            for (const float f : c.pose[i]) w.put_float(f);
+        }
         w.end_compound();
     }
     if (is_player) {

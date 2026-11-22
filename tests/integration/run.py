@@ -5451,6 +5451,102 @@ def signs():
 
 
 @test()
+def entity_tags():
+    """An entity out of a tag: /summon with {...} - a name over a pig, whether it is heard and thinks,
+    an armor stand's pose and what it wears, an item that is something, a fuse - what clients are
+    shown of it, what it saves as, and all of it there when the server starts again. (What a vanilla
+    server makes of the same tags is compared by tools/vanilla/command_probe.py.)"""
+    world = tempfile.mkdtemp(prefix="world-entities-")
+    srv = None
+    MOB, STAND = mc._constants("entities.hpp", "mob"), mc._constants("entities.hpp", "armor_stand")
+    NAME, VISIBLE, SILENT = mc.DATA["kCustomName"], mc.DATA["kCustomNameVisible"], mc.DATA["kSilent"]
+    OPTIONAL_TEXT, BOOL, ROTATIONS = mc.SERIALIZER["kOptionalComponent"], mc.SERIALIZER["kBoolean"], mc.SERIALIZER["kRotations"]
+    try:
+        srv = Server(EXE, world=world)
+        a = srv.client()
+        join(a, "Alice", view=3)
+        a.send("player_loaded")
+        settle(a)
+        make_op(srv, a, "Alice")
+
+        def data(selector: str, path: str) -> str:
+            said = run_command(a, f"data get entity {selector} {path}")["said"]
+            assert len(said) == 1 and "with" in said[0], said
+            return shown(said[0]["with"][-1])
+
+        def looks(c: Client) -> None:
+            pig = one(of_type(c, "kPig"))
+            assert pig.data[NAME] == (OPTIONAL_TEXT, "Bob") and pig.data[VISIBLE] == (BOOL, True), pig.data
+            assert pig.data[SILENT] == (BOOL, True) and pig.data[D_FLAGS] == (BYTE, 0x40), pig.data      # glowing
+            assert pig.data[MOB["kMobFlags"]] == (BYTE, 1), pig.data                                        # NoAI
+            stand = one(of_type(c, "kArmorStand"))
+            assert stand.data[STAND["kClientFlags"]] == (BYTE, 4 | 8) and stand.data[D_FLAGS] == (BYTE, 0x20), stand.data
+            assert stand.data[STAND["kHeadPose"]] == (ROTATIONS, (10.0, 20.0, 30.0)), stand.data
+            assert STAND["kBodyPose"] not in stand.data
+            assert stand.equipment == {MAINHAND: plain("kStone", 3), HEAD: (I["kDiamondHelmet"], 1, {"kDamage": 5})}, stand.equipment
+
+        def one(found: dict):
+            assert len(found) == 1, found
+            return next(iter(found.values()))
+
+        # ---- a pig with a name; an armor stand that was posed and dressed.
+        got = run_command(a, 'summon pig 8.5 -60 12.5 {CustomName:"Bob",CustomNameVisible:1b,NoAI:1b,Silent:1b,Glowing:1b,'
+                             'Tags:["x","y","x"],Rotation:[90f,0f],data:{from:"a test"},foo:1b}')
+        assert len(got["said"]) == 1 and got["said"][0]["translate"] == "commands.summon.success", got
+        assert shown(got["said"][0]["with"][0]) == "Bob"                    # it is called by its name
+        run_command(a, 'summon armor_stand 10.5 -60 12.5 {ShowArms:1b,NoBasePlate:1b,Invisible:1b,Pose:{Head:[10f,20f,30f],'
+                       'Body:[0f,0f,0f]},equipment:{head:{id:"diamond_helmet",components:{damage:5}},mainhand:{id:"stone",count:3}}}')
+        settle(a)
+        looks(a)
+        assert data("@e[type=pig,limit=1]", "CustomName") == '"Bob"' and data("@e[type=pig,limit=1]", "Tags") in ('["x", "y"]', '["y", "x"]')
+        assert data("@e[type=pig,limit=1]", "NoAI") == "1b" and data("@e[type=pig,limit=1]", "data") == '{from: "a test"}'
+        assert data("@e[tag=y,limit=1]", "Rotation") == "[90.0f, 0.0f]"              # ...and found by its tag, and by its name
+        assert data("@e[name=Bob,limit=1]", "Silent") == "1b"
+        assert data("@e[type=armor_stand,limit=1]", "Pose") == "{Head: [10.0f, 20.0f, 30.0f]}"
+        assert data("@e[type=armor_stand,limit=1]", "equipment.head.components") == '{"minecraft:damage": 5}'
+        assert run_command(a, "data get entity @e[tag=nope,limit=1]")["said"] == [failure(tr("argument.entity.notfound.entity"))]
+
+        # ---- what this server cannot make is refused, and nothing appears.
+        before = len(a.entities)
+        got = run_command(a, "summon cow 8.5 -60 14.5 {Age:-100}")
+        assert got["said"] == [failure("Mobs that are not grown up are not supported by this server yet")], got
+        got = run_command(a, "summon armor_stand 8.5 -60 14.5 {Small:1b}")
+        assert got["said"] == [failure("Armor stands that are small or markers are not supported by this server yet")], got
+        got = run_command(a, 'summon pig 8.5 -60 14.5 {CustomName:{selector:"@a"}}')
+        assert got["said"] == [failure("Names with parts of a text this server does not read are not supported by this server yet")], got
+        settle(a)
+        assert len(a.entities) == before
+
+        # ---- an item that is something, and that nobody picks up; a fuse; a block that falls.
+        run_command(a, 'summon item 8.5 -60 15.5 {Item:{id:"diamond",count:3,components:{rarity:"epic"}},PickupDelay:32767}')
+        run_command(a, "summon tnt 12.5 -60 15.5 {fuse:2000s,NoGravity:1b}")
+        settle(a, ticks=6)
+        item = one(of_type(a, "kItem"))
+        assert item.data[D_ITEM][1] == (I["kDiamond"], 3, {"kRarity": 3}), item.data
+        assert a.slots == [None] * 46                                       # never picked up
+        tnt = one(of_type(a, "kTnt"))
+        assert 1900 < tnt.data[mc._constants("entities.hpp", "primed_tnt")["kFuse"]][1] <= 2000, tnt.data
+        run_command(a, "kill @e[type=tnt]")
+
+        # ---- and all of it is there when the server is.
+        assert srv.stop() == 0, srv.read_log()
+        os.unlink(srv.log.name)
+        srv = Server(EXE, world=world)
+        c = srv.client()
+        join(c, "Carol", view=3)
+        c.send("player_loaded")
+        settle(c, ticks=6)
+        looks(c)
+        assert one(of_type(c, "kItem")).data[D_ITEM][1] == (I["kDiamond"], 3, {"kRarity": 3})
+        assert srv.stop() == 0, srv.read_log()
+        srv = None
+    finally:
+        if srv:
+            srv.stop()
+        shutil.rmtree(world, ignore_errors=True)
+
+
+@test()
 def the_world_is_kept():
     """What was built is there when the server starts again: every chunk a client is sent is the
     same bytes as before - blocks, heightmaps, light, block entities - a chest holds what it

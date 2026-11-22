@@ -349,6 +349,36 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str | No
 
     # ---- NBT: what `/data get` shows of a block entity, an entity, a storage; paths; tags as
     # text (SNBT) where a command takes one - right ones, and wrong ones for the error and its place
+    # An entity out of a tag: a name, whether it is heard and thinks, tags to find it by; an armor
+    # stand's pose and what it wears; an item that is something; a fuse. (Each is found by a tag
+    # of its own and killed again.)
+    run('summon pig ~ ~ ~3 {CustomName:"Bob",CustomNameVisible:1b,NoAI:1b,Silent:1b,Glowing:1b,Tags:["probe","y","probe"],'
+        'Rotation:[90f,0f],data:{from:"a probe"},foo:1b}')
+    run("data get entity @e[tag=probe,limit=1] CustomName")
+    run("data get entity @e[tag=probe,limit=1] Tags")
+    run("data get entity @e[tag=y,limit=1] data")
+    run("data get entity @e[name=Bob,limit=1] NoAI")
+    run("data get entity @e[tag=probe,limit=1] Rotation")
+    run("data get entity @e[tag=nope,limit=1]")
+    run("kill @e[tag=probe]")
+    run('summon armor_stand ~ ~ ~3 {Tags:["probe"],ShowArms:1b,NoBasePlate:1b,Invisible:1b,Pose:{Head:[10f,20f,30f],Body:[0f,0f,0f]},'
+        'equipment:{head:{id:"diamond_helmet",components:{damage:5}},mainhand:{id:"stone",count:3}}}')
+    run("data get entity @e[tag=probe,limit=1] Pose")
+    run("data get entity @e[tag=probe,limit=1] equipment")
+    run("data get entity @e[tag=probe,limit=1] ShowArms")
+    run("kill @e[tag=probe]")
+    run('summon item ~ ~ ~3 {Tags:["probe"],Item:{id:"diamond",count:3,components:{rarity:"epic"}},PickupDelay:32767}')
+    run("data get entity @e[tag=probe,limit=1] Item")
+    run("kill @e[tag=probe]")
+    run('summon tnt ~ ~ ~3 {Tags:["probe"],fuse:2000s}')
+    run("kill @e[tag=probe]")
+    run('summon pig ~ ~ ~3 {Tags:["probe"],Health:3f,PersistenceRequired:1b,Motion:[0d,50d,0d]}')    # a motion that is none
+    run("data get entity @e[tag=probe,limit=1] Health")
+    run("data get entity @e[tag=probe,limit=1] PersistenceRequired")
+    run("kill @e[tag=probe]")
+    run("summon pig ~ ~ ~3 {")
+    run("summon pig ~ ~ ~3 {a:}")
+
     section("nbt")
     # (What A carries by now depends on which of the dropped items flew its way: what it holds
     # from here on is put there.)

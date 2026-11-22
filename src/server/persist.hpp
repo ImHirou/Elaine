@@ -16,8 +16,9 @@ namespace server::record {
 inline constexpr u8 kVersion = 3;
 enum : u8 { kKept = 0, kChest = 1, kFurnaceV1 = 2, kFurnace = 3, kSign = 4 };
 inline constexpr u8 kSignWaxed = 1, kSignAllowsOp = 2;  // a sign's flags
-// entities. Version 2 knows one kind more than version 1 (a falling block), and is otherwise the same.
-inline constexpr u8 kEntitiesVersion = 2;
+// entities. Version 2 knows one kind more than version 1 (a falling block); version 3 has a tag
+// behind every record: what a tag once said of the entity (its name, its pose...), empty for most.
+inline constexpr u8 kEntitiesVersion = 3;
 enum : u8 { kItem = 1, kTnt = 2, kOther = 3, kFalling = 4 };
 inline constexpr u8 kOnGround = 1, kNoGravity = 2;
 inline constexpr u8 kDropItem = 1, kCancelDrop = 2;  // a falling block's flags

@@ -438,6 +438,26 @@ class Game {
     void select(const cmd::Selector& sel, const cmd::Source& source, bool players_only, std::vector<u32>& slots);
     bool teleport(u32 row, double x, double y, double z, u32 relatives, float yaw, float pitch);
     u32 summon(u32 type, double x, double y, double z);
+    // ---- an entity out of a tag (server/entity_tags.cpp)
+    struct EntityTag {
+        entity::Cold cold;
+        bool has_cold = false;
+        double motion[3] = {0, 0, 0};
+        bool has_motion = false, has_rotation = false;
+        float yaw = 0, pitch = 0;
+        double fall_distance = 0;
+        bool on_ground = false, no_gravity = false, glowing = false, invisible = false;
+        ItemStack item;  // an item entity's stack, its age, its pickup delay, its health
+        i32 item_age = 0, pickup_delay = 0, item_health = 5;
+        i32 fuse = 80;                  // a primed TNT's
+        world::BlockState falling = 0;  // a falling block's state, the ticks it has fallen, whether it drops
+        bool has_falling = false, drop_item = true, cancel_drop = false;
+        i32 falling_time = 0;
+    };
+    static bool read_entity_tag(u32 type, nbt::Tag tag, EntityTag& out, std::string& why);
+    void apply_entity_tag(u32 slot, EntityTag&& tag);
+    u32 summon(u32 type, double x, double y, double z, nbt::Tag tag, std::string& why);
+    void write_cold_tag(u32 row, nbt::Writer& w) const;
 
     // ---- what the game holds, as the tags vanilla saves it as (server/saved_tags.cpp)
     enum class Saved : u8 {

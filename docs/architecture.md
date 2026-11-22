@@ -188,6 +188,28 @@ The same once-only rule holds for pairing: the bundle that introduces an entity 
 first time someone needs it in a tick and copied after that (a player joining a crowd appears to
 everyone at once).
 
+### What a tag says of an entity (`entity::Cold`, `server/entity_tags.cpp`)
+
+Most entities are what their type makes them. A few are told more by a tag - `/summon pig ~ ~ ~
+{CustomName:"Bob",NoAI:1b}`: a name and whether it shows, tags
+to find it by, whether it is heard, glows or thinks, its health, an armor stand's pose and what
+it holds and wears. That is not a column of the table - nothing walks it - but a record by
+slot (`Store::cold`), made when a tag says something and gone with the entity. It is read in
+three places: when the entity is shown (`Tracker::non_default` / `put_data`: the custom name
+as an optional text component, the flags of `Mob` and `ArmorStand`, six rotations - each only
+where it is not the default, as `SynchedEntityData.getNonDefaultValues` has it), when it is
+saved as a tag (`Game::save_entity`), and when its chunk is written: behind an entity's record
+there is a tag of what was said of it (version 3 of the records), read back by the reader a
+command's tag is read by.
+
+The keys are those of `Entity.load` and of `readAdditionalSaveData` of `LivingEntity`, `Mob`,
+`AgeableMob`, `ItemEntity`, `PrimedTnt`, `FallingBlockEntity` and `ArmorStand`. A tag is read
+whole before an entity is made of it; what this server cannot make is refused in words of our
+own: a baby (`Age` below 0), a small armor stand, a marker - each another body to the physics,
+which has no recording of them - and a name with a part of a text that is not read. Not read
+at all: what a class below those saves (a pig's variant, a villager's trades), `UUID`,
+attributes, effects, passengers.
+
 ### What a tick of this costs
 
 `bench tracker` (i5-9300H, `release`), every player walking and turning every tick:

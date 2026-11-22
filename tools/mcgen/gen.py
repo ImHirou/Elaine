@@ -1710,6 +1710,9 @@ ENTITY_DATA_CLASSES = [
     ("item_entity", "net.minecraft.world.entity.item.ItemEntity", "entity"),
     ("primed_tnt", "net.minecraft.world.entity.item.PrimedTnt", "entity"),
     ("falling_block", "net.minecraft.world.entity.item.FallingBlockEntity", "entity"),
+    ("mob", "net.minecraft.world.entity.Mob", "living_entity"),
+    ("ageable_mob", "net.minecraft.world.entity.AgeableMob", "mob"),
+    ("armor_stand", "net.minecraft.world.entity.decoration.ArmorStand", "living_entity"),
 ]
 LIVING = "net.minecraft.world.entity.LivingEntity"
 
