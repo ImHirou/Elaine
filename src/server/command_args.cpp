@@ -868,9 +868,7 @@ bool item_components(Reader& r, item::PatchId& out, Error& err) {
         if (!read_identifier(r, id, err)) return false;
         const u32 type = item::find_component(id);
         // (Three components have no Codec in vanilla either - they only travel: no such component, to a command.)
-        const bool transient = type == item::component::kCreativeSlotLock || type == item::component::kAdditionalTradeCost ||
-                               type == item::component::kMapPostProcessing;
-        if (type == item::kNoComponent || transient) {
+        if (type == item::kNoComponent || item::transient(type)) {
             err = at(name_at, tr("arguments.item.component.unknown").arg(id));
             return false;
         }

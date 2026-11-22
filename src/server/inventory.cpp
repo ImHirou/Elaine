@@ -791,8 +791,17 @@ void Menu::send_all(base::ByteBuf& out, i32 threshold, const Containers& c) {
         remote_is(slot, at(slot));
     }
     remote_carried_is(carried);
-    write_packet(out, threshold,
-                 cb::ContainerSetContent{container_id(), next_state_id(), {items, static_cast<usize>(n)}, item::view(carried)});
+    const cb::ContainerSetContent all{container_id(), next_state_id(), {items, static_cast<usize>(n)}, item::view(carried)};
+    if (LIKELY(all.bound() + 16 <= proto::kMaxFrame)) {
+        write_packet(out, threshold, all);
+    } else {
+        // Heavy stacks, more of them than one frame holds: the same slots one by one, under the
+        // same state id - which leaves a client with what the one packet would have.
+        for (i32 slot = 0; slot < n; ++slot)
+            write_packet(out, threshold,
+                         cb::ContainerSetSlot{all.container_id, all.state_id, static_cast<i16>(slot), items[slot]});
+        write_packet(out, threshold, cb::SetCursorItem{all.carried});
+    }
     if (kind_ != Kind::kFurnace) return;
     for (u32 i = 0; i < Furnace::kDataCount; ++i) {  // sendInitialData: every data slot after the content
         open_.remote_data[i] = c.furnace->data(i);

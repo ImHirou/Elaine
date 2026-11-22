@@ -59,7 +59,14 @@ struct Stack {
         EXPECT_EQ(removed, 0u);
         EXPECT_LE(added, 1u);
         if (added) {
-            EXPECT_EQ(r.varint(), proto::gen::component::kDamage);
+            const u32 type = r.varint();
+            if (type == proto::gen::component::kCustomModelData) {  // floats, then three empty lists: a heavy stack
+                r.bytes(4 * r.varint());
+                EXPECT_EQ(r.varint() + r.varint() + r.varint(), 0u);
+                s.damage = -2;
+                return s;
+            }
+            EXPECT_EQ(type, proto::gen::component::kDamage);
             s.damage = static_cast<i32>(r.varint());
         }
         return s;
@@ -999,6 +1006,23 @@ item::ItemStack damaged(u32 item_id, u32 damage) {
     return s;
 }
 
+// A stack of about a megabyte: custom model data of 250 000 floats.
+item::ItemStack heavy(u32 item_id) {
+    constexpr u32 kFloats = 250000;
+    std::vector<u8> buf(64 + 4 * kFloats);
+    u8* p = put_varint(put_varint(buf.data(), 1), item_id);
+    p = put_varint(put_varint(p, 1), 0);
+    p = put_varint(p, proto::gen::component::kCustomModelData);
+    p = put_varint(p, varint_size(kFloats) + 4 * kFloats + 3);
+    p = put_varint(p, kFloats) + 4 * kFloats;  // (zeroes)
+    p += 3;                                    // no flags, no strings, no colours
+    Reader r(buf.data(), static_cast<usize>(p - buf.data()));
+    item::ItemStack s;
+    EXPECT_EQ(item::read_untrusted(r, s), item::Verdict::kOk);
+    EXPECT_GT(item::heavy_bytes(s), 1000000u);
+    return s;
+}
+
 }  // namespace
 
 TEST(Tracker, EquipmentGoesToViewersChangedSlotsOnly) {
@@ -1120,6 +1144,66 @@ TEST(Tracker, NewcomersAreShownEquipmentWithTheEntityAndRowsKeepTheirs) {
     w.tick();
     w.remove(b);
     w.tick();
+}
+
+TEST(Tracker, HeavyEquipmentWaitsForATickThatCanPayForIt) {
+    World w;
+    const u32 a = w.add_player(0, 64, 0, 10), b = w.add_player(5, 64, 0, 10), c = w.add_player(0, 64, 5, 10);
+    w.ticks(2);
+    const std::string idb = std::to_string(w.store.net_id(b)), idc = std::to_string(w.store.net_id(c));
+    take(w.client(a).log), take(w.client(b).log), take(w.client(c).log);
+    const auto equips = [](Log log) {
+        Log out;
+        for (std::string& line : log)
+            if (line.rfind("equip", 0) == 0) out.push_back(std::move(line));
+        return out;
+    };
+    // (Five megabytes are more than a frame holds: a packet a slot.)
+    const auto five = [](const std::string& id) {
+        Log out;
+        for (u32 slot = 0; slot < 5; ++slot) out.push_back("equip " + id + " " + std::to_string(slot));
+        return out;
+    };
+
+    // B and C each put on five megabytes, in one tick. Two players look at each: twenty megabytes
+    // to copy, where a tick copies eight. The first goes (or one larger than eight never would)...
+    Worn wb, wc;
+    const item::ItemStack megabyte = heavy(it::kStone);
+    for (u32 slot = 0; slot < 5; ++slot) wb.slot[slot] = wc.slot[slot] = megabyte;
+    w.tracker.show_equipment(b, wb.slot, w.outs.data());
+    w.tracker.show_equipment(c, wc.slot, w.outs.data());
+    w.tick();
+    EXPECT_EQ(equips(take(w.client(a).log)), five(idb));
+    EXPECT_EQ(w.view(a, b).equipment.at(0), (Stack{it::kStone, 1, -2}));
+    EXPECT_TRUE(w.view(a, c).equipment.empty());
+    // ...and the other when it is asked about again, which is every tick.
+    w.tracker.show_equipment(b, wb.slot, w.outs.data());
+    w.tracker.show_equipment(c, wc.slot, w.outs.data());
+    w.tick();
+    EXPECT_EQ(equips(take(w.client(a).log)), five(idc));
+    EXPECT_EQ(w.view(a, c).equipment.size(), 5u);
+    take(w.client(b).log), take(w.client(c).log);
+
+    // A newcomer is shown what they wear with them: B this tick, C - three megabytes are left - the next.
+    const u32 d = w.add_player(3, 64, 3, 10);
+    w.tick();
+    {
+        const Log log = take(w.client(d).log);
+        EXPECT_NE(std::find(log.begin(), log.end(), "add " + idb), log.end());
+        EXPECT_EQ(std::find(log.begin(), log.end(), "add " + idc), log.end());
+        EXPECT_EQ(equips(log), five(idb));
+    }
+    w.tick();
+    {
+        Log bundle{"bundle", "add " + idc, "data " + idc};
+        for (std::string& line : five(idc)) bundle.push_back(std::move(line));
+        bundle.push_back("bundle");
+        EXPECT_EQ(take(w.client(d).log), bundle);
+    }
+    EXPECT_EQ(w.view(d, c).equipment.size(), 5u);
+    w.tick();
+    EXPECT_TRUE(w.client(d).log.empty());  // and once
+    (void)a;
 }
 
 TEST(Tracker, ItemEntitiesCarryTheirStack) {

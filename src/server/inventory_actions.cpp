@@ -39,11 +39,29 @@ float eye_height(u32 pose) { return pose == pose::kStanding ? kEyeStanding : pos
 
 // ---------------------------------------------------------------------------- packets
 
+// A TickThrottler of bytes: what was sent is forgiven a little every tick.
+bool Game::admit_heavy(Player& p, u32 bytes) {
+    const u64 forgiven = (tick_ - p.heavy_inflow_tick) * kHeavyInflowPerTick;
+    p.heavy_inflow -= static_cast<u32>(std::min<u64>(p.heavy_inflow, forgiven));
+    p.heavy_inflow_tick = tick_;
+    if (p.heavy_inflow + static_cast<u64>(bytes) > kHeavyInflowLimit) return false;
+    p.heavy_inflow += bytes;
+    return true;
+}
+
+u64 Game::carried_heavy(const Player& p) {
+    u64 bytes = 0;
+    for (const ItemStack& s : p.menu.inv.items) bytes += item::heavy_bytes(s);
+    return bytes;
+}
+
 // handleSetCreativeModeSlot. The creative inventory lives on the client; this is how the server
 // learns what is in a slot, or that a stack was thrown out of the window (a negative slot).
 void Game::on_creative_slot(u32 pi, i32 slot, ItemStack stack, bool unsupported) {
     Player& p = players_[pi];
     const bool valid_slot = slot >= 1 && slot <= menu_slot::kOffhand;
+    // More heavy stacks than a player may bring into being: refused like one that is not read.
+    if (!unsupported && valid_slot && !may_carry(p, stack)) unsupported = true;
     if (unsupported) {
         // A stack with a component the server cannot vouch for (item/components.hpp): it is not
         // taken. The client shows it in the slot already, so the slot is sent back as it is here.

@@ -1429,7 +1429,30 @@ namespace proto::gen {
         it.append(f"\ninline constexpr std::string_view {ident(key)}Names[{len(entries)}] = {{\n")
         it.extend(f'    "{name}",\n' for name in sorted(entries, key=lambda n: entries[n]["protocol_id"]))
         it.append("};\n")
+    for key in ("villager_type", "map_decoration_type", "sound_event"):
+        entries = static_regs["minecraft:" + key]["entries"]
+        if key != "sound_event":
+            it.append(f"inline constexpr unsigned {ident(key)}Count = {len(entries)};\n")
+        it.append(f"\ninline constexpr std::string_view {ident(key)}Names[{len(entries)}] = {{\n")
+        it.extend(f'    "{name}",\n' for name in sorted(entries, key=lambda n: entries[n]["protocol_id"]))
+        it.append("};\n")
     it.append("\n}  // namespace proto::gen::static_registry\n")
+    # The enums a component holds one of: a name in a tag (StringRepresentable), an id in a packet
+    # (ByteBufCodecs.idMapper over the enum's own id, which is not always its ordinal).
+    it.append("\n// Enums that are component values: the name a tag spells, the id a packet carries.\n"
+              "namespace proto::gen::variant {\n\nstruct Named {\n    std::string_view name;\n    unsigned id;\n};\n")
+    for cid, cls, id_field in (("kFox", "animal.fox.Fox$Variant", "id"), ("kSalmon", "animal.fish.Salmon$Variant", "id"),
+                               ("kParrot", "animal.parrot.Parrot$Variant", "id"),
+                               ("kTropicalFishPattern", "animal.fish.TropicalFish$Pattern", "packedId"),
+                               ("kMooshroom", "animal.cow.MushroomCow$Variant", "id"),
+                               ("kRabbit", "animal.rabbit.Rabbit$Variant", "id"), ("kHorse", "animal.equine.Variant", "id"),
+                               ("kLlama", "animal.equine.Llama$Variant", "id"), ("kAxolotl", "animal.axolotl.Axolotl$Variant", "id")):
+        constants = game["enums"].get("net.minecraft.world.entity." + cls)
+        if not constants or any("serialized" not in c or not isinstance(c.get(id_field), int) for c in constants):
+            die(f"gamedata/enums.json: {cls} is not an enum of names and ids any more")
+        it.append(f"inline constexpr Named {cid}[{len(constants)}] = {{" +
+                  ", ".join(f'{{"{c["serialized"]}", {c[id_field]}}}' for c in constants) + "};\n")
+    it.append("\n}  // namespace proto::gen::variant\n")
     files["items.hpp"] = "".join(it)
 
     # ---- item_defaults.bin: the components every item has of its own (Item.components()), each

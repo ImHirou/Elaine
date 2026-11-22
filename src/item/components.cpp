@@ -10,6 +10,7 @@
 
 #include "nbt/nbt.hpp"
 #include "proto/identifier.hpp"
+#include "proto/static_data.hpp"
 #include "text/component.hpp"
 
 #include PROTO_GEN_ENTITIES_HPP
@@ -20,6 +21,7 @@ using proto::Reader;
 namespace reg = proto::reg;
 namespace sreg = proto::gen::static_registry;
 namespace entity_type = proto::gen::entity_type;
+namespace variant = proto::gen::variant;
 
 namespace {
 
@@ -28,6 +30,9 @@ constexpr u32 kMaxString = 32767;  // ByteBufCodecs.STRING_UTF8: at most this ma
 // long as the stack lasts. Beacons and potions nest one level.
 constexpr u32 kMaxEffectDepth = 8;
 constexpr u32 kMaxBlockStateProperties = 16;  // the block with the most properties has 9
+// A stack in a stack in a stack: a shulker box in a bundle is two. Vanilla recurses for as long
+// as the packet lasts.
+constexpr u32 kMaxPatchDepth = 8;
 
 // The re-encoded value: small appends to a buffer that keeps kSlack bytes writable past every reserve.
 struct Out {
@@ -42,6 +47,8 @@ struct Out {
 };
 
 ALWAYS_INLINE i32 vint(Reader& in) { return static_cast<i32>(in.varint()); }
+
+Verdict transcode(u32 type, Reader& in, Out& out);
 
 // The element count of a collection or map: ByteBufCodecs.readCount, then a container made for
 // min(count, 65536) elements - whose constructor throws for a negative count. Every element
@@ -89,6 +96,25 @@ Verdict t_int(Reader& in, Out& out) {
 Verdict t_enum(Reader& in, Out& out, u32 values) {
     const u32 id = in.varint();
     out.varint(id < values ? id : 0);
+    return Verdict::kOk;
+}
+
+// ...over ByIdMap.continuous(..., CLAMP): an id outside is the nearest end.
+Verdict t_enum_clamp(Reader& in, Out& out, i32 values) {
+    out.varint(static_cast<u32>(std::clamp(vint(in), 0, values - 1)));
+    return Verdict::kOk;
+}
+// ...over ByIdMap.continuous(..., WRAP): Mth.positiveModulo.
+Verdict t_enum_wrap(Reader& in, Out& out, i32 values) {
+    const i32 m = vint(in) % values;
+    out.varint(static_cast<u32>(m < 0 ? m + values : m));
+    return Verdict::kOk;
+}
+// ...over ByIdMap.sparse(..., default): the ids are the enum's own, and any other is `fallback`.
+Verdict t_enum_sparse(Reader& in, Out& out, std::span<const variant::Named> values, u32 fallback) {
+    const u32 id = in.varint();
+    const bool known = std::any_of(values.begin(), values.end(), [&](const variant::Named& v) { return v.id == id; });
+    out.varint(known ? id : fallback);
     return Verdict::kOk;
 }
 
@@ -367,6 +393,280 @@ Verdict t_block_state(Reader& in, Out& out) {
     return Verdict::kOk;
 }
 
+// CustomModelData.STREAM_CODEC: four lists - floats, flags, strings, colours (ints).
+Verdict t_custom_model_data(Reader& in, Out& out) {
+    u32 n;
+    if (!read_count(in, INT32_MAX, n) || 4ull * n > in.remaining()) return Verdict::kMalformed;
+    out.varint(n);
+    out.bytes(in.bytes(4 * n));
+    if (!read_count(in, INT32_MAX, n)) return Verdict::kMalformed;
+    out.varint(n);
+    for (u32 i = 0; i < n; ++i) out.u8v(in.u8v() != 0);
+    if (!read_count(in, INT32_MAX, n)) return Verdict::kMalformed;
+    out.varint(n);
+    Verdict verdict = Verdict::kOk;
+    for (u32 i = 0; i < n; ++i) {
+        const Verdict v = t_string(in, out);
+        if (v == Verdict::kMalformed) return v;
+        if (v != Verdict::kOk) verdict = v;
+    }
+    if (!read_count(in, INT32_MAX, n) || 4ull * n > in.remaining()) return Verdict::kMalformed;
+    out.varint(n);
+    out.bytes(in.bytes(4 * n));
+    return verdict;
+}
+
+}  // namespace
+
+bool registry_has_tag(std::string_view registry, std::string_view tag) {
+    const std::span<const u8> body = proto::tags_body();
+    Reader r(body.data(), body.size());
+    r.varint();  // the packet id
+    for (u32 registries = r.varint(); registries-- && r.ok;) {
+        const bool here = r.str(kMaxString) == registry;
+        for (u32 tags = r.varint(); tags-- && r.ok;) {
+            if (r.str(kMaxString) == tag && here) return true;
+            for (u32 ids = r.varint(); ids-- && r.ok;) r.varint();
+        }
+    }
+    return false;
+}
+
+namespace {
+
+// ByteBufCodecs.holderSet: 0 and the name of a tag (which the registry must have), or the number
+// of entries + 1 and their ids.
+Verdict t_holder_set(Reader& in, Out& out, std::string_view registry, u32 size) {
+    const i32 count = vint(in) - 1;
+    if (!in.ok) return Verdict::kMalformed;
+    if (count == -1) {
+        const std::string_view s = in.str(kMaxString);
+        proto::Identifier id;
+        if (!in.ok || !proto::parse_identifier(s, id)) return Verdict::kMalformed;
+        std::string full(id.size(), '\0');
+        id.put(reinterpret_cast<u8*>(full.data()));
+        if (!registry_has_tag(registry, full)) return Verdict::kMalformed;
+        out.varint(0);
+        out.varint(static_cast<u32>(full.size()));
+        out.bytes({reinterpret_cast<const u8*>(full.data()), full.size()});
+        return Verdict::kOk;
+    }
+    if (count < 0 || static_cast<u32>(count) > in.remaining()) return Verdict::kMalformed;
+    out.varint(static_cast<u32>(count) + 1);
+    for (i32 i = 0; i < count; ++i) {
+        if (const Verdict v = t_registry_id(in, out, size); v != Verdict::kOk) return v;
+    }
+    return Verdict::kOk;
+}
+
+// LodestoneTracker.STREAM_CODEC: an optional GlobalPos - the dimension's key, which is any
+// identifier, and a block position as a long - and whether the compass is tracked.
+Verdict t_lodestone_tracker(Reader& in, Out& out) {
+    const bool target = in.u8v() != 0;
+    out.u8v(target);
+    if (target) {
+        if (const Verdict v = t_identifier(in, out); v != Verdict::kOk) return v;
+        out.bytes(in.bytes(8));
+    }
+    return t_bool(in, out);
+}
+
+// ByteBufCodecs.holder(SOUND_EVENT, SoundEvent.DIRECT_STREAM_CODEC): id + 1, or 0 and the event
+// itself - the identifier of the sound and an optional range.
+Verdict t_sound_event(Reader& in, Out& out) {
+    const u32 id = in.varint();
+    if (!in.ok) return Verdict::kMalformed;
+    out.varint(id);
+    if (id != 0) return id - 1 < sreg::kSoundEventCount ? Verdict::kOk : Verdict::kMalformed;
+    if (const Verdict v = t_identifier(in, out); v != Verdict::kOk) return v;
+    const bool range = in.u8v() != 0;
+    out.u8v(range);
+    if (range) out.be32(in.be32());
+    return Verdict::kOk;
+}
+
+// ByteBufCodecs.GAME_PROFILE_PROPERTIES: at most 16 properties - a name (64), a value (32767),
+// perhaps a signature (1024). Vanilla holds them in a multimap and writes that: the properties
+// of one name together, the names in the order they first came.
+Verdict t_properties(Reader& in, Out& out) {
+    u32 n;
+    if (!read_count(in, 16, n)) return Verdict::kMalformed;
+    static base::ByteBuf scratch;
+    scratch.clear();
+    Out to{scratch};
+    struct Property {
+        u32 at, len, name_len;  // in `scratch`: the whole of it, and how long its name is behind the length
+    } props[16];
+    Verdict verdict = Verdict::kOk;
+    for (u32 i = 0; i < n; ++i) {
+        const u32 at = scratch.len;
+        Verdict v = t_string(in, to, 64);
+        const u32 name_end = scratch.len;
+        if (v != Verdict::kMalformed) v = std::max(v, t_string(in, to, 32767));
+        if (v == Verdict::kMalformed) return v;
+        const bool sig = in.u8v() != 0;
+        if (!in.ok) return Verdict::kMalformed;
+        to.u8v(sig);
+        if (sig) v = std::max(v, t_string(in, to, 1024));
+        if (v == Verdict::kMalformed) return v;
+        verdict = std::max(verdict, v);
+        props[i] = {at, scratch.len - at, name_end - at};
+    }
+    if (verdict != Verdict::kOk) return verdict;
+    const auto name = [&](const Property& p) {
+        return std::string_view(reinterpret_cast<const char*>(scratch.data) + p.at, p.name_len);
+    };
+    out.varint(n);
+    bool written[16] = {};
+    for (u32 i = 0; i < n; ++i) {
+        for (u32 k = i; k < n; ++k) {
+            if (written[k] || name(props[k]) != name(props[i])) continue;
+            written[k] = true;
+            out.bytes({scratch.data + props[k].at, props[k].len});
+        }
+    }
+    return Verdict::kOk;
+}
+
+// ResolvableProfile.STREAM_CODEC: a whole game profile (id, name, properties) or a partial one
+// (perhaps a name, perhaps an id, properties) - a flag says which - and a PlayerSkin.Patch:
+// three optional textures and an optional model (slim or not).
+Verdict t_profile(Reader& in, Out& out) {
+    const bool whole = in.u8v() != 0;
+    if (!in.ok) return Verdict::kMalformed;
+    out.u8v(whole);
+    Verdict verdict = Verdict::kOk;
+    const auto name = [&] {
+        const Verdict v = t_string(in, out, 16);  // ByteBufCodecs.PLAYER_NAME
+        verdict = std::max(verdict, v);
+        return v != Verdict::kMalformed;
+    };
+    if (whole) {
+        out.bytes(in.bytes(16));  // UUIDUtil.STREAM_CODEC: two longs
+        if (!in.ok || !name()) return Verdict::kMalformed;
+    } else {
+        const bool named = in.u8v() != 0;
+        out.u8v(named);
+        if (!in.ok || (named && !name())) return Verdict::kMalformed;
+        const bool id = in.u8v() != 0;
+        out.u8v(id);
+        if (id) out.bytes(in.bytes(16));
+        if (!in.ok) return Verdict::kMalformed;
+    }
+    const Verdict properties = t_properties(in, out);
+    if (properties == Verdict::kMalformed) return properties;
+    verdict = std::max(verdict, properties);
+    for (u32 texture = 0; texture < 3; ++texture) {  // body, cape, elytra: ClientAsset.ResourceTexture, an identifier
+        const bool present = in.u8v() != 0;
+        if (!in.ok) return Verdict::kMalformed;
+        out.u8v(present);
+        if (!present) continue;
+        if (const Verdict v = t_identifier(in, out); v != Verdict::kOk) return v;
+    }
+    const bool model = in.u8v() != 0;
+    out.u8v(model);
+    if (model) out.u8v(in.u8v() != 0);
+    return in.ok ? verdict : Verdict::kMalformed;
+}
+
+// ---------------------------------------------------------------------------- stacks in stacks
+
+// DataComponentPatch.STREAM_CODEC: a patch whose values follow their types without a length -
+// the patch of a stack inside a component. Written as Patches::assemble writes one.
+Verdict t_patch(Reader& in, Out& out) {
+    static base::ByteBuf scratch[kMaxPatchDepth];
+    static u32 depth = 0;
+    const i32 added = vint(in), removed = vint(in);
+    if (!in.ok || added < 0 || removed < 0 || static_cast<u64>(added) + static_cast<u64>(removed) > in.remaining())
+        return Verdict::kMalformed;
+    if (added == 0 && removed == 0) {
+        out.varint(0);
+        out.varint(0);
+        return Verdict::kOk;
+    }
+    if (depth == kMaxPatchDepth) return Verdict::kUnsupported;
+    Patches::Slot slot[component::kCount] = {};
+    base::ByteBuf& values = scratch[depth];
+    values.clear();
+    Out to{values};
+    for (i32 i = 0; i < added; ++i) {
+        const u32 type = in.varint();
+        if (!in.ok || type >= component::kCount) return Verdict::kMalformed;
+        const u32 at = values.len;
+        ++depth;
+        const Verdict v = transcode(type, in, to);
+        --depth;
+        if (v == Verdict::kMalformed || !in.ok) return Verdict::kMalformed;
+        // (What is behind a value that was not read cannot be found: there is no length.)
+        if (v == Verdict::kUnsupported) return v;
+        slot[type] = {1, at, values.len - at};
+    }
+    for (i32 i = 0; i < removed; ++i) {
+        const u32 type = in.varint();
+        if (!in.ok || type >= component::kCount) return Verdict::kMalformed;
+        slot[type] = {2, 0, 0};
+    }
+    u32 set = 0, gone = 0;
+    for (u32 type = 0; type < component::kCount; ++type) {
+        set += slot[type].state == 1;
+        gone += slot[type].state == 2;
+    }
+    out.varint(set);
+    out.varint(gone);
+    for (u32 type = 0; type < component::kCount; ++type) {
+        if (slot[type].state != 1) continue;
+        out.varint(type);
+        out.bytes({values.data + slot[type].off, slot[type].len});
+    }
+    for (u32 type = 0; type < component::kCount; ++type)
+        if (slot[type].state == 2) out.varint(type);
+    return Verdict::kOk;
+}
+
+// ItemStackTemplate.STREAM_CODEC: the item, the count, the patch. The constructor refuses air
+// and a count of 0 - and what a client sends is then written with ItemStack.CODEC to see
+// whether it can be (ItemStack.validatedStreamCodec), where the count of a template is
+// intRange(1, 99) however deep it lies: a vanilla server puts the sender out for a hundred.
+Verdict t_template(Reader& in, Out& out) {
+    const u32 item = in.varint();
+    const i32 count = vint(in);
+    if (!in.ok || item >= proto::gen::item::kCount || item == proto::gen::item::kAir || count < 1 || count > 99)
+        return Verdict::kMalformed;
+    out.varint(item);
+    out.varint(static_cast<u32>(count));
+    return t_patch(in, out);
+}
+
+// A list of templates (BundleContents, ChargedProjectiles: ByteBufCodecs.list(max)), or of
+// optional ones (ItemContainerContents: a flag before each).
+Verdict t_templates(Reader& in, Out& out, u32 max, bool optional) {
+    u32 n;
+    if (!read_count(in, max, n)) return Verdict::kMalformed;
+    out.varint(n);
+    for (u32 i = 0; i < n; ++i) {
+        if (optional) {
+            const bool present = in.u8v() != 0;
+            if (!in.ok) return Verdict::kMalformed;
+            out.u8v(present);
+            if (!present) continue;
+        }
+        if (const Verdict v = t_template(in, out); v != Verdict::kOk) return v;
+    }
+    return Verdict::kOk;
+}
+
+// PotDecorations.STREAM_CODEC: back, left, right, front - each an optional template.
+Verdict t_pot_decorations(Reader& in, Out& out) {
+    for (u32 side = 0; side < 4; ++side) {
+        const bool present = in.u8v() != 0;
+        if (!in.ok) return Verdict::kMalformed;
+        out.u8v(present);
+        if (!present) continue;
+        if (const Verdict v = t_template(in, out); v != Verdict::kOk) return v;
+    }
+    return Verdict::kOk;
+}
+
 // ---------------------------------------------------------------------------- NBT and text
 //
 // What travels as a tag: custom data and the data of entities and block entities, which stay
@@ -388,7 +688,7 @@ struct TagLevel {
 
 // A value this much longer than a whole patch may be is not looked at: it could only shrink to
 // fit by being mostly things vanilla drops, and it is the tick thread that would do the reading.
-constexpr u32 kMaxTagInput = 16 * kMaxPatchBytes;
+constexpr u32 kMaxTagInput = 2 * kMaxPatchBytes;
 
 // ByteBufCodecs.TAG: one tag in the network form, under NbtAccounter.defaultQuota().
 Verdict read_tag(Reader& in, TagLevel& level) {
@@ -435,6 +735,28 @@ Verdict t_typed_data(Reader& in, Out& out, u32 types, u32 fallback) {
 }
 
 // ComponentSerialization.STREAM_CODEC: a tag, read by the component codec and written by it.
+// Bees.STREAM_CODEC: a list of occupants - the entity as typed data, and two tick counts.
+Verdict t_bees(Reader& in, Out& out) {
+    u32 n;
+    if (!read_count(in, INT32_MAX, n)) return Verdict::kMalformed;
+    out.varint(n);
+    for (u32 i = 0; i < n; ++i) {
+        if (const Verdict v = t_typed_data(in, out, entity_type::kCount, entity_type::kPig); v != Verdict::kOk) return v;
+        out.varint(in.varint());
+        out.varint(in.varint());
+    }
+    return Verdict::kOk;
+}
+
+// A component without a StreamCodec of its own travels as the tag its Codec writes
+// (ByteBufCodecs.fromCodecWithRegistries): read by that Codec, kept as that Codec writes it
+// again (item/codec.cpp).
+Verdict t_codec_tag(u32 type, Reader& in, Out& out) {
+    TagLevel level;
+    if (const Verdict v = read_tag(in, level); v != Verdict::kOk) return v;
+    return tag_component(type, level.doc.root(), out.b);
+}
+
 Verdict t_text(Reader& in, Out& out) {
     TagLevel level;
     if (const Verdict v = read_tag(in, level); v != Verdict::kOk) return v;
@@ -578,6 +900,59 @@ Verdict transcode(u32 type, Reader& in, Out& out) {
         case component::kPaintingVariant: return t_holder_reference(in, out, reg::painting_variant::kCount);
         case component::kBannerPatterns: return t_banner_patterns(in, out);
         case component::kBlockState: return t_block_state(in, out);
+        // ---- stacks in stacks
+        case component::kContainer: return t_templates(in, out, 256, true);  // N list(256) of optional templates
+        case component::kBundleContents: return t_templates(in, out, INT32_MAX, false);
+        case component::kChargedProjectiles: return t_templates(in, out, 1024, false);  // N list(1024)
+        case component::kSulfurCubeContent: return t_template(in, out);
+        case component::kPotDecorations: return t_pot_decorations(in, out);
+        case component::kBees: return t_bees(in, out);
+        // ---- what a mob is: ids of registries (ByteBufCodecs.holderRegistry) and of enums
+        case component::kVillagerVariant: return t_registry_id(in, out, sreg::kVillagerTypeCount);
+        case component::kWolfVariant: return t_registry_id(in, out, reg::wolf_variant::kCount);
+        case component::kWolfSoundVariant: return t_registry_id(in, out, reg::wolf_sound_variant::kCount);
+        case component::kPigVariant: return t_registry_id(in, out, reg::pig_variant::kCount);
+        case component::kPigSoundVariant: return t_registry_id(in, out, reg::pig_sound_variant::kCount);
+        case component::kCowVariant: return t_registry_id(in, out, reg::cow_variant::kCount);
+        case component::kCowSoundVariant: return t_registry_id(in, out, reg::cow_sound_variant::kCount);
+        case component::kChickenVariant: return t_registry_id(in, out, reg::chicken_variant::kCount);
+        case component::kChickenSoundVariant: return t_registry_id(in, out, reg::chicken_sound_variant::kCount);
+        case component::kZombieNautilusVariant: return t_registry_id(in, out, reg::zombie_nautilus_variant::kCount);
+        case component::kFrogVariant: return t_registry_id(in, out, reg::frog_variant::kCount);
+        case component::kCatVariant: return t_registry_id(in, out, reg::cat_variant::kCount);
+        case component::kCatSoundVariant: return t_registry_id(in, out, reg::cat_sound_variant::kCount);
+        case component::kProvidesPotteryPattern: return t_registry_id(in, out, reg::decorated_pot_pattern::kCount);
+        case component::kFoxVariant: return t_enum(in, out, std::size(variant::kFox));              // ZERO
+        case component::kAxolotlVariant: return t_enum(in, out, std::size(variant::kAxolotl));      // ZERO
+        case component::kSalmonSize: return t_enum_clamp(in, out, std::size(variant::kSalmon));     // CLAMP
+        case component::kParrotVariant: return t_enum_clamp(in, out, std::size(variant::kParrot));  // CLAMP
+        case component::kMooshroomVariant: return t_enum_clamp(in, out, std::size(variant::kMooshroom));
+        case component::kLlamaVariant: return t_enum_clamp(in, out, std::size(variant::kLlama));
+        case component::kHorseVariant: return t_enum_wrap(in, out, std::size(variant::kHorse));  // WRAP
+        case component::kRabbitVariant: return t_enum_sparse(in, out, variant::kRabbit, 0);      // sparse, default BROWN
+        case component::kTropicalFishPattern:
+            return t_enum_sparse(in, out, variant::kTropicalFishPattern, 0);  // default KOB
+        // ---- the rest of what is only data
+        case component::kCustomModelData: return t_custom_model_data(in, out);
+        case component::kCreativeSlotLock: return Verdict::kOk;          // N Unit, and no P
+        case component::kAdditionalTradeCost: return t_varint(in, out);  // N VAR_INT, and no P
+        case component::kMapPostProcessing: return t_enum(in, out, 2);   // N idMapper, ZERO; no P
+        case component::kTrim: {  // N ArmorTrim: material, pattern - holders, an inline one is not read
+            const Verdict v = t_holder_reference(in, out, reg::trim_material::kCount);
+            return v == Verdict::kOk ? t_holder_reference(in, out, reg::trim_pattern::kCount) : v;
+        }
+        case component::kProvidesTrimMaterial: return t_holder_reference(in, out, reg::trim_material::kCount);
+        case component::kProvidesBannerPatterns:
+            return t_holder_set(in, out, reg::banner_pattern::kKey, reg::banner_pattern::kCount);
+        case component::kLodestoneTracker: return t_lodestone_tracker(in, out);
+        case component::kBreakSound: return t_sound_event(in, out);
+        case component::kProfile: return t_profile(in, out);
+        case component::kLock:                  // P LockCode (an ItemPredicate), and no N
+        case component::kIntangibleProjectile:  // P Unit, and no N: as the tag {}
+        case component::kMapDecorations:
+        case component::kDebugStickState:
+        case component::kRecipes:
+        case component::kContainerLoot: return t_codec_tag(type, in, out);  // P only
         default: return Verdict::kUnsupported;
     }
 }
@@ -624,7 +999,7 @@ Verdict Patches::read_untrusted(Reader& r, PatchId& out) {
         const u32 type = r.varint(), len = r.varint();
         if (!r.ok || type >= component::kCount || len > r.remaining()) return Verdict::kMalformed;
         Reader in(r.bytes(len));
-        if (values_.len > 16 * kMaxPatchBytes) {  // already far too big to keep: stop copying, keep walking
+        if (values_.len > 2 * kMaxPatchBytes) {  // already far too big to keep: stop copying, keep walking
             verdict = Verdict::kUnsupported;
             continue;
         }
@@ -675,6 +1050,40 @@ Verdict Patches::assemble(const Slot* slot, std::span<const u8> values, PatchId&
     if (wire_.len > kMaxPatchBytes) return Verdict::kUnsupported;
     out = intern({index, n}, {wire_.data, wire_.len});
     return Verdict::kOk;
+}
+
+void contained(u32 type, std::span<const u8> value, std::vector<Contained>& out) {
+    DCHECK(type == component::kContainer || type == component::kBundleContents || type == component::kChargedProjectiles);
+    base::ByteBuf skipped;  // a patch has no length: it is as long as reading it takes
+    Out to{skipped};
+    Reader in(value);
+    const u32 n = in.varint();
+    for (u32 i = 0; i < n && in.ok; ++i) {
+        if (type == component::kContainer && in.u8v() == 0) continue;
+        const u32 item = in.varint(), count = in.varint();
+        const u8* const patch = in.p;
+        skipped.clear();
+        if (t_patch(in, to) != Verdict::kOk) return;
+        out.push_back({i, item, count, {patch, static_cast<usize>(in.p - patch)}});
+    }
+}
+
+Patches::Found find_nested(std::span<const u8> patch, u32 type) {
+    base::ByteBuf skipped;
+    Out to{skipped};
+    Reader in(patch);
+    const u32 added = in.varint(), removed = in.varint();
+    Patches::Found found;
+    for (u32 i = 0; i < added && in.ok; ++i) {
+        const u32 t = in.varint();
+        const u8* const value = in.p;
+        skipped.clear();
+        if (transcode(t, in, to) != Verdict::kOk) return {};
+        if (t == type) found = {Patches::State::kSet, {value, static_cast<usize>(in.p - value)}};
+    }
+    for (u32 i = 0; i < removed && in.ok; ++i)
+        if (in.varint() == type) found = {Patches::State::kRemoved, {}};
+    return found;
 }
 
 Verdict check_value(u32 type, std::span<const u8> value, base::ByteBuf& out) {

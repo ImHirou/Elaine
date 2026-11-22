@@ -55,7 +55,14 @@ ALWAYS_INLINE void frame_end(base::ByteBuf& out, i32 threshold, FrameMark m, con
         out.commit(body_end);
         return;
     }
-    DCHECK(n + 1 <= kMaxFrame);
+    if (UNLIKELY(n + 1 > kMaxFrame)) {
+        // No frame can hold it. Whoever writes packets of stacks keeps them under the limit (a
+        // menu goes slot by slot, equipment too); should one get here all the same, a client
+        // that misses a packet is better off than one that is sent a frame it cannot read.
+        DCHECK(false);
+        out.len = m.at;
+        return;
+    }
     if (threshold < 0) {
         put_varint3(start, n);
         out.commit(body_end);

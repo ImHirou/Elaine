@@ -38,6 +38,12 @@ std::string_view component_name(u32 type);  // "minecraft:damage"
 u32 find_component(std::string_view name);
 // The component has a Codec this server reads: it may stand in a tag.
 bool has_codec(u32 type);
+// DataComponentType.isTransient: a component that only travels - no Codec, no part of any tag.
+bool transient(u32 type);
+// A component that has no StreamCodec and so travels as the tag its Codec writes (lock,
+// recipes, map_decorations...): `tag` read by that Codec, and appended - its type, its payload -
+// as that Codec and vanilla's tag writer put it out again. That is its wire form here too.
+Verdict tag_component(u32 type, nbt::Tag tag, base::ByteBuf& out);
 
 // The value of component `type` out of the tag its Codec reads, appended in the wire form.
 // kMalformed: the Codec answers with an error.
@@ -74,15 +80,18 @@ Patches::Found effective(const ItemStack& stack, u32 type);
 // component to what the item has anyway, or takes away one it does not have, is dropped. Takes
 // the caller's reference to `patch` and gives one to what it returns.
 PatchId sanitized(u32 item, PatchId patch);
+// ItemStack.validateContainedItemSizes: a stack in the stack's container, bundle or crossbow
+// that holds more than a stack of its kind may. False if there is one, with its count and that limit.
+bool contained_sizes_fit(const ItemStack& stack, u32& count, u32& max);
 // How many defaults of components that have a Codec here could not be read: 0, or a bug.
 u32 unread_defaults();
 
 // Item.getName(stack) of the items whose class makes the name of what the stack holds: a
 // potion's and a tipped arrow's of its contents ("item.minecraft.potion.effect.swiftness"), a
-// shield's of its colour. The translation key; empty for every other item, whose name is its
-// ITEM_NAME component. (A compass with a lodestone and a player's head do it too, by components
-// this server does not read.)
-std::string computed_name_key(const ItemStack& stack);
+// shield's of its colour, a compass's of its lodestone, a player's head's of whose it is (`arg`:
+// the name the translation takes). The translation key; empty for every other item, whose name
+// is its ITEM_NAME component.
+std::string computed_name_key(const ItemStack& stack, std::string* arg = nullptr);
 // ItemStack.getCustomName's second answer: the title of a written book, if it is not blank.
 std::string book_title(const ItemStack& stack);
 

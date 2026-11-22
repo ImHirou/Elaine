@@ -187,6 +187,13 @@ inline bool humanoid_armor(u32 slot) { return slot >= equip::kFeet && slot <= eq
 // ---------------------------------------------------------------------------- wire
 
 // A stack as packets carry it to a client (proto::put_item).
+// What a stack costs whoever is sent it, if it is heavy (kHeavyPatchBytes): its patch's bytes. 0 for the rest.
+inline u32 heavy_bytes(const ItemStack& s) {
+    if (LIKELY(!s.patch())) return 0;
+    const usize n = patches().wire(s.patch()).size();
+    return n > kHeavyPatchBytes ? static_cast<u32>(n) : 0;
+}
+
 inline proto::ItemView view(const ItemStack& s) {
     if (s.empty()) return {};
     return {s.count(), s.item(), s.patch() ? patches().wire(s.patch()) : std::span<const u8>{}};

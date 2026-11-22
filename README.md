@@ -155,7 +155,8 @@ cost per entity.*
 - [x] The inventory and every kind of click; dropping, picking up, items on the ground
 - [x] Crafting (1235 of 1266 recipes), smelting, fuel
 - [ ] The components that behave: food, tools, equipment
-- [ ] Stacks inside stacks: bundles, shulker boxes
+- [x] Stacks inside stacks, as data: a shulker box with its contents, a bundle, a loaded crossbow; stacks of up to a megabyte
+- [ ] What a bundle does when it is clicked; the shulker box as a block
 - [ ] Enchanting, the anvil, brewing and the other menus
 
 ### Commands

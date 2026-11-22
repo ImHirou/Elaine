@@ -165,7 +165,13 @@ class Tracker {
     // an index per row.
     struct Equipment {
         item::ItemStack slot[item::equip::kCount];
+        u32 heavy = 0;  // bytes of the heavy stacks among them (item::heavy_bytes)
     };
+    // What a tick may copy of heavy stacks to those who look, and what is left of it.
+    static constexpr u64 kHeavyPerTick = 8u << 20;
+    u64 heavy_left_ = kHeavyPerTick;
+    std::vector<u32> retry_;  // viewers a pairing was put off for: their rows are looked at again next tick
+    bool afford(u64 cost);
     u32* equip_ = nullptr;  // per entity: its record in equipment_, kNone = shows nothing
     std::vector<Equipment> equipment_;
     std::vector<u32> equipment_free_;

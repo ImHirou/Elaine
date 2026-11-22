@@ -197,9 +197,11 @@ Text Game::item_display_name(const ItemStack& stack) {
     const auto custom = patched(component::kCustomName), named = patched(component::kItemName);
     const bool has_custom = custom.state == item::Patches::State::kSet;
     const std::string title = has_custom ? std::string() : item::book_title(stack);
-    const std::string computed = item::computed_name_key(stack);
+    std::string whose;
+    const std::string computed = item::computed_name_key(stack, &whose);
     Text name = has_custom                                      ? Text::encoded(custom.value)
                 : !title.empty()                                ? Text::literal(title)
+                : !computed.empty() && !whose.empty()           ? tr(computed).arg(whose)
                 : !computed.empty()                             ? tr(computed)
                 : named.state == item::Patches::State::kSet     ? Text::encoded(named.value)
                 : named.state == item::Patches::State::kRemoved ? Text()
@@ -213,7 +215,10 @@ Text Game::item_display_name(const ItemStack& stack) {
     if (const auto r = patched(component::kRarity); r.state == item::Patches::State::kSet) rarity = r.value[0];
     if (stack.enchanted()) rarity = rarity < 2 ? 2 : rarity == 2 ? 3 : rarity;
     shown.color(kRarity[rarity]);
-    if (!stack.patch()) return std::move(shown).hover_item(world::item_name(stack.item()), stack.count());
+    // (A heavy stack is shown without its components: as a tag they are several times its size,
+    // and a line of chat goes to everyone.)
+    if (!stack.patch() || item::heavy_bytes(stack))
+        return std::move(shown).hover_item(world::item_name(stack.item()), stack.count());
     base::ByteBuf components;
     item::patch_to_wire_nbt(stack.patch(), components);
     return std::move(shown).hover_item(world::item_name(stack.item()), stack.count(), {components.data, components.len});
@@ -878,11 +883,20 @@ struct Game::Commands {
         // ItemStack.validateStrict (validateComponents).
         if (prototype.damageable_and_stackable())
             return in.fail(tr("arguments.item.malformed").arg("Item cannot be both damageable and stackable"));
+        if (u32 held, most; !item::contained_sizes_fit(prototype, held, most))
+            return in.fail(tr("arguments.item.malformed")
+                               .arg("Item stack with count of " + std::to_string(held) +
+                                    " was larger than maximum: " + std::to_string(most)));
         // An empty stack (air) reports the default size, as ItemStack.getMaxStackSize does.
         const i32 max_stack = prototype.empty() ? 64 : static_cast<i32>(prototype.max_stack());
         if (count > max_stack * kGiveMaxStacks)
             return in.fail(
                 tr("commands.give.failed.toomanyitems").arg(max_stack * kGiveMaxStacks).arg(item_display_name(prototype)));
+        for (const u32 slot : slots) {  // (before anybody is given anything)
+            const Player& p = g.players_[g.ents_.by_slot(slot)];
+            if (!may_carry(p, prototype, static_cast<u32>((count + max_stack - 1) / max_stack)))
+                return in.fail(Text::literal(p.name + " cannot carry that much data in items on this server"));
+        }
         Text first;
         for (const u32 slot : slots) {
             const u32 pi = g.ents_.by_slot(slot);

@@ -287,6 +287,7 @@ void Game::pick_up_items(u32 pi) {
         const u32 row = ents_.by_slot(slot);
         ItemStack& stack = ents_.item[row];
         const u32 count = stack.count();
+        if (!may_carry(p, stack)) continue;              // a heavy stack too many: it stays where it lies
         if (!p.menu.inv.add(-1, stack, true)) continue;  // everyone is creative: what does not fit is destroyed
         // LivingEntity.take: the collect animation, with the count the stack had - a client takes
         // that many off its copy of the item and drops the entity when none are left.

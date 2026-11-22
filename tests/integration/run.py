@@ -1125,12 +1125,13 @@ def creative_inventory(srv: Server):
     # A component it does not read yet: the stack is refused, and the slot is sent back as it is
     # here - the client shows the stack already. (Vanilla would have taken it.)
     before = len(c.menu_log)
-    boxed = {"kContainer": varint(0)}   # stacks within a stack
+    boxed = {"kTool": varint(0)}   # what an item does: a behaviour component
     c.send("set_creative_mode_slot", struct.pack(">h", 42) + mc.item_stack(I["kStone"], 1, boxed))
     c.send("set_creative_mode_slot", struct.pack(">h", 36) + mc.item_stack(I["kStone"], 1, boxed))
-    # ...and so is a text with a part it does not read (a selector), or a name longer than a stack carries here.
+    # ...and so is a text with a part it does not read (a selector), or lore longer than a stack carries here.
     c.send("set_creative_mode_slot", struct.pack(">h", 44) + mc.item_stack(I["kStone"], 1, {"kCustomName": mc.nbt({"selector": "@a"})}))
-    c.send("set_creative_mode_slot", struct.pack(">h", 45) + mc.item_stack(I["kStone"], 1, {"kCustomName": mc.nbt("x" * 2000)}))
+    c.send("set_creative_mode_slot", struct.pack(">h", 45) + mc.item_stack(I["kStone"], 1, {
+        "kLore": varint(20) + b"".join(mc.nbt(chr(97 + i) * 60000) for i in range(20))}))     # 1.2 MiB
     settle(c)
     assert c.menu_log[before:] == [("container_set_slot", 42, None), ("container_set_slot", 36, plain("kStone", 64)),
                                    ("container_set_slot", 44, None), ("container_set_slot", 45, None)], c.menu_log[before:]
@@ -1206,6 +1207,79 @@ def malformed_item_stacks_disconnect(srv: Server):
         c.close()
     c = srv.client()
     check_join(join(c, "Alice"), "Alice")
+
+
+@test()
+def heavy_stacks(srv: Server):
+    """Stacks of up to a megabyte: kept, shown to others, there again when their holder is - sent slot by
+    slot when no frame holds them all, and bounded: how fast a client may send them, how much of them it
+    may come to carry."""
+    a, b = srv.client(), srv.client()
+    join(a, "Alice")
+    jb = join(b, "Bob")
+    a.expect("player_info_update")
+    for cl in (a, b):
+        cl.send("player_loaded")
+    settle(b, a)
+
+    def put(slot: int, floats: int, tint: int) -> None:
+        """custom_model_data: so many floats, no flags, no strings, one colour that tells the stacks apart."""
+        value = varint(floats) + struct.pack(">f", 1.0) * floats + varint(0) + varint(0) + varint(1) + struct.pack(">i", tint)
+        b.send("set_creative_mode_slot", struct.pack(">h", slot) + mc.item_stack(I["kStone"], 1, {"kCustomModelData": value}))
+
+    def read(floats: int, tint: int) -> tuple:
+        return (I["kStone"], 1, {"kCustomModelData": ([1.0] * floats, [], [], [tint])})
+
+    def whole_menu() -> list:
+        """As server_menu() - but this menu is more than a frame holds, and comes slot by slot."""
+        before = len(b.menu_log)
+        menu_click(b, -1, 0, PICKUP, carried=None, state=(b.state_id + 1000) & 32767)
+        settle(b, ticks=2)
+        kinds = [m[0] for m in b.menu_log[before:]]
+        assert kinds == ["container_set_slot"] * 46 + ["set_cursor_item"], kinds
+        return b.slots
+
+    # 160 KiB in the hand: kept, and Alice is shown it.
+    put(36, 40000, 1)
+    settle(b, a)
+    assert a.entities[jb["login"]["entity_id"]].equipment == {MAINHAND: read(40000, 1)}
+
+    # Eight stacks of 900 KiB at once. A client may send four megabytes of heavy stacks in a
+    # burst: that is the one above and four of these. The rest are refused unread, and their
+    # slots come back as they are here - empty.
+    before = len(b.menu_log)
+    for i in range(8):
+        put(37 + i, 225000, 10 + i)
+    settle(b, ticks=2)
+    assert b.menu_log[before:] == [("container_set_slot", 41 + i, None) for i in range(4)], [m[:2] for m in b.menu_log[before:]]
+    slots = whole_menu()
+    assert slots[36] == read(40000, 1) and [slots[37 + i] for i in range(8)] == [read(225000, 10 + i) for i in range(4)] + [None] * 4
+
+    # Bob leaves and is back: with all of it, and Alice is shown his hand again.
+    b.close()
+    a.expect("player_info_remove")
+    b = srv.client()
+    jb = join(b, "Bob")
+    a.expect("player_info_update")
+    b.send("player_loaded")
+    settle(b, a)
+    assert b.slots[36] == read(40000, 1) and [b.slots[37 + i] for i in range(4)] == [read(225000, 10 + i) for i in range(4)]
+    assert a.entities[jb["login"]["entity_id"]].equipment == {MAINHAND: read(40000, 1)}
+
+    # What was sent is forgiven with time (a megabyte and a quarter a second). What a player may
+    # come to carry is not: eight megabytes of heavy stacks, and the tenth of these would be more.
+    for i in range(4):
+        put(41 + i, 225000, 20 + i)
+    settle(b, ticks=20)
+    put(9, 225000, 30)
+    settle(b, ticks=60)             # three seconds: nothing of what was sent counts any more
+    before = len(b.menu_log)
+    put(10, 225000, 31)
+    settle(b)
+    assert b.menu_log[before:] == [("container_set_slot", 10, None)], [m[:2] for m in b.menu_log[before:]]
+    slots = whole_menu()
+    assert [slots[41 + i] for i in range(4)] == [read(225000, 20 + i) for i in range(4)] and slots[9] == read(225000, 30)
+    assert slots[10] is None
 
 
 @test()

@@ -948,6 +948,34 @@ def _written_book(r: Reader) -> dict:
             "pages": [_filterable(r, Reader.nbt) for _ in range(r.varint())], "resolved": r.bool()}
 
 
+def _template(r: Reader) -> tuple:
+    """ItemStackTemplate.STREAM_CODEC: the item, the count, and a patch whose values have no length."""
+    return (r.varint(), r.svarint(), _read_patch(r))
+
+
+def _holder_set(r: Reader):
+    """ByteBufCodecs.holderSet: 0 and a tag's name, or the number of entries + 1 and their ids."""
+    n = r.varint()
+    return "#" + r.str() if n == 0 else [r.varint() for _ in range(n - 1)]
+
+
+def _sound_event(r: Reader):
+    """ByteBufCodecs.holder(SOUND_EVENT, DIRECT_STREAM_CODEC): id + 1, or 0, an identifier and an optional range."""
+    v = r.varint()
+    return v - 1 if v else (r.str(), r.f32() if r.bool() else None)
+
+
+def _profile(r: Reader) -> tuple:
+    """ResolvableProfile.STREAM_CODEC: a whole profile or a part of one (a flag says which), then a PlayerSkin.Patch."""
+    def properties():
+        return [(r.str(), r.str(), r.str() if r.bool() else None) for _ in range(r.varint())]
+    if r.bool():
+        who = (r.take(16).hex(), r.str(), properties())
+    else:
+        who = (r.str() if r.bool() else None, r.take(16).hex() if r.bool() else None, properties())
+    return (who, [r.str() if r.bool() else None for _ in range(3)], r.bool() if r.bool() else None)
+
+
 _UNIT = lambda r: True                                        # noqa: E731
 _DYE = lambda r: r.varint()                                   # noqa: E731
 COMPONENT_READERS = {
@@ -978,6 +1006,30 @@ COMPONENT_READERS = {
     "kWritableBookContent": lambda r: [_filterable(r, Reader.str) for _ in range(r.varint())],
     "kWrittenBookContent": _written_book,
     "kSignTextFront": _sign_text, "kSignTextBack": _sign_text,
+    # Stacks in stacks.
+    "kContainer": lambda r: [_template(r) if r.bool() else None for _ in range(r.varint())],
+    "kBundleContents": lambda r: [_template(r) for _ in range(r.varint())],
+    "kChargedProjectiles": lambda r: [_template(r) for _ in range(r.varint())],
+    "kSulfurCubeContent": _template,
+    "kPotDecorations": lambda r: [_template(r) if r.bool() else None for _ in range(4)],
+    "kBees": lambda r: [(r.varint(), r.nbt(), r.varint(), r.varint()) for _ in range(r.varint())],
+    # What a mob is: an id of a registry (holderRegistry) or of an enum (idMapper).
+    **{name: Reader.varint for name in (
+        "kVillagerVariant", "kWolfVariant", "kWolfSoundVariant", "kFoxVariant", "kSalmonSize", "kParrotVariant",
+        "kTropicalFishPattern", "kMooshroomVariant", "kRabbitVariant", "kPigVariant", "kPigSoundVariant", "kCowVariant",
+        "kCowSoundVariant", "kChickenVariant", "kChickenSoundVariant", "kZombieNautilusVariant", "kFrogVariant",
+        "kHorseVariant", "kLlamaVariant", "kAxolotlVariant", "kCatVariant", "kCatSoundVariant", "kProvidesPotteryPattern",
+        "kMapPostProcessing")},
+    "kAdditionalTradeCost": Reader.svarint, "kCreativeSlotLock": _UNIT,
+    "kCustomModelData": lambda r: ([r.f32() for _ in range(r.varint())], [r.bool() for _ in range(r.varint())],
+                                   [r.str() for _ in range(r.varint())], [r.i32() for _ in range(r.varint())]),
+    "kTrim": lambda r: (_holder_reference(r), _holder_reference(r)), "kProvidesTrimMaterial": _holder_reference,
+    "kProvidesBannerPatterns": _holder_set,
+    "kLodestoneTracker": lambda r: ((r.str(), r.i64()) if r.bool() else None, r.bool()),
+    "kBreakSound": _sound_event, "kProfile": _profile, "kLock": Reader.nbt,
+    # What has no StreamCodec travels as the tag its Codec writes.
+    "kIntangibleProjectile": Reader.nbt, "kMapDecorations": Reader.nbt, "kDebugStickState": Reader.nbt,
+    "kRecipes": Reader.nbt, "kContainerLoot": Reader.nbt,
 }
 _COMPONENT_NAME = {v: k for k, v in COMPONENT.items() if k != "kCount"}
 
@@ -988,6 +1040,11 @@ def read_item(r: Reader):
     if count == 0:
         return None
     item = r.varint()
+    return (item, count, _read_patch(r))
+
+
+def _read_patch(r: Reader) -> dict:
+    """DataComponentPatch.STREAM_CODEC: {name: value}, None = removed."""
     added, removed = r.varint(), r.varint()
     comps: dict = {}
     for _ in range(added):
@@ -999,7 +1056,7 @@ def read_item(r: Reader):
         name = _COMPONENT_NAME[r.varint()]
         assert name not in comps, f"component {name} both set and removed"
         comps[name] = None
-    return (item, count, comps)
+    return comps
 
 
 def _apply_menu_packet(self: "Client", name: str, r: Reader) -> None:

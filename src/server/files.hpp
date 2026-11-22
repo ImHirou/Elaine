@@ -39,7 +39,9 @@ class Files {
     void finish();
     u32 busy() const { return jobs_; }
 
-    static constexpr usize kMaxSize = 4u << 20;  // a file larger than this is not one of ours
+    // A file larger than this is not one of ours: a player's holds 46 stacks, each of at most
+    // item::kMaxPatchBytes.
+    static constexpr usize kMaxSize = 64u << 20;
 
   private:
     struct Entry {

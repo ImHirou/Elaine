@@ -282,7 +282,21 @@ void Tracker::write_equipment(u32 e, const item::ItemStack* stacks, u32 slots, b
     u32 n = 0;
     for (u32 slot = 0; slot < item::equip::kCount; ++slot)
         if (slots & (1u << slot)) entries[n++] = {static_cast<u8>(slot), item::view(stacks[slot])};
-    write_packet(to, threshold_, cb::SetEquipment{s_.net_id(e), {entries, n}});
+    const cb::SetEquipment all{s_.net_id(e), {entries, n}};
+    if (LIKELY(all.bound() + 16 <= proto::kMaxFrame)) {
+        write_packet(to, threshold_, all);
+    } else {  // heavy stacks, more than one frame holds: a packet a slot
+        for (u32 i = 0; i < n; ++i) write_packet(to, threshold_, cb::SetEquipment{all.id, {entries + i, 1}});
+    }
+}
+
+// Heavy stacks (item::kHeavyPatchBytes) are copied to everyone who looks. A tick copies so many
+// bytes of them and no more: what does not fit waits for a later tick - except the first of a
+// tick, which always goes, or one that is larger than the whole allowance never would.
+bool Tracker::afford(u64 cost) {
+    if (cost > heavy_left_ && heavy_left_ != kHeavyPerTick) return false;
+    heavy_left_ -= std::min(cost, heavy_left_);
+    return true;
 }
 
 void Tracker::broadcast(u32 e, std::span<const u8> framed, base::ByteBuf* const* outs) {
@@ -312,6 +326,13 @@ void Tracker::show_equipment(u32 e, const item::ItemStack* now, base::ByteBuf* c
     for (u32 slot = 0; slot < equip::kCount; ++slot)
         changed |= static_cast<u32>(!item::matches(shown.slot[slot], now[slot])) << slot;
     if (!changed) return;
+    {
+        u64 heavy = 0;
+        for (u32 slot = 0; slot < equip::kCount; ++slot)
+            if (changed & (1u << slot)) heavy += item::heavy_bytes(now[slot]);
+        // Not now: nothing is marked as shown, so the next call finds the same difference.
+        if (UNLIKELY(heavy) && !afford(heavy * sent_[e].viewers)) return;
+    }
 
     base::ByteBuf& packets = scratch_;
     packets.clear();
@@ -330,6 +351,8 @@ void Tracker::show_equipment(u32 e, const item::ItemStack* now, base::ByteBuf* c
         for (u32 slot = 0; slot < equip::kCount; ++slot)
             if (changed & (1u << slot)) shown.slot[slot] = now[slot];
     }
+    shown.heavy = 0;
+    for (u32 slot = 0; slot < equip::kCount; ++slot) shown.heavy += item::heavy_bytes(shown.slot[slot]);
     broadcast(e, {packets.data, packets.len}, outs);
 }
 
@@ -347,6 +370,12 @@ void Tracker::drop_equipment(u32 e) {
 // all get from now on apply to the newcomer too. Encoded once per entity and tick, however many
 // players it appears to (a player joining a crowd appears to everyone at once).
 void Tracker::pair(u32 w, u32 e, base::ByteBuf& out) {
+    // What it wears, and - an item on the ground - the stack it is: heavy ones are paid for.
+    const u64 heavy = (equip_[e] != kNone ? equipment_[equip_[e]].heavy : 0u) + item::heavy_bytes(s_.item[e]);
+    if (UNLIKELY(heavy) && !afford(heavy)) {
+        retry_.push_back(w);  // it appears a tick later: the viewer's row is looked at again
+        return;
+    }
     if (!bundle_at_[e]) {
         const Sent& t = sent_[e];
         const u32 at = bundles_.len;
@@ -615,6 +644,7 @@ HOT void Tracker::fan_out(const u64* bits, u32 n, base::ByteBuf& out) {
 void Tracker::tick(base::ByteBuf* const* outs) {
     const u32 n = s_.size(), np = s_.players();
     stats_ = {};
+    heavy_left_ = kHeavyPerTick;
 
     // A. Which pairs have to be looked at: ChunkMap.tick re-evaluates an entity when its section
     // changed, ChunkMap.move when a player sent a movement packet; both are in kMoved or found here.
@@ -635,6 +665,8 @@ void Tracker::tick(base::ByteBuf* const* outs) {
                 partial_row(w, *outs[w]);
         }
         for (const u32 e : changed_) s_.flags[e] &= static_cast<u16>(~flag::kMoved);
+        for (const u32 w : retry_) s_.flags[w] |= flag::kMoved;
+        retry_.clear();
         for (const u32 e : bundled_) bundle_at_[e] = 0;
         bundled_.clear();
         bundles_.clear();

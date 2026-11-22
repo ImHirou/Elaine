@@ -118,6 +118,9 @@ class Game {
         // stack thrown out of the creative inventory, -1 a tick.
         u32 drop_spam = 0;
         u64 drop_spam_tick = 0;
+        // Bytes of heavy stacks this client sent of late, as of heavy_inflow_tick (admit_heavy).
+        u32 heavy_inflow = 0;
+        u64 heavy_inflow_tick = 0;
         // ...and commandSpamThrottler: +20 for each command, -1 a tick, up to 20 a second of the threshold.
         u32 command_spam = 0;
         u64 command_spam_tick = 0;
@@ -261,6 +264,18 @@ class Game {
 
     // ---- the inventory (server/inventory_actions.cpp)
     void on_creative_slot(u32 pi, i32 slot, ItemStack stack, bool unsupported);
+    // ---- heavy stacks (item::kHeavyPatchBytes): what one client may make the server read and hold
+    static constexpr u32 kHeavyInflowLimit = 4u << 20;     // bytes of them a client may send in a burst...
+    static constexpr u32 kHeavyInflowPerTick = 64u << 10;  // ...and what a tick forgives: 1.25 MiB a second
+    // What a player may come to carry of them by creative slots, /give and picking up. (Out of
+    // a chest somebody else filled it can be more: a stack is never lost to this.)
+    static constexpr u64 kHeavyCarried = 8u << 20;
+    bool admit_heavy(Player& p, u32 bytes);  // the client sends so many bytes of a stack: within what it may?
+    static u64 carried_heavy(const Player& p);
+    static bool may_carry(const Player& p, const ItemStack& stack, u32 stacks = 1) {
+        const u32 heavy = item::heavy_bytes(stack);
+        return LIKELY(!heavy) || carried_heavy(p) + static_cast<u64>(heavy) * stacks <= kHeavyCarried;
+    }
     void on_container_click(u32 pi, const proto::sb::ContainerClick& c);
     void on_container_close(u32 pi);
     void on_drop_key(u32 pi, bool all);

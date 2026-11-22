@@ -285,8 +285,8 @@ TEST(Patches, EnvelopeErrorsAreMalformed) {
 }
 
 TEST(Patches, WhatTheServerCannotCheckIsUnsupportedNotWrong) {
-    // container: stacks within a stack. Well-formed here or not, it is not this server's to say.
-    Read r = read_patch(untrusted_patch({{comp::kContainer, vi(0)}}));
+    // tool: what an item does. Well-formed here or not, it is not this server's to say.
+    Read r = read_patch(untrusted_patch({{comp::kTool, vi(0)}}));
     EXPECT_EQ(r.verdict, Verdict::kUnsupported);
     EXPECT_TRUE(r.consumed);  // the length says where it ends: what follows the stack can still be read
     EXPECT_TRUE(r.wire.empty());
@@ -294,21 +294,34 @@ TEST(Patches, WhatTheServerCannotCheckIsUnsupportedNotWrong) {
     EXPECT_EQ(read_patch(untrusted_patch({{comp::kDamage, vi(1)}, {comp::kFood, {0x01, 0x02, 0x03}}})).verdict,
               Verdict::kUnsupported);
     // ...but removing a component needs no understanding of it.
-    EXPECT_EQ(read_patch(untrusted_patch({}, {comp::kContainer, comp::kAttributeModifiers})).verdict, Verdict::kOk);
+    EXPECT_EQ(read_patch(untrusted_patch({}, {comp::kTool, comp::kAttributeModifiers})).verdict, Verdict::kOk);
     // Malformed beats unsupported when it is noticed.
-    EXPECT_EQ(read_patch(untrusted_patch({{comp::kContainer, {0x08}}, {comp::kDamage, vi(0xFFFFFFFF)}})).verdict,
-              Verdict::kMalformed);
+    EXPECT_EQ(read_patch(untrusted_patch({{comp::kTool, {0x08}}, {comp::kDamage, vi(0xFFFFFFFF)}})).verdict, Verdict::kMalformed);
 }
 
 TEST(Patches, TooLargeIsUnsupported) {
-    // 400 custom potion effects: fine for vanilla, more than a stack may carry here.
+    // 400 custom potion effects: more than the creative inventory ever sends, and kept.
     Bytes effects = vi(400);
     for (u32 i = 0; i < 400; ++i) effects = effects + vi(i % 40) + Bytes{0, 1, 0, 1, 1, 0};
     const Bytes potion = Bytes{0, 0} + effects + Bytes{0};
-    ASSERT_GT(potion.size(), item::kMaxPatchBytes);
-    const Read r = read_patch(untrusted_patch({{comp::kPotionContents, potion}}));
+    EXPECT_EQ(read_patch(untrusted_patch({{comp::kPotionContents, potion}})).verdict, Verdict::kOk);
+    // Custom model data of 300 000 floats: fine for vanilla, more than a stack may carry here.
+    Bytes model = vi(300000);
+    model.resize(model.size() + 4 * 300000);
+    model = model + vi(0) + vi(0) + vi(0);
+    ASSERT_GT(model.size(), item::kMaxPatchBytes);
+    const Read r = read_patch(untrusted_patch({{comp::kCustomModelData, model}}));
     EXPECT_EQ(r.verdict, Verdict::kUnsupported);
     EXPECT_TRUE(r.consumed);
+    // ...and 250 000 are within it: a heavy stack, which is counted where it costs.
+    Bytes fits = vi(250000);
+    fits.resize(fits.size() + 4 * 250000);
+    fits = vi(1) + vi(it::kStone) + untrusted_patch({{comp::kCustomModelData, fits + vi(0) + vi(0) + vi(0)}});
+    Reader in(fits.data(), fits.size());
+    ItemStack heavy;
+    ASSERT_EQ(item::read_untrusted(in, heavy), Verdict::kOk);
+    EXPECT_GT(item::heavy_bytes(heavy), 1000000u);
+    EXPECT_EQ(item::heavy_bytes(ItemStack(it::kStone, 1)), 0u);
 }
 
 // ---------------------------------------------------------------------------- component values
@@ -555,15 +568,13 @@ TEST(Components, CustomDataIsACompound) {
     // The Codec of custom_data takes SNBT in a string too; the stream codec of the bucket's data does not.
     EXPECT_EQ(read_value(comp::kCustomData, n::root(8, n::str("{a:1}"))), Verdict::kUnsupported);
     EXPECT_EQ(read_value(comp::kBucketEntityData, n::root(8, n::str("{a:1}"))), Verdict::kMalformed);
-    // A tag sixteen times the size a whole patch may have is refused unread - vanilla would weigh
-    // these 50 000 empty compounds at 2.6 MiB and throw.
+    // A tag past vanilla's quota is not kept: these 50 000 empty compounds weigh 2.6 MiB there.
     Bytes heavy = n::root(10, Bytes{9} + n::str("l") + Bytes{10} + n::be32(50000));
     heavy.resize(heavy.size() + 50000, 0);
     EXPECT_EQ(read_value(comp::kCustomData, heavy + Bytes{0}), Verdict::kUnsupported);
-    EXPECT_EQ(read_value(comp::kCustomName, n::root(8, n::str(std::string(20000, 'x')))), Verdict::kUnsupported);
-    // One of 8 KiB is read: malformed is malformed, and what is well-formed is too large to keep.
+    // A long name is a name: 20 000 characters fit a stack (item::kMaxPatchBytes).
+    EXPECT_EQ(read_value(comp::kCustomName, n::root(8, n::str(std::string(20000, 'x')))), Verdict::kOk);
     EXPECT_EQ(read_value(comp::kCustomName, n::root(8, n::be16(8000) + Bytes(7999, 'x'))), Verdict::kMalformed);
-    EXPECT_EQ(read_value(comp::kCustomName, n::root(8, n::str(std::string(8000, 'x')))), Verdict::kUnsupported);
 
     // The same data in another order is the same data.
     const ItemStack a = with_patch(it::kStone, 1, untrusted_patch({{comp::kCustomData, in}}));
@@ -588,6 +599,190 @@ TEST(Components, EntityDataHasATypeInFront) {
     EXPECT_EQ(read_value(comp::kBlockEntityData, vi(sreg::kBlockEntityTypeCount) + data), Verdict::kMalformed);
 }
 
+TEST(Components, WhatAMobIsIsAnIdOfARegistryOrAnEnum) {
+    namespace reg = proto::reg;
+    namespace sreg = proto::gen::static_registry;
+    // ByteBufCodecs.holderRegistry: an id the registry has.
+    expect_kept(comp::kWolfVariant, vi(reg::wolf_variant::kCount - 1), vi(reg::wolf_variant::kCount - 1));
+    EXPECT_EQ(read_value(comp::kWolfVariant, vi(reg::wolf_variant::kCount)), Verdict::kMalformed);
+    expect_kept(comp::kVillagerVariant, vi(3), vi(3));
+    EXPECT_EQ(read_value(comp::kVillagerVariant, vi(sreg::kVillagerTypeCount)), Verdict::kMalformed);
+    EXPECT_EQ(read_value(comp::kCatSoundVariant, vi(reg::cat_sound_variant::kCount)), Verdict::kMalformed);
+    expect_kept(comp::kProvidesPotteryPattern, vi(0), vi(0));
+    // ByteBufCodecs.idMapper: what an id outside the enum becomes is the enum's own choice.
+    expect_kept(comp::kFoxVariant, vi(1), vi(1));
+    expect_kept(comp::kFoxVariant, vi(7), vi(0));  // ZERO
+    expect_kept(comp::kAxolotlVariant, vi(0xFFFFFFFF), vi(0));
+    expect_kept(comp::kSalmonSize, vi(9), vi(2));  // CLAMP
+    expect_kept(comp::kSalmonSize, vi(0xFFFFFFFF), vi(0));
+    expect_kept(comp::kParrotVariant, vi(4), vi(4));
+    expect_kept(comp::kLlamaVariant, vi(100), vi(3));
+    expect_kept(comp::kMooshroomVariant, vi(2), vi(1));
+    expect_kept(comp::kHorseVariant, vi(9), vi(2));  // WRAP: 7 colours
+    expect_kept(comp::kHorseVariant, vi(0xFFFFFFFF), vi(6));
+    expect_kept(comp::kRabbitVariant, vi(99), vi(99));  // sparse: the killer rabbit is 99
+    expect_kept(comp::kRabbitVariant, vi(6), vi(0));
+    expect_kept(comp::kTropicalFishPattern, vi(257), vi(257));  // sparse: size | pattern << 8
+    expect_kept(comp::kTropicalFishPattern, vi(2), vi(0));
+    // The three that only travel.
+    expect_kept(comp::kCreativeSlotLock, {}, {});
+    expect_kept(comp::kAdditionalTradeCost, vi(0xFFFFFFFB), vi(0xFFFFFFFB));
+    expect_kept(comp::kMapPostProcessing, vi(1), vi(1));
+    expect_kept(comp::kMapPostProcessing, vi(2), vi(0));
+}
+
+TEST(Components, StacksInStacks) {
+    const u32 held = item::patches().live();  // (the recipes keep a few stacks with components)
+    // ItemStackTemplate.STREAM_CODEC: item, count, and a patch whose values have no length.
+    const Bytes stones = vi(it::kStone) + vi(3) + trusted_patch({});
+    const Bytes sword =
+        vi(it::kDiamondSword) + vi(1) + trusted_patch({{comp::kDamage, vi(7)}, {comp::kMaxStackSize, vi(1)}}, {comp::kLore});
+    // ...kept with its entries by type, as a patch of a stack is.
+    const Bytes sword_kept =
+        vi(it::kDiamondSword) + vi(1) + trusted_patch({{comp::kMaxStackSize, vi(1)}, {comp::kDamage, vi(7)}}, {comp::kLore});
+    ASSERT_LT(comp::kMaxStackSize, comp::kDamage);
+    // container: at most 256 slots, each a flag and then a template.
+    expect_kept(comp::kContainer, vi(0), vi(0));
+    expect_kept(comp::kContainer, vi(3) + Bytes{1} + stones + Bytes{0} + Bytes{1} + sword + Bytes{0x55},
+                vi(3) + Bytes{1} + stones + Bytes{0} + Bytes{1} + sword_kept);
+    expect_kept(comp::kContainer, vi(2) + Bytes{1} + stones + Bytes{0},
+                vi(2) + Bytes{1} + stones + Bytes{0});  // an empty slot at the end stays
+    {
+        Bytes many = vi(257);
+        for (u32 i = 0; i < 257; ++i) many = many + Bytes{0};
+        EXPECT_EQ(read_value(comp::kContainer, many), Verdict::kMalformed);
+    }
+    EXPECT_EQ(read_value(comp::kContainer, vi(1) + Bytes{1} + vi(it::kStone)), Verdict::kMalformed);  // ends in the stack
+    // The template refuses air and a count of 0; and no count but 1..99 can be written into a tag,
+    // which is tried with what a client sends.
+    EXPECT_EQ(read_value(comp::kSulfurCubeContent, vi(it::kAir) + vi(1) + trusted_patch({})), Verdict::kMalformed);
+    EXPECT_EQ(read_value(comp::kSulfurCubeContent, vi(it::kCount) + vi(1) + trusted_patch({})), Verdict::kMalformed);
+    EXPECT_EQ(read_value(comp::kSulfurCubeContent, vi(it::kStone) + vi(0) + trusted_patch({})), Verdict::kMalformed);
+    EXPECT_EQ(read_value(comp::kSulfurCubeContent, vi(it::kStone) + vi(100) + trusted_patch({})), Verdict::kMalformed);
+    EXPECT_EQ(read_value(comp::kSulfurCubeContent, vi(it::kStone) + vi(0xFFFFFFFF) + trusted_patch({})), Verdict::kMalformed);
+    expect_kept(comp::kSulfurCubeContent, stones, stones);
+    // What is in the stack inside is read as any component is.
+    EXPECT_EQ(
+        read_value(comp::kBundleContents, vi(1) + vi(it::kStone) + vi(1) + trusted_patch({{comp::kDamage, vi(0xFFFFFFFF)}})),
+        Verdict::kMalformed);
+    EXPECT_EQ(read_value(comp::kBundleContents, vi(1) + vi(it::kStone) + vi(1) + trusted_patch({{comp::kTool, vi(0)}})),
+              Verdict::kUnsupported);
+    EXPECT_EQ(read_value(comp::kBundleContents, vi(1) + vi(it::kStone) + vi(1) + trusted_patch({{comp::kCount, {}}})),
+              Verdict::kMalformed);
+    expect_kept(comp::kBundleContents, vi(2) + sword + stones, vi(2) + sword_kept + stones);
+    // charged_projectiles: at most 1024.
+    expect_kept(comp::kChargedProjectiles, vi(1) + stones, vi(1) + stones);
+    {
+        Bytes many = vi(1025);
+        for (u32 i = 0; i < 1025; ++i) many = many + stones;
+        EXPECT_EQ(read_value(comp::kChargedProjectiles, many), Verdict::kMalformed);
+    }
+    // A stack in a stack in a stack: a shulker box in a bundle in a bundle.
+    const Bytes box = vi(it::kShulkerBox) + vi(1) + trusted_patch({{comp::kContainer, vi(1) + Bytes{1} + sword}});
+    const Bytes box_kept = vi(it::kShulkerBox) + vi(1) + trusted_patch({{comp::kContainer, vi(1) + Bytes{1} + sword_kept}});
+    const Bytes bundle = vi(it::kBundle) + vi(1) + trusted_patch({{comp::kBundleContents, vi(1) + box}});
+    const Bytes bundle_kept = vi(it::kBundle) + vi(1) + trusted_patch({{comp::kBundleContents, vi(1) + box_kept}});
+    expect_kept(comp::kBundleContents, vi(1) + bundle, vi(1) + bundle_kept);
+    {
+        Bytes deep = vi(1) + stones;  // ...and one that goes deeper than any real one: not followed
+        for (u32 i = 0; i < 12; ++i) deep = vi(1) + vi(it::kBundle) + vi(1) + trusted_patch({{comp::kBundleContents, deep}});
+        EXPECT_EQ(read_value(comp::kBundleContents, deep), Verdict::kUnsupported);
+    }
+    // pot_decorations: back, left, right, front.
+    expect_kept(comp::kPotDecorations, Bytes{1} + stones + Bytes{0, 0} + Bytes{1} + sword,
+                Bytes{1} + stones + Bytes{0, 0} + Bytes{1} + sword_kept);
+    EXPECT_EQ(read_value(comp::kPotDecorations, Bytes{0, 0, 0}), Verdict::kMalformed);
+    // bees: the entity as typed data, how long it has been in, how long it must be.
+    namespace et = proto::gen::entity_type;
+    const Bytes bee = vi(et::kBee) + n::root(10, n::compound({n::b("NoAI", 1)})) + vi(5) + vi(2400);
+    expect_kept(comp::kBees, vi(2) + bee + bee, vi(2) + bee + bee);
+    EXPECT_EQ(read_value(comp::kBees, vi(1) + vi(et::kBee) + n::root(8, n::str("x")) + vi(5) + vi(5)), Verdict::kMalformed);
+    EXPECT_EQ(item::patches().live(), held);
+}
+
+TEST(Components, TheRestOfWhatIsOnlyData) {
+    const u32 held = item::patches().live();  // (the recipes keep a few stacks with components)
+    namespace reg = proto::reg;
+    namespace sreg = proto::gen::static_registry;
+    // custom_model_data: floats, flags, strings, colours.
+    const Bytes model = vi(2) + f32(1.5f) + f32(-0.0f) + vi(2) + Bytes{1, 0} + vi(1) + str("a") + vi(1) + be32(0x00FF8800);
+    expect_kept(comp::kCustomModelData, model, model);
+    expect_kept(comp::kCustomModelData, vi(0) + vi(1) + Bytes{7} + vi(0) + vi(0), vi(0) + vi(1) + Bytes{1} + vi(0) + vi(0));
+    EXPECT_EQ(read_value(comp::kCustomModelData, vi(2) + f32(1.0f)), Verdict::kMalformed);
+    EXPECT_EQ(read_value(comp::kCustomModelData, vi(0) + vi(0) + vi(0)), Verdict::kMalformed);
+    // trim: material and pattern, each id + 1 - or 0 and the entry itself, which is not read.
+    expect_kept(comp::kTrim, vi(1) + vi(reg::trim_pattern::kCount), vi(1) + vi(reg::trim_pattern::kCount));
+    EXPECT_EQ(read_value(comp::kTrim, vi(0)), Verdict::kUnsupported);
+    EXPECT_EQ(read_value(comp::kTrim, vi(reg::trim_material::kCount + 1) + vi(1)), Verdict::kMalformed);
+    EXPECT_EQ(read_value(comp::kTrim, vi(1) + vi(reg::trim_pattern::kCount + 1)), Verdict::kMalformed);
+    expect_kept(comp::kProvidesTrimMaterial, vi(2), vi(2));
+    // provides_banner_patterns: a HolderSet - 0 and a tag the registry has, or n + 1 and n ids.
+    expect_kept(comp::kProvidesBannerPatterns, vi(0) + str("pattern_item/globe"), vi(0) + str("minecraft:pattern_item/globe"));
+    EXPECT_EQ(read_value(comp::kProvidesBannerPatterns, vi(0) + str("minecraft:no_such_tag")), Verdict::kMalformed);
+    expect_kept(comp::kProvidesBannerPatterns, vi(3) + vi(4) + vi(0), vi(3) + vi(4) + vi(0));
+    expect_kept(comp::kProvidesBannerPatterns, vi(1), vi(1));
+    EXPECT_EQ(read_value(comp::kProvidesBannerPatterns, vi(2) + vi(reg::banner_pattern::kCount)), Verdict::kMalformed);
+    // lodestone_tracker: perhaps a dimension and a position, and whether it is tracked.
+    const Bytes pos = be32(0x12345678) + be32(0x9ABCDEF0);
+    expect_kept(comp::kLodestoneTracker, Bytes{1} + str("the_nether") + pos + Bytes{1},
+                Bytes{1} + str("minecraft:the_nether") + pos + Bytes{1});
+    expect_kept(comp::kLodestoneTracker, Bytes{0, 0}, Bytes{0, 0});
+    EXPECT_EQ(read_value(comp::kLodestoneTracker, Bytes{1} + str("Bad Name") + pos + Bytes{1}), Verdict::kMalformed);
+    EXPECT_EQ(read_value(comp::kLodestoneTracker, Bytes{1} + str("a") + be32(1)), Verdict::kMalformed);
+    // break_sound: id + 1, or 0 and the sound itself - its identifier, perhaps a range.
+    expect_kept(comp::kBreakSound, vi(sreg::kSoundEventCount), vi(sreg::kSoundEventCount));
+    EXPECT_EQ(read_value(comp::kBreakSound, vi(sreg::kSoundEventCount + 1)), Verdict::kMalformed);
+    expect_kept(comp::kBreakSound, vi(0) + str("my:sound") + Bytes{1} + f32(16.0f),
+                vi(0) + str("my:sound") + Bytes{1} + f32(16.0f));
+    expect_kept(comp::kBreakSound, vi(0) + str("sound") + Bytes{0}, vi(0) + str("minecraft:sound") + Bytes{0});
+    // profile: a whole game profile or a part of one, and a skin patch.
+    const Bytes uuid = be32(1) + be32(2) + be32(3) + be32(4);
+    const Bytes no_skin = Bytes{0, 0, 0, 0};
+    const Bytes textures = str("textures") + str("abc") + Bytes{1} + str("sig"), other = str("other") + str("v") + Bytes{0},
+                again = str("textures") + str("def") + Bytes{0};
+    expect_kept(comp::kProfile, Bytes{1} + uuid + str("Notch") + vi(0) + no_skin,
+                Bytes{1} + uuid + str("Notch") + vi(0) + no_skin);
+    // (its properties are a multimap: those of one name stand together)
+    expect_kept(comp::kProfile, Bytes{1} + uuid + str("Notch") + vi(3) + textures + other + again + no_skin,
+                Bytes{1} + uuid + str("Notch") + vi(3) + textures + again + other + no_skin);
+    const Bytes skin = Bytes{1} + str("my:skin") + Bytes{0} + Bytes{1} + str("wings") + Bytes{1, 7};
+    expect_kept(comp::kProfile, Bytes{0} + Bytes{1} + str("Steve") + Bytes{0} + vi(0) + skin,
+                Bytes{0} + Bytes{1} + str("Steve") + Bytes{0} + vi(0) + Bytes{1} + str("my:skin") + Bytes{0} + Bytes{1} +
+                    str("minecraft:wings") + Bytes{1, 1});
+    expect_kept(comp::kProfile, Bytes{0, 0} + Bytes{1} + uuid + vi(0) + no_skin, Bytes{0, 0} + Bytes{1} + uuid + vi(0) + no_skin);
+    expect_kept(comp::kProfile, Bytes{0, 0, 0} + vi(0) + no_skin, Bytes{0, 0, 0} + vi(0) + no_skin);
+    EXPECT_EQ(read_value(comp::kProfile, Bytes{1} + uuid + str("SeventeenLettersXY") + vi(0) + no_skin), Verdict::kMalformed);
+    EXPECT_EQ(read_value(comp::kProfile, Bytes{1} + uuid + str("Notch") + vi(17)), Verdict::kMalformed);
+    EXPECT_EQ(read_value(comp::kProfile, Bytes{1} + uuid + str("Notch") + vi(0) + Bytes{0, 0}), Verdict::kMalformed);
+    EXPECT_EQ(read_value(comp::kProfile, Bytes{1} + be32(1)), Verdict::kMalformed);
+    // lock: no StreamCodec - the tag of an ItemPredicate.
+    expect_kept(comp::kLock, n::root(10, n::compound({n::s("items", "stone"), n::c("count", {n::i("min", 2), n::i("max", 2)})})),
+                n::root(10, n::compound({n::i("count", 2), n::s("items", "minecraft:stone")})));
+    EXPECT_EQ(read_value(comp::kLock, n::root(10, n::compound({n::s("items", "no_such_item")}))), Verdict::kMalformed);
+    EXPECT_EQ(read_value(comp::kLock, n::root(10, n::compound({n::c("predicates", {n::c("damage", {})})}))),
+              Verdict::kUnsupported);
+    // What has no StreamCodec travels as the tag its Codec writes - and is kept as that Codec
+    // writes it again, the entries of a compound in the order of vanilla's HashMap.
+    expect_kept(comp::kIntangibleProjectile, n::root(10, n::compound({n::b("x", 1)})), n::root(10, n::compound({})));
+    EXPECT_EQ(read_value(comp::kIntangibleProjectile, n::root(1, Bytes{1})), Verdict::kMalformed);
+    expect_kept(comp::kRecipes, n::root(9, n::list(8, {n::str("stick"), n::str("my:recipe")})),
+                n::root(9, n::list(8, {n::str("minecraft:stick"), n::str("my:recipe")})));
+    EXPECT_EQ(read_value(comp::kRecipes, n::root(9, n::list(8, {n::str("Not An Id")}))), Verdict::kMalformed);
+    EXPECT_EQ(read_value(comp::kRecipes, n::root(8, n::str("stick"))), Verdict::kMalformed);
+    expect_kept(comp::kContainerLoot,
+                n::root(10, n::compound({n::s("loot_table", "chests/simple_dungeon"), n::entry(4, "seed", n::be64(0))})),
+                n::root(10, n::compound({n::s("loot_table", "minecraft:chests/simple_dungeon")})));
+    EXPECT_EQ(read_value(comp::kContainerLoot, n::root(10, n::compound({n::entry(4, "seed", n::be64(5))}))), Verdict::kMalformed);
+    EXPECT_EQ(read_value(comp::kDebugStickState, n::root(10, n::compound({n::s("minecraft:oak_stairs", "nope")}))),
+              Verdict::kMalformed);
+    EXPECT_EQ(read_value(comp::kDebugStickState, n::root(10, n::compound({n::s("minecraft:no_block", "facing")}))),
+              Verdict::kMalformed);
+    expect_kept(comp::kDebugStickState, n::root(10, n::compound({n::s("oak_stairs", "facing")})),
+                n::root(10, n::compound({n::s("minecraft:oak_stairs", "facing")})));
+    EXPECT_EQ(read_value(comp::kMapDecorations, n::root(10, n::compound({n::s("a", "b")}))), Verdict::kMalformed);
+    EXPECT_EQ(item::patches().live(), held);
+}
+
 TEST(Components, Books) {
     // writable_book_content: pages of text, each perhaps with what a chat filter made of it.
     expect_kept(comp::kWritableBookContent, vi(2) + str("page one") + Bytes{0} + str("page two") + Bytes{1} + str("p*** two"),
@@ -595,8 +790,14 @@ TEST(Components, Books) {
     expect_kept(comp::kWritableBookContent, vi(0), vi(0));
     expect_kept(comp::kWritableBookContent, vi(1) + str(std::string(900, 'x')) + Bytes{0},
                 vi(1) + str(std::string(900, 'x')) + Bytes{0});
-    // A page may have 1024 characters - which is fine for vanilla and more than a stack carries here (kMaxPatchBytes).
-    EXPECT_EQ(read_value(comp::kWritableBookContent, vi(1) + str(std::string(1024, 'x')) + Bytes{0}), Verdict::kUnsupported);
+    // A page may have 1024 characters; a book of a hundred such pages is a stack like any other.
+    expect_kept(comp::kWritableBookContent, vi(1) + str(std::string(1024, 'x')) + Bytes{0},
+                vi(1) + str(std::string(1024, 'x')) + Bytes{0});
+    {
+        Bytes book = vi(100);
+        for (int i = 0; i < 100; ++i) book = book + str(std::string(1024, static_cast<char>('a' + i % 26))) + Bytes{0};
+        expect_kept(comp::kWritableBookContent, book, book);
+    }
     EXPECT_EQ(read_value(comp::kWritableBookContent, vi(1) + str(std::string(1025, 'x')) + Bytes{0}), Verdict::kMalformed);
     EXPECT_EQ(read_value(comp::kWritableBookContent, vi(1) + str("page")), Verdict::kMalformed);  // the filtered flag is missing
     Bytes pages = vi(101);
@@ -710,7 +911,7 @@ TEST(ItemWire, UntrustedStack) {
     EXPECT_TRUE(s.empty() && done);
     EXPECT_EQ(read(vi(100) + vi(it::kStone) + untrusted_patch({{comp::kDamage, vi(1)}}), s), Verdict::kMalformed);
     EXPECT_EQ(item::patches().live(), live);  // neither kept its patch
-    EXPECT_EQ(read(vi(1) + vi(it::kStone) + untrusted_patch({{comp::kContainer, vi(0)}}) + Bytes{0x77}, s, &done),
+    EXPECT_EQ(read(vi(1) + vi(it::kStone) + untrusted_patch({{comp::kTool, vi(0)}}) + Bytes{0x77}, s, &done),
               Verdict::kUnsupported);
     EXPECT_TRUE(s.empty());
     EXPECT_FALSE(done);  // the reader stands behind the stack, at the 0x77
@@ -915,6 +1116,117 @@ TEST(ComponentCodec, StacksAndPatches) {
 
 // What an item has of its own: the generated table of default components, read by the same
 // code that reads a command's `stone[...]` - so every default of vanilla's is a test of it.
+TEST(ComponentCodec, StacksInStacksAndTheRestOfTheData) {
+    const u32 held = item::patches().live();  // (the recipes keep a few stacks with components)
+    // ItemStackTemplate.CODEC: a compound - or the item's name alone. A count of 1 and no
+    // components are a field's default: left out.
+    EXPECT_EQ(through(comp::kSulfurCubeContent, "\"stone\""), "{id:\"minecraft:stone\"}");
+    EXPECT_EQ(through(comp::kSulfurCubeContent, "{id:\"stone\",count:1,components:{}}"), "{id:\"minecraft:stone\"}");
+    EXPECT_EQ(through(comp::kSulfurCubeContent, "{id:\"diamond_sword\",count:2b,components:{damage:3,\"!lore\":{}}}"),
+              "{components:{\"!minecraft:lore\":{},\"minecraft:damage\":3},count:2,id:\"minecraft:diamond_sword\"}");
+    EXPECT_EQ(through(comp::kSulfurCubeContent, "{id:\"air\"}"), "malformed");
+    EXPECT_EQ(through(comp::kSulfurCubeContent, "{id:\"stone\",count:100}"), "malformed");
+    EXPECT_EQ(through(comp::kSulfurCubeContent, "{id:\"stone\",count:0}"), "malformed");
+    EXPECT_EQ(through(comp::kSulfurCubeContent, "{id:\"stone\",components:{damage:-1}}"), "malformed");
+    EXPECT_EQ(through(comp::kSulfurCubeContent, "{id:\"stone\",components:{food:{}}}"), "unsupported");
+    EXPECT_EQ(through(comp::kSulfurCubeContent, "{id:\"stone\",components:{creative_slot_lock:{}}}"), "malformed");  // no Codec
+    // container: {slot, item}, whatever order they come in; a slot twice is its last.
+    EXPECT_EQ(through(comp::kContainer, "[{slot:2,item:{id:\"stone\",count:5}},{slot:0,item:\"dirt\"},{slot:2,item:\"sand\"}]"),
+              "[{item:{id:\"minecraft:dirt\"},slot:0},{item:{id:\"minecraft:sand\"},slot:2}]");
+    EXPECT_EQ(through(comp::kContainer, "[]"), "[]");
+    EXPECT_EQ(through(comp::kContainer, "[{slot:256,item:\"dirt\"}]"), "malformed");
+    EXPECT_EQ(through(comp::kContainer, "[{slot:0}]"), "malformed");
+    EXPECT_EQ(through(comp::kBundleContents, "[\"stone\",{id:\"shulker_box\",components:{container:[{slot:1,item:\"dirt\"}]}}]"),
+              "[{id:\"minecraft:stone\"},{components:{\"minecraft:container\":[{item:{id:\"minecraft:dirt\"},slot:1}]},id:"
+              "\"minecraft:shulker_box\"}]");
+    EXPECT_EQ(through(comp::kChargedProjectiles, "[{id:\"arrow\"}]"), "[{id:\"minecraft:arrow\"}]");
+    EXPECT_EQ(through(comp::kPotDecorations, "{front:\"brick\",back:{id:\"angler_pottery_sherd\"}}"),
+              "{back:{id:\"minecraft:angler_pottery_sherd\"},front:{id:\"minecraft:brick\"}}");
+    EXPECT_EQ(through(comp::kPotDecorations, "{}"), "{}");
+    EXPECT_EQ(through(comp::kBees, "[{entity_data:{id:\"bee\",NoAI:1b},ticks_in_hive:5,min_ticks_in_hive:2400}]"),
+              "[{entity_data:{NoAI:1b,id:\"minecraft:bee\"},min_ticks_in_hive:2400,ticks_in_hive:5}]");
+    EXPECT_EQ(through(comp::kBees, "[{entity_data:{id:\"bee\"},ticks_in_hive:5}]"), "malformed");
+    // One entry of a registry, one constant of an enum: by name.
+    EXPECT_EQ(through(comp::kWolfVariant, "\"snowy\""), "\"minecraft:snowy\"");
+    EXPECT_EQ(through(comp::kWolfVariant, "\"nope\""), "malformed");
+    EXPECT_EQ(through(comp::kVillagerVariant, "\"minecraft:taiga\""), "\"minecraft:taiga\"");
+    EXPECT_EQ(through(comp::kRabbitVariant, "\"evil\""), "\"evil\"");
+    EXPECT_EQ(through(comp::kRabbitVariant, "\"minecraft:evil\""), "malformed");
+    EXPECT_EQ(through(comp::kTropicalFishPattern, "\"stripey\""), "\"stripey\"");
+    EXPECT_EQ(through(comp::kHorseVariant, "\"dark_brown\""), "\"dark_brown\"");
+    EXPECT_EQ(through(comp::kFoxVariant, "1"), "malformed");
+    // The rest.
+    EXPECT_EQ(through(comp::kCustomModelData, "{floats:[1.5f,2],flags:[1b,0b,5],strings:[\"a\"],colors:[255]}"),
+              "{colors:[255],flags:[1b,0b,1b],floats:[1.5f,2.0f],strings:[\"a\"]}");
+    EXPECT_EQ(through(comp::kCustomModelData, "{}"), "{}");
+    EXPECT_EQ(through(comp::kCustomModelData, "{floats:[\"a\"]}"), "malformed");
+    EXPECT_EQ(through(comp::kTrim, "{material:\"gold\",pattern:\"minecraft:coast\"}"),
+              "{material:\"minecraft:gold\",pattern:\"minecraft:coast\"}");
+    EXPECT_EQ(through(comp::kTrim, "{material:\"gold\"}"), "malformed");
+    EXPECT_EQ(through(comp::kTrim, "{material:{asset_name:\"x\"},pattern:\"coast\"}"), "unsupported");
+    EXPECT_EQ(through(comp::kProvidesTrimMaterial, "\"iron\""), "\"minecraft:iron\"");
+    EXPECT_EQ(through(comp::kProvidesBannerPatterns, "\"#pattern_item/globe\""), "\"#minecraft:pattern_item/globe\"");
+    EXPECT_EQ(through(comp::kProvidesBannerPatterns, "\"#no_such_tag\""), "malformed");
+    EXPECT_EQ(through(comp::kProvidesBannerPatterns, "\"globe\""), "\"minecraft:globe\"");
+    EXPECT_EQ(through(comp::kProvidesBannerPatterns, "[\"globe\",\"creeper\"]"), "[\"minecraft:globe\",\"minecraft:creeper\"]");
+    EXPECT_EQ(through(comp::kProvidesBannerPatterns, "[]"), "[]");
+    EXPECT_EQ(through(comp::kLodestoneTracker, "{target:{dimension:\"overworld\",pos:[I;-5,70,1000]},tracked:0b}"),
+              "{target:{dimension:\"minecraft:overworld\",pos:[I;-5,70,1000]},tracked:0b}");
+    EXPECT_EQ(through(comp::kLodestoneTracker, "{target:{dimension:\"overworld\",pos:[1,-64,-3]}}"),
+              "{target:{dimension:\"minecraft:overworld\",pos:[I;1,-64,-3]}}");
+    EXPECT_EQ(through(comp::kLodestoneTracker, "{}"), "{}");
+    EXPECT_EQ(through(comp::kLodestoneTracker, "{target:{dimension:\"overworld\",pos:[I;1,2]}}"), "malformed");
+    EXPECT_EQ(through(comp::kBreakSound, "\"item.shield.break\""), "\"minecraft:item.shield.break\"");
+    EXPECT_EQ(through(comp::kBreakSound, "\"no.such.sound\""), "malformed");
+    EXPECT_EQ(through(comp::kBreakSound, "{sound_id:\"my:sound\",range:16}"), "{range:16.0f,sound_id:\"my:sound\"}");
+    EXPECT_EQ(through(comp::kIntangibleProjectile, "{}"), "{}");
+    EXPECT_EQ(through(comp::kRecipes, "[\"stick\",\"my:recipe\"]"), "[\"minecraft:stick\",\"my:recipe\"]");
+    EXPECT_EQ(through(comp::kRecipes, "[]"), "[]");
+    EXPECT_EQ(through(comp::kContainerLoot, "{loot_table:\"chests/simple_dungeon\",seed:5}"),
+              "{loot_table:\"minecraft:chests/simple_dungeon\",seed:5L}");
+    EXPECT_EQ(through(comp::kMapDecorations, "{a:{type:\"red_x\",x:1,z:2.5d,rotation:90}}"),
+              "{a:{rotation:90.0f,type:\"minecraft:red_x\",x:1.0d,z:2.5d}}");
+    EXPECT_EQ(through(comp::kMapDecorations, "{a:{type:\"nope\",x:1,z:2,rotation:0}}"), "malformed");
+    EXPECT_EQ(through(comp::kDebugStickState, "{oak_stairs:\"facing\"}"), "{\"minecraft:oak_stairs\":\"facing\"}");
+    // profile: a name alone, a whole profile, any part of one; its properties as a list or as a map.
+    EXPECT_EQ(through(comp::kProfile, "\"Notch\""), "{name:\"Notch\"}");
+    EXPECT_EQ(through(comp::kProfile,
+                      "{id:[I;1,2,3,4],name:\"Bob\",properties:[{name:\"textures\",value:\"abc\",signature:\"s\"}],"
+                      "texture:\"my:skin\",model:\"slim\"}"),
+              "{id:[I;1,2,3,4],model:\"slim\",name:\"Bob\",properties:[{name:\"textures\",signature:\"s\",value:\"abc\"}],"
+              "texture:\"my:skin\"}");
+    EXPECT_EQ(through(comp::kProfile, "{properties:{textures:[\"a\",\"b\"]},id:[1,2,3,4]}"),
+              "{id:[I;1,2,3,4],properties:[{name:\"textures\",value:\"a\"},{name:\"textures\",value:\"b\"}]}");
+    EXPECT_EQ(through(comp::kProfile, "{}"), "{}");
+    EXPECT_EQ(through(comp::kProfile, "{model:\"wide\",cape:\"cape\"}"), "{cape:\"minecraft:cape\",model:\"wide\"}");
+    EXPECT_EQ(through(comp::kProfile, "{name:\"has space\"}"), "malformed");
+    EXPECT_EQ(through(comp::kProfile, "\"SeventeenLettersXY\""), "malformed");
+    EXPECT_EQ(through(comp::kProfile, "{id:[I;1,2,3]}"), "malformed");
+    EXPECT_EQ(through(comp::kProfile, "{model:\"fat\"}"), "malformed");
+    // lock: an ItemPredicate - which items, how many, with which components exactly.
+    EXPECT_EQ(through(comp::kLock, "{items:\"#logs\",count:{min:1,max:1},components:{damage:3b}}"),
+              "{components:{\"minecraft:damage\":3},count:1,items:\"#minecraft:logs\"}");
+    EXPECT_EQ(through(comp::kLock, "{items:[\"stone\"],count:{min:2}}"), "{count:{min:2},items:\"minecraft:stone\"}");
+    EXPECT_EQ(through(comp::kLock, "{items:[\"stone\",\"dirt\"],count:{}}"), "{items:[\"minecraft:stone\",\"minecraft:dirt\"]}");
+    EXPECT_EQ(through(comp::kLock, "{}"), "{}");
+    EXPECT_EQ(through(comp::kLock, "{count:{min:5,max:1}}"), "malformed");
+    EXPECT_EQ(through(comp::kLock, "{items:\"#no_such_tag\"}"), "malformed");
+    EXPECT_EQ(through(comp::kLock, "{components:{damage:-1}}"), "malformed");
+    EXPECT_EQ(through(comp::kLock, "{predicates:{damage:{}}}"), "unsupported");
+    // How many of the 122 are read (docs/architecture.md says so too).
+    {
+        base::ByteBuf scratch;
+        u32 read = 0;
+        for (u32 type = 0; type < comp::kCount; ++type) read += item::check_value(type, {}, scratch) != Verdict::kUnsupported;
+        EXPECT_EQ(read, 93u);
+    }
+    // The three that only travel are no part of a tag.
+    EXPECT_FALSE(item::has_codec(comp::kCreativeSlotLock) || item::has_codec(comp::kAdditionalTradeCost) ||
+                 item::has_codec(comp::kMapPostProcessing));
+    EXPECT_EQ(through(comp::kAdditionalTradeCost, "5"), "malformed");
+    EXPECT_EQ(item::patches().live(), held);
+}
+
 TEST(ComponentCodec, DefaultsAndWhatAPatchNeedNotSay) {
     const u32 held = item::patches().live();
     EXPECT_EQ(item::unread_defaults(), 0u);  // every default of a component that is read here is read
@@ -971,6 +1283,15 @@ TEST(ComponentCodec, DefaultsAndWhatAPatchNeedNotSay) {
     EXPECT_EQ(item::computed_name_key(stack("{id:\"shield\",components:{base_color:\"red\"}}")), "item.minecraft.shield.red");
     EXPECT_EQ(item::computed_name_key(stack("{id:\"shield\"}")), "");
     EXPECT_EQ(item::computed_name_key(stack("{id:\"stone\"}")), "");
+    EXPECT_EQ(item::computed_name_key(stack("{id:\"compass\"}")), "");
+    EXPECT_EQ(item::computed_name_key(stack("{id:\"compass\",components:{lodestone_tracker:{}}}")),
+              "item.minecraft.lodestone_compass");
+    std::string whose;
+    EXPECT_EQ(item::computed_name_key(stack("{id:\"player_head\",components:{profile:\"Notch\"}}"), &whose),
+              "block.minecraft.player_head.named");
+    EXPECT_EQ(whose, "Notch");
+    EXPECT_EQ(item::computed_name_key(stack("{id:\"player_head\",components:{profile:{id:[I;1,2,3,4]}}}")), "");
+    EXPECT_EQ(item::computed_name_key(stack("{id:\"player_head\"}")), "");
     EXPECT_EQ(item::book_title(stack("{id:\"written_book\",components:{written_book_content:{title:\"T\",author:\"A\"}}}")), "T");
     EXPECT_EQ(item::book_title(stack("{id:\"written_book\",components:{written_book_content:{title:\"  \",author:\"A\"}}}")), "");
     EXPECT_EQ(item::patches().live(), held);

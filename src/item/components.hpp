@@ -24,7 +24,7 @@
 // PatchedDataComponentMap does (item::sanitized).
 //
 // Where this differs from vanilla, knowingly:
-//   * patches are capped at kMaxPatchBytes; vanilla's only limit is the packet size.
+//   * patches are capped at kMaxPatchBytes (1 MiB); vanilla's only limit is the packet size.
 //
 // Tick thread only: ids are reference-counted without atomics.
 #pragma once
@@ -45,10 +45,16 @@ namespace component = proto::gen::component;
 
 using PatchId = u32;  // 0 = no patch
 
-// Largest patch a stack may carry, in wire bytes. A stack is copied to everyone who sees its
-// holder; without a cap one client decides how many megabytes that is. Everything the creative
-// inventory offers is under 100 bytes.
-inline constexpr u32 kMaxPatchBytes = 1024;
+// Largest patch a stack may carry, in wire bytes: enough for a book of a hundred full pages or
+// a shulker box of such books, and half of what one frame can hold - so that any one stack can
+// be sent. Everything the creative inventory offers is under 100 bytes.
+inline constexpr u32 kMaxPatchBytes = 1u << 20;
+// A stack whose patch is longer than this is heavy: it is copied to everyone who sees its
+// holder, kept in a player's file, sent with every menu that shows it - and what one client can
+// make others pay is bounded where it is paid (docs/architecture.md, "A heavy stack"): how fast
+// a client may send such stacks, how much of them one player may bring into being, how many
+// bytes of them a tick may copy to those who look.
+inline constexpr u32 kHeavyPatchBytes = 4096;
 
 enum class Verdict : u8 {
     kOk,
@@ -133,6 +139,22 @@ Patches& patches();
 // and appended as vanilla would write the value it decoded - the decoders of components.cpp, the
 // one place that knows what a value may be. kUnsupported: a component, or a value, that is not read.
 Verdict check_value(u32 type, std::span<const u8> value, base::ByteBuf& out);
+
+// Registry.get(TagKey): does the registry ("minecraft:item") have this tag ("minecraft:logs")?
+// The tags are those every client is told (update_tags).
+bool registry_has_tag(std::string_view registry, std::string_view tag);
+
+// A stack inside a component (ItemStackTemplate), where it lies in the component's value.
+struct Contained {
+    u32 slot;  // its place in the list (a container's slot)
+    u32 item, count;
+    std::span<const u8> patch;  // DataComponentPatch.STREAM_CODEC: values without lengths
+};
+// The stacks a `container`, `bundle_contents` or `charged_projectiles` value holds; a
+// container's empty slots are passed over.
+void contained(u32 type, std::span<const u8> value, std::vector<Contained>& out);
+// One component of such a patch.
+Patches::Found find_nested(std::span<const u8> patch, u32 type);
 
 // A patch the server makes: another patch with components set, removed, or put back to the
 // item's own. The values are in the form check_value() writes. Tick thread, a cold path.

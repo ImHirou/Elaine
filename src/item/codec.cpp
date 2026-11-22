@@ -20,6 +20,7 @@ using nbt::Tag;
 using proto::Reader;
 namespace reg = proto::reg;
 namespace sreg = proto::gen::static_registry;
+namespace variant = proto::gen::variant;
 
 namespace {
 
@@ -158,6 +159,487 @@ void put_ints(nbt::Writer& w, std::string_view name, std::span<const i32> v) {
     for (const i32 x : v) w.put_int(x);
 }
 
+// ---------------------------------------------------------------------------- one entry of a registry, one constant of an enum
+
+// The components that are a Holder by name (RegistryCodecs.holder(registry): the entry's name
+// in a tag, its id in a packet).
+Names registry_names(u32 type) {
+    switch (type) {
+        case component::kVillagerVariant: return sreg::kVillagerTypeNames;
+        case component::kWolfVariant: return reg::wolf_variant::kNames;
+        case component::kWolfSoundVariant: return reg::wolf_sound_variant::kNames;
+        case component::kPigVariant: return reg::pig_variant::kNames;
+        case component::kPigSoundVariant: return reg::pig_sound_variant::kNames;
+        case component::kCowVariant: return reg::cow_variant::kNames;
+        case component::kCowSoundVariant: return reg::cow_sound_variant::kNames;
+        case component::kChickenVariant: return reg::chicken_variant::kNames;
+        case component::kChickenSoundVariant: return reg::chicken_sound_variant::kNames;
+        case component::kZombieNautilusVariant: return reg::zombie_nautilus_variant::kNames;
+        case component::kFrogVariant: return reg::frog_variant::kNames;
+        case component::kCatVariant: return reg::cat_variant::kNames;
+        case component::kCatSoundVariant: return reg::cat_sound_variant::kNames;
+        case component::kProvidesPotteryPattern: return reg::decorated_pot_pattern::kNames;
+        default: return {};
+    }
+}
+// ...and those that are an enum (StringRepresentable.fromEnum: its name in a tag, its own id in a packet).
+std::span<const variant::Named> enum_values(u32 type) {
+    switch (type) {
+        case component::kFoxVariant: return variant::kFox;
+        case component::kSalmonSize: return variant::kSalmon;
+        case component::kParrotVariant: return variant::kParrot;
+        case component::kTropicalFishPattern: return variant::kTropicalFishPattern;
+        case component::kMooshroomVariant: return variant::kMooshroom;
+        case component::kRabbitVariant: return variant::kRabbit;
+        case component::kHorseVariant: return variant::kHorse;
+        case component::kLlamaVariant: return variant::kLlama;
+        case component::kAxolotlVariant: return variant::kAxolotl;
+        default: return {};
+    }
+}
+
+Verdict from(u32 type, Tag t, Out& out);
+void to(u32 type, Reader& in, nbt::Writer& w, std::string_view name);
+
+// ---------------------------------------------------------------------------- stacks in stacks
+
+// DataComponentPatch.CODEC into the form a patch has inside a component: counts, the values
+// behind their types without a length, the types that are taken away.
+Verdict patch_wire_from(Tag components, Out& out) {
+    if (components.type != nbt::kCompound) return kBad;
+    Patches::Slot slot[component::kCount] = {};
+    base::ByteBuf values;
+    for (const Tag e : components.entries()) {
+        if (components.get(e.name()).at != e.at) continue;  // a name twice: the last one counts
+        const std::string key = nbt::to_utf8(e.name());
+        const bool removed = key.starts_with('!');
+        const u32 type = find_component(std::string_view(key).substr(removed));
+        if (type == kNoComponent || transient(type)) return kBad;
+        if (removed) {
+            slot[type] = {2, 0, 0};
+            continue;
+        }
+        const u32 at = values.len;
+        if (const Verdict v = value_from_nbt(type, e, values); v != kOk) return v;
+        slot[type] = {1, at, values.len - at};
+    }
+    u32 set = 0, gone = 0;
+    for (u32 type = 0; type < component::kCount; ++type) {
+        set += slot[type].state == 1;
+        gone += slot[type].state == 2;
+    }
+    out.varint(set);
+    out.varint(gone);
+    for (u32 type = 0; type < component::kCount; ++type) {
+        if (slot[type].state != 1) continue;
+        out.varint(type);
+        out.bytes({values.data + slot[type].off, slot[type].len});
+    }
+    for (u32 type = 0; type < component::kCount; ++type)
+        if (slot[type].state == 2) out.varint(type);
+    return kOk;
+}
+
+// ...and back: the entries of such a patch into the compound that is open.
+void patch_wire_to(Reader& in, nbt::Writer& w) {
+    const u32 added = in.varint(), removed = in.varint();
+    for (u32 i = 0; i < added; ++i) {
+        const u32 type = in.varint();
+        if (type == component::kAdditionalTradeCost || type == component::kMapPostProcessing) {
+            in.varint();  // no Codec: no part of a tag
+        } else if (type != component::kCreativeSlotLock) {
+            to(type, in, w, component::kNames[type]);
+        }
+    }
+    for (u32 i = 0; i < removed; ++i) {
+        std::string key = "!";
+        key += component::kNames[in.varint()];
+        w.begin_compound(key);
+        w.end_compound();
+    }
+}
+
+// ItemStackTemplate.CODEC: {id, count, components} - an item that is not air, a count of 1..99
+// that is 1 if left out - or, in its place, the name of the item alone.
+Verdict template_from(Tag t, Out& out) {
+    std::string name;
+    if (t.type == nbt::kString) {
+        if (!as_identifier(t, name)) return kBad;
+        const u32 item = world::find_item(name);
+        if (item == world::kNoId || item == 0) return kBad;
+        out.varint(item);
+        out.varint(1);
+        out.varint(0);
+        out.varint(0);
+        return kOk;
+    }
+    if (t.type != nbt::kCompound || !as_identifier(t.get("id"), name)) return kBad;
+    const u32 item = world::find_item(name);
+    i32 count;
+    if (item == world::kNoId || item == 0 || !optional(t, "count", count, 1, as_int) || count < 1 || count > 99) return kBad;
+    out.varint(item);
+    out.varint(static_cast<u32>(count));
+    if (const Tag components = t.get("components")) return patch_wire_from(components, out);
+    out.varint(0);
+    out.varint(0);
+    return kOk;
+}
+// The entries of a template into the compound that is open: what is as a field's default is left out.
+void template_to(Reader& in, nbt::Writer& w) {
+    w.put_string("id", world::item_name(in.varint()));
+    if (const i32 count = static_cast<i32>(in.varint()); count != 1) w.put_int("count", count);
+    Reader ahead = in;
+    if (ahead.varint() + ahead.varint() == 0) {
+        in = ahead;
+        return;
+    }
+    w.begin_compound("components");
+    patch_wire_to(in, w);
+    w.end_compound();
+}
+
+// A list of compounds whose number is known only once they are written.
+struct ListOf {
+    base::ByteBuf elements;
+    nbt::Writer w{elements};
+    u32 count = 0;
+    void put(nbt::Writer& to, std::string_view name) {
+        to.begin_list(name, count ? nbt::kCompound : nbt::kEnd, count);
+        to.put_raw({elements.data, elements.len});
+    }
+};
+
+// TypedEntityData.codec: a compound that names its type as "id".
+Verdict typed_data_from(Tag t, Out& out, bool entity) {
+    if (t.type != nbt::kCompound) return kBad;
+    std::string name;
+    if (!as_identifier(t.get("id"), name)) return kBad;
+    const u32 id = entity ? world::find_entity_type(name) : world::find_block_entity_type(name);
+    if (id == world::kNoId) return kBad;
+    out.varint(id);
+    out.u8v(nbt::kCompound);
+    nbt::Writer w(out.b);
+    for (const Tag e : t.entries())
+        if (e.name() != "id") w.put_raw(e.name(), e.type, e.bytes());
+    w.end_compound();
+    return kOk;
+}
+// ...the entries of the tag, and its type put among them as "id", into the compound that is open.
+void typed_data_to(Reader& in, nbt::Writer& w, bool entity) {
+    const u32 id = in.varint();
+    const Stored t = take_tag(in);
+    w.put_raw(t.payload.first(t.payload.size() - 1));  // its entries, without the end
+    w.put_string("id", entity ? world::entity_type_name(id) : world::block_entity_type_name(id));
+}
+
+// ---------------------------------------------------------------------------- a player's profile
+
+// Codec.sizeLimitedString: a string of at most `max` UTF-16 units.
+bool as_limited(Tag t, u32 max, std::string& v) {
+    return t.type == nbt::kString && nbt::utf16_length(t.str()) <= max && as_string(t, v);
+}
+// ExtraCodecs.PLAYER_NAME: at most 16 characters, none of them a space, a control or beyond '~'.
+bool as_player_name(Tag t, std::string& v) {
+    return as_limited(t, 16, v) && std::all_of(v.begin(), v.end(), [](char c) { return c > 32 && c < 127; });
+}
+// UUIDUtil.CODEC: four ints, as an array or a list; into the two longs of the wire.
+bool uuid_from(Tag t, Out& out) {
+    if (!t.collection() || t.size() != 4) return false;
+    for (const Tag e : t.elements()) {
+        if (!e.numeric()) return false;
+        out.be32(static_cast<u32>(e.as_int()));
+    }
+    return true;
+}
+// ExtraCodecs.PROPERTY_MAP: a map of names to lists of values, or a list of {name, value, signature}.
+Verdict properties_from(Tag t, Out& out) {
+    if (!t) {
+        out.varint(0);
+        return kOk;
+    }
+    base::ByteBuf list;
+    Out to{list};
+    u32 n = 0;
+    if (t.type == nbt::kCompound) {  // (the order of a map that was read from a tag: that of its HashMap)
+        if (t.size() > 16) return kBad;
+        std::vector<Tag> entries;
+        nbt::map_order(t, entries);
+        for (const Tag e : entries) {
+            if (!e.collection()) return kBad;
+            const std::string name = nbt::to_utf8(e.name());
+            for (const Tag value : e.elements()) {
+                std::string v;
+                if (!as_string(value, v)) return kBad;
+                to.str(name);
+                to.str(v);
+                to.u8v(0);
+                ++n;
+            }
+        }
+    } else {
+        if (!t.collection() || t.size() > 16) return kBad;
+        for (const Tag e : t.elements()) {
+            std::string name, value, signature;
+            const Tag sig = e.get("signature");
+            if (e.type != nbt::kCompound || !as_limited(e.get("name"), 64, name) || !as_limited(e.get("value"), 32767, value) ||
+                (sig && !as_limited(sig, 1024, signature)))
+                return kBad;
+            to.str(name);
+            to.str(value);
+            to.u8v(static_cast<bool>(sig));
+            if (sig) to.str(signature);
+            ++n;
+        }
+    }
+    if (n > 16) return kNotRead;  // more than a packet may carry (writeCount): vanilla takes it and cannot send it
+    out.varint(n);
+    out.bytes({list.data, list.len});
+    return kOk;
+}
+
+// ResolvableProfile.CODEC: {id, name, properties} (a whole profile, if it has an id and a
+// name) or any part of that, with the textures and the model of a skin beside it - or, in
+// its place, a player's name alone.
+Verdict profile_from(Tag t, Out& out) {
+    std::string name;
+    if (t.type == nbt::kString) {
+        if (!as_player_name(t, name)) return kBad;
+        out.u8v(0);  // a partial profile: a name, no id, no properties
+        out.u8v(1);
+        out.str(name);
+        out.u8v(0);
+        out.varint(0);
+        for (u32 i = 0; i < 4; ++i) out.u8v(0);
+        return kOk;
+    }
+    if (t.type != nbt::kCompound) return kBad;
+    const Tag id = t.get("id"), named = t.get("name");
+    if (named && !as_player_name(named, name)) return kBad;
+    base::ByteBuf uuid;
+    Out to_uuid{uuid};
+    if (id && !uuid_from(id, to_uuid)) return kBad;
+    const bool whole = id && named;
+    out.u8v(whole);
+    if (whole) {
+        out.bytes({uuid.data, uuid.len});
+        out.str(name);
+    } else {
+        out.u8v(static_cast<bool>(named));
+        if (named) out.str(name);
+        out.u8v(static_cast<bool>(id));
+        if (id) out.bytes({uuid.data, uuid.len});
+    }
+    if (const Verdict v = properties_from(t.get("properties"), out); v != kOk) return v;
+    for (const std::string_view key : {"texture", "cape", "elytra"}) {  // PlayerSkin.Patch
+        const Tag texture = t.get(key);
+        std::string asset;
+        if (texture && !as_identifier(texture, asset)) return kBad;
+        out.u8v(static_cast<bool>(texture));
+        if (texture) out.str(asset);
+    }
+    const Tag model = t.get("model");
+    u32 kind = 0;
+    static constexpr std::string_view kModels[] = {"slim", "wide"};
+    if (model && !as_enum(model, kModels, kind)) return kBad;
+    out.u8v(static_cast<bool>(model));
+    if (model) out.u8v(kind == 0);
+    return kOk;
+}
+
+void profile_to(Reader& in, nbt::Writer& w) {
+    const auto uuid = [&] {
+        const i32 parts[4] = {static_cast<i32>(in.be32()), static_cast<i32>(in.be32()), static_cast<i32>(in.be32()),
+                              static_cast<i32>(in.be32())};
+        w.put_int_array("id", parts);
+    };
+    if (in.u8v()) {
+        uuid();
+        w.put_string("name", take_str(in));
+    } else {
+        if (in.u8v()) w.put_string("name", take_str(in));
+        if (in.u8v()) uuid();
+    }
+    if (const u32 n = in.varint()) {  // lambda$static$53: always as the list
+        w.begin_list("properties", nbt::kCompound, n);
+        for (u32 i = 0; i < n; ++i) {
+            w.put_string("name", take_str(in));
+            w.put_string("value", take_str(in));
+            if (in.u8v()) w.put_string("signature", take_str(in));
+            w.end_compound();
+        }
+    }
+    for (const std::string_view key : {"texture", "cape", "elytra"})
+        if (in.u8v()) w.put_string(key, take_str(in));
+    if (in.u8v()) w.put_string("model", in.u8v() ? "slim" : "wide");
+}
+
+// ---------------------------------------------------------------------------- components that are a tag on the wire too
+
+// What was put together with a Writer, as vanilla writes the tag it made of it: every compound
+// in the order of its HashMap.
+Verdict finish_tag(const base::ByteBuf& built, base::ByteBuf& out) {
+    nbt::Doc doc;
+    if (doc.parse({built.data, built.len}, nbt::Form::kNameless, nbt::kTrusted) != nbt::Error::kNone) return kNotRead;
+    *out.reserve(1) = doc.root().type;
+    ++out.len;
+    nbt::write_map_order(doc.root(), out);
+    return kOk;
+}
+
+// Block.getStateDefinition().getProperty(name) != null
+bool has_property(u32 block, std::string_view name) {
+    for (u32 i = 0; i < world::block_property_count(block); ++i)
+        if (world::block_property(block, i).name == name) return true;
+    return false;
+}
+
+Verdict tag_component_built(u32 type, Tag t, nbt::Writer& w) {
+    switch (type) {
+        case component::kIntangibleProjectile:  // Unit.CODEC: any map
+            if (t.type != nbt::kCompound) return kBad;
+            w.root(nbt::kCompound);
+            w.end_compound();
+            return kOk;
+        case component::kRecipes: {  // Recipe.KEY_CODEC.listOf(): the keys of recipes, which are any identifiers
+            if (!t.collection()) return kBad;
+            w.root(nbt::kList);
+            w.begin_list(t.size() ? nbt::kString : nbt::kEnd, t.size());
+            for (const Tag key : t.elements()) {
+                std::string name;
+                if (!as_identifier(key, name)) return kBad;
+                w.put_string(name);
+            }
+            return kOk;
+        }
+        case component::kContainerLoot: {  // SeededContainerLoot: loot_table (a key), seed (a long, 0 if left out)
+            std::string table;
+            if (t.type != nbt::kCompound || !as_identifier(t.get("loot_table"), table)) return kBad;
+            const Tag seed = t.get("seed");
+            if (seed && !seed.numeric()) return kBad;
+            w.root(nbt::kCompound);
+            w.put_string("loot_table", table);
+            if (seed && seed.as_long() != 0) w.put_long("seed", seed.as_long());
+            w.end_compound();
+            return kOk;
+        }
+        case component::kMapDecorations: {  // a map of any names to {type, x, z, rotation}
+            if (t.type != nbt::kCompound) return kBad;
+            w.root(nbt::kCompound);
+            for (const Tag e : t.entries()) {
+                if (t.get(e.name()).at != e.at) continue;
+                u32 kind;
+                const Tag x = e.get("x"), z = e.get("z"), rotation = e.get("rotation");
+                if (e.type != nbt::kCompound || !as_entry(e.get("type"), sreg::kMapDecorationTypeNames, kind) || !x.numeric() ||
+                    !z.numeric() || !rotation.numeric())
+                    return kBad;
+                w.entry(nbt::kCompound, e.name());
+                w.put_string("type", sreg::kMapDecorationTypeNames[kind]);
+                w.put_double("x", x.as_double());
+                w.put_double("z", z.as_double());
+                w.put_float("rotation", static_cast<float>(rotation.as_double()));
+                w.end_compound();
+            }
+            w.end_compound();
+            return kOk;
+        }
+        case component::kDebugStickState: {  // a map of blocks to the name of one of their properties
+            if (t.type != nbt::kCompound) return kBad;
+            w.root(nbt::kCompound);
+            for (const Tag e : t.entries()) {
+                if (t.get(e.name()).at != e.at) continue;
+                std::string block, property;
+                proto::Identifier id;
+                const std::string key = nbt::to_utf8(e.name());  // (the identifier is views into it)
+                if (!proto::parse_identifier(key, id) || !as_string(e, property)) return kBad;
+                block.assign(id.ns).append(":").append(id.path);
+                const u32 b = world::find_block(block);
+                if (b == world::kNoId || !has_property(b, property)) return kBad;
+                w.put_string(block, property);
+            }
+            w.end_compound();
+            return kOk;
+        }
+        case component::kLock: {  // LockCode: an ItemPredicate - items, count, components, predicates
+            if (t.type != nbt::kCompound) return kBad;
+            w.root(nbt::kCompound);
+            if (const Tag items = t.get("items")) {  // a HolderSet of items: "#tag", one name, or a list of names
+                std::string name;
+                if (items.type == nbt::kString && items.str().starts_with('#')) {
+                    const std::string tag = nbt::to_utf8(items.str()).substr(1);
+                    proto::Identifier id;
+                    if (!proto::parse_identifier(tag, id)) return kBad;
+                    name.assign(id.ns).append(":").append(id.path);
+                    if (!registry_has_tag("minecraft:item", name)) return kBad;
+                    w.put_string("items", "#" + name);
+                } else if (items.type == nbt::kString) {
+                    if (!as_identifier(items, name) || world::find_item(name) == world::kNoId) return kBad;
+                    w.put_string("items", name);
+                } else {
+                    if (!items.collection()) return kBad;
+                    std::vector<std::string> names;
+                    for (const Tag e : items.elements()) {
+                        if (!as_identifier(e, name) || world::find_item(name) == world::kNoId) return kBad;
+                        names.push_back(name);
+                    }
+                    if (names.size() == 1) {  // HolderSetCodec: one entry is written alone
+                        w.put_string("items", names[0]);
+                    } else {
+                        w.begin_list("items", names.empty() ? nbt::kEnd : nbt::kString, static_cast<u32>(names.size()));
+                        for (const std::string& n : names) w.put_string(n);
+                    }
+                }
+            }
+            if (const Tag count = t.get("count")) {  // MinMaxBounds.Ints: {min, max}, or one number for both
+                i32 min = 0, max = 0;
+                bool has_min = false, has_max = false;
+                if (count.type == nbt::kCompound) {
+                    const Tag lo = count.get("min"), hi = count.get("max");
+                    has_min = static_cast<bool>(lo);
+                    has_max = static_cast<bool>(hi);
+                    if ((lo && !as_int(lo, min)) || (hi && !as_int(hi, max)) || (lo && hi && min > max)) return kBad;
+                } else {
+                    if (!as_int(count, min)) return kBad;
+                    max = min;
+                    has_min = has_max = true;
+                }
+                if (has_min && has_max && min == max) {
+                    w.put_int("count", min);
+                } else if (has_min || has_max) {
+                    w.begin_compound("count");
+                    if (has_min) w.put_int("min", min);
+                    if (has_max) w.put_int("max", max);
+                    w.end_compound();
+                }
+            }
+            if (const Tag components = t.get("components")) {  // DataComponentExactPredicate: components and their values
+                if (components.type != nbt::kCompound) return kBad;
+                bool any = false;
+                base::ByteBuf value;
+                for (const Tag e : components.entries()) {
+                    if (components.get(e.name()).at != e.at) continue;
+                    const std::string key = nbt::to_utf8(e.name());
+                    const u32 of = find_component(key);
+                    if (of == kNoComponent || transient(of)) return kBad;
+                    value.clear();
+                    if (const Verdict v = value_from_nbt(of, e, value); v != kOk) return v;
+                    if (!any) w.begin_compound("components");
+                    any = true;
+                    Reader stored(value.data, value.len);
+                    to(of, stored, w, component::kNames[of]);
+                }
+                if (any) w.end_compound();
+            }
+            if (const Tag predicates = t.get("predicates")) {  // tests of components: not read
+                if (predicates.type != nbt::kCompound) return kBad;
+                if (predicates.size() != 0) return kNotRead;
+            }
+            w.end_compound();
+            return kOk;
+        }
+        default: return kNotRead;
+    }
+}
+
 // ---------------------------------------------------------------------------- the components, each both ways
 //
 // `from`: the tag its Codec reads -> the bytes its StreamCodec writes (unchecked: check_value
@@ -269,6 +751,22 @@ void explosion_to(Reader& in, nbt::Writer& w) {
 }
 
 Verdict from(u32 type, Tag t, Out& out) {
+    if (const Names names = registry_names(type); !names.empty()) {
+        u32 id;
+        if (!as_entry(t, names, id)) return kBad;
+        out.varint(id);
+        return kOk;
+    }
+    if (const std::span<const variant::Named> values = enum_values(type); !values.empty()) {
+        std::string name;
+        if (!as_string(t, name)) return kBad;
+        for (const variant::Named& v : values) {
+            if (v.name != name) continue;
+            out.varint(v.id);
+            return kOk;
+        }
+        return kBad;
+    }
     switch (type) {
         case component::kCustomName:
         case component::kItemName: return text_from(t, out);
@@ -295,20 +793,7 @@ Verdict from(u32 type, Tag t, Out& out) {
             return kOk;
         }
         case component::kEntityData:
-        case component::kBlockEntityData: {  // TypedEntityData.codec: a compound that names its type as "id"
-            if (t.type != nbt::kCompound) return kBad;
-            std::string name;
-            if (!as_identifier(t.get("id"), name)) return kBad;
-            const u32 id = type == component::kEntityData ? world::find_entity_type(name) : world::find_block_entity_type(name);
-            if (id == world::kNoId) return kBad;
-            out.varint(id);
-            out.u8v(nbt::kCompound);
-            nbt::Writer w(out.b);
-            for (const Tag e : t.entries())
-                if (e.name() != "id") w.put_raw(e.name(), e.type, e.bytes());
-            w.end_compound();
-            return kOk;
-        }
+        case component::kBlockEntityData: return typed_data_from(t, out, type == component::kEntityData);
         case component::kWritableBookContent: {
             if (t.type != nbt::kCompound) return kBad;
             const Tag pages = t.get("pages");
@@ -587,11 +1072,214 @@ Verdict from(u32 type, Tag t, Out& out) {
             }
             return kOk;
         }
+        // ---- stacks in stacks
+        case component::kContainer: {  // a list of {slot, item}, at most 256, slots 0..255
+            if (!t.collection() || t.size() > 256) return kBad;
+            std::pair<u32, u32> at[256] = {};  // where a slot's template is, and how long
+            base::ByteBuf templates;
+            Out to_templates{templates};
+            u32 slots = 0;
+            for (const Tag e : t.elements()) {
+                i32 slot;
+                if (e.type != nbt::kCompound || !as_int(e.get("slot"), slot) || slot < 0 || slot > 255 || !e.get("item"))
+                    return kBad;
+                const u32 start = templates.len;
+                if (const Verdict v = template_from(e.get("item"), to_templates); v != kOk) return v;
+                at[slot] = {start, templates.len - start};
+                slots = std::max(slots, static_cast<u32>(slot) + 1);
+            }
+            out.varint(slots);
+            for (u32 i = 0; i < slots; ++i) {
+                out.u8v(at[i].second != 0);
+                out.bytes({templates.data + at[i].first, at[i].second});
+            }
+            return kOk;
+        }
+        case component::kBundleContents:
+        case component::kChargedProjectiles: {  // a list of templates (charged: at most 1024)
+            if (!t.collection() || (type == component::kChargedProjectiles && t.size() > 1024)) return kBad;
+            out.varint(t.size());
+            for (const Tag e : t.elements())
+                if (const Verdict v = template_from(e, out); v != kOk) return v;
+            return kOk;
+        }
+        case component::kSulfurCubeContent: return template_from(t, out);
+        case component::kPotDecorations: {  // back, left, right, front: each a template, or left out
+            if (t.type != nbt::kCompound) return kBad;
+            for (const std::string_view side : {"back", "left", "right", "front"}) {
+                const Tag item = t.get(side);
+                out.u8v(static_cast<bool>(item));
+                if (!item) continue;
+                if (const Verdict v = template_from(item, out); v != kOk) return v;
+            }
+            return kOk;
+        }
+        case component::kBees: {  // a list of {entity_data, ticks_in_hive, min_ticks_in_hive}
+            if (!t.collection()) return kBad;
+            out.varint(t.size());
+            for (const Tag e : t.elements()) {
+                i32 ticks, least;
+                if (e.type != nbt::kCompound || !as_int(e.get("ticks_in_hive"), ticks) ||
+                    !as_int(e.get("min_ticks_in_hive"), least))
+                    return kBad;
+                if (const Verdict v = typed_data_from(e.get("entity_data"), out, true); v != kOk) return v;
+                out.varint(static_cast<u32>(ticks));
+                out.varint(static_cast<u32>(least));
+            }
+            return kOk;
+        }
+        // ---- the rest of what is only data
+        case component::kCustomModelData: {  // floats, flags, strings, colors: lists, each empty if left out
+            if (t.type != nbt::kCompound) return kBad;
+            const Tag floats = t.get("floats"), flags = t.get("flags"), strings = t.get("strings"), colors = t.get("colors");
+            for (const Tag list : {floats, flags, strings, colors})
+                if (list && !list.collection()) return kBad;
+            out.varint(floats ? floats.size() : 0);
+            if (floats)
+                for (const Tag e : floats.elements()) {
+                    float v;
+                    if (!as_float(e, v)) return kBad;
+                    out.be32(std::bit_cast<u32>(v));
+                }
+            out.varint(flags ? flags.size() : 0);
+            if (flags)
+                for (const Tag e : flags.elements()) {
+                    bool v;
+                    if (!as_bool(e, v)) return kBad;
+                    out.u8v(v);
+                }
+            out.varint(strings ? strings.size() : 0);
+            if (strings)
+                for (const Tag e : strings.elements()) {
+                    std::string v;
+                    if (!as_string(e, v)) return kBad;
+                    out.str(v);
+                }
+            out.varint(colors ? colors.size() : 0);
+            if (colors)
+                for (const Tag e : colors.elements()) {  // ExtraCodecs.RGB_COLOR_CODEC: an int - or three floats, not read
+                    i32 v;
+                    if (e.collection()) return kNotRead;
+                    if (!as_int(e, v)) return kBad;
+                    out.be32(static_cast<u32>(v));
+                }
+            return kOk;
+        }
+        case component::kTrim: {  // ArmorTrim: material and pattern, holders - an entry written out is not read
+            if (t.type != nbt::kCompound) return kBad;
+            const Tag material = t.get("material"), pattern = t.get("pattern");
+            if (material.type == nbt::kCompound || pattern.type == nbt::kCompound) return kNotRead;
+            u32 m, p;
+            if (!as_entry(material, reg::trim_material::kNames, m) || !as_entry(pattern, reg::trim_pattern::kNames, p))
+                return kBad;
+            out.varint(m + 1);
+            out.varint(p + 1);
+            return kOk;
+        }
+        case component::kProvidesTrimMaterial: {
+            if (t.type == nbt::kCompound) return kNotRead;
+            u32 id;
+            if (!as_entry(t, reg::trim_material::kNames, id)) return kBad;
+            out.varint(id + 1);
+            return kOk;
+        }
+        case component::kProvidesBannerPatterns: {  // a HolderSet: "#tag", one name, or a list of names
+            std::string name;
+            if (t.type == nbt::kString && t.str().starts_with('#')) {
+                proto::Identifier id;
+                const std::string tag = nbt::to_utf8(t.str()).substr(1);
+                if (!proto::parse_identifier(tag, id)) return kBad;
+                out.varint(0);
+                out.str(std::string(id.ns).append(":").append(id.path));  // (that the tag exists: check_value)
+                return kOk;
+            }
+            u32 id;
+            if (t.type == nbt::kString) {
+                if (!as_entry(t, reg::banner_pattern::kNames, id)) return kBad;
+                out.varint(2);
+                out.varint(id);
+                return kOk;
+            }
+            if (!t.collection()) return kBad;
+            out.varint(t.size() + 1);
+            for (const Tag e : t.elements()) {
+                if (!as_entry(e, reg::banner_pattern::kNames, id)) return kBad;
+                out.varint(id);
+            }
+            return kOk;
+        }
+        case component::kLodestoneTracker: {  // target: {dimension, pos} or left out; tracked: true if left out
+            if (t.type != nbt::kCompound) return kBad;
+            bool tracked;
+            if (!optional(t, "tracked", tracked, true, as_bool)) return kBad;
+            const Tag target = t.get("target");
+            out.u8v(static_cast<bool>(target));
+            if (target) {
+                std::string dimension;
+                const Tag pos = target.get("pos");  // BlockPos.CODEC: three ints, as an array or a list
+                if (target.type != nbt::kCompound || !as_identifier(target.get("dimension"), dimension) || !pos.collection() ||
+                    pos.size() != 3)
+                    return kBad;
+                i64 c[3];
+                u32 i = 0;
+                for (const Tag e : pos.elements()) {
+                    if (!e.numeric()) return kBad;
+                    c[i++] = e.as_int();
+                }
+                // On the wire a position is a long of 26 + 26 + 12 bits: one beyond it does not come back as it went.
+                if (c[0] < -(1 << 25) || c[0] >= 1 << 25 || c[2] < -(1 << 25) || c[2] >= 1 << 25 || c[1] < -(1 << 11) ||
+                    c[1] >= 1 << 11)
+                    return kNotRead;
+                out.str(dimension);
+                const u64 packed = (static_cast<u64>(c[0]) & 0x3FFFFFF) << 38 | (static_cast<u64>(c[2]) & 0x3FFFFFF) << 12 |
+                                   (static_cast<u64>(c[1]) & 0xFFF);
+                out.be32(static_cast<u32>(packed >> 32));
+                out.be32(static_cast<u32>(packed));
+            }
+            out.u8v(tracked);
+            return kOk;
+        }
+        case component::kBreakSound: {  // a Holder<SoundEvent>: its name, or {sound_id, range}
+            if (t.type == nbt::kCompound) {
+                std::string sound;
+                if (!as_identifier(t.get("sound_id"), sound)) return kBad;
+                const Tag range = t.get("range");  // (lenient: a range that is no number is none)
+                out.varint(0);
+                out.str(sound);
+                out.u8v(range.numeric());
+                if (range.numeric()) out.be32(std::bit_cast<u32>(static_cast<float>(range.as_double())));
+                return kOk;
+            }
+            u32 id;
+            if (!as_entry(t, sreg::kSoundEventNames, id)) return kBad;
+            out.varint(id + 1);
+            return kOk;
+        }
+        case component::kProfile: return profile_from(t, out);
+        case component::kIntangibleProjectile:
+        case component::kMapDecorations:
+        case component::kDebugStickState:
+        case component::kRecipes:
+        case component::kLock:
+        case component::kContainerLoot: return tag_component(type, t, out.b);
+        case component::kCreativeSlotLock:
+        case component::kAdditionalTradeCost:
+        case component::kMapPostProcessing: return kBad;  // no Codec: not a component a tag can name
         default: return kNotRead;
     }
 }
 
 void to(u32 type, Reader& in, nbt::Writer& w, std::string_view name) {
+    if (const Names names = registry_names(type); !names.empty()) {
+        w.put_string(name, names[in.varint()]);
+        return;
+    }
+    if (const std::span<const variant::Named> values = enum_values(type); !values.empty()) {
+        const u32 id = in.varint();
+        for (const variant::Named& v : values)
+            if (v.id == id) w.put_string(name, v.name);
+        return;
+    }
     switch (type) {
         case component::kCustomName:
         case component::kItemName:
@@ -608,15 +1296,11 @@ void to(u32 type, Reader& in, nbt::Writer& w, std::string_view name) {
             break;
         }
         case component::kEntityData:
-        case component::kBlockEntityData: {  // the tag, and its type put into it as "id"
-            const u32 id = in.varint();
-            const Stored t = take_tag(in);
+        case component::kBlockEntityData:
             w.entry(nbt::kCompound, name);
-            w.put_raw(t.payload.first(t.payload.size() - 1));  // its entries, without the end
-            w.put_string("id", type == component::kEntityData ? world::entity_type_name(id) : world::block_entity_type_name(id));
+            typed_data_to(in, w, type == component::kEntityData);
             w.end_compound();
             break;
-        }
         case component::kWritableBookContent: {
             w.begin_compound(name);
             if (const u32 pages = in.varint()) {
@@ -780,11 +1464,164 @@ void to(u32 type, Reader& in, nbt::Writer& w, std::string_view name) {
             w.end_compound();
             break;
         }
+        // ---- stacks in stacks
+        case component::kContainer: {
+            ListOf slots;
+            const u32 n = in.varint();
+            for (u32 i = 0; i < n; ++i) {
+                if (in.u8v() == 0) continue;
+                slots.w.put_int("slot", static_cast<i32>(i));
+                slots.w.begin_compound("item");
+                template_to(in, slots.w);
+                slots.w.end_compound();
+                slots.w.end_compound();
+                ++slots.count;
+            }
+            slots.put(w, name);
+            break;
+        }
+        case component::kBundleContents:
+        case component::kChargedProjectiles: {
+            const u32 n = in.varint();
+            w.begin_list(name, n ? nbt::kCompound : nbt::kEnd, n);
+            for (u32 i = 0; i < n; ++i) {
+                template_to(in, w);
+                w.end_compound();
+            }
+            break;
+        }
+        case component::kSulfurCubeContent:
+            w.begin_compound(name);
+            template_to(in, w);
+            w.end_compound();
+            break;
+        case component::kPotDecorations:
+            w.begin_compound(name);
+            for (const std::string_view side : {"back", "left", "right", "front"}) {
+                if (in.u8v() == 0) continue;
+                w.begin_compound(side);
+                template_to(in, w);
+                w.end_compound();
+            }
+            w.end_compound();
+            break;
+        case component::kBees: {
+            const u32 n = in.varint();
+            w.begin_list(name, n ? nbt::kCompound : nbt::kEnd, n);
+            for (u32 i = 0; i < n; ++i) {
+                w.begin_compound("entity_data");
+                typed_data_to(in, w, true);
+                w.end_compound();
+                w.put_int("ticks_in_hive", static_cast<i32>(in.varint()));
+                w.put_int("min_ticks_in_hive", static_cast<i32>(in.varint()));
+                w.end_compound();
+            }
+            break;
+        }
+        // ---- the rest of what is only data
+        case component::kCustomModelData: {
+            w.begin_compound(name);
+            if (const u32 n = in.varint()) {
+                w.begin_list("floats", nbt::kFloat, n);
+                for (u32 i = 0; i < n; ++i) w.put_float(std::bit_cast<float>(in.be32()));
+            }
+            if (const u32 n = in.varint()) {
+                w.begin_list("flags", nbt::kByte, n);
+                for (u32 i = 0; i < n; ++i) w.put_byte(static_cast<i8>(in.u8v()));
+            }
+            if (const u32 n = in.varint()) {
+                w.begin_list("strings", nbt::kString, n);
+                for (u32 i = 0; i < n; ++i) w.put_string(take_str(in));
+            }
+            if (const u32 n = in.varint()) {
+                w.begin_list("colors", nbt::kInt, n);
+                for (u32 i = 0; i < n; ++i) w.put_int(static_cast<i32>(in.be32()));
+            }
+            w.end_compound();
+            break;
+        }
+        case component::kTrim:
+            w.begin_compound(name);
+            w.put_string("material", reg::trim_material::kNames[in.varint() - 1]);
+            w.put_string("pattern", reg::trim_pattern::kNames[in.varint() - 1]);
+            w.end_compound();
+            break;
+        case component::kProvidesTrimMaterial: w.put_string(name, reg::trim_material::kNames[in.varint() - 1]); break;
+        case component::kProvidesBannerPatterns: {  // HolderSetCodec: "#tag"; one name alone; else a list
+            const u32 n = in.varint();
+            if (n == 0) {
+                std::string tag = "#";
+                tag += take_str(in);
+                w.put_string(name, tag);
+            } else if (n == 2) {
+                w.put_string(name, reg::banner_pattern::kNames[in.varint()]);
+            } else {
+                w.begin_list(name, n > 1 ? nbt::kString : nbt::kEnd, n - 1);
+                for (u32 i = 1; i < n; ++i) w.put_string(reg::banner_pattern::kNames[in.varint()]);
+            }
+            break;
+        }
+        case component::kLodestoneTracker: {
+            w.begin_compound(name);
+            if (in.u8v()) {
+                w.begin_compound("target");
+                w.put_string("dimension", take_str(in));
+                const u64 packed = static_cast<u64>(in.be32()) << 32 | in.be32();
+                const i32 pos[3] = {static_cast<i32>(static_cast<i64>(packed) >> 38),
+                                    static_cast<i32>(static_cast<i64>(packed << 52) >> 52),
+                                    static_cast<i32>(static_cast<i64>(packed << 26) >> 38)};
+                w.put_int_array("pos", pos);
+                w.end_compound();
+            }
+            if (!in.u8v()) w.put_byte("tracked", 0);
+            w.end_compound();
+            break;
+        }
+        case component::kBreakSound: {
+            const u32 id = in.varint();
+            if (id != 0) {
+                w.put_string(name, sreg::kSoundEventNames[id - 1]);
+                break;
+            }
+            w.begin_compound(name);
+            w.put_string("sound_id", take_str(in));
+            if (in.u8v()) w.put_float("range", std::bit_cast<float>(in.be32()));
+            w.end_compound();
+            break;
+        }
+        case component::kProfile:
+            w.begin_compound(name);
+            profile_to(in, w);
+            w.end_compound();
+            break;
+        case component::kIntangibleProjectile:
+        case component::kMapDecorations:
+        case component::kDebugStickState:
+        case component::kRecipes:
+        case component::kLock:
+        case component::kContainerLoot: {
+            const Stored t = take_tag(in);
+            w.put_raw(name, t.type, t.payload);
+            break;
+        }
         default: DCHECK(false); break;
     }
 }
 
 }  // namespace
+
+bool transient(u32 type) {
+    return type == component::kCreativeSlotLock || type == component::kAdditionalTradeCost ||
+           type == component::kMapPostProcessing;
+}
+
+Verdict tag_component(u32 type, Tag t, base::ByteBuf& out) {
+    if (!t) return kBad;
+    base::ByteBuf built;
+    nbt::Writer w(built);
+    if (const Verdict v = tag_component_built(type, t, w); v != kOk) return v;
+    return finish_tag(built, out);
+}
 
 std::string_view component_name(u32 type) { return component::kNames[type]; }
 
@@ -805,7 +1642,7 @@ bool has_codec(u32 type) {
     static const std::vector<bool> known = [] {
         std::vector<bool> k(component::kCount);
         base::ByteBuf scratch;
-        for (u32 t = 0; t < component::kCount; ++t) k[t] = check_value(t, {}, scratch) != Verdict::kUnsupported;
+        for (u32 t = 0; t < component::kCount; ++t) k[t] = !transient(t) && check_value(t, {}, scratch) != Verdict::kUnsupported;
         return k;
     }();
     return type < component::kCount && known[type];
@@ -836,7 +1673,7 @@ Verdict patch_from_nbt(Tag components, PatchId& out) {
         std::string key = nbt::to_utf8(e.name());
         const bool removed = key.starts_with('!');
         const u32 type = find_component(std::string_view(key).substr(removed));
-        if (type == kNoComponent) return kBad;
+        if (type == kNoComponent || transient(type)) return kBad;  // PatchKey.CODEC: "... is not a persistent component"
         if (removed) {
             patch.remove(type);  // (its value is Codec.EMPTY: anything)
             continue;
@@ -920,6 +1757,30 @@ Default default_of(u32 item, u32 type) {
     return {};
 }
 
+bool contained_sizes_fit(const ItemStack& stack, u32& count, u32& max) {
+    std::vector<Contained> stacks;
+    for (const u32 type : {component::kContainer, component::kBundleContents, component::kChargedProjectiles}) {
+        const Patches::Found held = effective(stack, type);
+        if (held.state != Patches::State::kSet) continue;
+        stacks.clear();
+        contained(type, held.value, stacks);
+        for (const Contained& c : stacks) {
+            // ItemInstance.getMaxStackSize: the template's MAX_STACK_SIZE, its patch's or its item's, else 1.
+            const Patches::Found size = find_nested(c.patch, component::kMaxStackSize);
+            const Default of_item = default_of(c.item, component::kMaxStackSize);
+            const std::span<const u8> value = size.state == Patches::State::kSet ? size.value : of_item.value;
+            max = 1;
+            if (size.state != Patches::State::kRemoved && !value.empty()) {
+                Reader r(value);
+                max = r.varint();
+            }
+            count = c.count;
+            if (count > max) return false;
+        }
+    }
+    return true;
+}
+
 u32 unread_defaults() { return defaults().unread; }
 
 Patches::Found effective(const ItemStack& stack, u32 type) {
@@ -959,10 +1820,25 @@ PatchId sanitized(u32 item, PatchId patch) {
     return out;
 }
 
-std::string computed_name_key(const ItemStack& stack) {
+std::string computed_name_key(const ItemStack& stack, std::string* arg) {
     namespace it = proto::gen::item;
     const u32 item = stack.item();
     std::string key(world::item_text_key(item));
+    if (item == it::kCompass)  // CompassItem.getName
+        return effective(stack, component::kLodestoneTracker).state == Patches::State::kSet ? "item.minecraft.lodestone_compass"
+                                                                                            : "";
+    if (item == it::kPlayerHead) {  // PlayerHeadItem.getName: "<name>'s Head", if the profile has a name
+        const Patches::Found profile = effective(stack, component::kProfile);
+        if (profile.state != Patches::State::kSet) return {};
+        Reader in(profile.value);
+        if (in.u8v()) {
+            in.bytes(16);
+        } else if (!in.u8v()) {
+            return {};
+        }
+        if (arg) *arg = take_str(in);
+        return key + ".named";
+    }
     if (item == it::kShield) {  // ShieldItem.getName
         const Patches::Found colour = effective(stack, component::kBaseColor);
         if (colour.state != Patches::State::kSet) return {};
@@ -1011,6 +1887,7 @@ std::string book_title(const ItemStack& stack) {
 void patch_to_nbt(PatchId patch, nbt::Writer& w) {
     const Patches& store = patches();
     for (const Patches::Entry& e : store.entries(patch)) {
+        if (transient(e.type)) continue;  // no Codec: no part of a tag
         if (e.removed) {
             std::string key = "!";
             key += component::kNames[e.type];

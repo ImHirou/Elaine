@@ -656,6 +656,13 @@ HOT void Game::on_packet(u32 pi, const u8* body, u32 n) {
         case sbid::kSetCreativeModeSlot: {
             const auto c = sb::SetCreativeModeSlot::decode(rd);
             ItemStack stack;
+            // A heavy stack costs the tick thread its reading: more of them than a client may
+            // send in a while is refused unread - as a stack that is not read is.
+            if (rd.ok && rd.remaining() > item::kHeavyPatchBytes && !admit_heavy(p, static_cast<u32>(rd.remaining()))) {
+                LOG_DEBUG("%s sends heavy item stacks too fast, one refused", p.name.c_str());
+                on_creative_slot(pi, c.slot, {}, true);
+                break;
+            }
             const item::Verdict v = rd.ok ? item::read_untrusted(rd, stack) : item::Verdict::kMalformed;
             // Vanilla's decoder throws on such a stack, and on bytes left over behind a good one.
             if (v == item::Verdict::kMalformed || (v == item::Verdict::kOk && !rd.done()))

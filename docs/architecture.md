@@ -325,13 +325,57 @@ what it cannot vouch for. Read today:
 - tags: custom data, bucket entity data, entity data and block entity data - compounds, kept as
   vanilla would write the compound it loaded but with their entries in name order
   (`nbt::Doc::write`). What is *in* them is nobody's business on the wire: a client's decoder
-  takes any well-formed compound, and the server will read them only where it acts on them.
+  takes any well-formed compound, and the server will read them only where it acts on them;
+- stacks in stacks: `container` (a shulker box as an item), `bundle_contents`,
+  `charged_projectiles`, `sulfur_cube_content`, `pot_decorations` - each holds
+  `ItemStackTemplate`s: an item, a count and a patch whose values follow their types *without*
+  a length, so that a stack inside can only be read by reading every component in it. The same
+  decoders do that, a level down (`t_patch`; eight levels at most, where vanilla goes on for as
+  long as the packet lasts). A count is 1..99 at any depth: vanilla writes what a client sent
+  with `ItemStack.CODEC` to see whether it can, and puts the sender out for a hundred. `bees`
+  holds entities, as typed data;
+- what a mob is, as an item remembers it (a bucket, a spawn egg): 22 components that are one
+  entry of a registry or one constant of an enum - an id on the wire, a name in a tag. What an
+  id outside an enum becomes is the enum's own choice (`ByIdMap`: the first value, the nearest,
+  the remainder, a default), and the tables of names and ids are generated;
+- the rest that is only data: custom model data, armour trim and what provides one, banner
+  patterns an item provides (a holder set: a tag or a list), the lodestone a compass follows, a
+  break sound, a player's profile (a head's: whole or in part, its properties, a skin);
+- and the components that have a `Codec` and no `StreamCodec`, which therefore travel as the
+  tag that Codec writes: `lock` (an item predicate: which items, how many, with which
+  components exactly - a test of a component, `predicates`, is not read), `recipes`,
+  `container_loot`, `map_decorations`, `debug_stick_state`, `intangible_projectile`. They are
+  read by a port of their Codec and kept as that Codec and vanilla's tag writer put them out
+  again (`item::tag_component`: every compound in the order of its HashMap).
 
-That covers everything the creative inventory offers, the ominous banner included. Not read:
-stacks within stacks (containers, bundles, charged projectiles), the behaviour components (food,
-tool, equippable, attribute modifiers...), the components that have a `Codec` only and so travel
-as the tag it makes (map decorations, lock, recipes... - custom data is the one of them that is
-read), and in a text the parts listed under "Text components".
+That is 93 of the 122. Not read: the behaviour components - what an item *does* (food,
+consumable, tool, weapon, equippable, attribute modifiers, death protection, what it may be
+placed on or break, what it is as fuel or compost...) - which wait for the behaviour; a registry
+entry written out in place of its name (a trim material, an instrument); and in a text the
+parts listed under "Text components".
+
+### A heavy stack
+
+A patch may be a megabyte (`kMaxPatchBytes`): a book of a hundred full pages is a hundred
+kilobytes, and a shulker box may hold twenty-seven of them. Vanilla's only limit is the packet.
+But a stack is copied to everyone who sees its holder, to its holder with every menu, into a
+file every few minutes - and one client decides how large it is. So a patch of more than 4 KiB
+is *heavy* (`kHeavyPatchBytes`; nothing the creative inventory offers is), and what heavy stacks
+cost is bounded where it is paid:
+
+| where | the bound | what happens beyond it |
+|---|---|---|
+| reading what a client sends | 4 MiB of heavy stacks in a burst, 64 KiB forgiven a tick (`Game::admit_heavy`) | the stack is refused unread, its slot sent back - as for a component that is not read |
+| what a player comes to carry | 8 MiB, by creative slots, `/give` and picking up (`Game::may_carry`) | refused; an item stays on the ground |
+| copying what is worn, and an item on the ground, to those who look | 8 MiB a tick (`Tracker::afford`) | the change, or the entity's appearing to one more viewer, waits for the next tick - the first of a tick always goes |
+| one frame (2 MiB - 1) | a menu that does not fit goes slot by slot under one state id; equipment a slot a packet | (a packet that fits no frame is dropped, and stops a `dev` build: nothing should write one) |
+| a line of chat | a heavy stack is named without its components | - |
+| a player's file | 64 MiB (`Files::kMaxSize`): 46 stacks of a megabyte | - |
+
+None of this is vanilla's - there the answer to too much is a disconnect, of the sender or of
+whoever is sent it. The numbers are first guesses, not measurements. What is not bounded: a
+chest somebody else filled can be emptied into an inventory that then carries more than eight
+megabytes (it is kept and written all the same: a stack is never lost to a limit).
 
 Knowing differences from vanilla:
 
@@ -340,12 +384,10 @@ Knowing differences from vanilla:
   it does not have, is dropped (`item::sanitized`; the items' defaults are a generated table of
   tags, read at first use by the code that reads a command's `stone[...]`) - but only for the
   components this server reads: a default it does not read cannot be compared with;
-- a patch is capped at 1 KiB (vanilla's only limit is the packet; a stack is copied to every
-  viewer of its holder). Names, lore and custom data fit; **a book of more than a page or two
-  does not** and is refused like an unread component - the cap was set before there was text,
-  and is one constant (`kMaxPatchBytes`) to revisit together with a limit on how often a player's
-  equipment may be re-sent. A tag of more than sixteen times the cap is refused without being
-  read: it is the tick thread that reads;
+- a patch is capped at 1 MiB, and what comes of large ones is bounded ("A heavy stack");
+- a patch inside a stack is kept with its entries by type, as a stack's own is - vanilla keeps
+  them in the order they came (to a client, which reads them into a map, the same patch);
+- the reason why a tag is no value of a component is said in words of our own;
 - "equal" is "equal bytes". Vanilla holds a few things equal that it writes differently - a
   colour by name and the same colour by number, two NaNs - and such stacks merge there, not here;
 - strings that are not well-formed UTF-8 (or, inside a tag, not what Java itself writes) are
@@ -378,7 +420,8 @@ and what a text component carries of the item it shows.
 
 Compared with a vanilla 26.3 server by `tools/vanilla/component_probe.py`: with the server's
 console it also asks `/data get entity <holder> SelectedItem.components` of every stack, and
-goes on past text with a value or two of every component that is read - some 275 stacks. What
+goes on past text with a value or two of every component that is read, and with what vanilla
+refuses of each - some 390 stacks. What
 `/give item[...]` answers, hover event included, is compared by `command_probe.py`. Left:
 names that share a bucket of the HashMap come out in the order they went in, which a tag kept
 sorted (custom data) does not know; why a value is refused is said in words of our own, where

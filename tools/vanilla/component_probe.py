@@ -400,6 +400,115 @@ def more_cases() -> list[tuple]:
     add("block state", "kBlockState", varint(2) + utf8("lit") + utf8("true") + utf8("facing") + utf8("north"), "kFurnace")
     add("waxed", "kWaxed", b"", "kOakSign")
     add("sheep color", "kSheepColor", varint(14))
+
+    # ---- stacks in stacks. ItemStackTemplate.STREAM_CODEC: item, count, a patch without lengths.
+    I = mc.ITEM
+    no_patch = varint(0) + varint(0)
+
+    def template(item: str, count: int = 1, patch: bytes = no_patch) -> bytes:
+        return varint(I[item]) + varint(count) + patch
+
+    worn = varint(2) + varint(1) + varint(C["kDamage"]) + varint(7) + varint(C["kMaxStackSize"]) + varint(1) + varint(C["kLore"])
+    sword = template("kDiamondSword", 1, worn)
+    add("container", "kContainer", varint(3) + b"\x01" + template("kStone", 5) + b"\x00" + b"\x01" + sword, "kShulkerBox")
+    add("container: empty", "kContainer", varint(0), "kShulkerBox")
+    add("container: an empty slot at the end", "kContainer", varint(2) + b"\x01" + template("kDirt", 2) + b"\x00", "kShulkerBox")
+    add("container: a stack that says what its item says anyway", "kContainer",
+        varint(1) + b"\x01" + template("kStone", 1, varint(1) + varint(0) + varint(C["kMaxStackSize"]) + varint(64)), "kShulkerBox")
+    add("container: a hundred in one slot", "kContainer", varint(1) + b"\x01" + template("kStone", 100), "kShulkerBox")
+    add("container: air in a slot", "kContainer", varint(1) + b"\x01" + template("kAir", 1), "kShulkerBox")
+    add("container: none of an item", "kContainer", varint(1) + b"\x01" + template("kStone", 0), "kShulkerBox")
+    add("container: 257 slots", "kContainer", varint(257) + b"\x00" * 257, "kShulkerBox")
+    add("container: a wrong value inside", "kContainer",
+        varint(1) + b"\x01" + template("kStone", 1, varint(1) + varint(0) + varint(C["kMaxStackSize"]) + varint(0)), "kShulkerBox")
+    box = template("kShulkerBox", 1, varint(1) + varint(0) + varint(C["kContainer"]) + varint(1) + b"\x01" + sword)
+    add("bundle", "kBundleContents", varint(2) + template("kStone", 16) + sword, "kBundle")
+    add("bundle: empty", "kBundleContents", varint(0), "kBundle")
+    add("bundle: a shulker box in a bundle in a bundle", "kBundleContents",
+        varint(1) + template("kBundle", 1, varint(1) + varint(0) + varint(C["kBundleContents"]) + varint(1) + box), "kBundle")
+    add("charged projectiles", "kChargedProjectiles", varint(2) + template("kArrow") + template("kFireworkRocket"), "kCrossbow")
+    add("sulfur cube content", "kSulfurCubeContent", template("kTnt", 3))
+    add("pot decorations", "kPotDecorations", b"\x01" + template("kBrick") + b"\x00\x00" + b"\x01" + template("kAnglerPotterySherd"),
+        "kDecoratedPot")
+    add("pot decorations: none", "kPotDecorations", b"\x00\x00\x00\x00", "kDecoratedPot")
+    bee = varint(mc.ENTITY_TYPE["kBee"]) + nbt({"NoAI": Byte(1), "CustomName": "Bzz"}) + varint(5) + varint(2400)
+    add("bees", "kBees", varint(2) + bee + bee, "kBeeNest")
+    add("bees: none", "kBees", varint(0), "kBeeNest")
+
+    # ---- what a mob is: ids of registries and of enums. One past the end of a registry is an
+    # error; what an id outside an enum becomes is the enum's own choice.
+    for name, last in (("kVillagerVariant", 6), ("kWolfVariant", 3), ("kWolfSoundVariant", 2), ("kPigVariant", 1),
+                       ("kPigSoundVariant", 1), ("kCowVariant", 2), ("kCowSoundVariant", 1), ("kChickenVariant", 2),
+                       ("kChickenSoundVariant", 1), ("kZombieNautilusVariant", 1), ("kFrogVariant", 2), ("kCatVariant", 4),
+                       ("kCatSoundVariant", 1), ("kProvidesPotteryPattern", 5)):
+        add(name[1:], name, varint(last))
+        add(name[1:] + ": no such entry", name, varint(4000))
+    for name, values in (("kFoxVariant", (1, 7)), ("kAxolotlVariant", (4, 5)), ("kSalmonSize", (2, 9)), ("kParrotVariant", (3, 40)),
+                         ("kMooshroomVariant", (1, 2)), ("kLlamaVariant", (2, 100)), ("kHorseVariant", (6, 9)),
+                         ("kRabbitVariant", (99, 6)), ("kTropicalFishPattern", (257, 2))):
+        for v in values:
+            add(f"{name[1:]} {v}", name, varint(v))
+    add("HorseVariant -1", "kHorseVariant", varint(0xFFFFFFFF))
+    add("SalmonSize -1", "kSalmonSize", varint(0xFFFFFFFF))
+
+    # ---- the rest of what is only data
+    add("custom model data", "kCustomModelData",
+        varint(2) + f32(1.5) + f32(-2.0) + varint(2) + b"\x01\x00" + varint(1) + utf8("a") + varint(1) + struct.pack(">i", 0xFF8800))
+    add("custom model data: nothing", "kCustomModelData", varint(0) + varint(0) + varint(0) + varint(0))
+    add("trim", "kTrim", varint(2) + varint(3), "kIronChestplate")
+    add("trim: no such material", "kTrim", varint(4000) + varint(1), "kIronChestplate")
+    add("provides trim material", "kProvidesTrimMaterial", varint(1))
+    add("provides banner patterns: a tag", "kProvidesBannerPatterns", varint(0) + utf8("minecraft:pattern_item/globe"))
+    add("provides banner patterns: no such tag", "kProvidesBannerPatterns", varint(0) + utf8("minecraft:no_such_tag"))
+    add("provides banner patterns: a list", "kProvidesBannerPatterns", varint(3) + varint(4) + varint(0))
+    add("provides banner patterns: one", "kProvidesBannerPatterns", varint(2) + varint(7))
+    add("provides banner patterns: none", "kProvidesBannerPatterns", varint(1))
+    where = struct.pack(">q", ((-5 & 0x3FFFFFF) << 38 | (1000 & 0x3FFFFFF) << 12 | (70 & 0xFFF)) - (1 << 64))
+    add("lodestone tracker", "kLodestoneTracker", b"\x01" + utf8("minecraft:the_nether") + where + b"\x00", "kCompass")
+    add("lodestone tracker: no target", "kLodestoneTracker", b"\x00\x01", "kCompass")
+    add("break sound", "kBreakSound", varint(1 + mc.SOUND["kEntityItemPickup"]))
+    add("break sound: its own", "kBreakSound", varint(0) + utf8("probe:crack") + b"\x01" + f32(16.0))
+    add("break sound: its own, no range", "kBreakSound", varint(0) + utf8("probe:crack") + b"\x00")
+    add("break sound: no such sound", "kBreakSound", varint(4000))
+    add("creative slot lock", "kCreativeSlotLock", b"")
+    add("additional trade cost", "kAdditionalTradeCost", varint(5))
+    add("map post processing", "kMapPostProcessing", varint(1), "kFilledMap")
+    # ...and what has no StreamCodec and so travels as the tag its Codec writes
+    add("intangible projectile", "kIntangibleProjectile", nbt({}), "kArrow")
+    add("intangible projectile: no compound", "kIntangibleProjectile", nbt(Byte(1)), "kArrow")
+    add("recipes", "kRecipes", nbt(["stick", "probe:no_such_recipe"]), "kKnowledgeBook")
+    add("recipes: none", "kRecipes", nbt([]), "kKnowledgeBook")
+    add("recipes: no identifier", "kRecipes", nbt(["Not An Id"]), "kKnowledgeBook")
+    add("container loot", "kContainerLoot", nbt({"loot_table": "chests/simple_dungeon", "seed": Long(5)}), "kChest")
+    add("container loot: seed 0", "kContainerLoot", nbt({"seed": Long(0), "loot_table": "minecraft:chests/simple_dungeon"}), "kChest")
+    add("container loot: no table", "kContainerLoot", nbt({"seed": Long(5)}), "kChest")
+    add("map decorations", "kMapDecorations",
+        nbt({"here": {"type": "red_x", "x": Double(1.5), "z": Double(-2.0), "rotation": Float(90.0)},
+             "there": {"type": "minecraft:player", "x": 3, "z": 4, "rotation": Double(0.0)}}), "kFilledMap")
+    add("map decorations: no such type", "kMapDecorations",
+        nbt({"here": {"type": "nope", "x": Double(1.5), "z": Double(-2.0), "rotation": Float(90.0)}}), "kFilledMap")
+    add("debug stick state", "kDebugStickState", nbt({"oak_stairs": "facing", "minecraft:furnace": "lit"}), "kDebugStick")
+    add("debug stick state: not a property", "kDebugStickState", nbt({"oak_stairs": "nope"}), "kDebugStick")
+    # A profile - never one that is only a name or only an id: such a one a server may look up.
+    uuid = struct.pack(">iiii", 1, 2, 3, 4)
+    no_skin = b"\x00\x00\x00\x00"
+    textures = utf8("textures") + utf8("abc") + b"\x01" + utf8("sig")
+    add("profile", "kProfile", b"\x01" + uuid + utf8("ProbeHead") + varint(0) + no_skin, "kPlayerHead")
+    add("profile: properties of two names, mixed", "kProfile",
+        b"\x01" + uuid + utf8("ProbeHead") + varint(3) + textures + utf8("other") + utf8("v") + b"\x00" +
+        utf8("textures") + utf8("def") + b"\x00" + no_skin, "kPlayerHead")
+    add("profile: a part, with a skin", "kProfile",
+        b"\x00\x01" + utf8("ProbeHead") + b"\x00" + varint(1) + textures +
+        b"\x01" + utf8("probe:skin") + b"\x00" + b"\x01" + utf8("wings") + b"\x01\x01", "kPlayerHead")
+    add("profile: nothing", "kProfile", b"\x00\x00\x00" + varint(0) + no_skin, "kPlayerHead")
+    add("profile: a name too long", "kProfile", b"\x01" + uuid + utf8("SeventeenLettersXY") + varint(0) + no_skin, "kPlayerHead")
+    add("profile: 17 properties", "kProfile", b"\x01" + uuid + utf8("ProbeHead") + varint(17) + textures * 17 + no_skin, "kPlayerHead")
+    add("lock", "kLock", nbt({"items": "#logs", "count": {"min": 1, "max": 1}, "components": {"damage": 3}}), "kChest")
+    add("lock: one item, at least two", "kLock", nbt({"items": ["stone"], "count": {"min": 2}}), "kChest")
+    add("lock: nothing", "kLock", nbt({}), "kChest")
+    add("lock: no such item", "kLock", nbt({"items": "no_such_item"}), "kChest")
+    add("lock: bounds the wrong way round", "kLock", nbt({"count": {"min": 5, "max": 1}}), "kChest")
+    add("lock: a test of a component", "kLock", nbt({"predicates": {"damage": {"damage": 1}}}), "kChest")
     return out
 
 
@@ -526,8 +635,10 @@ def diff(path_ref: str, path_ours: str) -> int:
             verdict = "same"
         elif v.get("kicked"):
             verdict = "refused here" if not o["stack"] else "DIFFERENT"
+        elif not o.get("kicked") and not v["stack"] and not o["stack"] and v.get("sent_back") == o.get("sent_back"):
+            verdict = "same"        # neither showed a stack: it is the stack of the case before (an id an enum clamps)
         elif o.get("kicked") or not v["stack"]:
-            verdict = "DIFFERENT"   # ...or vanilla showed nothing, which no case here is meant to do
+            verdict = "DIFFERENT"   # ...or vanilla showed nothing where ours showed a stack
         elif not o["stack"]:
             verdict = "not read here"
         elif v["stack"] == o["stack"]:
