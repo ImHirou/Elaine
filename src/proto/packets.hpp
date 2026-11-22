@@ -257,6 +257,23 @@ struct GameEvent {
     u8* encode(u8* p) const { return put_f32(put_u8(p, event), param); }
 };
 
+// ticking_state (TickRateManager): ticks a second, and whether the world stands still.
+struct TickingState {
+    static constexpr u32 kId = ids::play::cb::kTickingState;
+    float tick_rate;
+    bool frozen;
+    usize bound() const { return 5; }
+    u8* encode(u8* p) const { return put_bool(put_f32(p, tick_rate), frozen); }
+};
+
+// ticking_step: how many ticks a world that stands still is still to step.
+struct TickingStep {
+    static constexpr u32 kId = ids::play::cb::kTickingStep;
+    u32 steps;
+    usize bound() const { return 5; }
+    u8* encode(u8* p) const { return put_varint(p, steps); }
+};
+
 // set_time. 26.x: no day time any more - the level's count of ticks, then the world clocks the
 // sender has news of: a map of clock (its id in minecraft:world_clock) to ClockNetworkState -
 // its ticks (a VarLong), the part of a tick it is into, and the rate it runs at, 0 for one that

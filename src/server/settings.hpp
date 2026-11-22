@@ -44,6 +44,9 @@ struct Settings {
     i32 max_chained_neighbor_updates = 1000000;
     u32 random_tick_speed = 3;  // random-tick-speed: the game rule randomTickSpeed, until there are game rules
     bool advance_time = true;   // advance-time: the game rule advance_time - do the world's clocks run?
+    // tick-rate: ticks a second, what vanilla's /tick rate sets (1 to 10000) - until there is a /tick.
+    // What is counted in seconds (keep-alives, autosaves, chunk-unload-seconds) stays in seconds.
+    float tick_rate = 20.0f;
 };
 
 // Missing file is not an error (defaults apply). Returns false + err on a malformed value.

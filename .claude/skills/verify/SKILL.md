@@ -42,10 +42,12 @@ timings go wrong, scenarios fail that would not have).
 - The dev preset is a second build tree: an edit is compiled twice. Leave it to step 3 unless the bug is one only
   a sanitizer shows (then `tools/check.py --dev -k <scenario>`).
 - All scenarios, sixteen at a time and the longest first (as long as they took the last time:
-  `build/<preset>/integration-times.json`): 43 s on four cores (one by one: five minutes). A scenario waits for ticks,
-  not for a core, so `full` puts the release and the dev scenarios in one pool, beside the unit tests' shards: 80 s
-  for both. The ones marked `alone=True` (the crowds, `many_players`) measure ticks and run after the rest, by
-  themselves.
+  `build/<preset>/integration-times.json`), their servers at a hundred ticks a second. A scenario waits for ticks,
+  not for a core, so `full` puts the release and the dev scenarios in one pool, beside the unit tests' shards: about
+  40 s for all of it when there is nothing to build (four cores; it was four minutes). The ones marked
+  `alone=True` (the crowds of `--slow`) measure ticks and run after the rest, by themselves.
+- A scenario that fails at a hundred ticks a second and passes at twenty waits a number of ticks for something
+  that is not counted in ticks (a worker, the clock, a slow client): make it wait for the thing.
 - A file of the game (one that includes `server/game.hpp`) compiles in about a second with the precompiled header
   (`MC_PCH`, on by default); an edit of a header under `game.hpp` rebuilds the header first (3 s), then every such
   file.

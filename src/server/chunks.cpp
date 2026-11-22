@@ -303,7 +303,7 @@ void Game::tend_chunks() {
     const u32 n = static_cast<u32>(players_.size());
     leaving_.clear();
     saving_.clear();
-    const u64 idle_ticks = 20ull * s_.chunk_unload_seconds, save_every = 20ull * s_.autosave_seconds;
+    const u64 idle_ticks = ticks_of(s_.chunk_unload_seconds), save_every = ticks_of(s_.autosave_seconds);
     const u64 walk_ticks = std::max<u64>(1, idle_ticks / 2);
     world_.scan(static_cast<u32>(world_.chunk_count() / walk_ticks) + 1, [&](world::Chunk& c) {
         const bool wanted = any_in_view(pcx_.data(), pcz_.data(), pview_.data(), n, c.x, c.z, kLoadMargin);

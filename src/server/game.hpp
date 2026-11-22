@@ -10,6 +10,7 @@
 // Removal is swap-with-last (the store does the same to its player rows), so all of it stays dense.
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <memory>
 #include <string>
@@ -72,7 +73,6 @@ class Game {
     friend struct cmd::Invocation;
 
     static constexpr u32 kNone = ~0u;
-    static constexpr u64 kTickNs = 50 * 1'000'000ull;
     static constexpr u32 kOutInitial = 8192;  // first size of a player's per-tick output buffer
     static constexpr u64 kNever = ~0ull;      // a tick that does not come
 
@@ -678,6 +678,10 @@ class Game {
     std::vector<u32> opaque_free_;
     std::vector<u16> update_pos_, update_state_;
     u64 tick_ = 0;
+    // TickRateManager.setTickRate: a tick lasts a second over the rate (as a long of nanoseconds).
+    // What is counted in seconds is counted in ticks of this rate (MinecraftServer's autosave is).
+    u64 tick_ns_ = 0;
+    u64 ticks_of(u64 seconds) const { return std::max<u64>(1, static_cast<u64>(s_.tick_rate * static_cast<float>(seconds))); }
     u64 rng_;
 
     // Item entities: what an ItemEntity has beyond its row of the entity table (where its stack

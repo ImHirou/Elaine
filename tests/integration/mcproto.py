@@ -447,6 +447,11 @@ class Client:
         # runs its clocks on by itself between packets; this is only what it was told.
         self.game_time = None
         self.clocks: dict[int, tuple] = {}
+        # How fast the server says it ticks (ticking_state, ticking_step - TickRateManager), kept by
+        # recv(): ticks a second, whether it stands still, and the ticks it is to step while it does.
+        self.tick_rate = None
+        self.tick_frozen = None
+        self.tick_steps = None
         self.time_log: list[tuple] = []        # (game time, {clock: (ticks, partial tick, rate)}) in arrival order
         self.chat: list[tuple] = []
         self.chat_index = 0
@@ -503,8 +508,18 @@ class Client:
                 self.apply_chat_packet(name, r)
             elif name == "set_time":
                 self.apply_time_packet(r)
+            elif name in TICK_PACKETS:
+                self.apply_tick_packet(name, r)
             elif name not in self.ignore:
                 return name, r
+
+    def apply_tick_packet(self, name: str, r: Reader) -> None:
+        """handleTickingState / handleTickingStep: what the client's own TickRateManager is told."""
+        if name == "ticking_state":
+            self.tick_rate, self.tick_frozen = r.f32(), r.bool()
+        else:
+            self.tick_steps = r.varint()
+        r.done()
 
     def apply_time_packet(self, r: Reader) -> None:
         """handleSetTime: the game time, and the clocks the packet has news of."""
@@ -585,7 +600,7 @@ class Client:
             self.chunks.drop(pos)
             self.chunk_log.append(("forget", *pos))
 
-    def sync_chunks(self, distance: int, center: tuple | None = None, ticks: int = 600) -> None:
+    def sync_chunks(self, distance: int, center: tuple | None = None, ticks: int = 3000) -> None:
         """Wait until the chunks held are exactly the view (ChunkTrackingView) at this view distance
         around chunk_center - which has to be `center`, if one is given. Whatever else arrives
         meanwhile is kept for recv(), in order."""
@@ -648,6 +663,8 @@ class Client:
                     self.apply_chat_packet(name, r)
                 elif name == "set_time":
                     self.apply_time_packet(r)
+                elif name in TICK_PACKETS:
+                    self.apply_tick_packet(name, r)
                 elif name == "keep_alive":
                     self.send("keep_alive", r.take(8))
         finally:
@@ -838,6 +855,7 @@ ENTITY_PACKETS = {"bundle_delimiter", "add_entity", "remove_entities", "set_enti
 CHUNK_PACKETS = {"set_chunk_cache_center", "chunk_batch_start", "level_chunk_with_light", "chunk_batch_finished",
                  "forget_level_chunk"}
 CHAT_PACKETS = {"system_chat", "player_chat", "disguised_chat"}
+TICK_PACKETS = {"ticking_state", "ticking_step"}
 
 
 def read_chat_type(r: "Reader") -> dict:

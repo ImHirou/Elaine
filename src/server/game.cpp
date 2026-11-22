@@ -50,6 +50,7 @@ Game::Game(const Settings& s, std::vector<std::unique_ptr<net::Reactor>>& reacto
       files_(workers, s.sync_chunk_writes),
       rng_(base::now_ns() | 1),
       console_(console) {
+    tick_ns_ = static_cast<u64>(static_cast<double>(base::kNsPerSec) / static_cast<double>(std::max(s.tick_rate, 1.0f)));
     random_value_ = static_cast<u32>(random());  // Level.randValue: RandomSource.create().nextInt()
     time_ = static_cast<u64>(world.time.game_time);
     for (u32 i = 0; i < kClocks; ++i) clocks_[i] = world.time.clocks[i];
@@ -159,10 +160,10 @@ void Game::run(const std::atomic<bool>& stop) {
         if (UNLIKELY(!editing_signs_.empty())) tick_signs();
         tick_players();
         autosave_players();
-        if (UNLIKELY((tick_ + 1) % (20ull * s_.autosave_seconds) == 0)) save_time();  // (with the autosave: what time it is)
+        if (UNLIKELY((tick_ + 1) % ticks_of(s_.autosave_seconds) == 0)) save_time();  // (with the autosave: what time it is)
         // Not t0: a player who joined during drain() has keepalive_sent_ns > t0, and the unsigned
-        // difference would wrap and send a keep-alive at once.
-        if (++tick_ % 20 == 0) keepalives(base::now_ns());
+        // difference would wrap and send a keep-alive at once. Looked at once a second.
+        if (++tick_ % ticks_of(1) == 0) keepalives(base::now_ns());
         if (UNLIKELY(commands_.version() != commands_sent_)) {  // a command was added or removed: everyone's tree is stale
             for (u32 pi = 0; pi < players_.size(); ++pi) send_commands(pi);
             commands_sent_ = commands_.version();
@@ -192,7 +193,7 @@ void Game::run(const std::atomic<bool>& stop) {
             busy_ns = worst_ns = track_ns = move_ns = flush_ns = block_ns = sent_bytes = 0;
         }
 
-        next += kTickNs;
+        next += tick_ns_;
         const u64 now = base::now_ns();
         if (now < next) {
             timespec ts{static_cast<time_t>(next / base::kNsPerSec), static_cast<long>(next % base::kNsPerSec)};
@@ -457,6 +458,10 @@ void Game::finish_join(u32 ri, const InHeader& h, const net::JoinTransport& t, J
     send(pi,
          cb::SetDefaultSpawnPosition{kOverworld, floor_int(spawn_[0]), static_cast<i32>(spawn_y), floor_int(spawn_[2]), 0, 0});
     send(pi, cb::GameEvent{cb::GameEvent::kLevelChunksLoadStart, 0});
+    // ServerTickRateManager.updateJoiningPlayer, at the end of sendLevelInfo: how fast the world
+    // ticks, that it does not stand still, and that there is nothing to step.
+    send(pi, cb::TickingState{std::max(s_.tick_rate, 1.0f), false});
+    send(pi, cb::TickingStep{0});
     // ServerLevel.addNewPlayer -> ChunkMap.updatePlayerStatus: the view is the player's from here
     // on. Its chunks go out batch by batch, from the end of this tick on (send_chunks).
     apply_view(pi, pcx_[pi], pcz_[pi], pview_[pi]);
@@ -572,7 +577,7 @@ void Game::save_player(u32 pi) {
 void Game::autosave_players() {
     if (players_.empty() || !keeps_players()) return;
     if (++autosave_at_ >= players_.size()) autosave_at_ = 0;
-    if (tick_ - players_[autosave_at_].saved_tick >= 20ull * s_.autosave_seconds) save_player(autosave_at_);
+    if (tick_ - players_[autosave_at_].saved_tick >= ticks_of(s_.autosave_seconds)) save_player(autosave_at_);
 }
 
 // ---------------------------------------------------------------------------- packets

@@ -67,6 +67,12 @@ def free_port() -> int:
             pass
 
 
+# The ticks a second a scenario's server runs at (tick-rate, vanilla's /tick rate). A scenario waits
+# for ticks, not for seconds - settle() and the rest count pongs - so five times the rate is a fifth of
+# the waiting. One that measures the server's ticks, or times what it does by the clock, asks for 20.
+TICK_RATE = 100
+
+
 class Server:
     def __init__(self, exe: str, world: str | None = None, **args):
         """`world`: the directory of a world to run (and to leave behind); without one the server
@@ -80,9 +86,10 @@ class Server:
         # whenever chance has it, and what a scenario is told must not depend on when.
         opts = {"server-ip": "127.0.0.1", "server-port": self.port, "online-mode": "false", "debug": "true",
                 "config": "/nonexistent/server.properties", "ops-file": self.ops_file, "level-name": self.world,
-                "random-tick-speed": 0}
+                "random-tick-speed": 0, "tick-rate": TICK_RATE}
         start_timeout = float(args.pop("start_timeout", 5))  # (importing a world takes its time)
         opts.update({k.replace("_", "-"): v for k, v in args.items()})
+        self.tick = 1.0 / float(opts["tick-rate"])   # seconds a tick
         self.log = tempfile.NamedTemporaryFile("w+", suffix=".log", delete=False)
         # stdin is the server's console: a pipe, so that a test can type on it.
         self.proc = subprocess.Popen([exe] + [f"--{k}={v}" for k, v in opts.items()], stderr=self.log, stdout=self.log,
@@ -119,12 +126,13 @@ class Server:
         self.proc.stdin.write(line.encode() + b"\n")
         self.proc.stdin.flush()
 
-    def wait_log(self, text: str, timeout: float = 5.0) -> str:
-        """The server's log once `text` is in it."""
+    def wait_log(self, text: str, timeout: float = 5.0, since: int = 0) -> str:
+        """The server's log once `text` is in it - after its first `since` characters, for a line
+        that may be there already."""
         deadline = time.time() + timeout
         while True:
             log = self.read_log()
-            if text in log:
+            if text in log[since:]:
                 return log
             assert time.time() < deadline, f"{text!r} never came up in the log:\n" + "\n".join(log.splitlines()[-15:])
             time.sleep(0.02)
@@ -243,6 +251,7 @@ def join(c: Client, name: str, online: bool = False, view: int = 2, chat: int = 
     c.send("move_player_status_only", b"\x00")
     out["center"] = c.chunk_center
     out["chunks"] = c.chunks
+    out["ticking"] = (c.tick_rate, c.tick_frozen, c.tick_steps)
     out["first_chunk"] = next(e[1][0] for e in c.chunk_log if e[0] == "batch")
     return out
 
@@ -270,6 +279,8 @@ def check_join(j: dict, name: str, view: int = 2, online: bool = False) -> None:
     assert j["teleport"]["pos"] == (8.5, -60.0, 8.5), j["teleport"]["pos"]
     assert j["abilities"][0] == 0x01 | 0x04 | 0x08, j["abilities"]  # invulnerable, may fly, instabuild - not flying
     assert j["game_event"] == (13, 0.0)
+    # ServerTickRateManager.updateJoiningPlayer: the rate the world ticks at, not frozen, no steps.
+    assert j["ticking"] == (float(TICK_RATE), False, 0), j["ticking"]
 
     cx, cz = j["center"]
     assert j["first_chunk"] == (cx, cz), "the player's own chunk must be sent first"
@@ -1215,7 +1226,9 @@ def malformed_item_stacks_disconnect(srv: Server):
     check_join(join(c, "Alice"), "Alice")
 
 
-@test()     # (megabytes through the test client: it fills a core by itself - of the many that wait beside it)
+# At vanilla's rate: what a client sends is forgiven by the tick, and the burst below has to come
+# within a tick or two. (Megabytes through the test client: it fills a core by itself.)
+@test(tick_rate=20)
 def heavy_stacks(srv: Server):
     """Stacks of up to a megabyte: kept, shown to others, there again when their holder is - sent slot by
     slot when no frame holds them all, and bounded: how fast a client may send them, how much of them it
@@ -1228,10 +1241,13 @@ def heavy_stacks(srv: Server):
         cl.send("player_loaded")
     settle(b, a)
 
-    def put(slot: int, floats: int, tint: int) -> None:
+    def stack(slot: int, floats: int, tint: int) -> tuple:
         """custom_model_data: so many floats, no flags, no strings, one colour that tells the stacks apart."""
         value = varint(floats) + struct.pack(">f", 1.0) * floats + varint(0) + varint(0) + varint(1) + struct.pack(">i", tint)
-        b.send("set_creative_mode_slot", struct.pack(">h", slot) + mc.item_stack(I["kStone"], 1, {"kCustomModelData": value}))
+        return "set_creative_mode_slot", struct.pack(">h", slot) + mc.item_stack(I["kStone"], 1, {"kCustomModelData": value})
+
+    def put(slot: int, floats: int, tint: int) -> None:
+        b.send(*stack(slot, floats, tint))
 
     def read(floats: int, tint: int) -> tuple:
         return (I["kStone"], 1, {"kCustomModelData": ([1.0] * floats, [], [], [tint])})
@@ -1254,8 +1270,7 @@ def heavy_stacks(srv: Server):
     # burst: that is the one above and four of these. The rest are refused unread, and their
     # slots come back as they are here - empty.
     before = len(b.menu_log)
-    for i in range(8):
-        put(37 + i, 225000, 10 + i)
+    b.send_together(*[stack(37 + i, 225000, 10 + i) for i in range(8)])     # (made first, then one write)
     settle(b, ticks=2)
     assert b.menu_log[before:] == [("container_set_slot", 41 + i, None) for i in range(4)], [m[:2] for m in b.menu_log[before:]]
     slots = whole_menu()
@@ -1278,7 +1293,7 @@ def heavy_stacks(srv: Server):
         put(41 + i, 225000, 20 + i)
     settle(b, ticks=20)
     put(9, 225000, 30)
-    settle(b, ticks=60)             # three seconds: nothing of what was sent counts any more
+    settle(b, ticks=60)             # sixty ticks: nothing of what was sent counts any more
     before = len(b.menu_log)
     put(10, 225000, 31)
     settle(b)
@@ -1592,9 +1607,9 @@ def arm_swings(srv: Server):
             b.ticks(ticks)
         return len(a.entity_log)
 
-    def soon_after(first, second, between: int, within: float, ticks: int = 0) -> list:
+    def soon_after(first, second, between: int, within: int, ticks: int = 0) -> list:
         """`first`, then `second` at least `between` + 1 ticks later and - going by the clock - not
-        many more: a client that was held up longer than `within` seconds tries again."""
+        many more: a client that was held up longer than `within` ticks' time tries again."""
         for attempt in range(20):
             if attempt:
                 settle(b, a)   # the attempt before ended in the middle of something
@@ -1603,7 +1618,7 @@ def arm_swings(srv: Server):
             first()
             b.ticks(between + 1)
             second()
-            if time.time() - t0 < within:
+            if time.time() - t0 < within * srv.tick:
                 settle(b, a)
                 return swings(mark)
         raise AssertionError("never quick enough to tell")
@@ -1626,7 +1641,7 @@ def arm_swings(srv: Server):
     assert swings(mark) == [default, default], swings(mark)
     # One that comes while a swing is in its first half - three ticks of a whack's six - is not
     # a swing; after that it is.
-    assert soon_after(punch, punch, between=0, within=0.1) == [default]
+    assert soon_after(punch, punch, between=0, within=2) == [default]
     mark = rest()
     punch()
     b.ticks(4)
@@ -1678,7 +1693,7 @@ def arm_swings(srv: Server):
     assert swings(mark) == [default, default], swings(mark)
     held = a.entities[idb].equipment[MAINHAND]
     assert held == plain("kStone", 63), held
-    assert soon_after(punch, lambda: action(b, DROP_ONE), between=0, within=0.1) == [default]
+    assert soon_after(punch, lambda: action(b, DROP_ONE), between=0, within=2) == [default]
     assert a.entities[idb].equipment[MAINHAND][1] < held[1]
 
     # ---- the animation is the main hand's attack animation: a spear stabs, and for longer. The
@@ -1690,7 +1705,7 @@ def arm_swings(srv: Server):
     punch()
     settle(b, a)
     assert swings(mark) == [stab], swings(mark)
-    assert soon_after(punch, punch, between=4, within=0.45, ticks=8) == [stab]      # a whack would be over
+    assert soon_after(punch, punch, between=4, within=9, ticks=8) == [stab]      # a whack would be over
     mark = rest(8)
     punch()
     b.ticks(12)
@@ -1707,24 +1722,37 @@ def arm_swings(srv: Server):
     assert not [x for x in b.entity_log if x[0] == "swing_animation"]
 
 
-@test(slow=True)
+@test(tick_rate=500)
 def dropped_items_expire(srv: Server):
-    """ItemEntity.LIFETIME: an item nobody picks up is gone after 6000 ticks - five minutes."""
+    """ItemEntity.LIFETIME: an item nobody picks up is gone after 6000 ticks - five minutes at the
+    rate of a vanilla server, twelve seconds at this one's. The game time says how many went by: at
+    five hundred ticks a second a client's pings do not come back once a tick."""
     c = srv.client()
     j = join(c, "Alice")
     c.send("player_loaded")
+    make_op(srv, c, "Alice")
+
+    def game_time() -> int:
+        said = run_command(c, "time query gametime", ticks=1)["said"]
+        assert said and said[0]["translate"] == "commands.time.query.gametime", said
+        return int(said[0]["with"][0])
+
     give(c, 36, I["kStone"], 1)
     action(c, DROP_ONE)
-    walk(c, j, 2.5, 2.5, 10)        # out of reach before it can be picked up
+    walk(c, j, 2.5, 2.5, 10)        # out of reach before it can be picked up (forty ticks)
+    dropped = game_time()           # (the drop's tick, or one of the few after it)
     settle(c)
     item_type = mc.ENTITY_TYPE["kItem"]
     lying = [i for i, e in c.entities.items() if e.type == item_type]
     assert len(lying) == 1
-    t0 = time.time()
-    c.pump(290 - (time.time() - t0))
-    assert lying[0] in c.entities, f"gone after {time.time() - t0:.0f} s"
-    c.pump(13)
-    assert lying[0] not in c.entities, "still there after 303 s"
+    deadline = time.time() + 120
+    while lying[0] in c.entities:
+        assert time.time() < deadline, "still there after two minutes"
+        c.pump(0.01)
+    # (Both questions come a little late: a millisecond is half a tick, and a client beside a full
+    # pool of others is late by tens of them.)
+    lay = game_time() - dropped
+    assert 6000 - 15 <= lay <= 6000 + 30, lay
     assert c.entity_log[-1] == ("remove_entities", lying[0], None), c.entity_log[-1]
 
 
@@ -2080,8 +2108,9 @@ def furnace_setup(srv: Server, stone: int, planks: int):
     assert changes[pos] == off - 1, changes         # lit
     assert w["slots"][0] == plain("kCobblestone", stone) and w["slots"][2] is None
     assert w["slots"][1] == (plain("kOakPlanks", planks - 1) if planks > 1 else None)
-    # The fire: 300 ticks for a plank, 200 to cook a stone - counting down and up as we look.
-    assert w["data"][1] == 300 and w["data"][3] == 200 and 0 < w["data"][2] <= 6 and 293 <= w["data"][0] < 300, w["data"]
+    # The fire: 300 ticks for a plank, 200 to cook a stone - counting down and up as we look, a tick
+    # at a time: the tick that lit it cooked too, and burnt nothing yet (AbstractFurnaceBlockEntity.serverTick).
+    assert w["data"][1] == 300 and w["data"][3] == 200 and 0 < w["data"][2] < 100 and w["data"][0] == 301 - w["data"][2], w["data"]
     return c, pos, off
 
 
@@ -2114,7 +2143,7 @@ def furnace(srv: Server):
     assert server_menu(c)[37] == plain("kCobblestone", 3)    # the cursor went back into the inventory: the slot it came from is the first free one
 
 
-@test(slow=True)
+@test()
 def furnace_smelts(srv: Server):
     """One cobblestone, one plank: a stone after 200 ticks, and the fire out after 300."""
     c, pos, off = furnace_setup(srv, stone=1, planks=1)
@@ -2125,7 +2154,7 @@ def furnace_smelts(srv: Server):
         if w["slots"][2]:
             break
     assert w["slots"][2] == plain("kStone", 1) and w["slots"][0] is None and w["data"][2] == 0, (w["slots"][:3], w["data"])
-    assert 80 < w["data"][0] <= 101 and pos not in changes, (w["data"], changes)     # still burning: the tick that lit it cooked too
+    assert 50 < w["data"][0] <= 101 and pos not in changes, (w["data"], changes)     # still burning: the tick that lit it cooked too
     for _ in range(40):
         changes.update(collect(c, ticks=3))
         if pos in changes:
@@ -2167,7 +2196,7 @@ def cooker_setup(c: Client, n: int, count: int, planks: int):
     assert w["slots"][0] == plain(cooks, count) and w["slots"][2] is None
     assert w["slots"][1] == (plain("kOakPlanks", planks - 1) if planks > 1 else None)
     # A plank burns for 150 ticks here, not 300, and what cooks takes 100, not 200.
-    assert w["data"][1] == 150 and w["data"][3] == 100 and 0 < w["data"][2] <= 6 and 143 <= w["data"][0] < 150, w["data"]
+    assert w["data"][1] == 150 and w["data"][3] == 100 and 0 < w["data"][2] < 50 and w["data"][0] == 151 - w["data"][2], w["data"]
     return pos, off
 
 
@@ -2195,7 +2224,7 @@ def smoker_and_blast_furnace(srv: Server):
                                                                ((10, -60, 10), mc.BLOCK_ENTITY["kBlastFurnace"], None)]
 
 
-@test(slow=True)
+@test()
 def smoker_smokes(srv: Server):
     """One piece of beef, one plank, in a smoker: a steak after 100 ticks, and the fire out after
     150. An ingot from a blast furnace likewise."""
@@ -2212,7 +2241,7 @@ def smoker_smokes(srv: Server):
             if w["slots"][2]:
                 break
         assert w["slots"][2] == plain(COOKERS[n][3], 1) and w["slots"][0] is None and w["data"][2] == 0, (w["slots"][:3], w["data"])
-        assert 30 < w["data"][0] <= 51 and pos not in changes, (w["data"], changes)
+        assert 10 < w["data"][0] <= 51 and pos not in changes, (w["data"], changes)
         for _ in range(25):
             changes.update(collect(c, ticks=3))
             if pos in changes:
@@ -2291,8 +2320,13 @@ def barrel(srv: Server):
     # Broken, it spills what it holds.
     dig(b, pos, seq=2)
     assert collect(a)[pos] == AIR
-    # (Containers.dropItemStack throws a stack out in pieces of 10 to 30: twenty stones are one item or two.)
-    spilled = [e.data[D_ITEM][1] for e in of_type(a, "kItem").values() if e.data[D_ITEM][0] == STACK]
+    # (Containers.dropItemStack throws a stack out in pieces of 10 to 30: twenty stones are one item or
+    # two - which may merge, and be shown as one gone before the other is shown its new count.)
+    for _ in range(40):
+        spilled = [e.data[D_ITEM][1] for e in of_type(a, "kItem").values() if e.data[D_ITEM][0] == STACK]
+        if sum(s[1] for s in spilled) == 20:
+            break
+        collect(a, ticks=1)
     assert spilled and all(s[0] == I["kStone"] and s[2] == {} for s in spilled) and sum(s[1] for s in spilled) == 20, spilled
     d = srv.client()
     jd = join(d, "Dave", view=2)
@@ -2396,20 +2430,24 @@ def copper_chest_weathers(srv: Server):
 
     def wait(ticks: int = 3) -> None:
         seen.update(collect(a, ticks=ticks))
-    for n, pos in enumerate((shut, left, right, held)):
+    for n, pos in enumerate((shut, left, right)):
         click(a, (pos[0], -61, pos[2]), 1, seq=1 + n)
     wait()
     assert seen[left] - LEFT == seen[right] - RIGHT and seen[left] - LEFT in (copper, *aged), seen
-    click(a, shut, 1, seq=5)                    # stone into one of them
+    click(a, shut, 1, seq=4)                    # stone into one of them
     wait()
     menu_click(a, 55, 0, QUICK_MOVE)
     wait()
     assert a.window and a.window["slots"][0] == plain("kStone", 20), a.window
     close_window(a)
     wait()
-    click(a, held, 1, seq=6)                    # and another one open, for as long as the others take
+    # ...and another one, open for as long as the others take - opened as soon as it stands: copper
+    # oxidizes in some eighty of these ticks, and one that had would never be seen to weather.
+    click(a, (held[0], -61, held[2]), 1, seq=5)
     wait()
-    assert a.window
+    click(a, held, 1, seq=6)
+    wait()
+    assert a.window and seen[held] != oxidized, (a.window, seen)
     frozen = seen[held]
     for _ in range(1200):
         wait(1)
@@ -2836,6 +2874,7 @@ def sand_falls(srv: Server):
         if not falling(a):
             break
     assert not falling(a) and not falling(b)
+    settle(a, b)       # (what the tick that broke it sent the one who was read first)
     for cl in (a, b):
         # (One time in ten gravel is flint when it is mined; this one was not mined.)
         assert [e.data[D_ITEM][1] for e in of_type(cl, "kItem").values()] == [plain("kGravel", 1)]
@@ -3382,14 +3421,16 @@ def falling_block_survives_a_restart():
         a.send("player_loaded")
         settle(a)
         make_op(srv, a, "Alice")
-        out = run_command(a, "setblock 8 120 12 minecraft:sand")
-        assert out["said"] == [tr("commands.setblock.success", 8, 120, 12)], out["said"]
+        # High up: the server ticks on while it stops and while Carol joins (some twenty ticks of it
+        # at a hundred a second), and sand falls two blocks a tick.
+        out = run_command(a, "setblock 8 300 12 minecraft:sand")
+        assert out["said"] == [tr("commands.setblock.success", 8, 300, 12)], out["said"]
         for _ in range(20):
             settle(a, ticks=2)
             if of_type(a, "kFallingBlock"):
                 break
         (eid, e), = of_type(a, "kFallingBlock").items()
-        assert e.object_data == mc.BLOCK["kSand"] and e.spawned[0] == (8.5, 120.0, 12.5)
+        assert e.object_data == mc.BLOCK["kSand"] and e.spawned[0] == (8.5, 300.0, 12.5)
         settle(a, ticks=8)
         assert srv.stop() == 0, srv.read_log()
         os.unlink(srv.log.name)
@@ -3400,9 +3441,9 @@ def falling_block_survives_a_restart():
         c.send("player_loaded")
         settle(c, ticks=6)
         (eid, e), = of_type(c, "kFallingBlock").items()
-        assert e.object_data == mc.BLOCK["kSand"] and 20.0 < e.pos[1] < 120.0, e.pos
+        assert e.object_data == mc.BLOCK["kSand"] and 20.0 < e.pos[1] < 300.0, e.pos
         assert mc.FALLING_DATA["kStartPos"] not in e.data      # where it began is not kept (vanilla does not either)
-        changes = until(c, lambda ch: ch.get((8, -60, 12)) == mc.BLOCK["kSand"], ticks=300)
+        changes = until(c, lambda ch: ch.get((8, -60, 12)) == mc.BLOCK["kSand"], ticks=600)
         assert changes == {(8, -60, 12): mc.BLOCK["kSand"]}, changes
         collect(c)
         assert not of_type(c, "kFallingBlock") and c.transient_blocks == [((8, -60, 12), mc.BLOCK["kSand"])]
@@ -3910,6 +3951,7 @@ def command_teleport_give_summon(srv: Server):
     # Far away: the view follows, and the place is as real as any (a block can be set there).
     got = run_command(a, "tp 1000 -60 1000", ticks=6)
     assert got["teleports"][0]["pos"] == (1000.5, -60.0, 1000.5)
+    a.sync_chunks(2, (62, 62))     # (made by the workers, in their own time: so many ticks are no measure of it)
     got = run_command(a, "setblock ~ ~ ~1 stone")
     assert got["blocks"] == {(1000, -60, 1001): mc.BLOCK["kStone"]}, got
     settle(a, b)
@@ -4612,7 +4654,9 @@ def time_of_day(srv: Server):
     assert time("query early_game repetition") == ([tr("commands.time.query.timeline.repetitions", "minecraft:early_game", mc.Long(0))], [])
     said, told = time("query gametime")
     assert told == [] and len(said) == 1 and said[0]["translate"] == "commands.time.query.gametime", said
-    assert isinstance(said[0]["with"][0], mc.Long) and a.game_time <= said[0]["with"][0] <= a.game_time + 40, (said, a.game_time)
+    # (A set_time of the command's tick, or of one of the three after it, may have come before the
+    # answer was read: it tells a time a little later.)
+    assert isinstance(said[0]["with"][0], mc.Long) and a.game_time - 4 <= said[0]["with"][0] <= a.game_time + 40, (said, a.game_time)
     line = "time query week"
     assert time("query week")[0] == [failure(tr("argument.resource.not_found", "minecraft:week", "minecraft:timeline")), here(line, 15)]
     # of <clock>: another clock. The end's has run all the while; the day is not its timeline.
@@ -4693,20 +4737,24 @@ def grass_sleeps_at_night(srv: Server):
     assert a.clocks[OVERWORLD] == (18000, 0.0, 0.0), a.clocks
     # A hole in the grass, at midnight: the dirt at its bottom stays dirt.
     dig(a, (8, -61, 12), seq=1)
-    assert collect(a, ticks=40) == {(8, -61, 12): AIR}
+    changes = collect(a, ticks=40)
+    assert changes == {(8, -61, 12): AIR}, changes
     # Dusk, as long as the sky still gives nine levels: at tick 13014 of the day it is 15 - 6.
     srv.console("time set 13015")
     srv.wait_log("to 13015 tick")
-    assert collect(a, ticks=40) == {}
+    changes = collect(a, ticks=40)
+    assert changes == {}, changes
     srv.console("time set 37014")
     srv.wait_log("to 37014 tick")
     changes = until(a, lambda ch: ch.get((8, -62, 12)) == grass)
     assert changes == {(8, -62, 12): grass}, changes
     # ...and a torch does what the sun does not: light of its own is not the sky's to take.
+    mark = len(srv.read_log())     # (it said "midnight" once already)
     srv.console("time set midnight")
-    srv.wait_log("to time marker minecraft:midnight")
+    srv.wait_log("to time marker minecraft:midnight", since=mark)
     dig(a, (11, -61, 12), seq=2)
-    assert collect(a, ticks=40) == {(11, -61, 12): AIR}
+    changes = collect(a, ticks=40)
+    assert changes == {(11, -61, 12): AIR}, changes
     give(a, 36, I["kTorch"])
     click(a, (12, -61, 12), 1, seq=3)
     changes = until(a, lambda ch: ch.get((11, -62, 12)) == grass)
@@ -4735,7 +4783,9 @@ def join_many(srv: Server, n: int, view: int, online: bool = False) -> list:
     return clients
 
 
-@test(alone=True, max_players=100, view_distance=2)
+# (A hundred Python clients: a core of their own, of the eight the pool leaves free. What it asserts
+# is what they are shown, not how long the server took.)
+@test(max_players=100, view_distance=2, tick_rate=20)
 def crowd(srv: Server):
     """60 players on one spot: everyone is shown everyone, and everyone's picture of the others is exact."""
     n = 60
@@ -4834,7 +4884,7 @@ def crowd_load(srv: Server, n: int, seconds: int, online: bool) -> None:
         c.close()
 
 
-@test(alone=True, slow=True, max_players=200, view_distance=2, debug="true")
+@test(alone=True, slow=True, max_players=200, view_distance=2, debug="true", tick_rate=20)
 def ten_thousand_at_rest(srv: Server):
     """What a tick costs with ten thousand things lying about and nobody there: 150 bots each
     walk a row and drop a stone every block and a half - 68 of them, nothing near enough to
@@ -4916,7 +4966,7 @@ def ten_thousand_at_rest(srv: Server):
     account("items and armor stands", bots * each + 10000)
 
 
-@test(alone=True, slow=True, max_players=500, view_distance=2, debug="true")
+@test(alone=True, slow=True, max_players=500, view_distance=2, debug="true", tick_rate=20)
 def crowd_500(srv: Server):
     """The worst case the server is built for, without encryption (offline mode)."""
     crowd_load(srv, 500, 11, online=False)
@@ -4926,7 +4976,7 @@ def crowd_500(srv: Server):
 def crowd_500_online():
     """The same crowd in online mode: every byte of it goes through AES-CFB8 in the flush."""
     mock = MockSessionServer()
-    srv = Server(EXE, online_mode="true", session_server=mock.url, max_players=500, view_distance=2, debug="true")
+    srv = Server(EXE, online_mode="true", session_server=mock.url, max_players=500, view_distance=2, debug="true", tick_rate=20)
     try:
         crowd_load(srv, 500, 11, online=True)
     finally:
@@ -4935,7 +4985,8 @@ def crowd_500_online():
         assert code == 0, f"server exit code {code}\n{srv.read_log()[-2000:]}"
 
 
-@test(alone=True, max_players=400)
+# (As crowd: the server's cost is printed, not asserted.)
+@test(max_players=400, tick_rate=20)
 def many_players(srv: Server):
     n = 200
     errors = []

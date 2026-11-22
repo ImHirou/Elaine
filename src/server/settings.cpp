@@ -25,6 +25,14 @@ bool parse_num(std::string_view v, T& out, long long lo, long long hi) {
     return true;
 }
 
+bool parse_float(std::string_view v, float& out, float lo, float hi) {
+    float f = 0;
+    auto [p, ec] = std::from_chars(v.data(), v.data() + v.size(), f);
+    if (ec != std::errc() || p != v.data() + v.size() || !(f >= lo && f <= hi)) return false;
+    out = f;
+    return true;
+}
+
 bool parse_bool(std::string_view v, bool& out) {
     if (v == "true" || v == "1")
         out = true;
@@ -92,6 +100,8 @@ bool set_key(Settings& s, std::string_view k, std::string_view v, std::string& e
         ok = parse_num(v, s.random_tick_speed, 0, 4096);
     else if (k == "advance-time")
         ok = parse_bool(v, s.advance_time);
+    else if (k == "tick-rate")
+        ok = parse_float(v, s.tick_rate, 1.0f, 10000.0f);  // (TickCommand: floatArg(1, 10000))
     else
         return true;  // unknown keys (vanilla has many we do not implement yet) are ignored
     if (!ok) err = "invalid value for " + std::string(k) + ": '" + std::string(v) + "'";

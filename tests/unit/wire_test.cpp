@@ -568,6 +568,23 @@ TEST(Packets, BlockUpdateLayoutsAreTheJars) {
     EXPECT_EQ(add.substr(add.size() - 2), "79");
 }
 
+TEST(Packets, TickingLayoutsAreTheJars) {
+    // ClientboundTickingStatePacket.write: writeFloat(tickRate), writeBoolean(isFrozen).
+    EXPECT_EQ(body_hex(cb::TickingState{20.0f, false}),
+              "41a00000"
+              "00");
+    const std::string state = body_hex(cb::TickingState{100.0f, true});
+    std::vector<u8> raw;
+    for (usize i = 0; i < state.size(); i += 2) raw.push_back(static_cast<u8>(std::stoi(state.substr(i, 2), nullptr, 16)));
+    Reader r(raw.data(), raw.size());
+    EXPECT_EQ(r.f32(), 100.0f);
+    EXPECT_TRUE(r.boolean());
+    EXPECT_TRUE(r.done());
+    // ClientboundTickingStepPacket.write: writeVarInt(tickSteps).
+    EXPECT_EQ(body_hex(cb::TickingStep{0}), "00");
+    EXPECT_EQ(body_hex(cb::TickingStep{300}), "ac02");
+}
+
 TEST(Packets, SignLayoutsAreTheJars) {
     // ClientboundOpenSignEditorPacket: BlockPos, SignTextSlot (ByteBufCodecs.idMapper: 0 the back, 1 the front).
     EXPECT_EQ(body_hex(cb::OpenSignEditor{4, -60, -13, true}),
