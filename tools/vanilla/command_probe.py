@@ -66,7 +66,7 @@ from inventory_probe import Actor  # noqa: E402
 
 LOGGED = {"system_chat", "player_chat", "disguised_chat", "set_time", "command_suggestions", "block_update", "section_blocks_update", "player_position", "sound", "stop_sound", "add_entity",
           "remove_entities", "entity_event", "commands", "disconnect", "set_entity_data", "container_set_slot",
-          "set_player_inventory", "take_item_entity"}
+          "set_player_inventory", "take_item_entity", "open_screen"}
 UUID_RX = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -174,6 +174,9 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str | No
         steps.append({"step": name, "A": a.log[mark_a:], "B": b.log[mark_b:]})
         print(f"{name}: A {len(a.log) - mark_a}, B {len(b.log) - mark_b} packets")
 
+    # (Nothing spawns by itself while this records: a horse that walks by is a row of its own.
+    # The rule is put back at the end; ours has no such rule and says so on its console.)
+    type_on_console("gamerule minecraft:spawn_mobs false")
     type_on_console(f"op {name_a}")   # A is told its level and sent the commands that come with it
 
     def run(command: str, bot=a, ticks: int = 5):
@@ -365,6 +368,42 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str | No
     run("data get block ~ ~ ~2 speed_multiplier 3")
     run("data get block ~ ~ ~2 RecipesUsed")
     run("setblock ~ ~ ~2 air")
+    # A block entity out of a tag: what is wrong in it is left out (a slot that is none - 300 is
+    # the byte 44 -, an item that is none, a hundred of something, an entry no chest has).
+    chest = ('chest{CustomName:"Loot",lock:{items:"stick"},foo:1b,components:{rarity:"rare",nope:1},Items:['
+             '{Slot:3b,id:"stone",count:5},{Slot:300,id:"dirt"},{Slot:1b,id:"diamond_sword",components:{damage:7}},'
+             '{Slot:2b,id:"nope"},{Slot:4b,id:"apple",count:100},{id:"dirt",count:2}]}')
+    run("setblock ~ ~ ~2 " + chest)
+    run("data get block ~ ~ ~2")
+    run("data get block ~ ~ ~2 Items")
+    run("setblock ~ ~ ~2 " + chest)                   # the same again: nothing changed
+
+    def click_chest() -> None:
+        a.c.send("use_item_on", mc.varint(0) + mc.pack_block_pos(ox, oy, oz + 2) + mc.varint(1) + struct.pack(">fff", 0.5, 1.0, 0.5) +
+                 b"\x00\x00" + mc.varint(900))
+    step("A clicks the chest, a diamond in hand: it is locked", click_chest)
+    step("A clicks it with a stick: its name on the menu", lambda: (a.give(36, "kStick", 1), click_chest()), ticks=8)
+    step("A closes it and takes the diamond again", lambda: (a.c.send("container_close", mc.varint(1)), a.give(36, "kDiamond", 1)))
+    run("setblock ~ ~ ~2 chest{CustomName:{text:\"J\",color:\"red\"},lock:{}}")
+    run("data get block ~ ~ ~2")
+    run("setblock ~ ~ ~2 chest{CustomName:5,lock:{count:{min:5,max:1}},components:\"x\",Items:{}}")   # all of it wrong
+    run("data get block ~ ~ ~2")
+    run("setblock ~ ~ ~2 furnace{lit_total_time:1600s,cooking_total_time:\"x\",speed_multiplier:2,"
+        "RecipesUsed:{\"minecraft:iron_ingot\":3},Items:[{Slot:2b,id:\"iron_ingot\",count:3}],CustomName:\"Hot\"}")
+    run("data get block ~ ~ ~2")
+    run("setblock ~ ~ ~2 stone{a:1}")                 # no block entity: the tag is nobody's
+    run("setblock ~ ~ ~2 chest{")
+    run("setblock ~ ~ ~2 chest{a:}")
+    run("fill ~ ~ ~2 ~2 ~ ~2 barrel{Items:[{Slot:0b,id:\"apple\"}],CustomName:\"B\"}")
+    run("data get block ~1 ~ ~2")
+    run("setblock ~1 ~ ~2 barrel")                    # the barrel it was, with what it held: nothing changed
+    run("setblock ~1 ~ ~2 barrel[facing=up]")         # another state of the same block: it keeps its block entity
+    run("data get block ~1 ~ ~2 Items")
+    run("setblock ~1 ~ ~2 air")
+    run("setblock ~1 ~ ~2 barrel")
+    run("fill ~ ~ ~2 ~2 ~ ~2 stone replace barrel{Items:[{id:\"minecraft:apple\"}]}")   # two of the three
+    run("fill ~ ~ ~2 ~2 ~ ~2 dirt replace #minecraft:planks{a:1}")                       # no block entity among them
+    run("fill ~ ~ ~2 ~2 ~ ~2 air")
     run("data get entity @s Pos")
     run("data get entity @s Pos[0] 2")
     run("data get entity @s Pos[-1]")
@@ -601,6 +640,7 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str | No
     run(f"kick {name_b} that is enough")
 
     type_on_console(f"deop {name_a}")
+    type_on_console("gamerule minecraft:spawn_mobs true")
     a.c.close()
     Path(out_path).write_text(json.dumps({"origin": origin, "names": [name_a, name_b, name_c], "recorded": int(time.time() * 1000), "steps": steps}))
     print(f"wrote {out_path}")
@@ -882,10 +922,12 @@ def _normalise(rec: dict, who: str, commands: set | None) -> tuple[dict[str, lis
             elif name == "sound":
                 holder = r.varint()
                 if holder != 0:
-                    if holder - 1 != mc.SOUND["kEntityItemPickup"]:
+                    if holder - 1 == mc.SOUND["kBlockChestLocked"]:
+                        sound, pitch_free = "block.chest.locked", False
+                    elif holder - 1 != mc.SOUND["kEntityItemPickup"]:
                         continue     # a sound of the world (footsteps, a block placed), not of a command
-                    pitch_free = True
-                    sound = "entity.item.pickup"
+                    else:
+                        sound, pitch_free = "entity.item.pickup", True
                 else:
                     sound, pitch_free = r.str(), False
                     assert not r.bool()
@@ -893,6 +935,9 @@ def _normalise(rec: dict, who: str, commands: set | None) -> tuple[dict[str, lis
                 pos = tuple(v / 8 - o for v, o in zip((r.i32(), r.i32(), r.i32()), origin))
                 volume, pitch = r.f32(), r.f32()
                 rows.append((name, f"{sound} source {source} at {pos} volume {volume} pitch {'random' if pitch_free else pitch}"))
+            elif name == "open_screen":
+                r.varint()
+                rows.append((name, f"menu {r.varint()} title {mc.snbt(r.nbt())}"))
             elif name == "stop_sound":
                 flags = r.u8()
                 rows.append((name, f"source {r.varint() if flags & 1 else '*'} sound {r.str() if flags & 2 else '*'}"))

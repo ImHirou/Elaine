@@ -563,6 +563,15 @@ void Dimension::update_light() {
     for (Chunk* c : light_.changed()) invalidate(*c);
 }
 
+void Dimension::block_changed(i32 x, i32 y, i32 z) {
+    Chunk* c = map_.find(x >> 4, z >> 4);
+    if (!c || y < min_y() || y > max_y()) return;
+    const u32 si = static_cast<u32>((y - min_y()) >> 4), lx = static_cast<u32>(x & 15), ly = static_cast<u32>(y & 15),
+              lz = static_cast<u32>(z & 15);
+    changes_.push_back({c, static_cast<u16>(si), static_cast<u16>((lx << 8) | (lz << 4) | ly)});
+    changes_sorted_ = false;
+}
+
 std::vector<Dimension::BlockChange>& Dimension::block_changes() {
     if (!changes_sorted_) {
         std::sort(changes_.begin(), changes_.end(), [](const BlockChange& a, const BlockChange& b) {

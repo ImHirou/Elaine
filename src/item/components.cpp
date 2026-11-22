@@ -1086,6 +1086,29 @@ Patches::Found find_nested(std::span<const u8> patch, u32 type) {
     return found;
 }
 
+Verdict nested_patch(std::span<const u8> patch, PatchId& out) {
+    out = 0;
+    base::ByteBuf skipped;
+    Out to{skipped};
+    Reader in(patch);
+    const u32 added = in.varint(), removed = in.varint();
+    PatchBuilder builder;
+    for (u32 i = 0; i < added && in.ok; ++i) {
+        const u32 type = in.varint();
+        const u8* const value = in.p;
+        skipped.clear();
+        if (type >= component::kCount || transcode(type, in, to) != Verdict::kOk) return Verdict::kMalformed;
+        builder.set(type, {value, static_cast<usize>(in.p - value)});
+    }
+    for (u32 i = 0; i < removed && in.ok; ++i) {
+        const u32 type = in.varint();
+        if (type >= component::kCount) return Verdict::kMalformed;
+        builder.remove(type);
+    }
+    if (!in.ok) return Verdict::kMalformed;
+    return builder.empty() ? Verdict::kOk : builder.build(out);
+}
+
 Verdict check_value(u32 type, std::span<const u8> value, base::ByteBuf& out) {
     if (type >= component::kCount) return Verdict::kMalformed;
     Reader in(value);

@@ -448,7 +448,12 @@ TEST(CommandArguments, BlockStatesAndPredicates) {
     EXPECT_EQ(block("chest[facing]", false), "Expected value for property 'facing' on block minecraft:chest @12");
     EXPECT_EQ(block("chest[facing=east", false), "Expected closing ] for block state properties @17");
     EXPECT_EQ(block("chest[facing=east;", false), "Expected closing ] for block state properties @17");
-    EXPECT_EQ(block("chest{Items:[]}", false), "Block entity data in commands are not supported by this server yet @5");
+    // A tag behind it: TagParser's compound, with its errors.
+    EXPECT_EQ(block("chest{Items:[]}", false), "ok 15");
+    EXPECT_EQ(block("chest[facing=east]{a:1b} x", false), "ok 24");
+    EXPECT_EQ(block("#minecraft:planks{a:1}", true), "ok 22");
+    EXPECT_NE(block("chest{", false).rfind("ok", 0), 0u);
+    EXPECT_FALSE(block("chest{a:1}", false, &b).rfind("ok", 0) != 0 || b.nbt.empty());
     EXPECT_EQ(block("#logs", false), "Tags aren't allowed here; only actual blocks are @0");
 
     EXPECT_EQ(block("#minecraft:logs", true, &b), "ok 15");

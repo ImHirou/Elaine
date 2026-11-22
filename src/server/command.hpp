@@ -151,6 +151,9 @@ struct BlockArg {
     bool is_tag = false;
     std::vector<u16> tag_blocks;                                 // the blocks of the tag
     std::vector<std::pair<std::string, std::string>> tag_given;  // a tag's properties stay words
+    // `stone{...}`: the tag behind it, in the network form (type, payload); empty for none. What
+    // a block entity is to be loaded from - or, of a predicate, what one has to hold.
+    std::vector<u8> nbt;
     // BlockPredicateArgument's predicates: is `s` what was named?
     bool test(world::BlockState s) const;
 };

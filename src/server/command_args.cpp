@@ -445,7 +445,7 @@ bool SelectorParser::option(std::string_view key, u32 key_start, Error& err) {
         if (!read_string(r, value, err)) return false;
         if (!name.can_parse(inverted)) return inapplicable(start);
         name.mark(inverted);
-        sel.tests.push_back({Selector::Test::kName, inverted, 0, std::move(value), {}});
+        sel.tests.push_back({Selector::Test::kName, inverted, 0, std::move(value), {}, {}});
     } else if (key == "distance" || key == "level") {
         const bool level = key == "level";
         Range& range = level ? sel.level : sel.distance;
@@ -497,13 +497,13 @@ bool SelectorParser::option(std::string_view key, u32 key_start, Error& err) {
             return false;
         }
         sel.includes_entities = false;
-        sel.tests.push_back({Selector::Test::kGamemode, inverted, static_cast<u32>(found - std::begin(kGameModes)), {}, {}});
+        sel.tests.push_back({Selector::Test::kGamemode, inverted, static_cast<u32>(found - std::begin(kGameModes)), {}, {}, {}});
         gamemode.mark(inverted);
     } else if (key == "team") {
         const bool inverted = eat('!');
         const std::string_view value = read_unquoted(r);
         if (!team.can_parse(inverted)) return inapplicable(start);
-        sel.tests.push_back({Selector::Test::kTeam, inverted, 0, std::string(value), {}});
+        sel.tests.push_back({Selector::Test::kTeam, inverted, 0, std::string(value), {}, {}});
         team.mark(inverted);
     } else if (key == "type") {
         const bool inverted = eat('!');
@@ -512,7 +512,7 @@ bool SelectorParser::option(std::string_view key, u32 key_start, Error& err) {
             if (type.state == Invertable::kSingle) return inapplicable(start);
             if (!read_identifier(r, id, err)) return false;
             if (std::find(type.tags.begin(), type.tags.end(), id) != type.tags.end()) return inapplicable(start);
-            Selector::Test test{Selector::Test::kTypeTag, inverted, 0, {}, {}};
+            Selector::Test test{Selector::Test::kTypeTag, inverted, 0, {}, {}, {}};
             tag_members("minecraft:entity_type", id, test.ids);  // a tag nobody defined has no members
             sel.tests.push_back(std::move(test));
             type.state = Invertable::kMultiple;
@@ -526,13 +526,13 @@ bool SelectorParser::option(std::string_view key, u32 key_start, Error& err) {
                 return false;
             }
             if (found == proto::gen::entity_type::kPlayer && !inverted) sel.includes_entities = false;
-            sel.tests.push_back({Selector::Test::kType, inverted, found, {}, {}});
+            sel.tests.push_back({Selector::Test::kType, inverted, found, {}, {}, {}});
             if (!inverted) sel.type = found;
             type.mark(inverted);
         }
     } else if (key == "tag") {
         const bool inverted = eat('!');
-        sel.tests.push_back({Selector::Test::kTag, inverted, 0, std::string(read_unquoted(r)), {}});
+        sel.tests.push_back({Selector::Test::kTag, inverted, 0, std::string(read_unquoted(r)), {}, {}});
     } else if (key == "nbt") {
         const bool inverted = eat('!');
         Selector::Test test{Selector::Test::kNbt, inverted, 0, {}, {}, {}};
@@ -594,7 +594,7 @@ bool SelectorParser::selector(Error& err) {
         sel.max_results = max;
         sel.includes_entities = true;
         sel.order = order;
-        sel.tests.push_back({Selector::Test::kAlive, false, 0, {}, {}});
+        sel.tests.push_back({Selector::Test::kAlive, false, 0, {}, {}, {}});
     };
     switch (kind) {
         case 'p': players(1, Selector::kNearest); break;
@@ -720,6 +720,8 @@ bool ItemArg::test(u32 item_id) const {
 }
 
 // BlockStateParser.parse: `predicate` is its forTesting - a tag may stand for the block.
+bool parse_nbt(std::string_view line, u32& cursor, bool compound, std::vector<u8>& out, Error& err);
+
 bool parse_block(std::string_view line, u32& cursor, bool predicate, BlockArg& out, Error& err) {
     Reader r{line, cursor};
     out = {};
@@ -829,9 +831,8 @@ bool parse_block(std::string_view line, u32& cursor, bool predicate, BlockArg& o
         }
         ++r.at;
     }
-    if (r.can_read() && r.peek() == '{') {  // readNbt
-        err = here(r, unsupported("Block entity data in commands"));
-        return false;
+    if (r.can_read() && r.peek() == '{') {  // readNbt: TagParser.parseCompoundAsArgument
+        if (!parse_nbt(line, r.at, true, out.nbt, err)) return false;
     }
     cursor = r.at;
     return true;

@@ -1,8 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // What the game holds, as the tags vanilla saves it as: BlockEntity.saveWithFullMetadata and
 // Entity.saveWithoutId (26.3) - for `/data get`, and for whatever compares a tag with one
-// (`@e[nbt=...]`). Nothing here is what the server keeps on disk: that is server/persist.cpp, in a
-// form of its own.
+// (`@e[nbt=...]`) - and the way back: a block entity out of such a tag
+// (BlockEntity.loadWithComponents), for `/setblock chest{...}`, for a block item that carries
+// data, for a block entity of an imported world. Nothing here is what the server keeps on disk:
+// that is server/persist.cpp, in a form of its own.
+//
+// Of a chest, a barrel and a furnace the server holds the stacks and the timers itself; what
+// else their tag says - CustomName, lock, components, the recipes a furnace has used - is kept
+// beside them as a tag (Chest::keep), each entry as its vanilla codec writes it, and read where
+// it is acted on: the name when a menu opens, the lock before.
 //
 // Entries are written in the order vanilla's code puts them, because the text of `/data get`
 // shows a compound in the order of a HashMap, and what that is depends on the order of arrival
@@ -10,11 +17,15 @@
 //
 // Of an entity, what the server does not keep is written as the value vanilla gives a fresh one
 // (Fire, Air, PortalCooldown...).
+#include <cstring>
+
 #include "item/codec.hpp"
 #include "nbt/nbt.hpp"
 #include "nbt/ops.hpp"
+#include "proto/identifier.hpp"
 #include "server/game.hpp"
 #include "server/persist.hpp"
+#include "text/component.hpp"
 
 #include PROTO_GEN_PHYSICS_HPP
 #include PROTO_GEN_STATIC_IDS_HPP
@@ -53,18 +64,239 @@ void put_uuid(nbt::Writer& w, std::string_view name, Uuid id) {
     w.put_int_array(name, parts);
 }
 
-// What follows `prefix` in a tag that was kept beside a block entity: the entries of the
-// compound, as they are.
-void put_kept(nbt::Writer& w, std::span<const u8> kept) {
-    nbt::Doc doc;
-    if (kept.empty() || doc.parse(kept, nbt::Form::kNameless, nbt::kTrusted) != nbt::Error::kNone) return;
-    if (doc.root().type != nbt::kCompound) return;
-    for (const nbt::Tag e : doc.root().entries()) w.put_raw(e.name(), e.type, e.bytes());
+// What the tag of a chest, a barrel or a furnace says: loadAdditional of BaseContainerBlockEntity,
+// ChestBlockEntity / BarrelBlockEntity and AbstractFurnaceBlockEntity, and BlockEntity.components.
+struct ContainerTag {
+    ItemStack items[Chest::kSlots];
+    i32 lit_remaining = 0, lit_total = 0, cook = 0, cook_total = 0;
+    float speed = 1.0f;
+    base::ByteBuf rest;  // CustomName, lock, RecipesUsed, components: a nameless compound; empty for none of them
+};
+
+// Reads it as vanilla's ValueInput does: what is not there is its default, and of what is
+// wrong vanilla keeps what the failed decode left it (DataResult's partial value) - a stack
+// whose count is none is one of it, a lock one of whose fields is wrong is a lock without
+// that field, an item that does not exist is no stack at all. False, and `why`, where the
+// tag asks for something this server cannot do - a loot table to roll, a stack or a text it
+// does not read: such a tag is not half taken.
+// `components`: the entries of the block entity's components to keep when the tag is read
+// without them (loadCustomOnly), else none - then the tag's own are read.
+bool read_container_tag(nbt::Tag tag, u32 slots, bool furnace, bool with_components, nbt::Tag components, ContainerTag& out,
+                        std::string& why) {
+    if (tag.type != nbt::kCompound) return true;  // (nothing to read: everything is its default)
+    nbt::Writer w(out.rest);
+    bool any = false;
+    const auto entry = [&](std::string_view name, std::span<const u8> nameless) {
+        if (!any) w.root(nbt::kCompound);
+        any = true;
+        w.put_raw(name, static_cast<nbt::Type>(nameless[0]), nameless.subspan(1));
+    };
+    base::ByteBuf value;
+    // ---- BaseContainerBlockEntity: lock (LockCode.fromTag), CustomName (parseCustomNameSafe)
+    if (const nbt::Tag lock = tag.get("lock"); lock.type == nbt::kCompound) {
+        // A field of the predicate that is wrong is left out, and the rest is the lock: vanilla
+        // goes on with what the failed decode left it (an optional field, absent).
+        base::ByteBuf fields;
+        nbt::Writer fw(fields);
+        fw.root(nbt::kCompound);
+        for (const std::string_view field : {"items", "count", "components", "predicates"}) {
+            const nbt::Tag f = lock.get(field);
+            if (!f) continue;
+            base::ByteBuf one;
+            nbt::Writer ow(one);
+            ow.root(nbt::kCompound);
+            ow.put_raw(field, f.type, f.bytes());
+            ow.end_compound();
+            nbt::Doc alone;
+            alone.parse({one.data, one.len}, nbt::Form::kNameless, nbt::kTrusted);
+            value.clear();
+            const item::Verdict v = item::tag_component(item::component::kLock, alone.root(), value);
+            if (v == item::Verdict::kUnsupported) {
+                why = "Locks that test components";
+                return false;
+            }
+            if (v == item::Verdict::kOk) fw.put_raw(field, f.type, f.bytes());
+        }
+        fw.end_compound();
+        nbt::Doc kept;
+        kept.parse({fields.data, fields.len}, nbt::Form::kNameless, nbt::kTrusted);
+        value.clear();
+        if (item::tag_component(item::component::kLock, kept.root(), value) == item::Verdict::kOk)
+            entry("lock", {value.data, value.len});
+    }
+    if (const nbt::Tag name = tag.get("CustomName")) {
+        value.clear();
+        const text::Result v = text::transcode(name, value);
+        if (v == text::Result::kUnsupported) {
+            why = "Names with parts of a text this server does not read";
+            return false;
+        }
+        if (v == text::Result::kOk) entry("CustomName", {value.data, value.len});
+    }
+    // ---- the items: ContainerHelper.loadAllItems - unless a chest names a loot table to roll
+    if (!furnace) {
+        const nbt::Tag loot = tag.get("LootTable");
+        proto::Identifier id;
+        std::string name;
+        if (loot.type == nbt::kString && proto::parse_identifier(name = nbt::to_utf8(loot.str()), id)) {
+            why = "Loot tables of containers";
+            return false;
+        }
+    }
+    if (const nbt::Tag items = tag.get("Items"); items.type == nbt::kList) {
+        for (const nbt::Tag e : items.elements()) {
+            if (e.type != nbt::kCompound) continue;
+            // ExtraCodecs.UNSIGNED_BYTE: a number's byte, unsigned; 0 if left out - or if it is no number.
+            const nbt::Tag slot = e.get("Slot");
+            const u32 at = slot.numeric() ? static_cast<u8>(slot.as_int()) : 0;
+            ItemStack stack;
+            const item::Verdict v = item::stack_from_nbt(e, stack, true);
+            if (v == item::Verdict::kUnsupported) {
+                why = "Items with components this server does not read";
+                return false;
+            }
+            if (v == item::Verdict::kOk && at < slots) out.items[at] = std::move(stack);  // isValidInContainer
+        }
+    }
+    if (furnace) {
+        const auto number = [&](std::string_view name, i32 fallback) {  // getIntOr
+            const nbt::Tag t = tag.get(name);
+            return t.numeric() ? t.as_int() : fallback;
+        };
+        out.cook = number("cooking_time_spent", 0);
+        out.cook_total = number("cooking_total_time", 0);
+        out.lit_remaining = number("lit_time_remaining", 0);
+        out.lit_total = number("lit_total_time", 0);
+        if (const nbt::Tag speed = tag.get("speed_multiplier"); speed.numeric())
+            out.speed = static_cast<float>(speed.as_double());
+        // RecipesUsed: recipes and how often - the experience it owes. Nothing here reads it.
+        if (const nbt::Tag used = tag.get("RecipesUsed"); used.type == nbt::kCompound && used.size()) {
+            bool ok = true;
+            for (const nbt::Tag e : used.entries()) {
+                proto::Identifier id;
+                const std::string key = nbt::to_utf8(e.name());
+                ok &= e.numeric() && proto::parse_identifier(key, id);
+            }
+            if (ok) {
+                if (!any) w.root(nbt::kCompound);
+                any = true;
+                w.put_raw("RecipesUsed", nbt::kCompound, used.bytes());
+            }
+        }
+    }
+    // ---- BlockEntity.components: DataComponentMap.CODEC - component and value; what is wrong is left out
+    if (!with_components) {
+        if (components.type == nbt::kCompound && components.size()) {
+            if (!any) w.root(nbt::kCompound);
+            any = true;
+            w.put_raw("components", nbt::kCompound, components.bytes());
+        }
+    } else if (const nbt::Tag given = tag.get("components"); given.type == nbt::kCompound) {
+        base::ByteBuf map;
+        nbt::Writer mw(map);
+        mw.root(nbt::kCompound);
+        u32 n = 0;
+        for (const nbt::Tag e : given.entries()) {
+            if (given.get(e.name()).at != e.at) continue;
+            const std::string key = nbt::to_utf8(e.name());
+            const u32 type = item::find_component(key);
+            if (type == item::kNoComponent || item::transient(type)) continue;
+            value.clear();
+            const item::Verdict v = item::value_from_nbt(type, e, value);
+            if (v == item::Verdict::kUnsupported) {
+                why = "Block entities with components this server does not read";
+                return false;
+            }
+            if (v != item::Verdict::kOk) continue;
+            item::value_to_nbt(type, {value.data, value.len}, mw, item::component_name(type));
+            ++n;
+        }
+        mw.end_compound();
+        if (n) entry("components", {map.data, map.len});
+    }
+    if (any) w.end_compound();
+    return true;
 }
 
 }  // namespace
 
 // ---------------------------------------------------------------------------- block entities
+
+nbt::Tag Game::kept_entry(u32 keep, std::string_view name, nbt::Doc& doc) const {
+    if (keep == kNone || doc.parse(opaque_[keep], nbt::Form::kNameless, nbt::kTrusted) != nbt::Error::kNone) return {};
+    return doc.root().get(name);
+}
+
+bool Game::can_load_block_entity(u32 block, nbt::Tag tag, std::string& why) {
+    const u32 kind = world::block_info(block).kind;
+    if (!chest_kind(kind) && kind != gen::block_kind::kFurnace)
+        return true;  // no block entity of this server's: nothing is loaded
+    ContainerTag read;
+    return read_container_tag(tag, chest_kind(kind) ? Chest::kSlots : Furnace::kSlots, !chest_kind(kind), true, {}, read, why);
+}
+
+Game::Loaded Game::load_block_entity(BlockPos pos, nbt::Tag tag, bool with_components, bool& changed, std::string& why) {
+    changed = false;
+    const world::BlockEntityRef* ref = world_.block_entity(pos.x, pos.y, pos.z);
+    if (!ref) return Loaded::kNone;
+    if (ref->data & kOpaqueBlockEntity) {
+        why = "Block entities that were imported as they are";
+        return Loaded::kRefused;
+    }
+    const u32 kind = world::block_info_of(world_.block(pos.x, pos.y, pos.z)).kind;
+    const bool chest = chest_kind(kind);
+    if (!chest && kind != gen::block_kind::kFurnace) return Loaded::kNone;
+    u32& keep = chest ? chests_[ref->data].keep : furnaces_[ref->data].keep;
+    nbt::Doc kept;
+    ContainerTag read;
+    if (!read_container_tag(tag, chest ? Chest::kSlots : Furnace::kSlots, !chest, with_components,
+                            with_components ? nbt::Tag{} : kept_entry(keep, "components", kept), read, why))
+        return Loaded::kRefused;
+    base::ByteBuf before, after;
+    save_block_entity(pos.x, pos.y, pos.z, before);
+    if (chest) {
+        Chest& c = chests_[ref->data];
+        for (u32 i = 0; i < Chest::kSlots; ++i) c.items[i] = std::move(read.items[i]);
+    } else {
+        Furnace& f = furnaces_[ref->data];
+        for (u32 i = 0; i < Furnace::kSlots; ++i) f.items[i] = std::move(read.items[i]);
+        f.cook = read.cook, f.cook_total = read.cook_total, f.lit_remaining = read.lit_remaining, f.lit_total = read.lit_total;
+        f.speed = read.speed;
+    }
+    drop_kept(keep);
+    keep = keep_tag({read.rest.data, read.rest.len});
+    save_block_entity(pos.x, pos.y, pos.z, after);
+    changed = before.len != after.len || std::memcmp(before.data, after.data, before.len) != 0;
+    if (changed) world_.mark_dirty(pos.x, pos.z);
+    return Loaded::kOk;
+}
+
+bool Game::adopt_kept_block_entity(BlockPos pos, world::BlockState state, u32 type, std::span<const u8> tag) {
+    const world::BlockInfo& info = world::block_info_of(state);
+    const bool chest = chest_kind(info.kind);
+    if ((!chest && info.kind != gen::block_kind::kFurnace) || type != info.block_entity) return false;
+    nbt::Doc doc;
+    if (doc.parse(tag, nbt::Form::kNameless, nbt::kTrusted) != nbt::Error::kNone) return false;
+    ContainerTag read;
+    std::string why;
+    if (!read_container_tag(doc.root(), chest ? Chest::kSlots : Furnace::kSlots, !chest, true, {}, read, why)) return false;
+    u32 data;
+    if (chest) {
+        data = new_chest(pos);
+        for (u32 i = 0; i < Chest::kSlots; ++i) chests_[data].items[i] = std::move(read.items[i]);
+        chests_[data].keep = keep_tag({read.rest.data, read.rest.len});
+    } else {
+        data = new_furnace(pos, cooker_of(type));
+        Furnace& f = furnaces_[data];
+        for (u32 i = 0; i < Furnace::kSlots; ++i) f.items[i] = std::move(read.items[i]);
+        f.cook = read.cook, f.cook_total = read.cook_total, f.lit_remaining = read.lit_remaining, f.lit_total = read.lit_total;
+        f.speed = read.speed;
+        f.keep = keep_tag({read.rest.data, read.rest.len});
+    }
+    world_.add_block_entity(pos.x, pos.y, pos.z, type, data);
+    world_.mark_dirty(pos.x, pos.z);  // (it is written as a chest from now on)
+    return true;
+}
 
 Game::Saved Game::save_block_entity(i32 x, i32 y, i32 z, base::ByteBuf& out) {
     const world::BlockEntityRef* ref = world_.block_entity(x, y, z);
@@ -89,11 +321,21 @@ Game::Saved Game::save_block_entity(i32 x, i32 y, i32 z, base::ByteBuf& out) {
             w.end_compound();
         }
     };
-    u32 keep = ~0u;
+    // What is kept beside it, each entry where vanilla's code puts it.
+    const u32 keep = chest_kind(kind) ? chests_[ref->data].keep : furnaces_[ref->data].keep;
+    nbt::Doc kept_doc;
+    nbt::Tag kept{};
+    if (keep != kNone && kept_doc.parse(opaque_[keep], nbt::Form::kNameless, nbt::kTrusted) == nbt::Error::kNone)
+        kept = kept_doc.root();
+    const auto kept_as_is = [&](std::string_view name) {
+        const nbt::Tag e = kept.get(name);
+        if (e) w.put_raw(name, e.type, e.bytes());
+        return static_cast<bool>(e);
+    };
+    kept_as_is("lock");  // BaseContainerBlockEntity.saveAdditional: lockKey.addToTag, CustomName
+    kept_as_is("CustomName");
     if (chest_kind(kind)) {
-        const Chest& c = chests_[ref->data];
-        items(c.items, Chest::kSlots);
-        keep = c.keep;
+        items(chests_[ref->data].items, Chest::kSlots);
     } else {  // AbstractFurnaceBlockEntity.saveAdditional
         const Furnace& f = furnaces_[ref->data];
         w.put_int("cooking_time_spent", f.cook);
@@ -102,15 +344,15 @@ Game::Saved Game::save_block_entity(i32 x, i32 y, i32 z, base::ByteBuf& out) {
         w.put_int("lit_total_time", f.lit_total);
         w.put_float("speed_multiplier", f.speed);
         items(f.items, Furnace::kSlots);
-        keep = f.keep;
-        if (keep == ~0u) {  // recipesUsed: a map that is always written
+        if (!kept_as_is("RecipesUsed")) {  // recipesUsed: a map that is always written
             w.begin_compound("RecipesUsed");
             w.end_compound();
         }
     }
-    if (keep != ~0u) put_kept(w, opaque_[keep]);
-    w.begin_compound("components");  // BlockEntity.components: nothing it holds beyond its own fields
-    w.end_compound();
+    if (!kept_as_is("components")) {  // BlockEntity.components: a map that is always written
+        w.begin_compound("components");
+        w.end_compound();
+    }
     w.put_string("id", world::block_entity_type_name(ref->type));  // saveMetadata
     w.put_int("x", x);
     w.put_int("y", y);

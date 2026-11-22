@@ -644,7 +644,17 @@ bool Game::place_block_input(BlockPos pos, const cmd::BlockArg& block, u32 flags
         const u32 now = (state - first) / p.stride % static_cast<u32>(p.values.size());
         state = static_cast<BlockState>(state + (static_cast<i32>(value) - static_cast<i32>(now)) * static_cast<i32>(p.stride));
     }
-    return set_block(pos, state, flags);
+    bool affected = set_block(pos, state, flags);
+    if (!block.nbt.empty()) {  // ...and the block entity that is there now is loaded from the tag
+        nbt::Doc doc;
+        std::string why;
+        bool changed = false;
+        if (doc.parse(block.nbt, nbt::Form::kNameless, nbt::kTrusted) == nbt::Error::kNone)
+            load_block_entity(pos, doc.root(), true, changed, why);
+        if (changed) world_.block_changed(pos.x, pos.y, pos.z);  // ChunkHolder.blockChanged
+        affected |= changed;
+    }
+    return affected;
 }
 
 // ---------------------------------------------------------------------------- the commands
@@ -719,11 +729,31 @@ struct Game::Commands {
         const world::BlockInfo& info = world::block_info(block.block);
         const bool known =
             world::is_air(block.state) || (info.flags & world::block_flag::kPlaceMask) != world::block_flag::kPlaceNone;
-        if (known && world::state::fluid_legacy_of(block.state) == world::kAir) return true;
+        if (known && world::state::fluid_legacy_of(block.state) == world::kAir) {
+            // The tag behind it: whatever of it this server cannot do is said before a block is touched.
+            nbt::Doc doc;
+            std::string what;
+            if (block.nbt.empty() || doc.parse(block.nbt, nbt::Form::kNameless, nbt::kTrusted) != nbt::Error::kNone ||
+                can_load_block_entity(block.block, doc.root(), what))
+                return true;
+            return in.fail(Text::literal(what + " are not supported by this server yet"));
+        }
         std::string why = "The block ";
         why += world::block_name(block.block);
         why += known ? " cannot hold a fluid on this server yet" : " is not supported by this server yet";
         return in.fail(Text::literal(why));
+    }
+    // BlockPredicateArgument's predicates: the block, and - if a tag was given - a block entity
+    // that saves as at least that (NbtUtils.compareNbt).
+    static bool block_matches(Game& g, const cmd::BlockArg& filter, BlockPos pos, BlockState state) {
+        if (!filter.test(state)) return false;
+        if (filter.nbt.empty()) return true;
+        nbt::Doc want, has;
+        base::ByteBuf saved;
+        return g.save_block_entity(pos.x, pos.y, pos.z, saved) == Saved::kOk &&
+               want.parse(filter.nbt, nbt::Form::kNameless, nbt::kTrusted) == nbt::Error::kNone &&
+               has.parse({saved.data, saved.len}, nbt::Form::kNameless, nbt::kTrusted) == nbt::Error::kNone &&
+               nbt::matches(want.root(), has.root(), true);
     }
     // CommandResponseTracker.sendFeedback for the usual pair of messages: one about the single
     // element, one about how many there were.
@@ -789,7 +819,7 @@ struct Game::Commands {
                 for (i32 x = lo.x; x <= hi.x; ++x) {
                     const BlockPos pos{x, y, z};
                     const BlockState old = g.world_.block(x, y, z);
-                    if (filter && !filter->block.test(old)) continue;
+                    if (filter && !block_matches(g, filter->block, pos, old)) continue;
                     if (keep && !world::is_air(old)) continue;
                     const bool affected = destroy && g.destroy_block_with_drops(pos);
                     const bool edge = x == lo.x || x == hi.x || y == lo.y || y == hi.y || z == lo.z || z == hi.z;

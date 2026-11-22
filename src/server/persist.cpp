@@ -115,6 +115,27 @@ void Game::free_block_entity(u32 kind, u32 data) {
     }
 }
 
+u32 Game::keep_tag(std::span<const u8> tag) {
+    if (tag.empty()) return kNone;
+    u32 index;
+    if (!opaque_free_.empty()) {
+        index = opaque_free_.back();
+        opaque_free_.pop_back();
+    } else {
+        index = static_cast<u32>(opaque_.size());
+        opaque_.emplace_back();
+    }
+    opaque_[index].assign(tag.begin(), tag.end());
+    return index;
+}
+
+void Game::drop_kept(u32& keep) {
+    if (keep == kNone) return;
+    opaque_[keep] = {};
+    opaque_free_.push_back(keep);
+    keep = kNone;
+}
+
 void Game::write_block_entities(const world::Chunk& c, base::ByteBuf& out) const {
     if (c.block_entity_count == 0) return;
     put_block_entities_head(out, c.block_entity_count);
@@ -153,19 +174,7 @@ void Game::read_block_entities(world::Chunk& c, std::span<const u8> bytes) {
         LOG_ERROR("chunk %d, %d: its block entities are of a version this server does not read", c.x, c.z);
         return;
     }
-    const auto keep = [&](std::span<const u8> tag) -> u32 {
-        if (tag.empty()) return kNone;
-        u32 index;
-        if (!opaque_free_.empty()) {
-            index = opaque_free_.back();
-            opaque_free_.pop_back();
-        } else {
-            index = static_cast<u32>(opaque_.size());
-            opaque_.emplace_back();
-        }
-        opaque_[index].assign(tag.begin(), tag.end());
-        return index;
-    };
+    const auto keep = [&](std::span<const u8> tag) { return keep_tag(tag); };
     const auto stacks = [&](ItemStack* to, u32 n) {
         for (u32 i = 0; i < n; ++i) {
             // A stack this server would not take from a client it does not take from a file: the slot is empty.
@@ -186,7 +195,10 @@ void Game::read_block_entities(world::Chunk& c, std::span<const u8> bytes) {
                           y >= world_.min_y() && y <= world_.max_y() && type < gen::block_entity_type::kCount;
         if (record == kKept) {
             const std::span<const u8> tag = r.bytes(r.varint());
-            if (r.ok && fits) world_.add_block_entity(pos.x, pos.y, pos.z, type, keep(tag) | kOpaqueBlockEntity);
+            // What an import could not make ours on a worker (a chest with a name, a stack with
+            // components) is made ours here, where the item codecs may be used - if it can be.
+            if (r.ok && fits && !adopt_kept_block_entity(pos, state, type, tag))
+                world_.add_block_entity(pos.x, pos.y, pos.z, type, keep(tag) | kOpaqueBlockEntity);
         } else if (record == kChest) {
             Chest chest;
             stacks(chest.items, Chest::kSlots);

@@ -53,10 +53,13 @@ void value_to_nbt(u32 type, std::span<const u8> value, nbt::Writer& w, std::stri
 
 // DataComponentPatch.CODEC: a compound of "type": value and "!type": {}. `out` is the patch
 // (0 for an empty one), the caller's reference.
-Verdict patch_from_nbt(nbt::Tag components, PatchId& out);
+// `partial`: as where vanilla goes on with what a failed decode left it (DataResult's partial
+// value: a ValueInput reading a saved tag) - an entry that is wrong is left out, not the patch.
+Verdict patch_from_nbt(nbt::Tag components, PatchId& out, bool partial = false);
 // ItemStack.CODEC: {id, count, components}; an item that does not exist, air or a count outside
 // 1..99 is an error. (ItemStack.OPTIONAL_CODEC's empty stack is the caller's to spell.)
-Verdict stack_from_nbt(nbt::Tag tag, ItemStack& out);
+// `partial`: as above - a count that is none is 1, a component that is wrong is not there.
+Verdict stack_from_nbt(nbt::Tag tag, ItemStack& out, bool partial = false);
 // ...and its three entries into the compound that is open: id, count, and components if it has any.
 void stack_to_nbt(const ItemStack& stack, nbt::Writer& w);
 // A patch's entries ("minecraft:damage": 3, "!minecraft:lore": {}) into the compound that is open.
@@ -83,6 +86,9 @@ PatchId sanitized(u32 item, PatchId patch);
 // ItemStack.validateContainedItemSizes: a stack in the stack's container, bundle or crossbow
 // that holds more than a stack of its kind may. False if there is one, with its count and that limit.
 bool contained_sizes_fit(const ItemStack& stack, u32& count, u32& max);
+// ItemStackTemplate.create(): the stack a template stands for - or none, where the template
+// says what no stack may be (validateStrict: more than a stack of its kind, and so on).
+ItemStack stack_of(const Contained& c);
 // How many defaults of components that have a Codec here could not be read: 0, or a bug.
 u32 unread_defaults();
 

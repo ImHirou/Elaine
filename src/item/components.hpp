@@ -155,6 +155,8 @@ struct Contained {
 void contained(u32 type, std::span<const u8> value, std::vector<Contained>& out);
 // One component of such a patch.
 Patches::Found find_nested(std::span<const u8> patch, u32 type);
+// Such a patch as a stack's own: kOk, and `out` is it (0 for an empty one), the caller's reference.
+Verdict nested_patch(std::span<const u8> patch, PatchId& out);
 
 // A patch the server makes: another patch with components set, removed, or put back to the
 // item's own. The values are in the form check_value() writes. Tick thread, a cold path.

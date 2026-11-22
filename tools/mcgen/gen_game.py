@@ -240,7 +240,7 @@ FAMILY_LAYOUTS = {
 SOUNDS = ["block.chest.open", "block.chest.close", "entity.tnt.primed", "entity.generic.explode", "entity.item.pickup",
           "entity.armor_stand.break", "block.barrel.open", "block.barrel.close", "block.copper_chest.open",
           "block.copper_chest.close", "block.copper_chest_weathered.open", "block.copper_chest_weathered.close",
-          "block.copper_chest_oxidized.open", "block.copper_chest_oxidized.close"]
+          "block.copper_chest_oxidized.open", "block.copper_chest_oxidized.close", "block.chest.locked"]
 PARTICLES = ["explosion", "explosion_emitter", "poof", "smoke"]
 
 

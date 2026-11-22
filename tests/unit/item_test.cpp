@@ -1227,6 +1227,59 @@ TEST(ComponentCodec, StacksInStacksAndTheRestOfTheData) {
     EXPECT_EQ(item::patches().live(), held);
 }
 
+TEST(ComponentCodec, WhatAFailedDecodeLeavesAndStacksOutOfTemplates) {
+    const u32 held = item::patches().live();
+    const auto read = [](std::string_view snbt, bool partial, ItemStack& out) {
+        base::ByteBuf tag;
+        nbt::SnbtError why;
+        EXPECT_TRUE(nbt::read_snbt_fully(snbt, tag, why)) << snbt;
+        nbt::Doc doc;
+        EXPECT_EQ(doc.parse({tag.data, tag.len}, nbt::Form::kNameless, nbt::kTrusted), nbt::Error::kNone);
+        return item::stack_from_nbt(doc.root(), out, partial);
+    };
+    // A saved tag is read by a ValueInput, which goes on with what a failed decode left: an
+    // optional field that is wrong is its default, an entry of a map that is wrong is not there.
+    // A command's tag is read in full or not at all.
+    ItemStack s;
+    EXPECT_EQ(read("{id:\"apple\",count:100}", false, s), Verdict::kMalformed);
+    ASSERT_EQ(read("{id:\"apple\",count:100}", true, s), Verdict::kOk);
+    EXPECT_EQ(s.count(), 1u);
+    ASSERT_EQ(read("{id:\"apple\",count:\"x\",components:5}", true, s), Verdict::kOk);
+    EXPECT_TRUE(s.count() == 1 && !s.has_patch());
+    EXPECT_EQ(read("{id:\"diamond_sword\",components:{damage:-1,nope:1,rarity:\"epic\"}}", false, s), Verdict::kMalformed);
+    ASSERT_EQ(read("{id:\"diamond_sword\",components:{damage:-1,nope:1,rarity:\"epic\",creative_slot_lock:{}}}", true, s),
+              Verdict::kOk);
+    ASSERT_TRUE(s.has_patch());
+    ASSERT_EQ(item::patches().entries(s.patch()).size(), 1u);
+    EXPECT_EQ(item::patches().entries(s.patch())[0].type, comp::kRarity);
+    EXPECT_EQ(read("{id:\"nope\"}", true, s), Verdict::kMalformed);                          // a required field: nothing is left
+    EXPECT_EQ(read("{id:\"apple\",components:{food:{}}}", true, s), Verdict::kUnsupported);  // not read is not "wrong"
+
+    // ItemStackTemplate.create: the stacks a container holds, as stacks.
+    ASSERT_EQ(read("{id:\"shulker_box\",components:{container:[{slot:0,item:{id:\"stone\",count:5}},"
+                   "{slot:3,item:{id:\"diamond_sword\",components:{damage:7,max_stack_size:1,\"!lore\":{}}}},"
+                   "{slot:5,item:{id:\"diamond_sword\",count:2}}]}}",
+                   false, s),
+              Verdict::kOk);
+    std::vector<item::Contained> inside;
+    item::contained(comp::kContainer, item::effective(s, comp::kContainer).value, inside);
+    ASSERT_EQ(inside.size(), 3u);
+    EXPECT_EQ(inside[1].slot, 3u);
+    const ItemStack stones = item::stack_of(inside[0]), sword = item::stack_of(inside[1]);
+    EXPECT_TRUE(stones.item() == it::kStone && stones.count() == 5 && !stones.has_patch());
+    ASSERT_TRUE(sword.item() == it::kDiamondSword && sword.has_patch());
+    // (What a patch says that the item says anyway is no part of the stack's: max_stack_size=1, of a sword.)
+    ASSERT_EQ(item::patches().entries(sword.patch()).size(), 2u);
+    EXPECT_EQ(item::patches().entries(sword.patch())[0].type, comp::kDamage);
+    EXPECT_TRUE(item::patches().entries(sword.patch())[1].removed);
+    EXPECT_TRUE(item::stack_of(inside[2]).empty());  // two swords are more than a stack of them: validateStrict, no stack
+    EXPECT_EQ(item::find_nested(inside[1].patch, comp::kDamage).value.size(), 1u);
+    EXPECT_EQ(item::find_nested(inside[1].patch, comp::kLore).state, item::Patches::State::kRemoved);
+    EXPECT_EQ(item::find_nested(inside[0].patch, comp::kDamage).state, item::Patches::State::kInherit);
+    s = {};
+    EXPECT_EQ(item::patches().live(), held + 1);  // the sword's
+}
+
 TEST(ComponentCodec, DefaultsAndWhatAPatchNeedNotSay) {
     const u32 held = item::patches().live();
     EXPECT_EQ(item::unread_defaults(), 0u);  // every default of a component that is read here is read

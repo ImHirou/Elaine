@@ -1661,9 +1661,9 @@ void value_to_nbt(u32 type, std::span<const u8> value, nbt::Writer& w, std::stri
     to(type, in, w, name);
 }
 
-Verdict patch_from_nbt(Tag components, PatchId& out) {
+Verdict patch_from_nbt(Tag components, PatchId& out, bool partial) {
     out = 0;
-    if (components.type != nbt::kCompound) return kBad;
+    if (components.type != nbt::kCompound) return partial ? kOk : kBad;
     PatchBuilder patch;
     base::ByteBuf value;
     Verdict verdict = kOk;
@@ -1673,13 +1673,17 @@ Verdict patch_from_nbt(Tag components, PatchId& out) {
         std::string key = nbt::to_utf8(e.name());
         const bool removed = key.starts_with('!');
         const u32 type = find_component(std::string_view(key).substr(removed));
-        if (type == kNoComponent || transient(type)) return kBad;  // PatchKey.CODEC: "... is not a persistent component"
+        if (type == kNoComponent || transient(type)) {  // PatchKey.CODEC: "... is not a persistent component"
+            if (partial) continue;
+            return kBad;
+        }
         if (removed) {
             patch.remove(type);  // (its value is Codec.EMPTY: anything)
             continue;
         }
         value.clear();
         const Verdict v = value_from_nbt(type, e, value);
+        if (v == kBad && partial) continue;
         if (v == kBad) return v;
         if (v == kNotRead) verdict = v;
         patch.set(type, {value.data, value.len});
@@ -1687,7 +1691,7 @@ Verdict patch_from_nbt(Tag components, PatchId& out) {
     return verdict == kOk ? patch.build(out) : verdict;
 }
 
-Verdict stack_from_nbt(Tag tag, ItemStack& out) {
+Verdict stack_from_nbt(Tag tag, ItemStack& out, bool partial) {
     out = {};
     if (tag.type != nbt::kCompound) return kBad;
     // ItemStack.MAP_CODEC: id (Item.CODEC: not air), count (1..99, 1 if left out), components.
@@ -1695,10 +1699,14 @@ Verdict stack_from_nbt(Tag tag, ItemStack& out) {
     if (!as_identifier(tag.get("id"), name)) return kBad;
     const u32 item = world::find_item(name);
     i32 count;
-    if (item == world::kNoId || item == 0 || !optional(tag, "count", count, 1, as_int) || count < 1 || count > 99) return kBad;
+    if (item == world::kNoId || item == 0) return kBad;
+    if (!optional(tag, "count", count, 1, as_int) || count < 1 || count > 99) {
+        if (!partial) return kBad;
+        count = 1;
+    }
     PatchId patch = 0;
     if (const Tag components = tag.get("components")) {
-        if (const Verdict v = patch_from_nbt(components, patch); v != kOk) return v;
+        if (const Verdict v = patch_from_nbt(components, patch, partial); v != kOk) return v;
     }
     out = ItemStack(item, static_cast<u32>(count), sanitized(item, patch));
     return kOk;
@@ -1779,6 +1787,16 @@ bool contained_sizes_fit(const ItemStack& stack, u32& count, u32& max) {
         }
     }
     return true;
+}
+
+ItemStack stack_of(const Contained& c) {
+    PatchId patch = 0;
+    if (nested_patch(c.patch, patch) != kOk) return {};
+    ItemStack stack(c.item, c.count, sanitized(c.item, patch));
+    u32 held, most;
+    if (stack.count() > stack.max_stack() || stack.damageable_and_stackable() || !contained_sizes_fit(stack, held, most))
+        return {};
+    return stack;
 }
 
 u32 unread_defaults() { return defaults().unread; }

@@ -207,6 +207,34 @@ class Game {
     // A block entity's handle (world::BlockEntityRef::data) with this bit names an entry of
     // opaque_: one that came with an imported world and is kept as the tag it was (server/persist.cpp).
     static constexpr u32 kOpaqueBlockEntity = 1u << 31;
+    // ---- a block entity out of the tag vanilla saves it as (server/saved_tags.cpp)
+    enum class Loaded : u8 {
+        kOk,
+        kNone,     // no block entity there that a tag could be loaded into
+        kRefused,  // the tag asks for what this server cannot do: `why` says what, nothing was changed
+    };
+    // BlockEntity.loadWithComponents, or - without components - loadCustomOnly: what the chest,
+    // barrel or furnace at `pos` holds becomes what `tag` says. `changed`: it is not what it was.
+    Loaded load_block_entity(proto::BlockPos pos, nbt::Tag tag, bool with_components, bool& changed, std::string& why);
+    // Could a block entity of `block` be loaded from `tag`? (Asked before anything is changed.)
+    static bool can_load_block_entity(u32 block, nbt::Tag tag, std::string& why);
+    // A block entity that was kept as its tag, now that its chunk is here: a chest, a barrel or
+    // a furnace of it, if the tag is one this server can act on. False: it stays a tag.
+    bool adopt_kept_block_entity(proto::BlockPos pos, world::BlockState state, u32 type, std::span<const u8> tag);
+    // BlockItem.place, after the block: what the stack's components make of the block and of
+    // its block entity (updateBlockStateFromTag, updateCustomBlockEntityTag, updateBlockEntityComponents).
+    void apply_item_to_block(proto::BlockPos pos, const ItemStack& stack);
+    // ...and whether this server can do that for `stack` on `block` (a loot table it cannot roll).
+    static bool can_apply_item_to_block(u32 block, const ItemStack& stack);
+    u32 keep_tag(std::span<const u8> tag);  // an entry of opaque_ with these bytes; kNone for none
+    void drop_kept(u32& keep);
+    // What is kept beside a chest or a furnace (its CustomName, lock, components...): the entry
+    // `name` of it, a view into `doc`.
+    nbt::Tag kept_entry(u32 keep, std::string_view name, nbt::Doc& doc) const;
+    // BaseContainerBlockEntity.canOpen: does what the player holds open the lock, if there is one?
+    bool unlocks(u32 keep, const ItemStack& held) const;
+    // sendChestLockedNotifications: "<name> is locked!" over the hotbar, and the rattle.
+    void chest_locked(u32 pi, double x, double y, double z, const text::Text& name);
 
     void drain(u32 ri);
     void on_join(u32 ri, const net::InHeader& h, const u8* payload, u32 n);

@@ -5185,6 +5185,114 @@ def a_player_comes_back(srv: Server):
 
 
 @test()
+def block_entity_tags():
+    """A block entity out of a tag: /setblock and /fill with {...}, a filter that asks for one; a
+    chest's name on its menu, its lock; a chest placed from an item that carries its contents - and
+    all of it there when the server starts again. (What a vanilla server makes of the same tags is
+    compared by tools/vanilla/command_probe.py.)"""
+    world = tempfile.mkdtemp(prefix="world-tags-")
+    srv = None
+    try:
+        srv = Server(EXE, world=world)
+        a = srv.client()
+        join(a, "Alice", view=3)
+        a.send("player_loaded")
+        settle(a)
+        make_op(srv, a, "Alice")
+        chest, placed = (8, -60, 12), (8, -60, 10)
+
+        def data(pos: tuple, path: str) -> str:
+            said = run_command(a, "data get block %d %d %d %s" % (*pos, path))["said"]
+            assert len(said) == 1 and "with" in said[0], said
+            return shown(said[0]["with"][-1])
+
+        def held(pos: tuple) -> dict:
+            return {"Items": data(pos, "Items"), "CustomName": data(pos, "CustomName"), "components": data(pos, "components")}
+
+        # ---- /setblock with a tag. What is wrong in it is left out as vanilla leaves it out: a slot
+        # that is none (300 is the byte 44), an item that is none, an entry no chest has.
+        line = ('setblock 8 -60 12 chest{CustomName:"Loot",lock:{items:"stick"},foo:1b,components:{rarity:"rare",nope:1},Items:['
+                '{Slot:3b,id:"stone",count:5},{Slot:300,id:"dirt"},{Slot:1b,id:"diamond_sword",components:{damage:7}},{Slot:2b,id:"nope"}]}')
+        assert run_command(a, line)["said"] == [tr("commands.setblock.success", *chest)]
+        loot = {"Items": '[{components: {"minecraft:damage": 7}, count: 1, Slot: 1b, id: "minecraft:diamond_sword"}, '
+                         '{count: 5, Slot: 3b, id: "minecraft:stone"}]',
+                "CustomName": '"Loot"', "components": '{"minecraft:rarity": "rare"}'}
+        assert held(chest) == loot, held(chest)
+        assert data(chest, "lock") == '{items: "minecraft:stick"}'
+        assert run_command(a, "data get block 8 -60 12 foo")["said"] == [failure(tr("arguments.nbtpath.nothing_found", "foo"))]
+        # The same again changes nothing, and that is a failure; a tag that is not loaded is said to be, before a block is touched.
+        assert run_command(a, line)["said"] == [failure(tr("commands.setblock.failed"))]
+        got = run_command(a, 'setblock 8 -60 14 chest{LootTable:"chests/simple_dungeon"}')
+        assert got["said"] == [failure("Loot tables of containers are not supported by this server yet")] and not got["blocks"], got
+        got = run_command(a, 'setblock 8 -60 14 chest{Items:[{id:"apple",components:{food:{nutrition:1,saturation:1}}}]}')
+        assert got["said"] == [failure("Items with components this server does not read are not supported by this server yet")], got
+
+        # ---- its lock, and its name. An empty hand does not open it: a line over the hotbar, a rattle.
+        mark = len(a.chat)
+        click(a, chest, 1, seq=1)
+        collect(a)
+        assert a.window is None and a.chat[mark:] == [("system", tr("container.isLocked", "Loot"), True)], a.chat[mark:]
+        assert a.sounds[-1] == (mc.SOUND["kBlockChestLocked"], 4, (8.5, -59.5, 12.5), 1.0, 1.0), a.sounds[-1]
+        a.mark_chat_read()
+        give(a, 36, I["kStick"], 1)
+        click(a, chest, 1, seq=2)
+        collect(a)
+        w = a.window
+        assert w and (w["type"], w["title"]) == ("kGeneric9x3", "Loot"), w
+        assert w["slots"][1] == (I["kDiamondSword"], 1, {"kDamage": 7}) and w["slots"][3] == plain("kStone", 5)
+        assert [i for i, st in enumerate(w["slots"][:27]) if st] == [1, 3]
+        close_window(a)
+        collect(a)
+
+        # ---- /fill with a tag, and a filter that asks for one (a block entity that saves as at least that).
+        assert run_command(a, 'fill 10 -60 12 12 -60 12 barrel{Items:[{Slot:0b,id:"apple"}]}')["said"] == [tr("commands.fill.success", 3)]
+        assert data((11, -60, 12), "Items") == '[{count: 1, Slot: 0b, id: "minecraft:apple"}]'
+        # (A barrel set where one stands is the block it was, and holds what it held: nothing changed.)
+        assert run_command(a, "setblock 11 -60 12 barrel")["said"] == [failure(tr("commands.setblock.failed"))]
+        run_command(a, "setblock 11 -60 12 air")
+        run_command(a, "setblock 11 -60 12 barrel")
+        got = run_command(a, 'fill 10 -60 12 12 -60 12 stone replace barrel{Items:[{id:"minecraft:apple"}]}')
+        assert got["said"] == [tr("commands.fill.success", 2)] and sorted(got["blocks"]) == [(10, -60, 12), (12, -60, 12)], got
+
+        # ---- a chest out of an item that carries one: what it holds, its name, and what else its
+        # stack says, which becomes the block entity's components.
+        template = varint(I["kStone"]) + varint(5) + varint(0) + varint(0)
+        a.send("set_creative_mode_slot", struct.pack(">h", 36) + mc.item_stack(I["kChest"], 1, {
+            "kContainer": varint(3) + b"\x00\x00\x01" + template, "kCustomName": mc.nbt("Box"), "kRarity": varint(2)}))
+        settle(a)
+        click(a, (8, -61, 10), 1, seq=3)
+        collect(a)
+        box = {"Items": '[{count: 5, Slot: 2b, id: "minecraft:stone"}]', "CustomName": '"Box"',
+               "components": '{"minecraft:rarity": "rare"}'}
+        assert held(placed) == box, held(placed)
+        # ...and one whose item names a loot table is not placed.
+        a.send("set_creative_mode_slot", struct.pack(">h", 36) + mc.item_stack(I["kChest"], 1, {
+            "kContainerLoot": mc.nbt({"loot_table": "minecraft:chests/simple_dungeon"})}))
+        settle(a)
+        click(a, (10, -61, 10), 1, seq=4)
+        collect(a)
+        assert run_command(a, "data get block 10 -60 10")["said"] == [failure(tr("commands.data.block.invalid"))]
+
+        # ---- and all of it is there when the server is.
+        assert srv.stop() == 0, srv.read_log()
+        os.unlink(srv.log.name)
+        srv = Server(EXE, world=world)
+        a = srv.client()
+        join(a, "Alice", view=3)
+        a.send("player_loaded")
+        settle(a, ticks=6)
+        make_op(srv, a, "Alice")
+        assert held(chest) == loot and data(chest, "lock") == '{items: "minecraft:stick"}', held(chest)
+        assert held(placed) == box, held(placed)
+        assert srv.stop() == 0, srv.read_log()
+        srv = None
+    finally:
+        if srv:
+            srv.stop()
+        shutil.rmtree(world, ignore_errors=True)
+
+
+@test()
 def the_world_is_kept():
     """What was built is there when the server starts again: every chunk a client is sent is the
     same bytes as before - blocks, heightmaps, light, block entities - a chest holds what it
@@ -5456,7 +5564,8 @@ def anvil_world(path: str, extra: dict | None = None) -> dict:
         {"id": "minecraft:chest", "x": 1, "y": -60, "z": 1, "keepPacked": mc.Byte(0), "components": {},
          "Items": [{"Slot": mc.Byte(0), "id": "minecraft:stone", "count": 20}, {"Slot": mc.Byte(26), "id": "minecraft:diamond"}]},
         {"id": "minecraft:chest", "x": 3, "y": -60, "z": 1, "CustomName": "Treasure",
-         "Items": [{"Slot": mc.Byte(0), "id": "minecraft:gold_ingot", "count": 9}]},
+         "Items": [{"Slot": mc.Byte(0), "id": "minecraft:gold_ingot", "count": 9},
+                   {"Slot": mc.Byte(1), "id": "minecraft:diamond_sword", "components": {"minecraft:damage": 7}}]},
         {"id": "minecraft:furnace", "x": 5, "y": -60, "z": 1, "Items": [{"Slot": mc.Byte(0), "id": "minecraft:iron_ore", "count": 3}],
          "cooking_time_spent": mc.Short(0), "cooking_total_time": mc.Short(200), "lit_time_remaining": mc.Short(0),
          "lit_total_time": mc.Short(0), "RecipesUsed": {"minecraft:iron_ingot_from_smelting_iron_ore": 2}},
@@ -5568,10 +5677,17 @@ def a_vanilla_world_is_imported():
         settle(c)
         assert w["slots"][0] == plain("kGoldOre", 1) and w["data"][3] == 100, (w["slots"][:3], w["data"])
         close_window(c)
-        # The chest with a name is kept as it is and stays shut: nothing opens, nothing is placed against it.
+        # The chest with a name, and a sword in it that is worn: a worker could not make that
+        # ours (the item codecs are the tick thread's), so it came as its tag - and became a
+        # chest when its chunk was read.
         give(c, 36, I["kStone"], 5)
         click(c, (3, -60, 1), 1, seq=5)
-        assert collect(c) == {(3, -60, 1): mc.BLOCK["kChest"], (3, -59, 1): 0} and c.window is None
+        collect(c)
+        w = c.window
+        assert w and (w["type"], w["title"]) == ("kGeneric9x3", "Treasure"), w
+        assert w["slots"][0] == plain("kGoldIngot", 9) and w["slots"][1] == (I["kDiamondSword"], 1, {"kDamage": 7}), w["slots"][:3]
+        close_window(c)
+        collect(c)
         first = frames(c)
         assert srv.stop() == 0, srv.read_log()
         os.unlink(srv.log.name)

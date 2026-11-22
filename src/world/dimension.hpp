@@ -176,6 +176,9 @@ class Dimension {
     // broadcast. False when nothing changed (same state, outside the world, chunk not ticking).
     // What the change means to the blocks around it is the game's (Game::set_block).
     bool set_block(i32 x, i32 y, i32 z, BlockState s);
+    // ChunkHolder.blockChanged: the block is told to its viewers with this tick's changes,
+    // though it is the block it was (what its block entity holds is not).
+    void block_changed(i32 x, i32 y, i32 z);
 
     // ---- scheduled ticks (world/ticks.hpp)
     // The game time, as the level knows it (Level.getGameTime): told once a tick, before

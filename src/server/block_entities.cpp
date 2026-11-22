@@ -27,9 +27,16 @@
 //     player's inventory is not kept either;
 //   * ContainerOpenersCounter counts by a box around the chest; here a player counts while its
 //     menu is open on the chest - and that closes when it walks away (stillValid).
+#include <algorithm>
+#include <cstring>
+
+#include "item/codec.hpp"
 #include "nbt/nbt.hpp"
+#include "nbt/ops.hpp"
+#include "server/command.hpp"
 #include "server/game.hpp"
 #include "text/component.hpp"
+#include "text/text.hpp"
 
 #include PROTO_GEN_ITEMS_HPP
 #include PROTO_GEN_STATIC_IDS_HPP
@@ -217,6 +224,10 @@ BlockState Game::chest_for_placement(u32 pi, const world::BlockInfo& block, Bloc
 
 // ---------------------------------------------------------------------------- clicking a block
 
+namespace {
+std::span<const u8> nameless(nbt::Tag entry, base::ByteBuf& scratch);
+}  // namespace
+
 // BlockState.useItemOn, then (main hand only) useWithoutItem, for the blocks that override one:
 // true when the click was the block's (InteractionResult.SUCCESS).
 bool Game::use_block(u32 pi, BlockPos pos, BlockState state, const ItemStack& held, u32 hand) {
@@ -237,15 +248,30 @@ bool Game::use_block(u32 pi, BlockPos pos, BlockState state, const ItemStack& he
             if (hand != cb::SwingAnimation::kMainHand) return false;
             const world::BlockEntityRef* be = world_.block_entity(pos.x, pos.y, pos.z);
             if (!be) return true;
+            if (be->data & kOpaqueBlockEntity) return true;
             const u32 data = be->data;
             // FurnaceMenu, SmokerMenu, BlastFurnaceMenu: one menu, three types and names of it.
-            switch (furnaces_[data].type) {
-                case item::Cooker::kSmoking: open_menu(pi, Menu::Kind::kFurnace, gen::menu::kSmoker, title_smoker_, 0); break;
-                case item::Cooker::kBlasting:
-                    open_menu(pi, Menu::Kind::kFurnace, gen::menu::kBlastFurnace, title_blast_furnace_, 0);
-                    break;
-                default: open_menu(pi, Menu::Kind::kFurnace, gen::menu::kFurnace, title_furnace_, 0); break;
+            const item::Cooker cooker = furnaces_[data].type;
+            const u32 menu = cooker == item::Cooker::kSmoking    ? gen::menu::kSmoker
+                             : cooker == item::Cooker::kBlasting ? gen::menu::kBlastFurnace
+                                                                 : gen::menu::kFurnace;
+            const std::string_view key = cooker == item::Cooker::kSmoking    ? "container.smoker"
+                                         : cooker == item::Cooker::kBlasting ? "container.blast_furnace"
+                                                                             : "container.furnace";
+            const std::span<const u8> plain = cooker == item::Cooker::kSmoking    ? std::span<const u8>(title_smoker_)
+                                              : cooker == item::Cooker::kBlasting ? std::span<const u8>(title_blast_furnace_)
+                                                                                  : std::span<const u8>(title_furnace_);
+            nbt::Doc kept;
+            base::ByteBuf named;
+            const nbt::Tag name = kept_entry(furnaces_[data].keep, "CustomName", kept);
+            const std::span<const u8> title = name ? nameless(name, named) : plain;
+            if (!unlocks(furnaces_[data].keep,
+                         p.menu.inv.selected_item())) {  // BaseContainerBlockEntity.createMenu: canOpen, or the rattle
+                chest_locked(pi, pos.x + 0.5, pos.y + 0.5, pos.z + 0.5,
+                             name ? text::Text::encoded(title) : text::Text::translatable(key));
+                return true;
             }
+            open_menu(pi, Menu::Kind::kFurnace, menu, title, 0);
             p.open_pos = pos;
             p.open_data[0] = data;
             p.menu.send_all(out(pi), p.threshold, containers(p));
@@ -255,10 +281,20 @@ bool Game::use_block(u32 pi, BlockPos pos, BlockState state, const ItemStack& he
             if (hand != cb::SwingAnimation::kMainHand) return false;
             const world::BlockEntityRef* be = world_.block_entity(pos.x, pos.y, pos.z);
             if (!be) return true;
+            if (be->data & kOpaqueBlockEntity) return true;
             const u32 barrel = be->data;
+            nbt::Doc kept;
+            base::ByteBuf named;
+            const nbt::Tag name = kept_entry(chests_[barrel].keep, "CustomName", kept);
+            const std::span<const u8> title = name ? nameless(name, named) : std::span<const u8>(title_barrel_);
+            if (!unlocks(chests_[barrel].keep, p.menu.inv.selected_item())) {
+                chest_locked(pi, pos.x + 0.5, pos.y + 0.5, pos.z + 0.5,
+                             name ? text::Text::encoded(title) : text::Text::translatable("container.barrel"));
+                return true;
+            }
             if (p.menu.kind() != Menu::Kind::kInventory) close_menu(pi, true);
             chest_opened(barrel);  // Container.startOpen comes before the screen opens
-            open_menu(pi, Menu::Kind::kChest, gen::menu::kGeneric9x3, title_barrel_, 3);
+            open_menu(pi, Menu::Kind::kChest, gen::menu::kGeneric9x3, title, 3);
             p.open_pos = pos;
             p.open_data[0] = barrel;
             p.menu.send_all(out(pi), p.threshold, containers(p));
@@ -289,12 +325,32 @@ bool Game::use_block(u32 pi, BlockPos pos, BlockState state, const ItemStack& he
                     }
                 }
             }
+            // The name: its own - of a pair the first half's, else the second's (ChestBlock's
+            // MenuProvider.getDisplayName) - or what a chest is called.
+            nbt::Doc kept;
+            base::ByteBuf named;
+            nbt::Tag name = kept_entry(chests_[first].keep, "CustomName", kept);
+            if (!name && second != kNone) name = kept_entry(chests_[second].keep, "CustomName", kept);
+            const std::span<const u8> title = name              ? nameless(name, named)
+                                              : second == kNone ? std::span<const u8>(title_chest_)
+                                                                : std::span<const u8>(title_double_chest_);
+            // createMenu: both halves have to open (canOpen), or it rattles - from between them.
+            if (!unlocks(chests_[first].keep, p.menu.inv.selected_item()) ||
+                (second != kNone && !unlocks(chests_[second].keep, p.menu.inv.selected_item()))) {
+                const Chest& a = chests_[first];
+                const double dx = second == kNone ? 0.0 : (chests_[second].x - a.x) / 2.0,
+                             dz = second == kNone ? 0.0 : (chests_[second].z - a.z) / 2.0;
+                chest_locked(pi, a.x + 0.5 + dx, a.y + 0.5, a.z + 0.5 + dz,
+                             name ? text::Text::encoded(title)
+                                  : text::Text::translatable(second == kNone ? "container.chest" : "container.chestDouble"));
+                return true;
+            }
             // new ChestMenu: Container.startOpen comes before the screen opens.
             if (p.menu.kind() != Menu::Kind::kInventory) close_menu(pi, true);
             chest_opened(first);
             if (second != kNone) chest_opened(second);
-            open_menu(pi, Menu::Kind::kChest, second == kNone ? gen::menu::kGeneric9x3 : gen::menu::kGeneric9x6,
-                      second == kNone ? title_chest_ : title_double_chest_, second == kNone ? 3 : 6);
+            open_menu(pi, Menu::Kind::kChest, second == kNone ? gen::menu::kGeneric9x3 : gen::menu::kGeneric9x6, title,
+                      second == kNone ? 3 : 6);
             p.open_pos = pos;
             p.open_data[0] = first;
             p.open_data[1] = second;
@@ -306,6 +362,198 @@ bool Game::use_block(u32 pi, BlockPos pos, BlockState state, const ItemStack& he
         case block_kind::kFence: return false;
         default: return false;
     }
+}
+
+// ---------------------------------------------------------------------------- names and locks
+
+namespace {
+
+// A text component that is kept as an entry of a tag, as a tag of its own (type, payload).
+std::span<const u8> nameless(nbt::Tag entry, base::ByteBuf& scratch) {
+    scratch.clear();
+    *scratch.reserve(1) = entry.type;
+    ++scratch.len;
+    scratch.append(entry.bytes().data(), entry.bytes().size());
+    return {scratch.data, scratch.len};
+}
+
+// ItemPredicate.test, of a lock: is `held` one of `items`, so many, and with these components exactly?
+bool predicate_matches(nbt::Tag lock, const ItemStack& held) {
+    if (const nbt::Tag items = lock.get("items")) {  // a HolderSet: "#tag", a name, or a list of names
+        if (held.empty()) return false;
+        const std::string_view own = world::item_name(held.item());
+        bool found = false;
+        if (items.type == nbt::kString && items.str().starts_with('#')) {
+            std::vector<u16> members;
+            cmd::tag_members("minecraft:item", items.str().substr(1), members);
+            found = std::find(members.begin(), members.end(), held.item()) != members.end();
+        } else if (items.type == nbt::kString) {
+            found = items.str() == own;
+        } else {
+            for (const nbt::Tag e : items.elements()) found |= e.str() == own;
+        }
+        if (!found) return false;
+    }
+    if (const nbt::Tag count = lock.get("count")) {  // MinMaxBounds.Ints: one number, or {min, max}
+        const i32 have = static_cast<i32>(held.count());
+        if (count.type == nbt::kCompound) {
+            const nbt::Tag min = count.get("min"), max = count.get("max");
+            if ((min && have < min.as_int()) || (max && have > max.as_int())) return false;
+        } else if (have != count.as_int()) {
+            return false;
+        }
+    }
+    if (const nbt::Tag components = lock.get("components")) {  // DataComponentExactPredicate: equal, each of them
+        base::ByteBuf expected;
+        for (const nbt::Tag e : components.entries()) {
+            const std::string key = nbt::to_utf8(e.name());
+            const u32 type = item::find_component(key);
+            expected.clear();
+            if (type == item::kNoComponent || item::value_from_nbt(type, e, expected) != item::Verdict::kOk) return false;
+            const item::Patches::Found has = held.empty() ? item::Patches::Found{} : item::effective(held, type);
+            if (has.state != item::Patches::State::kSet || has.value.size() != expected.len ||
+                std::memcmp(has.value.data(), expected.data, expected.len) != 0)
+                return false;
+        }
+    }
+    return true;
+}
+
+}  // namespace
+
+bool Game::unlocks(u32 keep, const ItemStack& held) const {
+    nbt::Doc doc;
+    const nbt::Tag lock = kept_entry(keep, "lock", doc);
+    return !lock || predicate_matches(lock, held);
+}
+
+void Game::chest_locked(u32 pi, double x, double y, double z, const text::Text& name) {
+    system_message(pi, text::Text::translatable("container.isLocked").arg(name), true);
+    play_sound(gen::sound::kBlockChestLocked, cb::Sound::kSourceBlocks, x, y, z, 1.0f, 1.0f);
+}
+
+// ---------------------------------------------------------------------------- a block item's components
+
+// BlockItem.updateBlockStateFromTag, updateCustomBlockEntityTag and updateBlockEntityComponents
+// can all be done here for this stack - or the block is not placed (a chest whose item names a
+// loot table would have to roll it when it is opened).
+bool Game::can_apply_item_to_block(u32 block, const ItemStack& stack) {
+    if (!stack.patch()) return true;
+    const u32 kind = world::block_info(block).kind;
+    if (chest_kind(kind) && item::effective(stack, item::component::kContainerLoot).state == item::Patches::State::kSet)
+        return false;
+    const item::Patches::Found data = item::effective(stack, item::component::kBlockEntityData);
+    if (data.state != item::Patches::State::kSet || (!chest_kind(kind) && kind != block_kind::kFurnace)) return true;
+    proto::Reader r(data.value);
+    if (r.varint() != world::block_info(block).block_entity) return true;  // of another type: not looked at
+    nbt::Doc doc;
+    std::string why;
+    return doc.parse({r.p, r.remaining()}, nbt::Form::kNameless, nbt::kTrusted) == nbt::Error::kNone &&
+           can_load_block_entity(block, doc.root(), why);
+}
+
+void Game::apply_item_to_block(BlockPos pos, const ItemStack& stack) {
+    namespace comp = item::component;
+    using State = item::Patches::State;
+    // ---- updateBlockStateFromTag: BlockItemStateProperties.apply - the properties the block has, set to the values they have
+    if (const item::Patches::Found properties = item::effective(stack, comp::kBlockState); properties.state == State::kSet) {
+        const BlockState placed = world_.block(pos.x, pos.y, pos.z);
+        const u32 block = world::block_of(placed), first = world::block_info(block).first_state;
+        BlockState state = placed;
+        proto::Reader r(properties.value);
+        for (u32 n = r.varint(); n > 0 && r.ok; --n) {
+            const std::string_view name = r.str(32767), value = r.str(32767);
+            for (u32 i = 0, count = world::block_property_count(block); i < count; ++i) {
+                const world::BlockProperty p = world::block_property(block, i);
+                if (p.name != name) continue;
+                const auto it = std::find(p.values.begin(), p.values.end(), value);
+                if (it == p.values.end()) break;
+                const i32 now = static_cast<i32>((state - first) / p.stride % p.values.size());
+                state =
+                    static_cast<BlockState>(state + (static_cast<i32>(it - p.values.begin()) - now) * static_cast<i32>(p.stride));
+                break;
+            }
+        }
+        if (state != placed) set_block(pos, state, kUpdateClients);
+    }
+    const world::BlockEntityRef* ref = world_.block_entity(pos.x, pos.y, pos.z);
+    if (!ref || (ref->data & kOpaqueBlockEntity)) return;
+    const u32 kind = world::block_info_of(world_.block(pos.x, pos.y, pos.z)).kind;
+    const bool chest = chest_kind(kind);
+    if (!chest && kind != block_kind::kFurnace) return;
+    bool changed = false;
+    std::string why;
+    // ---- updateCustomBlockEntityTag: TypedEntityData.loadInto - what it saves, with the item's tag put over it
+    if (const item::Patches::Found data = item::effective(stack, comp::kBlockEntityData); data.state == State::kSet) {
+        proto::Reader r(data.value);
+        nbt::Doc over, now;
+        base::ByteBuf saved, merged;
+        if (r.varint() == ref->type &&
+            over.parse({r.p, r.remaining()}, nbt::Form::kNameless, nbt::kTrusted) == nbt::Error::kNone &&
+            save_block_entity(pos.x, pos.y, pos.z, saved) == Saved::kOk &&
+            now.parse({saved.data, saved.len}, nbt::Form::kNameless, nbt::kTrusted) == nbt::Error::kNone) {
+            *merged.reserve(1) = nbt::kCompound;
+            ++merged.len;
+            nbt::merge(now.root(), over.root(), merged);
+            nbt::Doc all;
+            if (all.parse({merged.data, merged.len}, nbt::Form::kNameless, nbt::kTrusted) == nbt::Error::kNone)
+                load_block_entity(pos, all.root(), false, changed, why);
+        }
+    }
+    // ---- updateBlockEntityComponents: BlockEntity.applyComponents. What the block entity takes
+    // for itself (applyImplicitComponents): its name, its lock, what it holds...
+    ref = world_.block_entity(pos.x, pos.y, pos.z);
+    ItemStack* const items = chest ? chests_[ref->data].items : furnaces_[ref->data].items;
+    const u32 slots = chest ? Chest::kSlots : Furnace::kSlots;
+    u32& keep = chest ? chests_[ref->data].keep : furnaces_[ref->data].keep;
+    for (u32 i = 0; i < slots; ++i) items[i] = {};  // ItemContainerContents.copyInto: every slot, from the item or empty
+    if (const item::Patches::Found held = item::effective(stack, comp::kContainer); held.state == State::kSet) {
+        std::vector<item::Contained> stacks;
+        item::contained(comp::kContainer, held.value, stacks);
+        for (const item::Contained& c : stacks)
+            if (c.slot < slots) items[c.slot] = item::stack_of(c);
+    }
+    // ...and the rest of the stack's patch is the block entity's components: what was set, less
+    // what it took (and block_entity_data, block_state).
+    base::ByteBuf rest, value;
+    nbt::Writer w(rest);
+    w.root(nbt::kCompound);
+    u32 entries = 0;
+    nbt::Doc kept;
+    if (const nbt::Tag used = kept_entry(keep, "RecipesUsed", kept)) {
+        w.put_raw("RecipesUsed", used.type, used.bytes());
+        ++entries;
+    }
+    if (const item::Patches::Found name = item::effective(stack, comp::kCustomName); name.state == State::kSet) {
+        w.put_raw("CustomName", static_cast<nbt::Type>(name.value[0]), name.value.subspan(1));
+        ++entries;
+    }
+    if (const item::Patches::Found lock = item::effective(stack, comp::kLock); lock.state == State::kSet) {
+        w.put_raw("lock", static_cast<nbt::Type>(lock.value[0]), lock.value.subspan(1));
+        ++entries;
+    }
+    if (stack.patch()) {
+        base::ByteBuf map;
+        nbt::Writer mw(map);
+        u32 n = 0;
+        for (const item::Patches::Entry& e : item::patches().entries(stack.patch())) {
+            const bool taken = e.type == comp::kBlockEntityData || e.type == comp::kBlockState || e.type == comp::kCustomName ||
+                               e.type == comp::kLock || e.type == comp::kContainer || (chest && e.type == comp::kContainerLoot);
+            if (e.removed || taken || item::transient(e.type)) continue;
+            item::value_to_nbt(e.type, item::patches().wire(stack.patch()).subspan(e.off, e.len), mw,
+                               item::component_name(e.type));
+            ++n;
+        }
+        if (n) {
+            mw.end_compound();
+            w.put_raw("components", nbt::kCompound, {map.data, map.len});
+            ++entries;
+        }
+    }
+    w.end_compound();
+    drop_kept(keep);
+    if (entries) keep = keep_tag({rest.data, rest.len});
+    world_.mark_dirty(pos.x, pos.z);
 }
 
 Containers Game::containers(const Player& p) {

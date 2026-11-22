@@ -570,6 +570,32 @@ adds a hook to `ChestBlock` stops the generator until someone has read it.
   index - and furnaces, the one kind that ticks, are walked in a row: one that neither burns
   nor could start costs the test at the top of the loop.
 - **Who is looking** belongs to the player: the menu (below).
+- **What else its tag says** - a `CustomName`, a `lock`, its `components`, the recipes a furnace
+  has used - is kept beside it as a tag (`Chest::keep`, an entry of `Game::opaque_`), each entry
+  as its vanilla codec writes it, and read where it is acted on: the name when a menu opens
+  (its title; of a double chest the first half's, else the second's), the lock just before
+  (`Game::unlocks`: an item predicate against what is in the hand - which items, how many, with
+  which components exactly - or "<name> is locked!" over the hotbar and a rattle). Few chests
+  have any of it; the ones that do pay a parse when they are opened.
+
+A block entity comes out of a tag by `Game::load_block_entity`, a port of
+`BlockEntity.loadWithComponents` for the three kinds there are: what is not in the tag is its
+default, what is there and wrong is left out as vanilla's `ValueInput` leaves it out (a slot
+that is none, an item that is none, a name that is no text). It is the one way in:
+
+- `/setblock chest{...}` and `/fill` (`BlockInput.place`: the block, then the tag into the
+  block entity that is there now; "nothing changed" is a failure only if the tag changed
+  nothing either). A filter with a tag (`replace chest{Items:[...]}`) asks for a block entity
+  that saves as at least that (`NbtUtils.compareNbt`);
+- a block item that carries data (`BlockItem.place`, `Game::apply_item_to_block`): its
+  `block_state`, its `block_entity_data` put over what the new block entity saves, then its
+  components - the chest takes its name, its lock and its `container` for itself, and what is
+  left of the stack's patch becomes the block entity's own `components`;
+- a block entity of an imported world, when its chunk is read (below).
+
+What a tag asks for that this server cannot do - a loot table to roll when the chest is first
+opened, a stack or a text it does not read - is refused before a block is touched, in words of
+our own; an imported one stays the tag it is.
 
 `Game::set_block` is the one door every block change of the game goes through, and the port of
 what `LevelChunk.setBlockState` and `Level.setBlock` do around a change: the old block's block
@@ -1600,10 +1626,13 @@ block state is saved as its block's name alone when it is the default one and as
 - **A chunk vanilla had not finished generating** (any `Status` but `minecraft:full`) holds
   nothing anyone made, and is left to the generator here.
 - **Block entities**: a chest (of wood or copper), a barrel, a furnace, a smoker or a blast
-  furnace whose tag says nothing this server would not act on -
-  stacks without components, no name, no lock, no loot table - becomes one of ours. Every other
-  one is kept as its tag: a client is told that it is there, and it does nothing - a chest with
-  an enchanted sword in it stays shut rather than open as if it were something else.
+  furnace becomes one of ours - at once, on the worker, if its tag is plain (stacks without
+  components, no name, no lock); otherwise it travels as its tag and is loaded when its chunk
+  is first read, on the tick thread, where the item codecs may be used
+  (`Game::adopt_kept_block_entity`): its name, its lock, its components and the components of
+  what it holds come with it. One that names a loot table, or holds a stack this server does
+  not read, stays its tag - as every other kind of block entity does: a client is told that
+  it is there, and it does nothing, rather than open as if it were something else.
 - **Entities**, and **the rest of a chunk's tag** (structures, scheduled ticks, `InhabitedTime`...):
   kept as tags, with the chunk. No entity of an imported world is in the game yet.
 - **The generator**: a flat world goes on as it was made (its layers and biome are read from

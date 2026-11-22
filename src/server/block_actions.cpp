@@ -242,10 +242,10 @@ bool Game::place_block(u32 pi, const sb::UseItemOn& u, const ItemStack& held) {
     if (item.block == gen::kNoBlock) return false;  // not a block item; other items' useOn() is not implemented
     const world::BlockInfo& block = world::block_info(item.block);
     const u32 kind = block.flags & block_flag::kPlaceMask;
-    // A stack with components may ask for more than the block's default state (block_state,
-    // block_entity_data): BlockItem.updateBlockStateFromTag and friends are not implemented.
+    // (A stack with components may ask for something of the block entity that is not done here:
+    // can_apply_item_to_block.)
     if (kind == block_flag::kPlaceNone || !(item.flags & (item_flag::kPlainBlockItem | item_flag::kStandingAndWall)) ||
-        held.has_patch()) {
+        !can_apply_item_to_block(item.block, held)) {
         LOG_DEBUG("%s: placing %.*s is not implemented yet", players_[pi].name.c_str(),
                   static_cast<int>(world::block_name(item.block).size()), world::block_name(item.block).data());
         return false;
@@ -276,7 +276,10 @@ bool Game::place_block(u32 pi, const sb::UseItemOn& u, const ItemStack& held) {
     if (state == world::Section::kNoState) return false;  // getPlacementState: null
     // BlockItem.canPlace: the block can be there (canSurvive), and nobody stands there.
     if (!can_survive(state, at) || obstructed(state, at)) return false;
-    return set_block(at, state);  // false above/below the build height
+    if (!set_block(at, state)) return false;  // above or below the build height
+    // What the stack carries for the block and its block entity: its components, a tag.
+    if (held.has_patch() && world::block_of(world_.block(at.x, at.y, at.z)) == item.block) apply_item_to_block(at, held);
+    return true;
 }
 
 // Direction.orderedByNearest(player): the six directions, the one it looks along most first.

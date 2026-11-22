@@ -11,9 +11,11 @@
 // The rules are vanilla's (26.3): ChestBlockEntity, BarrelBlockEntity, AbstractFurnaceBlockEntity
 // (serverTick, setItem, canBurn, burn, consumeFuel, getTotalCookTime, getSpeedMultiplier).
 //
-// Not here: custom names and locks (a chest named on an anvil; BaseContainerBlockEntity.name /
-// lockKey), loot tables (RandomizableContainerBlockEntity), the experience a furnace has
-// stored up (recipesUsed) - it gives none when emptied, and experience orbs do not exist yet.
+// Not here: its custom name, its lock and its components (BaseContainerBlockEntity.name /
+// lockKey, BlockEntity.components) and the recipes a furnace has used - those are kept beside it
+// as the tags they are (`keep`; server/saved_tags.cpp) and read where they are acted on. Not
+// anywhere: loot tables (RandomizableContainerBlockEntity), the experience a furnace has stored
+// up - it gives none when emptied, and experience orbs do not exist yet.
 #pragma once
 
 #include "item/recipes.hpp"
@@ -30,8 +32,8 @@ struct Chest {
     i32 x = 0, y = 0, z = 0;
     u16 open = 0;        // ContainerOpenersCounter.openCount: players that have it open
     bool alive = false;  // false: a free entry of the store
-    // What its saved tag held that nothing here reads and nothing here needs to act as vanilla
-    // does (an imported block entity's `components`...): an entry of Game::opaque_, ~0 for none.
+    // What else its tag says - CustomName, lock, components - as a tag: an entry of
+    // Game::opaque_, ~0 for none.
     u32 keep = ~0u;
 };
 

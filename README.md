@@ -168,7 +168,8 @@ cost per entity.*
 - [x] Coordinates, entity selectors, block states and tags, items
 - [x] Tags as text (SNBT) with vanilla's errors, NBT paths, `nbt=` in selectors
 - [x] Item components in commands: `give @s diamond_sword[damage=3,!lore]`
-- [ ] Tags into the world: block entity data, `/summon`'s tag; `data merge` / `modify` / `remove`
+- [x] A block entity's tag in commands: `setblock ~ ~ ~ chest{Items:[...],CustomName:"Loot"}`; named and locked chests
+- [ ] `/summon`'s tag; `data merge` / `modify` / `remove`
 - [x] Suggestions a client asks the server for (time markers, timelines)
 - [ ] `execute`, `gamemode`, `weather`, `gamerule`, `effect`, `scoreboard` and the rest
 
