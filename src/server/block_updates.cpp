@@ -124,16 +124,22 @@ bool Game::set_block(BlockPos pos, BlockState state, u32 flags, i32 limit) {
         } else if (gone_kind == block_kind::kFurnace) {
             furnaces_[gone].alive = false;
             if (spill) drop_contents(pos, furnaces_[gone].items, Furnace::kSlots);
+        } else if (sign_kind(gone_kind)) {  // nothing to spill, nobody to tell: it is gone at once
+            free_block_entity(gone_kind, gone);
+            gone_kind = block_kind::kPlain;
         }
     }
     // (BlockState.affectNeighborsAfterRemoval comes here. Of the ported classes the containers
     // have one, and it tells comparators.)
     if (!(flags & kUpdateSkipOnPlace)) on_place(state, pos, old);
     // EntityBlock.newBlockEntity - if the block is still the one that was set, and has none yet.
-    if (old_block != new_block && (chest_kind(now.kind) || now.kind == block_kind::kFurnace) &&
+    if (old_block != new_block && (chest_kind(now.kind) || now.kind == block_kind::kFurnace || sign_kind(now.kind)) &&
         world::block_of(world_.block(pos.x, pos.y, pos.z)) == new_block && !(kept && world_.block_entity(pos.x, pos.y, pos.z))) {
-        const u32 data = chest_kind(now.kind) ? new_chest(pos) : new_furnace(pos, cooker_of(now.block_entity));
+        const u32 data = chest_kind(now.kind)  ? new_chest(pos)
+                         : sign_kind(now.kind) ? new_sign(pos)
+                                               : new_furnace(pos, cooker_of(now.block_entity));
         world_.add_block_entity(pos.x, pos.y, pos.z, now.block_entity, data);
+        if (sign_kind(now.kind)) show_sign(data);  // (what a client is shown of it: an empty sign's text)
     }
     // Back in Level.setBlock: the rest happens only if the block is what was asked for - onPlace
     // may have made it something else, with a setBlock of its own (a TNT that went off).
@@ -341,6 +347,12 @@ BlockState Game::update_shape(BlockState state, BlockPos pos, u32 dir, BlockPos 
             return dir == world::kDown && !can_survive(state, pos) ? world::kAir : state;
         case block_kind::kWallTorch:
             return world::opposite(dir) == wall_torch_facing(state, info) && !can_survive(state, pos) ? world::kAir : state;
+        // A sign: gone with what it stands on, hangs against or hangs from. (One that hangs
+        // between walls stays whatever goes: WallHangingSignBlock has no canSurvive of its own.)
+        case block_kind::kSign: return dir == world::kDown && !can_survive(state, pos) ? world::kAir : state;
+        case block_kind::kWallSign:
+            return world::opposite(dir) == sign_facing(state) && !can_survive(state, pos) ? world::kAir : state;
+        case block_kind::kHangingSign: return dir == world::kUp && !can_survive(state, pos) ? world::kAir : state;
         case block_kind::kAmethystCluster:  // (waterlogged: a tick for the water - there are no fluid ticks)
             return dir == world::opposite(cluster_facing(state, info)) && !can_survive(state, pos) ? world::kAir : state;
         case block_kind::kPlant:
@@ -392,6 +404,12 @@ bool Game::can_survive(BlockState state, BlockPos pos) const {
             const u32 facing = wall_torch_facing(state, info);
             return world::face_sturdy(state_for_client(step(pos, world::opposite(facing))), facing);
         }
+        // StandingSignBlock / WallSignBlock: on, or against, a block that is solid (isSolid).
+        case block_kind::kSign: return world::is_solid(state_for_client({pos.x, pos.y - 1, pos.z}));
+        case block_kind::kWallSign: return world::is_solid(state_for_client(step(pos, world::opposite(sign_facing(state)))));
+        // CeilingHangingSignBlock: under a block whose middle holds something (SupportType.CENTER).
+        case block_kind::kHangingSign:
+            return world::face_sturdy_center(state_for_client({pos.x, pos.y + 1, pos.z}), world::kDown);
         case block_kind::kAmethystCluster: {
             const u32 facing = cluster_facing(state, info);
             return world::face_sturdy(state_for_client(step(pos, world::opposite(facing))), facing);

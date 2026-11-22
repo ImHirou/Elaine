@@ -95,7 +95,7 @@ defaults to what suits a big server.*
 
 *All 1286 blocks, each doing everything it does in vanilla.*
 
-- [x] Breaking and placing; 716 blocks can be placed
+- [x] Breaking and placing; 768 blocks can be placed
 - [x] Neighbour updates, scheduled ticks and random ticks, in vanilla's order
 - [x] Chest, furnace, crafting table, TNT and explosions
 - [x] Barrel, smoker, blast furnace, and the chests of copper that weather

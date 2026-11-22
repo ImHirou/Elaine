@@ -5,7 +5,7 @@
 //
 // Written with the wire's own primitives (big-endian, VarInts) and read with proto::Reader:
 //
-//   block entities   u8 version (2; 1 is the same without kind 3), VarInt count, then per block entity
+//   block entities   u8 version (3; 2 is the same without kind 4, 1 without kind 3), VarInt count, then per block entity
 //                      u8 xz (x << 4 | z in the chunk), i16 y, VarInt block_entity_type, u8 kind
 //                      kind 0 kept:    VarInt n + n bytes - the tag it came with (an import), as
 //                                      nbt::Doc::write left it. Listed for clients, never opened
@@ -16,6 +16,9 @@
 //                      kind 3 furnace: the same with a float after the four numbers: the speed
 //                                      of the fuel that was lit last. Of a furnace, a smoker or
 //                                      a blast furnace: which it is, its block says
+//                      kind 4 sign:    u8 flags (1 waxed, 2 allow_op_features), its front text and its
+//                                      back text (VarInt n + n bytes each: SignText.STREAM_CODEC, n = 0
+//                                      for an empty side), then a kept tag. Of any of the four signs
 //   entities         u8 version (2; 1 is the same without kind 4), then until the end
 //                      u8 kind, VarInt entity type, uuid, 3 doubles position, 3 doubles velocity,
 //                      float yaw, pitch, head yaw, u8 flags (1 on the ground, 2 no gravity),
@@ -112,6 +115,10 @@ void Game::free_block_entity(u32 kind, u32 data) {
         free_kept(furnaces_[data].keep);
         furnaces_[data] = {};
         furnace_free_.push_back(data);
+    } else if (sign_kind(kind)) {
+        free_kept(signs_[data].keep);
+        signs_[data] = {};  // (tick_signs finds it dead, if somebody was writing on it)
+        sign_free_.push_back(data);
     }
 }
 
@@ -147,9 +154,20 @@ void Game::write_block_entities(const world::Chunk& c, base::ByteBuf& out) const
         const BlockPos pos{c.x * 16 + (be.xz >> 4), be.y, c.z * 16 + (be.xz & 15)};
         const u32 kind = world::block_info_of(world_.block(pos.x, pos.y, pos.z)).kind;
         const bool opaque = (be.data & kOpaqueBlockEntity) != 0;
-        put_block_entity(out, be.xz, be.y, be.type, opaque ? kKept : chest_kind(kind) ? kChest : kFurnace);
+        put_block_entity(out, be.xz, be.y, be.type,
+                         opaque             ? kKept
+                         : chest_kind(kind) ? kChest
+                         : sign_kind(kind)  ? kSign
+                                            : kFurnace);
         if (opaque) {
             kept(be.data & ~kOpaqueBlockEntity);
+        } else if (sign_kind(kind)) {
+            const Sign& sign = signs_[be.data];
+            *out.reserve(1) = static_cast<u8>((sign.waxed ? kSignWaxed : 0) | (sign.allow_op ? kSignAllowsOp : 0));
+            ++out.len;
+            put_counted(out, sign.text[0]);
+            put_counted(out, sign.text[1]);
+            kept(sign.keep);
         } else if (chest_kind(kind)) {
             const Chest& chest = chests_[be.data];
             for (const ItemStack& stack : chest.items) item::write_untrusted(out, stack);
@@ -225,6 +243,26 @@ void Game::read_block_entities(world::Chunk& c, std::span<const u8> bytes) {
             to.speed = f.speed;
             to.keep = keep(tag);
             world_.add_block_entity(pos.x, pos.y, pos.z, type, data);
+        } else if (record == kSign) {
+            const u8 flags = r.u8v();
+            const std::span<const u8> front = r.bytes(r.varint()), back = r.bytes(r.varint());
+            const std::span<const u8> tag = r.bytes(r.varint());
+            if (!r.ok || !fits || !sign_kind(kind)) continue;
+            // A text is read by the reader a client's is read by, or the side is empty.
+            base::ByteBuf checked[2];
+            const std::span<const u8> sides[2] = {front, back};
+            const u32 data = new_sign(pos);
+            for (u32 side = 0; side < 2; ++side) {
+                if (sides[side].empty() ||
+                    item::check_value(item::component::kSignTextFront, sides[side], checked[side]) != item::Verdict::kOk)
+                    continue;
+                signs_[data].text[side].assign(checked[side].data, checked[side].data + checked[side].len);
+            }
+            signs_[data].waxed = (flags & kSignWaxed) != 0;
+            signs_[data].allow_op = (flags & kSignAllowsOp) != 0;
+            signs_[data].keep = keep(tag);
+            world_.add_block_entity(pos.x, pos.y, pos.z, type, data);
+            show_sign(data);  // its text, for the chunk's packet
         } else {
             r.ok = false;
         }

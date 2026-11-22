@@ -230,25 +230,25 @@ std::span<const u8> nameless(nbt::Tag entry, base::ByteBuf& scratch);
 
 // BlockState.useItemOn, then (main hand only) useWithoutItem, for the blocks that override one:
 // true when the click was the block's (InteractionResult.SUCCESS).
-bool Game::use_block(u32 pi, BlockPos pos, BlockState state, const ItemStack& held, u32 hand) {
+Game::Used Game::use_block(u32 pi, BlockPos pos, BlockState state, const ItemStack& held, u32 hand) {
     Player& p = players_[pi];
     switch (world::block_info_of(state).kind) {
         case block_kind::kTnt:  // TntBlock.useItemOn: lit by flint and steel or a fire charge, in either hand
-            if (held.item() != gen::item::kFlintAndSteel && held.item() != gen::item::kFireCharge) return false;
+            if (held.item() != gen::item::kFlintAndSteel && held.item() != gen::item::kFireCharge) return Used::kPass;
             prime_tnt(pos, 80, true);
             set_block(pos, world::kAir);
             // hurtAndBreak / consume: neither takes anything from a creative player.
-            return true;
+            return Used::kSuccess;
         case block_kind::kCraftingTable:  // CraftingTableBlock.useWithoutItem
-            if (hand != cb::SwingAnimation::kMainHand) return false;
+            if (hand != cb::SwingAnimation::kMainHand) return Used::kPass;
             open_menu(pi, Menu::Kind::kCrafting, gen::menu::kCrafting, title_crafting_, 0);
             p.open_pos = pos;
-            return true;
+            return Used::kSuccess;
         case block_kind::kFurnace: {  // AbstractFurnaceBlock.useWithoutItem -> openContainer of the three
-            if (hand != cb::SwingAnimation::kMainHand) return false;
+            if (hand != cb::SwingAnimation::kMainHand) return Used::kPass;
             const world::BlockEntityRef* be = world_.block_entity(pos.x, pos.y, pos.z);
-            if (!be) return true;
-            if (be->data & kOpaqueBlockEntity) return true;
+            if (!be) return Used::kSuccess;
+            if (be->data & kOpaqueBlockEntity) return Used::kSuccess;
             const u32 data = be->data;
             // FurnaceMenu, SmokerMenu, BlastFurnaceMenu: one menu, three types and names of it.
             const item::Cooker cooker = furnaces_[data].type;
@@ -269,19 +269,19 @@ bool Game::use_block(u32 pi, BlockPos pos, BlockState state, const ItemStack& he
                          p.menu.inv.selected_item())) {  // BaseContainerBlockEntity.createMenu: canOpen, or the rattle
                 chest_locked(pi, pos.x + 0.5, pos.y + 0.5, pos.z + 0.5,
                              name ? text::Text::encoded(title) : text::Text::translatable(key));
-                return true;
+                return Used::kSuccess;
             }
             open_menu(pi, Menu::Kind::kFurnace, menu, title, 0);
             p.open_pos = pos;
             p.open_data[0] = data;
             p.menu.send_all(out(pi), p.threshold, containers(p));
-            return true;
+            return Used::kSuccess;
         }
         case block_kind::kBarrel: {  // BarrelBlock.useWithoutItem: a ChestMenu of three rows, whatever is on top of it
-            if (hand != cb::SwingAnimation::kMainHand) return false;
+            if (hand != cb::SwingAnimation::kMainHand) return Used::kPass;
             const world::BlockEntityRef* be = world_.block_entity(pos.x, pos.y, pos.z);
-            if (!be) return true;
-            if (be->data & kOpaqueBlockEntity) return true;
+            if (!be) return Used::kSuccess;
+            if (be->data & kOpaqueBlockEntity) return Used::kSuccess;
             const u32 barrel = be->data;
             nbt::Doc kept;
             base::ByteBuf named;
@@ -290,7 +290,7 @@ bool Game::use_block(u32 pi, BlockPos pos, BlockState state, const ItemStack& he
             if (!unlocks(chests_[barrel].keep, p.menu.inv.selected_item())) {
                 chest_locked(pi, pos.x + 0.5, pos.y + 0.5, pos.z + 0.5,
                              name ? text::Text::encoded(title) : text::Text::translatable("container.barrel"));
-                return true;
+                return Used::kSuccess;
             }
             if (p.menu.kind() != Menu::Kind::kInventory) close_menu(pi, true);
             chest_opened(barrel);  // Container.startOpen comes before the screen opens
@@ -298,16 +298,16 @@ bool Game::use_block(u32 pi, BlockPos pos, BlockState state, const ItemStack& he
             p.open_pos = pos;
             p.open_data[0] = barrel;
             p.menu.send_all(out(pi), p.threshold, containers(p));
-            return true;
+            return Used::kSuccess;
         }
         case block_kind::kChest: {  // ChestBlock.useWithoutItem -> getMenuProvider -> DoubleBlockCombiner
-            if (hand != cb::SwingAnimation::kMainHand) return false;
+            if (hand != cb::SwingAnimation::kMainHand) return Used::kPass;
             const world::BlockEntityRef* be = world_.block_entity(pos.x, pos.y, pos.z);
             // isChestBlockedAt: something solid on top keeps the lid shut. (Or a cat.)
             const auto blocked = [&](BlockPos at) {
                 return (world::flags_of(world_.block(at.x, at.y + 1, at.z)) & world::state::kRedstoneConductor) != 0;
             };
-            if (!be || blocked(pos)) return true;
+            if (!be || blocked(pos)) return Used::kSuccess;
             u32 first = be->data, second = kNone;
             const ChestState c = chest_state(state);
             if (c.type != kSingle) {
@@ -318,7 +318,7 @@ bool Game::use_block(u32 pi, BlockPos pos, BlockState state, const ItemStack& he
                     const world::BlockEntityRef* obe = world_.block_entity(other.x, other.y, other.z);
                     if (o.type != kSingle && o.type != c.type && o.facing == c.facing) {
                         // (A half that is kept as the tag it came with keeps the pair shut.)
-                        if (blocked(other) || (obe && (obe->data & kOpaqueBlockEntity))) return true;
+                        if (blocked(other) || (obe && (obe->data & kOpaqueBlockEntity))) return Used::kSuccess;
                         // The right half is the first 27 slots (DoubleBlockCombiner.BlockType.FIRST).
                         if (obe) second = obe->data;
                         if (obe && c.type != kRight) std::swap(first, second);
@@ -343,7 +343,7 @@ bool Game::use_block(u32 pi, BlockPos pos, BlockState state, const ItemStack& he
                 chest_locked(pi, a.x + 0.5 + dx, a.y + 0.5, a.z + 0.5 + dz,
                              name ? text::Text::encoded(title)
                                   : text::Text::translatable(second == kNone ? "container.chest" : "container.chestDouble"));
-                return true;
+                return Used::kSuccess;
             }
             // new ChestMenu: Container.startOpen comes before the screen opens.
             if (p.menu.kind() != Menu::Kind::kInventory) close_menu(pi, true);
@@ -355,12 +355,16 @@ bool Game::use_block(u32 pi, BlockPos pos, BlockState state, const ItemStack& he
             p.open_data[0] = first;
             p.open_data[1] = second;
             p.menu.send_all(out(pi), p.threshold, containers(p));
-            return true;
+            return Used::kSuccess;
         }
         // FenceBlock.useWithoutItem -> LeadItem.bindPlayerMobs: the mobs the player leads are tied
         // to the fence. PASS when it leads none - and nothing is on a lead here.
-        case block_kind::kFence: return false;
-        default: return false;
+        case block_kind::kFence: return Used::kPass;
+        case block_kind::kSign:
+        case block_kind::kWallSign:
+        case block_kind::kHangingSign:
+        case block_kind::kWallHangingSign: return use_sign(pi, pos, state, held, hand);
+        default: return Used::kPass;
     }
 }
 
@@ -443,7 +447,8 @@ bool Game::can_apply_item_to_block(u32 block, const ItemStack& stack) {
     if (chest_kind(kind) && item::effective(stack, item::component::kContainerLoot).state == item::Patches::State::kSet)
         return false;
     const item::Patches::Found data = item::effective(stack, item::component::kBlockEntityData);
-    if (data.state != item::Patches::State::kSet || (!chest_kind(kind) && kind != block_kind::kFurnace)) return true;
+    if (data.state != item::Patches::State::kSet || (!chest_kind(kind) && kind != block_kind::kFurnace && !sign_kind(kind)))
+        return true;
     proto::Reader r(data.value);
     if (r.varint() != world::block_info(block).block_entity) return true;  // of another type: not looked at
     nbt::Doc doc;
@@ -480,7 +485,7 @@ void Game::apply_item_to_block(BlockPos pos, const ItemStack& stack) {
     if (!ref || (ref->data & kOpaqueBlockEntity)) return;
     const u32 kind = world::block_info_of(world_.block(pos.x, pos.y, pos.z)).kind;
     const bool chest = chest_kind(kind);
-    if (!chest && kind != block_kind::kFurnace) return;
+    if (!chest && kind != block_kind::kFurnace && !sign_kind(kind)) return;
     bool changed = false;
     std::string why;
     // ---- updateCustomBlockEntityTag: TypedEntityData.loadInto - what it saves, with the item's tag put over it
@@ -500,9 +505,43 @@ void Game::apply_item_to_block(BlockPos pos, const ItemStack& stack) {
                 load_block_entity(pos, all.root(), false, changed, why);
         }
     }
+    ref = world_.block_entity(pos.x, pos.y, pos.z);
+    if (sign_kind(kind)) {
+        // SignBlockEntity.applyImplicitComponents: its two texts and its wax are the stack's -
+        // an empty text and no wax where the stack has none - and the rest are its components.
+        Sign& sign = signs_[ref->data];
+        const item::Patches::Found front = item::effective(stack, comp::kSignTextFront),
+                                   back = item::effective(stack, comp::kSignTextBack);
+        sign.text[0].assign(front.value.begin(), front.value.end());
+        sign.text[1].assign(back.value.begin(), back.value.end());
+        sign.waxed = item::effective(stack, comp::kWaxed).state == State::kSet;
+        base::ByteBuf map, rest;
+        nbt::Writer mw(map);
+        u32 n = 0;
+        if (stack.patch()) {
+            for (const item::Patches::Entry& e : item::patches().entries(stack.patch())) {
+                const bool taken = e.type == comp::kBlockEntityData || e.type == comp::kBlockState ||
+                                   e.type == comp::kSignTextFront || e.type == comp::kSignTextBack || e.type == comp::kWaxed;
+                if (e.removed || taken || item::transient(e.type)) continue;
+                item::value_to_nbt(e.type, item::patches().wire(stack.patch()).subspan(e.off, e.len), mw,
+                                   item::component_name(e.type));
+                ++n;
+            }
+        }
+        drop_kept(sign.keep);
+        if (n) {
+            mw.end_compound();
+            nbt::Writer w(rest);
+            w.root(nbt::kCompound);
+            w.put_raw("components", nbt::kCompound, {map.data, map.len});
+            w.end_compound();
+            sign.keep = keep_tag({rest.data, rest.len});
+        }
+        sign_changed(ref->data);
+        return;
+    }
     // ---- updateBlockEntityComponents: BlockEntity.applyComponents. What the block entity takes
     // for itself (applyImplicitComponents): its name, its lock, what it holds...
-    ref = world_.block_entity(pos.x, pos.y, pos.z);
     ItemStack* const items = chest ? chests_[ref->data].items : furnaces_[ref->data].items;
     const u32 slots = chest ? Chest::kSlots : Furnace::kSlots;
     u32& keep = chest ? chests_[ref->data].keep : furnaces_[ref->data].keep;

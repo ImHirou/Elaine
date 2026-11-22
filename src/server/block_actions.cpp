@@ -224,9 +224,12 @@ void Game::on_use_item_on(u32 pi, const sb::UseItemOn& u) {
         // item changes (gen.py checks). Vanilla runs the swing twice here - the same branch
         // stands twice in handleUseItemOn - and so sends two packets; the second begins the same
         // swing again in the same tick, which no client can tell from one.
-        if ((takes_click && !unknown && use_block(pi, pos, clicked, held, u.hand)) ||
-            (!unknown && !held.empty() && place_block(pi, u, held)))
-            swing(pi, u.hand, {}, false);
+        last_use_face_ = u.direction;
+        Used used = takes_click && !unknown ? use_block(pi, pos, clicked, held, u.hand) : Used::kPass;
+        if (used == Used::kPass && !unknown && !held.empty() && place_block(pi, u, held)) used = Used::kSuccess;
+        // (SUCCESS_SERVER: the client did not know it would - a sign whose editor opens - and is
+        // shown its own arm with everybody else.)
+        if (used != Used::kPass) swing(pi, u.hand, {}, used == Used::kSuccessServer);
     }
     // Whatever happened, the client predicted something: tell it what the two blocks it may have
     // touched really are.
@@ -278,7 +281,11 @@ bool Game::place_block(u32 pi, const sb::UseItemOn& u, const ItemStack& held) {
     if (!can_survive(state, at) || obstructed(state, at)) return false;
     if (!set_block(at, state)) return false;  // above or below the build height
     // What the stack carries for the block and its block entity: its components, a tag.
-    if (held.has_patch() && world::block_of(world_.block(at.x, at.y, at.z)) == item.block) apply_item_to_block(at, held);
+    const world::BlockInfo& placed = world::block_info_of(world_.block(at.x, at.y, at.z));
+    if (held.has_patch() && world::block_of(world_.block(at.x, at.y, at.z)) == world::block_of(state))
+        apply_item_to_block(at, held);
+    if (sign_kind(placed.kind) && world::block_of(world_.block(at.x, at.y, at.z)) == world::block_of(state))
+        sign_placed(pi, at);  // setPlacedBy
     return true;
 }
 
@@ -369,6 +376,8 @@ BlockState Game::state_for_placement(u32 pi, const sb::UseItemOn& u, const world
             }
             return world::Section::kNoState;
         }
+        case block_flag::kPlaceSign:
+        case block_flag::kPlaceHangingSign: return sign_for_placement(pi, u, block, kind, at, replacing_clicked);
         case block_flag::kPlaceCluster: {  // AmethystClusterBlock: on the clicked face, wet in a source of water
             static constexpr u8 kIndex[6] = {5, 4, 0, 2, 3, 1};  // facing: north, east, south, west, up, down
             const bool wet = world::holds_water_source(state_for_client(at));
@@ -447,11 +456,21 @@ void Game::broadcast_changes() {
                 const auto state_at = [&](u16 pos) {  // pos = x<<8 | z<<4 | y
                     return sec.get(world::Section::index(pos >> 8, pos & 15u, (pos >> 4) & 15u));
                 };
+                // ChunkHolder.broadcastBlockEntityIfNeeded: behind a block's update, what its block
+                // entity shows - of those that show something (a sign's text).
+                const auto block_entity_data = [&](u16 pos) {
+                    if (LIKELY(!c->block_entity_tags)) return;
+                    const i32 x = c->x * 16 + (pos >> 8), y = sy * 16 + (pos & 15), z = c->z * 16 + ((pos >> 4) & 15);
+                    const std::span<const u8> tag = world_.block_entity_tag(x, y, z);
+                    if (tag.empty()) return;
+                    write_packet(scratch_, threshold, cb::BlockEntityData{x, y, z, world_.block_entity(x, y, z)->type, tag});
+                };
                 if (k - j == 1) {
                     const u16 pos = changes[j].pos;
                     write_packet(scratch_, threshold,
                                  cb::BlockUpdate{c->x * 16 + (pos >> 8), sy * 16 + (pos & 15), c->z * 16 + ((pos >> 4) & 15),
                                                  state_at(pos)});
+                    block_entity_data(pos);
                 } else {
                     update_pos_.clear();
                     update_state_.clear();
@@ -460,6 +479,7 @@ void Game::broadcast_changes() {
                         update_state_.push_back(state_at(changes[m].pos));
                     }
                     write_packet(scratch_, threshold, cb::SectionBlocksUpdate{c->x, sy, c->z, update_pos_, update_state_});
+                    for (usize m = j; m < k; ++m) block_entity_data(changes[m].pos);
                 }
                 j = k;
             }

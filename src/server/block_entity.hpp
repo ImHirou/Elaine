@@ -18,6 +18,8 @@
 // up - it gives none when emptied, and experience orbs do not exist yet.
 #pragma once
 
+#include <vector>
+
 #include "item/recipes.hpp"
 #include "item/stack.hpp"
 
@@ -71,6 +73,19 @@ struct Furnace {
     void set_item(u32 slot, ItemStack stack);
     // AbstractFurnaceBlockEntity.serverTick
     Ticked tick();
+};
+
+// A sign of any of the four kinds: its two texts, each as SignText's StreamCodec writes it (the
+// form of the item components sign_text_front / sign_text_back; empty: SignText.EMPTY), and who
+// may write on it just now (SignBlockEntity; server/signs.cpp).
+struct Sign {
+    std::vector<u8> text[2];  // front, back
+    i32 x = 0, y = 0, z = 0;
+    u32 keep = ~0u;  // its components, as a tag: as Chest::keep
+    Uuid editor{};   // playerWhoMayEdit, while `editing`
+    bool editing = false, waxed = false;
+    bool allow_op = false;  // allow_op_features: the click commands of its lines are run
+    bool alive = false;
 };
 
 }  // namespace server

@@ -221,6 +221,10 @@ class Dimension {
     void add_block_entity(i32 x, i32 y, i32 z, u32 type, u32 data);
     // LevelChunk.removeBlockEntity: false if there was none; `data` receives its handle.
     bool remove_block_entity(i32 x, i32 y, i32 z, u32& data);
+    // What the block entity at a block shows a client (BlockEntity.getUpdateTag): a tag in the
+    // network form, copied; empty for none. The chunk's packet carries it from now on.
+    void set_block_entity_tag(i32 x, i32 y, i32 z, std::span<const u8> tag);
+    std::span<const u8> block_entity_tag(i32 x, i32 y, i32 z) const;
     // What the chunk at a block holds changed in a way only its owner knows (a container's
     // contents): it is to be saved again.
     void mark_dirty(i32 x, i32 z) {
@@ -248,6 +252,7 @@ class Dimension {
     void encode(Chunk& c);
     void write_body(Chunk& c, base::ByteBuf& to);
     bool set_block_raw(Chunk& c, i32 x, i32 y, i32 z, BlockState s);
+    static void free_block_entities(Chunk& c);
     void recount_random(Chunk& c, u32 si, u32 lx, i32 y, u32 lz, BlockState old, BlockState s);
     u32 active_mask(const Chunk& c) const;
     void refresh_active(Chunk& c);

@@ -774,7 +774,7 @@ TEST(Import, AVanillaChunkBecomesOneOfOurs) {
 
     // Block entities: the layout of server/persist.cpp, read by hand.
     proto::Reader r(lc.parts.block_entities.data(), lc.parts.block_entities.size());
-    EXPECT_EQ(r.u8v(), 2);
+    EXPECT_EQ(r.u8v(), 3);  // (the version that knows a sign; the import writes none)
     ASSERT_EQ(r.varint(), 4u);
     const auto stack = [&]() -> std::pair<u32, u32> {
         const u32 count = r.varint();

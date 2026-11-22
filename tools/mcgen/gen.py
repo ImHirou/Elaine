@@ -442,6 +442,10 @@ BLOCK_FLAGS = [
     ("kPlaceBarrel", 20, "BarrelBlock: `facing` = opposite of the direction the player looks along most (props::barrel)"),
     ("kPlaceSegment", 21, "SegmentableBlock (petals, leaf litter): one more onto the block of it that is there, else one "
                           "that faces the player (props::flower_bed)"),
+    ("kPlaceSign", 22, "a sign's StandingAndWallBlockItem: standing, turned to the player, or on the first wall the player "
+                       "looks at that holds it; alt = the standing block's default state, the wall block's first state"),
+    ("kPlaceHangingSign", 23, "HangingSignItem: under what holds it when the player looks up, else between two walls; "
+                              "alt = the ceiling block's default state, the wall block's first state"),
     ("kSnowTag", 0x40, "member of #minecraft:snow (makes the SnowyBlock below it snowy)"),
     ("kInteractive", 0x80, "overrides useItemOn/useWithoutItem: a click may be consumed by the block"),
     ("kGameMaster", 0x100, "GameMasterBlock: only operators may break it"),
@@ -792,6 +796,13 @@ def build_block_tables(v: dict, blocks: dict, data: dict, static_regs: dict, van
 
     shapes = data["collision_shapes"]
     coll = [0xFFFF if c < 0 else c for c in st["collision_shape"]]
+    # Block.isFaceFull(collision shape, DOWN): do the boxes that reach the bottom cover it? (A
+    # shape is on a grid of sixteenths, a few on thirty-seconds: sampled at sixty-fourths.)
+    def covers_bottom(boxes) -> bool:
+        low = [b for b in boxes if b[1] <= 0.0]
+        return bool(low) and all(any(b[0] <= (x + 0.5) / 64 <= b[3] and b[2] <= (z + 0.5) / 64 <= b[5] for b in low)
+                                 for x in range(64) for z in range(64))
+    full_below = {0xFFFF: False, **{i: covers_bottom(boxes) for i, boxes in enumerate(shapes)}}
 
     # ExplosionDamageCalculator.getBlockExplosionResistance takes the more of the block's and its
     # fluid's; the server reads the fluid's off the fluid's block (world::blast_positions).
@@ -948,7 +959,8 @@ def build_block_tables(v: dict, blocks: dict, data: dict, static_regs: dict, van
         "state_hooks.bin": bytes(hooks),
         "state_random.bin": bytes(random_ticks),
         "state_sturdy_full.bin": bytes(cols["sturdy_full"]),
-        "state_sturdy_center.bin": bytes(cols["sturdy_center"]),
+        "state_sturdy_center.bin": bytes(cols["sturdy_center"][i] | (0x40 if st["solid"][i] else 0) |
+                                         (0x80 if full_below[coll[i]] else 0) for i in range(n)),
         "state_connect.bin": bytes(connect),
         "state_wall_above.bin": bytes(wall_above),
         "state_support.bin": bytes(support),
@@ -995,6 +1007,9 @@ inline constexpr unsigned char kRandom[] = {
 };
 // BlockState.isFaceSturdy(level, pos, direction, SupportType.FULL / CENTER): bit = direction. Asked
 // of the state alone: a block whose support shape depends on where it is answers for nowhere.
+// kSturdyCenter has two bits to spare, and they are: 0x40 BlockState.isSolid() (what a sign
+// stands on or hangs against), 0x80 Block.isFaceFull(the collision shape, DOWN) (what a hanging
+// sign hangs from with both chains).
 inline constexpr unsigned char kSturdyFull[] = {
 #embed "state_sturdy_full.bin"
 };
@@ -1204,11 +1219,19 @@ namespace proto::gen {
     for it in game["items"].values():
         if it["class"][0] == "StandingAndWallBlockItem":
             standing, wall = it["fields"]["block"], it["fields"]["wallBlock"]
-            if (ported_of.get(standing) or (None,))[0] != "kTorch":
+            pair_kind = (ported_of.get(standing) or (None,))[0]
+            if pair_kind not in ("kTorch", "kSign"):
                 continue
-            if it["fields"]["attachmentDirection"] != "DOWN" or (ported_of.get(wall) or (None,))[0] != "kWallTorch":
-                die(f"{it['name']}: a torch item that hangs, or whose wall block is not a ported WallTorchBlock")
+            want = "kWallTorch" if pair_kind == "kTorch" else "kWallSign"
+            if it["fields"]["attachmentDirection"] != "DOWN" or (ported_of.get(wall) or (None,))[0] != want:
+                die(f"{it['name']}: a torch or sign item that hangs, or whose wall block is not the ported wall block")
             torch_pairs[standing] = torch_pairs[wall] = (standing, wall)
+        elif it["class"][0] == "HangingSignItem":   # ...and the two blocks of a hanging sign: under a ceiling, between walls
+            ceiling, wall = it["fields"]["block"], it["fields"]["wallBlock"]
+            if (it["fields"]["attachmentDirection"] != "UP" or (ported_of.get(ceiling) or (None,))[0] != "kHangingSign" or
+                    (ported_of.get(wall) or (None,))[0] != "kWallHangingSign"):
+                die(f"{it['name']}: a hanging sign item whose blocks are not the two ported hanging sign blocks")
+            torch_pairs[ceiling] = torch_pairs[wall] = (ceiling, wall)
     weather_states = [c["name"] for c in game["enums"]["net.minecraft.world.level.block.WeatheringCopper$WeatherState"]]
     weathering_next = game["statics"]["net.minecraft.world.level.block.WeatheringCopper"]["NEXT_BY_BLOCK"]
     wax_off = game["statics"]["net.minecraft.world.item.HoneycombItem"]["WAX_OFF_BY_BLOCK"]
@@ -1257,10 +1280,10 @@ namespace proto::gen {
             if set(blocks[name]["properties"]) != {"snowy"}:
                 die(f"{name}: a SnowyBlock with more properties than `snowy`")
             alt = [snowy["false"], snowy["true"], default_of(gb["fields"]["baseBlock"]) if own_kind == "kSpreading" else 0]
-        elif kind == bf["kPlaceTorch"]:
+        elif kind in (bf["kPlaceTorch"], bf["kPlaceSign"], bf["kPlaceHangingSign"]):
             pair = torch_pairs.get(name)
             if pair is None:
-                die(f"{name}: a torch that no StandingAndWallBlockItem places")
+                die(f"{name}: a torch or a sign that no StandingAndWallBlockItem places")
             alt = [default_of(pair[0]), first[pair[1]], 0]
         elif kind == bf["kPlaceConcretePowder"]:
             alt = [default_of(gb["fields"]["concrete"]), 0, 0]
@@ -1326,7 +1349,7 @@ namespace proto::gen {
         comps = item_default_components(name)
         tool = comps.get("minecraft:tool")
         f = itf["kPlainBlockItem"] if it["class"] == "BlockItem" else 0
-        f |= itf["kStandingAndWall"] if it["class"] == "StandingAndWallBlockItem" else 0
+        f |= itf["kStandingAndWall"] if it["class"] in ("StandingAndWallBlockItem", "HangingSignItem") else 0
         f |= itf["kDestroysInCreative"] if (tool is None or tool.get("can_destroy_blocks_in_creative", True)) else 0
         blk = block_ids[it["block"]] if "block" in it else 0xFFFF
         stack = comps.get("minecraft:max_stack_size", 1)

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "world/dimension.hpp"
 
+#include <cstring>
+
 #include <algorithm>
 #include <new>
 #include <thread>
@@ -89,7 +91,7 @@ Dimension::~Dimension() {
     map_.for_each([this](Chunk& c) {
         ticks_.release(c);
         std::free(c.frame);
-        std::free(c.block_entities);
+        free_block_entities(c);
         std::free(c.biomes);
         std::free(c.keep.bytes);
         light_.release_chunk(c);
@@ -333,7 +335,7 @@ void Dimension::unload(Chunk& c) {
     for (u32 si = 0; si < sections_; ++si) c.sections[si].release(alloc_);
     frame_bytes_ -= c.frame_len;
     std::free(c.frame);
-    std::free(c.block_entities);
+    free_block_entities(c);
     std::free(c.biomes);
     std::free(c.keep.bytes);
     map_.remove(c.x, c.z);
@@ -537,8 +539,15 @@ void Dimension::add_block_entity(i32 x, i32 y, i32 z, u32 type, u32 data) {
         auto* grown = static_cast<BlockEntityRef*>(std::realloc(c->block_entities, cap * sizeof(BlockEntityRef)));
         if (UNLIKELY(!grown)) std::abort();
         c->block_entities = grown;
+        if (c->block_entity_tags) {
+            auto* tags = static_cast<BlockEntityTag*>(std::realloc(c->block_entity_tags, cap * sizeof(BlockEntityTag)));
+            if (UNLIKELY(!tags)) std::abort();
+            for (u32 i = c->block_entity_cap; i < cap; ++i) tags[i] = {};
+            c->block_entity_tags = tags;
+        }
         c->block_entity_cap = static_cast<u16>(cap);
     }
+    if (c->block_entity_tags) c->block_entity_tags[c->block_entity_count] = {};
     c->block_entities[c->block_entity_count++] = {static_cast<u8>((x & 15) << 4 | (z & 15)), static_cast<u8>(type),
                                                   static_cast<i16>(y), data};
     c->dirty = true;
@@ -550,10 +559,54 @@ bool Dimension::remove_block_entity(i32 x, i32 y, i32 z, u32& data) {
     const BlockEntityRef* found = block_entity(x, y, z);
     if (!found) return false;
     data = found->data;
-    c->block_entities[found - c->block_entities] = c->block_entities[--c->block_entity_count];
+    const usize at = static_cast<usize>(found - c->block_entities);
+    c->block_entities[at] = c->block_entities[--c->block_entity_count];
+    if (c->block_entity_tags) {
+        std::free(c->block_entity_tags[at].bytes);
+        c->block_entity_tags[at] = c->block_entity_tags[c->block_entity_count];
+        c->block_entity_tags[c->block_entity_count] = {};
+    }
     c->dirty = true;
     invalidate(*c);
     return true;
+}
+
+void Dimension::free_block_entities(Chunk& c) {
+    if (c.block_entity_tags)
+        for (u32 i = 0; i < c.block_entity_count; ++i) std::free(c.block_entity_tags[i].bytes);
+    std::free(c.block_entity_tags);
+    std::free(c.block_entities);
+    c.block_entity_tags = nullptr;
+    c.block_entities = nullptr;
+}
+
+void Dimension::set_block_entity_tag(i32 x, i32 y, i32 z, std::span<const u8> tag) {
+    Chunk* c = map_.find(x >> 4, z >> 4);
+    const BlockEntityRef* found = block_entity(x, y, z);
+    if (!found) return;
+    if (!c->block_entity_tags) {
+        if (tag.empty()) return;
+        c->block_entity_tags = static_cast<BlockEntityTag*>(std::calloc(c->block_entity_cap, sizeof(BlockEntityTag)));
+        if (UNLIKELY(!c->block_entity_tags)) std::abort();
+    }
+    BlockEntityTag& t = c->block_entity_tags[found - c->block_entities];
+    std::free(t.bytes);
+    t = {};
+    if (!tag.empty()) {
+        t.bytes = static_cast<u8*>(std::malloc(tag.size()));
+        if (UNLIKELY(!t.bytes)) std::abort();
+        std::memcpy(t.bytes, tag.data(), tag.size());
+        t.len = static_cast<u32>(tag.size());
+    }
+    invalidate(*c);
+}
+
+std::span<const u8> Dimension::block_entity_tag(i32 x, i32 y, i32 z) const {
+    const Chunk* c = map_.find(x >> 4, z >> 4);
+    const BlockEntityRef* found = block_entity(x, y, z);
+    if (!found || !c->block_entity_tags) return {};
+    const BlockEntityTag& t = c->block_entity_tags[found - c->block_entities];
+    return {t.bytes, t.len};
 }
 
 // ---------------------------------------------------------------------------- per tick

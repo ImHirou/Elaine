@@ -124,6 +124,7 @@ void Game::system_message(u32 pi, const Text& message, bool overlay) {
 // CommandSourceStack.sendSuccess: the source is told; with `broadcast`, so are the other
 // operators and the log (broadcastToAdmins: "[Steve: Set the block at 1, 2, 3]", grey, italic).
 void Game::command_success(const cmd::Source& source, const Text& message, bool broadcast) {
+    if (source.silent) return;
     const u32 pi = player_of(source);
     if (source.player == cmd::kNone) {
         LOG_INFO("%s", message.plain().c_str());
@@ -145,6 +146,7 @@ void Game::command_success(const cmd::Source& source, const Text& message, bool 
 
 // CommandSourceStack.sendFailure: the message in red.
 void Game::command_failure(const cmd::Source& source, const Text& message) {
+    if (source.silent) return;
     if (source.player == cmd::kNone) {
         LOG_INFO("%s", message.plain().c_str());
     } else if (const u32 pi = player_of(source); pi != kNone) {

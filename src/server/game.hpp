@@ -514,7 +514,27 @@ class Game {
     void tick_falling(u32 slot, u32 row);
 
     // ---- block entities and the menus on them (server/block_entities.cpp)
-    bool use_block(u32 pi, proto::BlockPos pos, world::BlockState state, const ItemStack& held, u32 hand);
+    // InteractionResult, of a block that was clicked: nothing for it (the item has the click),
+    // done (the client swung its arm itself), or done where only the server knows it was (the
+    // player is shown its own arm swing).
+    enum class Used : u8 { kPass, kSuccess, kSuccessServer };
+    Used use_block(u32 pi, proto::BlockPos pos, world::BlockState state, const ItemStack& held, u32 hand);
+    // ---- signs (server/signs.cpp)
+    static bool sign_kind(u32 kind);
+    static u32 sign_facing(world::BlockState s);    // of the two that hang on a wall: a Direction
+    static u32 sign_rotation(world::BlockState s);  // of the two that do not: sixteenths of a turn
+    u32 new_sign(proto::BlockPos pos);
+    void write_sign_tag(const Sign& sign, nbt::Writer& w) const;
+    void show_sign(u32 data);
+    void sign_changed(u32 data);
+    bool sign_front_faces(u32 pi, const Sign& sign) const;
+    void open_sign_editor(u32 pi, u32 data, bool front);
+    void tick_signs();
+    void sign_placed(u32 pi, proto::BlockPos pos);
+    void on_sign_update(u32 pi, const proto::sb::SignUpdate& u);
+    Used use_sign(u32 pi, proto::BlockPos pos, world::BlockState state, const ItemStack& held, u32 hand);
+    world::BlockState sign_for_placement(u32 pi, const proto::sb::UseItemOn& u, const world::BlockInfo& block, u32 kind,
+                                         proto::BlockPos at, bool replacing_clicked) const;
     world::BlockState chest_for_placement(u32 pi, const world::BlockInfo& block, proto::BlockPos at, u32 face) const;
     void open_menu(u32 pi, Menu::Kind kind, u32 menu_type, std::span<const u8> title, u32 rows);
     void close_menu(u32 pi, bool tell_client);
@@ -669,6 +689,10 @@ class Game {
     std::vector<Chest> chests_;
     std::vector<Furnace> furnaces_;
     std::vector<u32> chest_free_, furnace_free_;
+    std::vector<Sign> signs_;
+    std::vector<u32> sign_free_;
+    std::vector<u32> editing_signs_;  // the signs somebody may write on just now (tick_signs)
+    u32 last_use_face_ = 0;           // the face of the block that is being clicked (BlockHitResult.getDirection)
     std::vector<BlockEventData> block_events_;
     // CollectingNeighborUpdater: the updates that wait (a stack), those the one that runs has
     // made, how many there have been since the first of this chain, and how many there may be.

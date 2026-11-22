@@ -156,6 +156,7 @@ void Game::run(const std::atomic<bool>& stop) {
         move_ns += base::now_ns() - t_entities;
         sync_menus();
         tick_furnaces();  // block entities tick after the entities
+        if (UNLIKELY(!editing_signs_.empty())) tick_signs();
         tick_players();
         autosave_players();
         if (UNLIKELY((tick_ + 1) % (20ull * s_.autosave_seconds) == 0)) save_time();  // (with the autosave: what time it is)
@@ -651,6 +652,11 @@ HOT void Game::on_packet(u32 pi, const u8* body, u32 n) {
                 p.menu.inv.selected = static_cast<u8>(c.slot);
                 dirty_[pi] |= kEquipDirty;  // another stack is in hand
             }
+            break;
+        }
+        case sbid::kSignUpdate: {  // handleSignUpdate
+            const auto u = sb::SignUpdate::decode(rd);
+            if (rd.done()) on_sign_update(pi, u);
             break;
         }
         case sbid::kSetCreativeModeSlot: {

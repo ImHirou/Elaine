@@ -66,7 +66,10 @@ from inventory_probe import Actor  # noqa: E402
 
 LOGGED = {"system_chat", "player_chat", "disguised_chat", "set_time", "command_suggestions", "block_update", "section_blocks_update", "player_position", "sound", "stop_sound", "add_entity",
           "remove_entities", "entity_event", "commands", "disconnect", "set_entity_data", "container_set_slot",
-          "set_player_inventory", "take_item_entity", "open_screen"}
+          "set_player_inventory", "take_item_entity", "open_screen", "block_entity_data", "open_sign_editor", "level_event"}
+# The sounds a recording keeps beside the one of an item given: what a lock and a sign say.
+SIGN_SOUNDS = {mc.SOUND[k]: k for k in ("kBlockChestLocked", "kItemDyeUse", "kItemInkSacUse", "kItemGlowInkSacUse",
+                                        "kItemHoneycombWaxOn", "kBlockSignWaxedInteractFail")}
 UUID_RX = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -100,7 +103,8 @@ class Prober(Actor):
                     b"\x7f" + mc.varint(1) + b"\x00\x01" + mc.varint(0))
 
 
-SECTIONS = ("basics", "blocks", "give", "moving", "entities", "nbt", "tellraw", "sounds", "talking", "time", "permissions")
+SECTIONS = ("basics", "blocks", "give", "moving", "entities", "nbt", "signs", "tellraw", "sounds", "talking", "time",
+            "permissions")
 
 
 def record(port: int, out_path: str, name_a: str, name_b: str, console: str | None = None, only: set | None = None) -> None:
@@ -463,6 +467,55 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str | No
     run("tp @a[nbt={},limit=1] ~ ~ ~")
     run("tp @s[nbt=5] ~ ~ ~")
     run("tp @s[nbt={a:}] ~ ~ ~")
+    # ---- signs: where one stands, hangs on a wall or from a ceiling; its editor; dye, ink, wax;
+    # what holds it; one out of a tag. A looks south (the yaw it is put at), from the block's middle.
+    section("signs")
+    run("tp @s ~ ~ ~ 0 0")
+    use_seq = [1000]
+
+    def use(dx: int, dy: int, dz: int, face: int) -> None:
+        use_seq[0] += 1
+        a.c.send("use_item_on", mc.varint(0) + mc.pack_block_pos(ox + dx, oy + dy, oz + dz) + mc.varint(face) +
+                 struct.pack(">fff", 0.5, 0.5, 0.5) + b"\x00\x00" + mc.varint(use_seq[0]))
+
+    def write(dx: int, dy: int, dz: int, lines: list, front: bool = True) -> None:
+        a.c.send("sign_update", mc.pack_block_pos(ox + dx, oy + dy, oz + dz) + b"".join(mc.mc_str(line) for line in lines) +
+                 mc.varint(1 if front else 0))
+
+    step("A places a sign on the ground, two blocks ahead", lambda: (a.give(36, "kOakSign", 8), use(0, -1, 2, 1)), ticks=8)
+    step("A writes on it", lambda: write(0, 0, 2, ["Hello", "\u00a7cred?", "", "x" * 40]))
+    step("A writes on it again: nobody may", lambda: write(0, 0, 2, ["again", "", "", ""]))
+    run("data get block ~ ~ ~2")
+    step("A clicks it with an empty hand: the editor", lambda: (a.give(36, None), use(0, 0, 2, 2)), ticks=8)
+    step("A writes two lines", lambda: write(0, 0, 2, ["Hello", "world", "", ""]))
+    step("A dyes it red", lambda: (a.give(36, "kRedDye", 1), use(0, 0, 2, 2)), ticks=8)
+    step("A dyes it red again: the editor instead", lambda: use(0, 0, 2, 2), ticks=8)
+    step("A makes it glow", lambda: (a.give(36, "kGlowInkSac", 1), use(0, 0, 2, 2)), ticks=8)
+    step("A takes the glow off", lambda: (a.give(36, "kInkSac", 1), use(0, 0, 2, 2)), ticks=8)
+    step("A waxes it", lambda: (a.give(36, "kHoneycomb", 1), use(0, 0, 2, 2)), ticks=8)
+    step("A clicks the waxed sign with an empty hand", lambda: (a.give(36, None), use(0, 0, 2, 2)), ticks=8)
+    step("A dyes the waxed sign: nothing", lambda: (a.give(36, "kBlueDye", 1), use(0, 0, 2, 2)), ticks=8)
+    run("data get block ~ ~ ~2")
+    run("setblock ~1 ~ ~1 stone")
+    step("A places a sign against the stone's west side", lambda: (a.give(36, "kOakSign", 8), use(1, 0, 1, 4)), ticks=8)
+    run("setblock ~ ~2 ~1 stone")
+    step("A hangs a sign under a block", lambda: (a.give(36, "kOakHangingSign", 8), use(0, 2, 1, 0)), ticks=8)
+    run("setblock ~1 ~ ~1 air")                      # what the wall sign hung on
+    run("setblock ~ ~2 ~1 air")                      # ...and what the hanging one hung from
+    run("setblock ~ ~-1 ~2 air")                     # ...and what the first one stood on
+    run("setblock ~ ~-1 ~2 grass_block")
+    run("setblock ~ ~ ~2 oak_sign[rotation=4]{front_text:{messages:[\"a\",{text:\"b\",color:\"red\"},\"\",\"\"],color:\"blue\"},"
+        "is_waxed:1b,back_text:{messages:[\"only three\",\"\",\"\"]},foo:1}")
+    run("data get block ~ ~ ~2")
+    run("setblock ~ ~ ~2 air")
+    run("setblock ~ ~ ~2 oak_sign{front_text:{messages:[{text:\"x\",click_event:{action:\"run_command\",command:\"say hi\"}},"
+        "\"\",\"\",\"\"]}}")
+    step("A clicks a sign with a command on it: not allowed", lambda: (a.give(36, None), use(0, 0, 2, 2)), ticks=8)
+    run("setblock ~ ~ ~2 air")
+    run("setblock ~ ~ ~2 oak_wall_sign")             # nothing behind it: it is set all the same
+    run("setblock ~ ~ ~2 air")
+    step("A takes its diamond again", lambda: a.give(36, "kDiamond", 1))
+
     section("tellraw")
     run("tellraw @s \"quoted\"")
     run("tellraw @s 'single'")
@@ -922,8 +975,8 @@ def _normalise(rec: dict, who: str, commands: set | None) -> tuple[dict[str, lis
             elif name == "sound":
                 holder = r.varint()
                 if holder != 0:
-                    if holder - 1 == mc.SOUND["kBlockChestLocked"]:
-                        sound, pitch_free = "block.chest.locked", False
+                    if holder - 1 in SIGN_SOUNDS:
+                        sound, pitch_free = SIGN_SOUNDS[holder - 1], False
                     elif holder - 1 != mc.SOUND["kEntityItemPickup"]:
                         continue     # a sound of the world (footsteps, a block placed), not of a command
                     else:
@@ -938,6 +991,18 @@ def _normalise(rec: dict, who: str, commands: set | None) -> tuple[dict[str, lis
             elif name == "open_screen":
                 r.varint()
                 rows.append((name, f"menu {r.varint()} title {mc.snbt(r.nbt())}"))
+            elif name == "block_entity_data":
+                pos = mc.unpack_block_pos(r.u64())
+                rows.append((name, f"at {tuple(p - o for p, o in zip(pos, origin))} type {r.varint()} {mc.snbt(r.nbt())}"))
+            elif name == "open_sign_editor":
+                pos = mc.unpack_block_pos(r.u64())
+                rows.append((name, f"at {tuple(p - o for p, o in zip(pos, origin))} side {r.varint()}"))
+            elif name == "level_event":
+                kind = r.i32()
+                pos = mc.unpack_block_pos(r.u64())
+                if kind != 3003:
+                    continue     # (a block that breaks is told by its block update here)
+                rows.append((name, f"{kind} at {tuple(p - o for p, o in zip(pos, origin))} data {r.i32()}"))
             elif name == "stop_sound":
                 flags = r.u8()
                 rows.append((name, f"source {r.varint() if flags & 1 else '*'} sound {r.str() if flags & 2 else '*'}"))

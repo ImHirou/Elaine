@@ -218,6 +218,61 @@ bool read_container_tag(nbt::Tag tag, u32 slots, bool furnace, bool with_compone
     return true;
 }
 
+// The components of a block entity's tag (DataComponentMap.CODEC), as a tag to keep: {components: {...}},
+// empty for none. False: one of them is a component this server does not read.
+bool read_components(nbt::Tag given, base::ByteBuf& rest) {
+    if (given.type != nbt::kCompound) return true;
+    base::ByteBuf map, value;
+    nbt::Writer mw(map);
+    mw.root(nbt::kCompound);
+    u32 n = 0;
+    for (const nbt::Tag e : given.entries()) {
+        if (given.get(e.name()).at != e.at) continue;
+        const std::string key = nbt::to_utf8(e.name());
+        const u32 type = item::find_component(key);
+        if (type == item::kNoComponent || item::transient(type)) continue;
+        value.clear();
+        const item::Verdict v = item::value_from_nbt(type, e, value);
+        if (v == item::Verdict::kUnsupported) return false;
+        if (v != item::Verdict::kOk) continue;
+        item::value_to_nbt(type, {value.data, value.len}, mw, item::component_name(type));
+        ++n;
+    }
+    mw.end_compound();
+    if (!n) return true;
+    nbt::Writer w(rest);
+    w.root(nbt::kCompound);
+    w.put_raw("components", nbt::kCompound, {map.data + 1, map.len - 1});
+    w.end_compound();
+    return true;
+}
+
+// SignBlockEntity.loadAdditional: allow_op_features, front_text, back_text, is_waxed. A text
+// that is wrong is an empty one (SignText.EMPTY); one this server does not read is refused.
+struct SignTag {
+    base::ByteBuf text[2];
+    bool waxed = false, allow_op = false;
+};
+bool read_sign_tag(nbt::Tag tag, SignTag& out, std::string& why) {
+    const auto flag = [&](std::string_view name) {  // getBooleanOr: a number that is not 0
+        const nbt::Tag t = tag.get(name);
+        return t.numeric() && t.as_int() != 0;
+    };
+    out.allow_op = flag("allow_op_features");
+    out.waxed = flag("is_waxed");
+    for (u32 side = 0; side < 2; ++side) {
+        const nbt::Tag text = tag.get(side == 0 ? "front_text" : "back_text");
+        if (!text) continue;
+        const item::Verdict v = item::value_from_nbt(item::component::kSignTextFront, text, out.text[side]);
+        if (v == item::Verdict::kUnsupported) {
+            why = "Signs with parts of a text this server does not read";
+            return false;
+        }
+        if (v != item::Verdict::kOk) out.text[side].clear();
+    }
+    return true;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------- block entities
@@ -229,6 +284,13 @@ nbt::Tag Game::kept_entry(u32 keep, std::string_view name, nbt::Doc& doc) const 
 
 bool Game::can_load_block_entity(u32 block, nbt::Tag tag, std::string& why) {
     const u32 kind = world::block_info(block).kind;
+    if (sign_kind(kind)) {
+        SignTag read;
+        base::ByteBuf rest;
+        if (!read_sign_tag(tag, read, why)) return false;
+        if (!read_components(tag.get("components"), rest)) why = "Block entities with components this server does not read";
+        return why.empty();
+    }
     if (!chest_kind(kind) && kind != gen::block_kind::kFurnace)
         return true;  // no block entity of this server's: nothing is loaded
     ContainerTag read;
@@ -244,6 +306,28 @@ Game::Loaded Game::load_block_entity(BlockPos pos, nbt::Tag tag, bool with_compo
         return Loaded::kRefused;
     }
     const u32 kind = world::block_info_of(world_.block(pos.x, pos.y, pos.z)).kind;
+    if (sign_kind(kind)) {
+        SignTag read;
+        base::ByteBuf rest, before, after;
+        if (!read_sign_tag(tag, read, why)) return Loaded::kRefused;
+        if (with_components && !read_components(tag.get("components"), rest)) {
+            why = "Block entities with components this server does not read";
+            return Loaded::kRefused;
+        }
+        save_block_entity(pos.x, pos.y, pos.z, before);
+        Sign& sign = signs_[ref->data];
+        for (u32 side = 0; side < 2; ++side)
+            sign.text[side].assign(read.text[side].data, read.text[side].data + read.text[side].len);
+        sign.waxed = read.waxed, sign.allow_op = read.allow_op;
+        if (with_components) {
+            drop_kept(sign.keep);
+            sign.keep = keep_tag({rest.data, rest.len});
+        }
+        save_block_entity(pos.x, pos.y, pos.z, after);
+        changed = before.len != after.len || std::memcmp(before.data, after.data, before.len) != 0;
+        if (changed) sign_changed(ref->data);
+        return Loaded::kOk;
+    }
     const bool chest = chest_kind(kind);
     if (!chest && kind != gen::block_kind::kFurnace) return Loaded::kNone;
     u32& keep = chest ? chests_[ref->data].keep : furnaces_[ref->data].keep;
@@ -274,9 +358,24 @@ Game::Loaded Game::load_block_entity(BlockPos pos, nbt::Tag tag, bool with_compo
 bool Game::adopt_kept_block_entity(BlockPos pos, world::BlockState state, u32 type, std::span<const u8> tag) {
     const world::BlockInfo& info = world::block_info_of(state);
     const bool chest = chest_kind(info.kind);
-    if ((!chest && info.kind != gen::block_kind::kFurnace) || type != info.block_entity) return false;
+    if ((!chest && info.kind != gen::block_kind::kFurnace && !sign_kind(info.kind)) || type != info.block_entity) return false;
     nbt::Doc doc;
     if (doc.parse(tag, nbt::Form::kNameless, nbt::kTrusted) != nbt::Error::kNone) return false;
+    if (sign_kind(info.kind)) {  // a sign of a vanilla world shows what is written on it
+        SignTag read;
+        base::ByteBuf rest;
+        std::string why;
+        if (!read_sign_tag(doc.root(), read, why) || !read_components(doc.root().get("components"), rest)) return false;
+        const u32 data = new_sign(pos);
+        for (u32 side = 0; side < 2; ++side)
+            signs_[data].text[side].assign(read.text[side].data, read.text[side].data + read.text[side].len);
+        signs_[data].waxed = read.waxed, signs_[data].allow_op = read.allow_op;
+        signs_[data].keep = keep_tag({rest.data, rest.len});
+        world_.add_block_entity(pos.x, pos.y, pos.z, type, data);
+        show_sign(data);
+        world_.mark_dirty(pos.x, pos.z);
+        return true;
+    }
     ContainerTag read;
     std::string why;
     if (!read_container_tag(doc.root(), chest ? Chest::kSlots : Furnace::kSlots, !chest, true, {}, read, why)) return false;
@@ -309,6 +408,23 @@ Game::Saved Game::save_block_entity(i32 x, i32 y, i32 z, base::ByteBuf& out) {
     const u32 kind = world::block_info_of(world_.block(x, y, z)).kind;
     nbt::Writer w(out);
     w.root(nbt::kCompound);
+    if (sign_kind(kind)) {  // SignBlockEntity.saveAdditional, BlockEntity.components, saveMetadata
+        const Sign& sign = signs_[ref->data];
+        write_sign_tag(sign, w);
+        nbt::Doc doc;
+        if (const nbt::Tag components = kept_entry(sign.keep, "components", doc)) {
+            w.put_raw("components", components.type, components.bytes());
+        } else {
+            w.begin_compound("components");
+            w.end_compound();
+        }
+        w.put_string("id", world::block_entity_type_name(ref->type));
+        w.put_int("x", x);
+        w.put_int("y", y);
+        w.put_int("z", z);
+        w.end_compound();
+        return Saved::kOk;
+    }
     // ContainerHelper.saveAllItems: the slots that hold something.
     const auto items = [&](const ItemStack* stacks, u32 n) {
         u32 held = 0;

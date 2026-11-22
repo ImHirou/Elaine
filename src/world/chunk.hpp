@@ -118,6 +118,14 @@ struct BlockEntityRef {
 };
 static_assert(sizeof(BlockEntityRef) == 8);
 
+// BlockEntity.getUpdateTag of a block entity that has one to show (a sign's text): what the chunk
+// packet and block_entity_data carry of it - a tag in the network form (type, payload), owned by
+// the chunk. Most block entities have none, most chunks no array of these.
+struct BlockEntityTag {
+    u8* bytes = nullptr;
+    u32 len = 0;
+};
+
 // The scheduled ticks of a chunk (world/ticks.hpp).
 struct ChunkTicks;
 
@@ -176,6 +184,7 @@ struct Chunk {
     // The chunk's block entities, in no order. A handful at most in nearly every chunk that has
     // any: finding one by position is a scan of this array.
     BlockEntityRef* block_entities = nullptr;
+    BlockEntityTag* block_entity_tags = nullptr;  // [block_entity_cap], beside block_entities - or null: nobody has one
     u16 block_entity_count = 0, block_entity_cap = 0;
     // Light sections whose data changed since the last broadcast (bit = light section index).
     u32 sky_changed = 0, block_changed = 0;

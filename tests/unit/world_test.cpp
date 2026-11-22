@@ -805,13 +805,15 @@ TEST(Blocks, GeneratedTablesAgreeWithEachOther) {
         ASSERT_LT(info.item, item_count());
         const u32 kind = info.flags & block_flag::kPlaceMask;
         if (kind == block_flag::kPlaceNone) continue;
-        if (kind == block_flag::kPlaceTorch) {
-            // A torch and its wall block share an item, which places either (StandingAndWallBlockItem).
+        if (kind == block_flag::kPlaceTorch || kind == block_flag::kPlaceSign || kind == block_flag::kPlaceHangingSign) {
+            // A torch and its wall block share an item, which places either (StandingAndWallBlockItem);
+            // so do a sign's two blocks, and a hanging sign's (HangingSignItem).
             const ItemInfo& item = item_info(info.item);
             ASSERT_TRUE(item.flags & item_flag::kStandingAndWall) << block_name(b);
             ASSERT_EQ(info.alt[0], block_info(item.block).default_state) << block_name(b);
             ASSERT_TRUE(block_of(info.alt[0]) == b || block_of(info.alt[1]) == b) << block_name(b);
-            ASSERT_EQ(block_info_of(info.alt[1]).state_count, 4u) << block_name(b);  // facing: four walls
+            // facing: four walls - of a sign with and without water in it
+            ASSERT_EQ(block_info_of(info.alt[1]).state_count, kind == block_flag::kPlaceTorch ? 4u : 8u) << block_name(b);
         } else {
             // Placeable: its item is a plain block item that places exactly this block.
             ASSERT_EQ(item_info(info.item).block, b) << block_name(b);

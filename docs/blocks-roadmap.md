@@ -2,7 +2,7 @@
 
 Minecraft 26.3 has 1286 blocks in 268 block classes. The server holds a block only if it
 simulates everything vanilla would do with it - so the list of what can be **placed** is the list
-of what is **done**: 719 blocks today. This file is that list, block class by block class,
+of what is **done**: 771 blocks today. This file is that list, block class by block class,
 in the order the missing systems are meant to be built.
 
 **Generated** by `tools/mcgen/roadmap.py` from the jar's block classes (`mcgen.py gamedata`) and the
@@ -522,7 +522,7 @@ Needs: The chest's machinery again - a block entity with stacks, a menu, what th
 - [ ] **TrappedChestBlock** (1, *block entity*) - `affectNeighborsAfterRemoval`, `getAnalogOutputSignal`, `getDirectSignal`, `getFluidState`, `getMenuProvider`, `getStateForPlacement`, `hasAnalogOutputSignal`, `isSignalSource`, `ownSignal`, `tick`, `triggerEvent`, `updateShape`, `useWithoutItem`  
   trapped_chest
 
-## 10. Block entities: what a client is shown (0 of 132 blocks)
+## 10. Block entities: what a client is shown (52 of 132 blocks)
 
 Needs: Block entities whose data travels to the client: `getUpdateTag` in the chunk packet, `block_entity_data` on change (`nbt::Writer` is there), text through `text::transcode`.
 
@@ -532,13 +532,13 @@ Needs: Block entities whose data travels to the client: `getUpdateTag` in the ch
   white_bed, orange_bed, magenta_bed, light_blue_bed, yellow_bed, lime_bed, pink_bed, gray_bed, light_gray_bed, cyan_bed, purple_bed, blue_bed, brown_bed, green_bed, red_bed, black_bed
 - [ ] **WallBannerBlock** (16, *block entity*) - `canSurvive`, `getCloneItemStack`, `getMenuProvider`, `getStateForPlacement`, `isPossibleToRespawnInThis`, `triggerEvent`, `updateShape`  
   white_wall_banner, orange_wall_banner, magenta_wall_banner, light_blue_wall_banner, yellow_wall_banner, lime_wall_banner, pink_wall_banner, gray_wall_banner, light_gray_wall_banner, cyan_wall_banner, purple_wall_banner, blue_wall_banner, brown_wall_banner, green_wall_banner, red_wall_banner, black_wall_banner
-- [ ] **CeilingHangingSignBlock** (13, *block entity*) - `canSurvive`, `getFluidState`, `getMenuProvider`, `getStateForPlacement`, `isPossibleToRespawnInThis`, `setPlacedBy`, `triggerEvent`, `updateShape`, `useItemOn`, `useWithoutItem`  
+- [x] **CeilingHangingSignBlock** (13, *block entity*) - `canSurvive`, `getFluidState`, `getMenuProvider`, `getStateForPlacement`, `isPossibleToRespawnInThis`, `setPlacedBy`, `triggerEvent`, `updateShape`, `useItemOn`, `useWithoutItem`  
   oak_hanging_sign, spruce_hanging_sign, birch_hanging_sign, acacia_hanging_sign, cherry_hanging_sign, jungle_hanging_sign, dark_oak_hanging_sign, pale_oak_hanging_sign, crimson_hanging_sign, warped_hanging_sign, mangrove_hanging_sign, poplar_hanging_sign, bamboo_hanging_sign
-- [ ] **StandingSignBlock** (13, *block entity*) - `canSurvive`, `getFluidState`, `getMenuProvider`, `getStateForPlacement`, `isPossibleToRespawnInThis`, `setPlacedBy`, `triggerEvent`, `updateShape`, `useItemOn`, `useWithoutItem`  
+- [x] **StandingSignBlock** (13, *block entity*) - `canSurvive`, `getFluidState`, `getMenuProvider`, `getStateForPlacement`, `isPossibleToRespawnInThis`, `setPlacedBy`, `triggerEvent`, `updateShape`, `useItemOn`, `useWithoutItem`  
   oak_sign, spruce_sign, birch_sign, acacia_sign, cherry_sign, jungle_sign, dark_oak_sign, pale_oak_sign, mangrove_sign, poplar_sign, bamboo_sign, crimson_sign, warped_sign
-- [ ] **WallHangingSignBlock** (13, *block entity*) - `getFluidState`, `getMenuProvider`, `getStateForPlacement`, `isPossibleToRespawnInThis`, `setPlacedBy`, `triggerEvent`, `updateShape`, `useItemOn`, `useWithoutItem`  
+- [x] **WallHangingSignBlock** (13, *block entity*) - `getFluidState`, `getMenuProvider`, `getStateForPlacement`, `isPossibleToRespawnInThis`, `setPlacedBy`, `triggerEvent`, `updateShape`, `useItemOn`, `useWithoutItem`  
   oak_wall_hanging_sign, spruce_wall_hanging_sign, birch_wall_hanging_sign, acacia_wall_hanging_sign, cherry_wall_hanging_sign, jungle_wall_hanging_sign, dark_oak_wall_hanging_sign, pale_oak_wall_hanging_sign, mangrove_wall_hanging_sign, poplar_wall_hanging_sign, crimson_wall_hanging_sign, warped_wall_hanging_sign, bamboo_wall_hanging_sign
-- [ ] **WallSignBlock** (13, *block entity*) - `canSurvive`, `getFluidState`, `getMenuProvider`, `getStateForPlacement`, `isPossibleToRespawnInThis`, `setPlacedBy`, `triggerEvent`, `updateShape`, `useItemOn`, `useWithoutItem`  
+- [x] **WallSignBlock** (13, *block entity*) - `canSurvive`, `getFluidState`, `getMenuProvider`, `getStateForPlacement`, `isPossibleToRespawnInThis`, `setPlacedBy`, `triggerEvent`, `updateShape`, `useItemOn`, `useWithoutItem`  
   oak_wall_sign, spruce_wall_sign, birch_wall_sign, acacia_wall_sign, cherry_wall_sign, jungle_wall_sign, dark_oak_wall_sign, pale_oak_wall_sign, mangrove_wall_sign, poplar_wall_sign, bamboo_wall_sign, crimson_wall_sign, warped_wall_sign
 - [ ] **SkullBlock** (5, *block entity*) - `getMenuProvider`, `getStateForPlacement`, `neighborChanged`, `triggerEvent`  
   skeleton_skull, zombie_head, creeper_head, dragon_head, piglin_head

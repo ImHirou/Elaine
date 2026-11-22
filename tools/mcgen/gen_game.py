@@ -52,6 +52,9 @@ _FURNACE = {"affectNeighborsAfterRemoval", "getAnalogOutputSignal", "getMenuProv
 _PLANT = {"canSurvive", "isPathfindable", "propagatesSkylightDown", "updateShape"}  # VegetationBlock
 _SEGMENTS = _PLANT | {"canBeReplaced(BlockState,BlockPlaceContext)", "getShape", "mirror", "rotate",
                       "createBlockStateDefinition", "getStateForPlacement"}
+_SIGN = {"canSurvive", "getFluidState", "getMenuProvider", "getShape", "mirror", "rotate", "triggerEvent", "updateShape",
+         "useItemOn", "useWithoutItem", "createBlockStateDefinition", "getStateForPlacement", "isPossibleToRespawnInThis",
+         "setPlacedBy"}
 PORTED_BLOCKS = {
     "ChestBlock": ("kChest", "kPlaceChest", _CHEST),
     # A copper chest joins any other copper chest, and the pair is then of one block: the less
@@ -94,6 +97,14 @@ PORTED_BLOCKS = {
     "ColoredFallingBlock": ("kFalling", "kPlaceDefault", {"onPlace", "tick", "updateShape", "animateTick"}),
     "ConcretePowderBlock": ("kConcretePowder", "kPlaceConcretePowder", {
         "onPlace", "tick", "updateShape", "animateTick", "getStateForPlacement"}),
+    # ---- signs: a block entity that holds text (SignBlockEntity; server/signs.cpp). Standing and on a
+    # wall they are one item's two blocks, as a torch's; hanging from a ceiling and from a wall too.
+    "StandingSignBlock": ("kSign", "kPlaceSign", _SIGN, "StandingAndWallBlockItem"),
+    "WallSignBlock": ("kWallSign", "kPlaceSign", _SIGN, "StandingAndWallBlockItem"),
+    "CeilingHangingSignBlock": ("kHangingSign", "kPlaceHangingSign", _SIGN | {"getBlockSupportShape"}, "HangingSignItem"),
+    "WallHangingSignBlock": ("kWallHangingSign", "kPlaceHangingSign",
+                             (_SIGN - {"canSurvive"}) | {"getBlockSupportShape", "getCollisionShape", "isPathfindable"},
+                             "HangingSignItem"),
     # ---- shapes: a state from how the block is placed and what stands beside it (server/block_shapes.cpp).
     # `waterlogged` is in most of them: getFluidState answers water, and updateShape asks for the
     # water's tick - of which there is none, so a class whose updateShape does nothing else has no
@@ -170,7 +181,8 @@ PLANT_SUPPORT = {
 }
 BLOCK_KINDS = ["kPlain", "kChest", "kFurnace", "kCraftingTable", "kTnt", "kPowered", "kSnowy", "kSpreading", "kNylium",
                "kBuddingAmethyst", "kAmethystCluster", "kTorch", "kWallTorch", "kLamp", "kFalling", "kConcretePowder",
-               "kSlab", "kStairs", "kFence", "kBars", "kWall", "kLantern", "kMushroom", "kBarrel", "kPlant", "kSegmented"]
+               "kSlab", "kStairs", "kFence", "kBars", "kWall", "kLantern", "kMushroom", "kBarrel", "kPlant", "kSegmented",
+               "kSign", "kWallSign", "kHangingSign", "kWallHangingSign"]
 # The kinds whose randomTick is ported, and of those the ones whose tick may act whatever stands
 # around the block (the others are asked what is around them: state::kSmothers and its like).
 RANDOM_TICK_KINDS = {"kSpreading", "kNylium", "kBuddingAmethyst"}
@@ -213,6 +225,7 @@ _BOOL = ["true", "false"]
 _SIDE = ["none", "low", "tall"]
 _HORIZONTAL = ["north", "south", "west", "east"]
 _FOUR = ["1", "2", "3", "4"]
+_SIXTEEN = [str(i) for i in range(16)]
 FAMILY_LAYOUTS = {
     "chest": ({"ChestBlock", "CopperChestBlock", "WeatheringCopperChestBlock"},
               [("facing", _HORIZONTAL), ("type", ["single", "left", "right"]), _WET]),
@@ -234,13 +247,18 @@ FAMILY_LAYOUTS = {
                      "MangroveRootsBlock"}, [_WET]),
     "mushroom": ({"HugeMushroomBlock"}, [("down", _BOOL), ("east", _BOOL), ("north", _BOOL), ("south", _BOOL), ("up", _BOOL),
                                          ("west", _BOOL)]),
+    "sign": ({"StandingSignBlock"}, [("rotation", _SIXTEEN), _WET]),
+    "wall_sign": ({"WallSignBlock", "WallHangingSignBlock"}, [("facing", _HORIZONTAL), _WET]),
+    "hanging_sign": ({"CeilingHangingSignBlock"}, [("attached", _BOOL), ("rotation", _SIXTEEN), _WET]),
 }
 
 # Sounds and particles the server sends by id (static registries: sound_event, particle_type).
 SOUNDS = ["block.chest.open", "block.chest.close", "entity.tnt.primed", "entity.generic.explode", "entity.item.pickup",
           "entity.armor_stand.break", "block.barrel.open", "block.barrel.close", "block.copper_chest.open",
           "block.copper_chest.close", "block.copper_chest_weathered.open", "block.copper_chest_weathered.close",
-          "block.copper_chest_oxidized.open", "block.copper_chest_oxidized.close", "block.chest.locked"]
+          "block.copper_chest_oxidized.open", "block.copper_chest_oxidized.close", "block.chest.locked",
+          "item.dye.use", "item.ink_sac.use", "item.glow_ink_sac.use", "item.honeycomb.wax_on",
+          "block.sign.waxed_interact_fail"]
 PARTICLES = ["explosion", "explosion_emitter", "poof", "smoke"]
 
 

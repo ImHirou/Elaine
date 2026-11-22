@@ -43,7 +43,8 @@ PORTED_ENTITY_HOOKS = {
     ("stepOn", "MagmaBlock"): None,                    # burns the living
 }
 # Classes whose getCollisionShape override returns one shape whoever asks (read in the jar).
-CONSTANT_COLLISION_SHAPE = {"SoulSandBlock", "MudBlock", "HoneyBlock", "CrossCollisionBlock", "WallBlock"}
+CONSTANT_COLLISION_SHAPE = {"SoulSandBlock", "MudBlock", "HoneyBlock", "CrossCollisionBlock", "WallBlock",
+                            "WallHangingSignBlock"}   # (the plank it hangs from, by its axis)
 
 MATERIAL_FLAGS = [
     ("kFence", 0x1, "#fences: an entity on it stands on it even 0.2 blocks down (Entity.getOnPos)"),

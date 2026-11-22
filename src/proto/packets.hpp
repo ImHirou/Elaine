@@ -986,6 +986,24 @@ struct LevelEvent {
         return put_bool(put_be32(put_be64(put_be32(p, type), pack_block_pos(x, y, z)), static_cast<u32>(data)), global);
     }
 };
+// ClientboundBlockEntityDataPacket: the position, the block entity's type, and its update tag
+// (BlockEntity.getUpdateTag) as a tag in the network form - what a sign reads now.
+struct BlockEntityData {
+    static constexpr u32 kId = ids::play::cb::kBlockEntityData;
+    i32 x, y, z;
+    u32 type;                 // block_entity_type id
+    std::span<const u8> tag;  // type byte and payload
+    usize bound() const { return 8 + 5 + tag.size(); }
+    u8* encode(u8* p) const { return put_bytes(put_varint(put_be64(p, pack_block_pos(x, y, z)), type), tag.data(), tag.size()); }
+};
+// ClientboundOpenSignEditorPacket: the sign, and the side to write on (SignTextSlot: 0 back, 1 front).
+struct OpenSignEditor {
+    static constexpr u32 kId = ids::play::cb::kOpenSignEditor;
+    i32 x, y, z;
+    bool front;
+    usize bound() const { return 8 + 5; }
+    u8* encode(u8* p) const { return put_varint(put_be64(p, pack_block_pos(x, y, z)), front ? 1u : 0u); }
+};
 // What a falling block sends to those who see it when it lands (26.x): the block it became,
 // ahead of the chunk's own block update. The layout of block_update.
 struct AddTransientBlock {
@@ -1180,6 +1198,23 @@ struct SetCarriedItem {
 
 // The stack is ItemStack.OPTIONAL_UNTRUSTED_STREAM_CODEC, which only item::read_untrusted reads:
 // this stops in front of it.
+// ServerboundSignUpdatePacket: the sign, four lines of at most 384 characters each (no count: a
+// fixedSizeList), and the side they were written on (SignTextSlot, an id that is 0 for anything
+// but 1: ByIdMap ... ZERO, and 0 is the back).
+struct SignUpdate {
+    static constexpr u32 kLineChars = 384;
+    BlockPos pos;
+    std::string_view lines[4];
+    bool front;
+    static SignUpdate decode(Reader& r) {
+        SignUpdate u;
+        u.pos = unpack_block_pos(r.be64());
+        for (std::string_view& line : u.lines) line = r.str(kLineChars * 3);
+        u.front = r.varint() == 1;
+        return u;
+    }
+};
+
 struct SetCreativeModeSlot {
     i16 slot;  // menu slot; negative: drop the stack
     static SetCreativeModeSlot decode(Reader& r) { return {static_cast<i16>(r.be16())}; }

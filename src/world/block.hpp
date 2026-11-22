@@ -69,6 +69,10 @@ ALWAYS_INLINE bool random_target(u32 r, u32 above) { return (r & state::kSoil) &
 // BlockState.isFaceSturdy(level, pos, dir) - SupportType.FULL - and (..., SupportType.CENTER).
 ALWAYS_INLINE bool face_sturdy(BlockState s, u32 dir) { return (state::kSturdyFull[s] >> dir) & 1; }
 ALWAYS_INLINE bool face_sturdy_center(BlockState s, u32 dir) { return (state::kSturdyCenter[s] >> dir) & 1; }
+// BlockState.isSolid(): what a sign stands on, or hangs against.
+ALWAYS_INLINE bool is_solid(BlockState s) { return (state::kSturdyCenter[s] & 0x40) != 0; }
+// Block.isFaceFull(the state's collision shape, DOWN): what a hanging sign hangs from by both chains.
+ALWAYS_INLINE bool collision_full_below(BlockState s) { return (state::kSturdyCenter[s] & 0x80) != 0; }
 
 // FluidState.is(FluidTags.WATER): water, still or flowing, as the block or with it (waterlogged) -
 // and FluidState.is(Fluids.WATER): a source of it.

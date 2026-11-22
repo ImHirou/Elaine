@@ -1209,7 +1209,7 @@ def malformed_item_stacks_disconnect(srv: Server):
     check_join(join(c, "Alice"), "Alice")
 
 
-@test()
+@test(alone=True)     # (megabytes through the test client: it fills a core by itself)
 def heavy_stacks(srv: Server):
     """Stacks of up to a megabyte: kept, shown to others, there again when their holder is - sent slot by
     slot when no frame holds them all, and bounded: how fast a client may send them, how much of them it
@@ -3744,6 +3744,10 @@ def command_blocks(srv: Server):
     assert not of_type(a, "kTnt") and not of_type(b, "kTnt")
 
 
+def plain_text(component) -> str:
+    return shown(component)
+
+
 def shown(component) -> str:
     """Component.getString of literal text: a text and its children."""
     if isinstance(component, str):
@@ -5284,6 +5288,160 @@ def block_entity_tags():
         make_op(srv, a, "Alice")
         assert held(chest) == loot and data(chest, "lock") == '{items: "minecraft:stick"}', held(chest)
         assert held(placed) == box, held(placed)
+        assert srv.stop() == 0, srv.read_log()
+        srv = None
+    finally:
+        if srv:
+            srv.stop()
+        shutil.rmtree(world, ignore_errors=True)
+
+
+@test()
+def signs():
+    """Signs: standing and on a wall and hanging, turned to whoever places them; the editor that opens,
+    and whose lines are taken; dye, glow ink and wax; what holds them; a sign out of a tag - and its
+    text there for whoever comes later, in the chunk's own packet, also after the server was stopped.
+    (Where a vanilla server puts a sign and what it sends is compared by tools/vanilla/command_probe.py.)"""
+    world = tempfile.mkdtemp(prefix="world-signs-")
+    srv = None
+    try:
+        srv = Server(EXE, world=world)
+        a, b = srv.client(), srv.client()
+        join(a, "Alice", view=3)
+        join(b, "Bob", view=3)
+        a.expect("player_info_update")
+        for cl in (a, b):
+            cl.send("player_loaded")
+        settle(a, b)
+        make_op(srv, a, "Alice")
+        SIGN = mc.BLOCK_ENTITY["kSign"]
+        pos = (8, -60, 10)
+
+        def write(c: Client, lines: list, front: bool = True, at: tuple = pos) -> None:
+            c.send("sign_update", mc.pack_block_pos(*at) + b"".join(mc.mc_str(line) for line in lines) + varint(1 if front else 0))
+
+        def shown(c: Client, at: tuple = pos, of: int = SIGN) -> dict:
+            """What the client was last told the sign says: its update tag."""
+            told = [tag for where, kind, tag in c.block_entity_data if where == at and kind == of]
+            assert told, f"nothing was told about the sign at {at}"
+            return told[-1]
+
+        # ---- placing: it stands turned to Alice, who looks south, and her editor opens on its front.
+        give(a, 36, I["kOakSign"], 8)
+        click(a, (8, -61, 10), 1, seq=1)
+        assert collect(a)[pos] == mc.BLOCK["kOakSign"]         # rotation 8: facing north
+        assert collect(b)[pos] == mc.BLOCK["kOakSign"]
+        assert a.sign_editor == (pos, True) and b.sign_editor is None
+        empty = ["", "", "", ""]
+        for cl in (a, b):
+            assert shown(cl)["front_text"]["messages"] == empty and shown(cl)["back_text"]["messages"] == empty, shown(cl)
+            assert shown(cl)["is_waxed"] == 0
+        # Only whoever was sent the editor may write - once.
+        told = len(b.block_entity_data)
+        write(b, ["Bob", "was", "here", ""])
+        settle(a, b)
+        assert len(b.block_entity_data) == told
+        write(a, ["Hello", "\u00a7cred?", "", "x" * 384])
+        collect(a), collect(b)
+        for cl in (a, b):
+            assert shown(cl)["front_text"]["messages"] == ["Hello", "red?", "", "x" * 384], shown(cl)["front_text"]
+        told = len(b.block_entity_data)
+        write(a, ["again", "", "", ""])
+        settle(a, b)
+        assert len(b.block_entity_data) == told
+
+        # ---- a click with an empty hand opens the editor of the side one stands on; while Bob has it, Alice gets none.
+        a.sign_editor = None
+        click(b, pos, 2, seq=1)
+        collect(b)
+        assert b.sign_editor == (pos, True)
+        give(a, 36, 0, 0)
+        click(a, pos, 2, seq=2)
+        collect(a)
+        assert a.sign_editor is None
+        write(b, ["Hello", "from", "Bob", ""])
+        collect(a), collect(b)
+        assert shown(a)["front_text"]["messages"] == ["Hello", "from", "Bob", ""]
+
+        # ---- dye, glow ink, wax.
+        give(a, 36, I["kRedDye"], 1)
+        click(a, pos, 2, seq=3)
+        collect(a), collect(b)
+        assert shown(b)["front_text"]["color"] == "red" and a.sounds[-1][0] == mc.SOUND["kItemDyeUse"], shown(b)["front_text"]
+        give(a, 36, I["kGlowInkSac"], 1)
+        click(a, pos, 2, seq=4)
+        collect(a), collect(b)
+        assert shown(b)["front_text"]["has_glowing_text"] == 1 and a.sounds[-1][0] == mc.SOUND["kItemGlowInkSacUse"]
+        give(a, 36, I["kHoneycomb"], 1)
+        click(a, pos, 2, seq=5)
+        collect(a), collect(b)
+        assert shown(b)["is_waxed"] == 1 and a.sounds[-1][0] == mc.SOUND["kItemHoneycombWaxOn"]
+        assert b.level_events[-1][:2] == (3003, pos), b.level_events[-1]
+        # Waxed: nothing opens it any more, and it says so with a sound.
+        give(a, 36, 0, 0)
+        a.sign_editor = None
+        click(a, pos, 2, seq=6)
+        collect(a)
+        assert a.sign_editor is None and a.sounds[-1][0] == mc.SOUND["kBlockSignWaxedInteractFail"]
+
+        # ---- on a wall: against the side of a block, facing away from it.
+        run_command(a, "setblock 8 -60 13 stone")
+        give(a, 36, I["kOakSign"], 8)
+        click(a, (8, -60, 13), 2, seq=7)
+        assert collect(a)[(8, -60, 12)] == mc.BLOCK["kOakWallSign"]     # facing north
+        assert a.sign_editor == ((8, -60, 12), True)
+        # ...and hanging: under a block, by both chains, across the way Alice looks.
+        run_command(a, "setblock 10 -58 10 stone")
+        give(a, 36, I["kOakHangingSign"], 8)
+        click(a, (10, -58, 10), 0, seq=8)
+        assert collect(a)[(10, -59, 10)] == mc.BLOCK["kOakHangingSign"]
+        assert shown(a, (10, -59, 10), mc.BLOCK_ENTITY["kHangingSign"])["front_text"]["messages"] == empty
+
+        # ---- what holds a sign: without it the sign breaks.
+        got = run_command(a, "setblock 8 -60 13 air")
+        assert got["blocks"][(8, -60, 12)] == 0, got["blocks"]
+        got = run_command(a, "setblock 10 -58 10 air")
+        assert got["blocks"][(10, -59, 10)] == 0, got["blocks"]
+
+        # ---- a sign out of a tag, and what it saves as.
+        line = ('setblock 8 -60 14 oak_sign{front_text:{messages:["a",{text:"b",color:"red"},"",""],color:"blue"},'
+                'is_waxed:1b,back_text:{messages:["only three","",""]}}')
+        assert run_command(a, line)["said"] == [tr("commands.setblock.success", 8, -60, 14)]
+        tagged = shown(a, (8, -60, 14))
+        assert tagged["front_text"] == {"messages": ["a", {"color": "red", "text": "b"}, "", ""], "color": "blue",
+                                        "has_glowing_text": 0}, tagged
+        assert tagged["back_text"]["messages"] == empty and tagged["is_waxed"] == 1     # (a text of three lines is no text)
+
+        def data(path: str) -> str:
+            said = run_command(a, "data get block 8 -60 14 " + path)["said"]
+            assert len(said) == 1 and "with" in said[0], said
+            return said[0]["with"][-1]
+
+        assert plain_text(data("front_text.messages[1].color")) == '"red"' and plain_text(data("is_waxed")) == "1b"
+
+        # ---- whoever comes later reads it in the chunk's own packet.
+        def in_chunk(c: Client) -> dict:
+            return {where: (kind, tag) for where, kind, tag in c.chunks[(0, 0)]["block_entities"]}
+
+        c = srv.client()
+        join(c, "Carol", view=3)
+        c.send("player_loaded")
+        settle(c)
+        seen = in_chunk(c)
+        assert seen[pos][0] == SIGN and seen[pos][1]["front_text"]["messages"] == ["Hello", "from", "Bob", ""], seen[pos]
+        assert seen[pos][1]["front_text"]["color"] == "red" and seen[pos][1]["is_waxed"] == 1
+        assert seen[(8, -60, 14)][1] == tagged
+        c.close()
+
+        # ---- and after the server was stopped and started.
+        assert srv.stop() == 0, srv.read_log()
+        os.unlink(srv.log.name)
+        srv = Server(EXE, world=world)
+        c = srv.client()
+        join(c, "Carol", view=3)
+        c.send("player_loaded")
+        settle(c, ticks=6)
+        assert in_chunk(c) == seen, in_chunk(c)
         assert srv.stop() == 0, srv.read_log()
         srv = None
     finally:

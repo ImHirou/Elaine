@@ -419,6 +419,8 @@ class Client:
         self.window = None
         self.block_events: list[tuple] = []    # ((x, y, z), b0, b1, block id)
         self.level_events: list[tuple] = []    # (type, (x, y, z), data, global)
+        self.block_entity_data: list[tuple] = []   # ((x, y, z), block entity type, its update tag)
+        self.sign_editor = None                # ((x, y, z), front): the sign whose editor the server opened last
         self.transient_blocks: list[tuple] = []  # add_transient_block: ((x, y, z), state)
         self.explosions: list[dict] = []
         # The chunks the client holds (ClientChunkCache), kept up to date by recv() like the
@@ -892,7 +894,7 @@ class ChunkCache(dict):
 
 MENU_PACKETS = {"container_set_content", "container_set_slot", "set_cursor_item", "set_player_inventory", "set_held_slot",
                 "sound", "open_screen", "container_set_data", "container_close", "update_recipes", "block_event", "explode",
-                "commands", "stop_sound", "level_event", "add_transient_block"}
+                "commands", "stop_sound", "level_event", "add_transient_block", "block_entity_data", "open_sign_editor"}
 # Slots of the menus a block opens, by menu type (the menu registry): the container's own, then
 # the 36 of the inventory. From the constructors of ChestMenu, AbstractFurnaceMenu, CraftingMenu.
 WINDOW_SLOTS = {"kGeneric9x3": 27, "kGeneric9x6": 54, "kFurnace": 3, "kSmoker": 3, "kBlastFurnace": 3, "kCrafting": 10}
@@ -1150,6 +1152,13 @@ def _apply_menu_packet(self: "Client", name: str, r: Reader) -> None:
     elif name == "level_event":   # ClientboundLevelEventPacket: int type, BlockPos, int data, boolean globalEvent
         kind = r.i32()
         self.level_events.append((kind, unpack_block_pos(r.u64()), r.i32(), r.bool()))
+    elif name == "block_entity_data":   # ClientboundBlockEntityDataPacket: BlockPos, the block entity's type, its update tag
+        pos = unpack_block_pos(r.u64())
+        kind = r.varint()
+        self.block_entity_data.append((pos, kind, r.nbt()))
+    elif name == "open_sign_editor":    # ClientboundOpenSignEditorPacket: BlockPos, SignTextSlot (0 back, 1 front)
+        pos = unpack_block_pos(r.u64())
+        self.sign_editor = (pos, r.varint() == 1)
     elif name == "add_transient_block":   # ClientboundAddTransientBlockPacket: BlockPos, the state's id
         pos = unpack_block_pos(r.u64())
         self.transient_blocks.append((pos, r.varint()))

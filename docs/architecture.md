@@ -635,6 +635,46 @@ see "Block updates". A tick's block events are a set in vanilla (`ServerLevel.bl
 a lid that is closed in the very tick of its recount is told to fall once; `Game::block_event`
 drops the second likewise.
 
+### Signs (`server/signs.cpp`)
+
+Four classes - `StandingSignBlock`, `WallSignBlock`, `CeilingHangingSignBlock`,
+`WallHangingSignBlock` - of every wood: 52 blocks, two items a wood. A standing sign and a wall
+sign are one item's two blocks, as a torch's (`kPlaceSign`); a hanging sign's item hangs it from
+what is above when the player looks up, else between two walls (`kPlaceHangingSign`: under a
+block with a whole face down by both chains, else - or sneaking - by the middle; under another
+hanging sign that runs the same way, in line with it). What holds one is a bit of the state
+beside it (`isSolid`, the sturdy tables), and it breaks when that goes - but for the one
+between walls, which `WallHangingSignBlock` lets hang on nothing.
+
+A sign's two texts are kept as `SignText`'s StreamCodec writes them - the form the item
+components `sign_text_front` / `sign_text_back` have, so that the codecs of those components
+are the sign's too: four lines, each a text component as a tag, a dye, whether it glows.
+
+- **What a client is shown** is the block entity's update tag (`SignBlockEntity.getUpdateTag`:
+  both texts and the wax). It lies with the chunk - an array beside the chunk's block entities,
+  for the ones that show something (`Dimension::set_block_entity_tag`) - so that the chunk's
+  packet carries it without asking the game, and a change sends `block_entity_data` behind the
+  block's update (`ChunkHolder.broadcastBlockEntityIfNeeded`).
+- **Writing.** The block that is placed opens the editor of its front (`setPlacedBy`); a click
+  with an empty hand that of the side the player stands on (`getSlotPlayerIsFacing`). Whoever
+  was sent the editor is the one player whose `sign_update` is taken, once - until then nobody
+  else gets an editor, and whoever walks more than four blocks out of reach loses it
+  (`SignBlockEntity.tick`; only signs somebody may write on are looked at). A line that comes in
+  is plain text, without formatting codes, in the style the line had.
+- **Dye, ink, wax** (`SignApplicator`): a dye colours the side one stands on, glow ink makes it
+  glow, an ink sac takes that off - each only if something is written there and it changes
+  something, else the click is an empty hand's - and honeycomb waxes the sign: no editor opens
+  any more, and a click says so with a sound.
+- **Click commands**: a line's click event runs only on a sign that allows it
+  (`allow_op_features`, which only a tag can set) - as the player, at the sign, with a game
+  master's permissions, unheard; otherwise the player is told that it does not.
+- **Kept**: a record of its own in the chunk's bytes (version 3). A sign of an imported world is
+  read when its chunk is, like a chest with a name.
+
+Not vanilla's: `Mth.atan2` is a table there and the library's function here, so that a player
+standing exactly beside a sign may be on its other side; a text with a selector or a score is
+not read at all, so `allow_op_features` never resolves one.
+
 ### The rest of two families
 
 **A smoker and a blast furnace** are the furnace: one class in vanilla

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <gtest/gtest.h>
+#include <cstring>
 
 #include <algorithm>
 #include <cmath>
@@ -565,6 +566,57 @@ TEST(Packets, BlockUpdateLayoutsAreTheJars) {
     // A falling block's add_entity carries its block state where other entities carry 0.
     const std::string add = body_hex(cb::AddEntity{7, {1, 2}, entity_type::kFallingBlock, 0.5, 70.0, 0.5, 0, 0, 0, 0, 0, 0, 121});
     EXPECT_EQ(add.substr(add.size() - 2), "79");
+}
+
+TEST(Packets, SignLayoutsAreTheJars) {
+    // ClientboundOpenSignEditorPacket: BlockPos, SignTextSlot (ByteBufCodecs.idMapper: 0 the back, 1 the front).
+    EXPECT_EQ(body_hex(cb::OpenSignEditor{4, -60, -13, true}),
+              "0000013fffff3fc4"
+              "01");
+    EXPECT_EQ(body_hex(cb::OpenSignEditor{4, -60, -13, false}),
+              "0000013fffff3fc4"
+              "00");
+    // ClientboundBlockEntityDataPacket: BlockPos, the block entity's type (a registry id), its
+    // update tag in the network form. Here {w:1b}.
+    const u8 tag[] = {0x0A, 0x01, 0x00, 0x01, 'w', 0x01, 0x00};
+    EXPECT_EQ(body_hex(cb::BlockEntityData{4, -60, -13, 7, tag}),
+              "0000013fffff3fc4"
+              "07"
+              "0a010001770100");
+    // ServerboundSignUpdatePacket: BlockPos, four strings - a fixedSizeList, which has no
+    // count - and the SignTextSlot.
+    const u8 body[] = {0x00, 0x00, 0x01, 0x3f, 0xff, 0xff, 0x3f, 0xc4, 2, 'h', 'i', 0, 1, 'x', 0, 1};
+    Reader r(body, sizeof body);
+    const sb::SignUpdate u = sb::SignUpdate::decode(r);
+    EXPECT_TRUE(r.done());
+    EXPECT_EQ(u.pos.x, 4);
+    EXPECT_EQ(u.pos.y, -60);
+    EXPECT_EQ(u.pos.z, -13);
+    EXPECT_EQ(u.lines[0], "hi");
+    EXPECT_EQ(u.lines[1], "");
+    EXPECT_EQ(u.lines[2], "x");
+    EXPECT_EQ(u.lines[3], "");
+    EXPECT_TRUE(u.front);
+    // The slot is an id by ByIdMap ... ZERO: anything but 1 is the first one, the back.
+    u8 back[sizeof body];
+    std::memcpy(back, body, sizeof body);
+    back[sizeof body - 1] = 7;
+    Reader rb(back, sizeof back);
+    EXPECT_FALSE(sb::SignUpdate::decode(rb).front);
+    // A line is at most 384 characters, which is at most three bytes each.
+    std::vector<u8> ok(body, body + 8), over(body, body + 8);
+    for (std::vector<u8>* v : {&ok, &over}) {
+        const u32 n = v == &ok ? 384 * 3 : 384 * 3 + 1;
+        v->push_back(static_cast<u8>((n & 0x7F) | 0x80));
+        v->push_back(static_cast<u8>(n >> 7));
+        v->insert(v->end(), n, 'a');
+        v->insert(v->end(), {0, 0, 0, 1});
+    }
+    Reader r1(ok.data(), ok.size()), r2(over.data(), over.size());
+    sb::SignUpdate::decode(r1);
+    sb::SignUpdate::decode(r2);
+    EXPECT_TRUE(r1.done());
+    EXPECT_FALSE(r2.ok);
 }
 
 TEST(Packets, ChunkBatchReceivedLayout) {

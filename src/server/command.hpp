@@ -214,6 +214,8 @@ struct Source {
     // CommandSigningContext: the line came as chat_command_signed, so what its message arguments
     // say is said by the player (player_chat) and not for it (disguised_chat).
     bool signs = false;
+    // CommandSource.NULL: nobody hears what the command answers (a sign's click command).
+    bool silent = false;
 };
 
 struct Invocation;

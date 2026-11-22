@@ -172,6 +172,8 @@ u8* put_light(u8* p, const Chunk& c, u32 sky_mask, u32 block_mask) {
 usize chunk_wire_bound(const Chunk& c) {
     usize n = 8 + 1 + 3 * (2 + 2 + 8 * kHeightmapWords) + 5 + kVarIntMaxBytes +
               static_cast<usize>(c.block_entity_count) * (1 + 2 + kVarIntMaxBytes + 1);
+    if (c.block_entity_tags)
+        for (u32 i = 0; i < c.block_entity_count; ++i) n += c.block_entity_tags[i].len;
     for (u32 si = 0; si < c.sections_count; ++si)
         n += section_wire_size(c.sections[si], c.biome[si], c.biomes ? &c.biomes[si] : nullptr);
     return n + light_wire_bound(c, ~0u, ~0u);
@@ -195,16 +197,19 @@ u8* put_chunk(u8* p, const Chunk& c) {
     DCHECK(static_cast<usize>(p - start) == size);
 
     // ClientboundLevelChunkPacketData.BlockEntityInfo: packed x/z, y, type, and the block entity's
-    // update tag - BlockEntity.getUpdateTag(), which is empty for every type the server has (a
-    // chest and a furnace keep their contents to themselves), and an empty tag travels as "no
-    // tag": one TAG_End (FriendlyByteBuf.writeNbt(null)).
+    // update tag - BlockEntity.getUpdateTag(), which is empty for most types (a chest and a
+    // furnace keep their contents to themselves), and an empty tag travels as "no tag": one
+    // TAG_End (FriendlyByteBuf.writeNbt(null)). A sign's is its text.
     p = put_varint(p, c.block_entity_count);
     for (u32 i = 0; i < c.block_entity_count; ++i) {
         const BlockEntityRef& be = c.block_entities[i];
         p = put_u8(p, be.xz);
         p = put_be16(p, static_cast<u16>(be.y));
         p = put_varint(p, be.type);
-        p = put_u8(p, 0);
+        if (c.block_entity_tags && c.block_entity_tags[i].len)
+            p = put_bytes(p, c.block_entity_tags[i].bytes, c.block_entity_tags[i].len);
+        else
+            p = put_u8(p, 0);
     }
     return put_light(p, c, ~0u, ~0u);
 }
