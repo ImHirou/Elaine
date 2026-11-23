@@ -57,10 +57,11 @@ u32 section_traits(BlockState s) {
 
 u32 fill_section_masks(Chunk& c) {
     u32 any = 0;
-    c.filled_sections = c.large_sections = c.entity_sections = c.fall_sections = 0;
+    c.filled_sections = c.large_sections = c.entity_sections = c.fall_sections = c.fluid_sections = 0;
     for (u32 si = 0; si < c.sections_count; ++si) {
         const u32 traits = traits_of_section(c.sections[si]), bit = 1u << si;
         if (!c.sections[si].only_air()) c.filled_sections |= bit;
+        if (c.sections[si].fluids) c.fluid_sections |= bit;
         if (traits & 1) c.large_sections |= bit;
         if (traits & 2) c.entity_sections |= bit;
         if (traits & 4) c.fall_sections |= bit;

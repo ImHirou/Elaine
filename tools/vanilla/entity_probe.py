@@ -7,8 +7,8 @@
     entity_probe.py diff <vanilla.json> <ours.json>
 
 `record` joins two bots (tests/integration/mcproto.py, offline mode): A watches, B acts - joins,
-walks, turns, sneaks, sprints, jumps, stands, walks out of sight and back, changes its options,
-leaves. Every play packet either of them receives is logged per step, entity packets with their
+walks, turns, sneaks, sprints, jumps, stands, walks out of sight and back, sprints in a tank of
+water the console builds around it - and so swims - changes its options, leaves. Every play packet either of them receives is logged per step, entity packets with their
 bytes. `diff` lines two recordings up step by step, entity ids and the two bots' packets only.
 
 The reference is the vanilla server, run under the rules in AGENTS.md - compare.py starts it and
@@ -28,6 +28,7 @@ Reading the diff:
 from __future__ import annotations
 
 import json
+import math
 import socket
 import struct
 import sys
@@ -201,6 +202,28 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str) -> 
     step("B steps 9 blocks at once (too far for a delta)", tick(lambda i: b.move(dx=9.0)), ticks=1, bots=[b])
     step("B walks away, 4 a tick, 12 ticks", tick(lambda i: b.move(dx=4.0)), ticks=12, bots=[b])
     step("B walks back, 4 a tick, 15 ticks", tick(lambda i: b.move(dx=-4.0)), ticks=15, bots=[b])
+    # In water: one that sprints with its eyes under it swims - a flag and a pose, the server's to
+    # say. Twelve blocks from A, in a tank of glass the console builds around where B stands.
+    def tank(inside: str | None) -> None:
+        x, y, z = (math.floor(v) for v in b.pos)
+        if inside:
+            lock.console(f"fill {x - 2} {y - 1} {z - 2} {x + 2} {y + 3} {z + 2} minecraft:glass\n"
+                         f"fill {x - 1} {y} {z - 1} {x + 1} {y + 2} {z + 1} {inside}")
+        else:
+            lock.console(f"fill {x - 2} {y} {z - 2} {x + 2} {y + 3} {z + 2} minecraft:air\n"
+                         f"fill {x - 2} {y - 1} {z - 2} {x + 2} {y - 1} {z + 2} minecraft:grass_block")
+
+    def sprinting(on: bool) -> None:
+        b.c.send("player_command", varint(b.entity_id) + varint(1 if on else 2) + varint(0))
+
+    step("B walks 12 blocks off", tick(lambda i: b.move(dz=4.0)), ticks=3, bots=[b])
+    step("the console builds a tank of water around B", tick(lambda i: tank("minecraft:water") if i == 0 else None), ticks=4, bots=[b])
+    step("B sprints under water: it swims", tick(lambda i: sprinting(True) if i == 0 else None), ticks=6, bots=[b])
+    step("B stops sprinting: it stands", tick(lambda i: sprinting(False) if i == 0 else None), ticks=6, bots=[b])
+    step("B sprints again, and the water goes: it swims, then only sprints", ticks=8, bots=[b],
+         actions=tick(lambda i: sprinting(True) if i == 0 else tank("minecraft:air") if i == 4 else None))
+    step("B stops, and the tank goes", tick(lambda i: (sprinting(False), tank(None)) if i == 0 else None), ticks=4, bots=[b])
+    step("B walks back", tick(lambda i: b.move(dz=-4.0)), ticks=3, bots=[b])
     step("A turns", lambda i: (a.look(45.0, 0.0), a.tick_end()), ticks=2, bots=[b])
     step("B changes options: cape off, left-handed", tick(options), ticks=4, bots=[b])
     step("B disconnects", lambda i: (lock.leave(b), b.c.close()), ticks=1, settle=20)

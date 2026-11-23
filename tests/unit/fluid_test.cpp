@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <random>
 #include <string>
@@ -203,7 +204,8 @@ TEST(Fluids, AStateHoldsWhatTheJarSays) {
     for (const BlockState s : {dry, lava, kAir}) EXPECT_FALSE(holds_water(s) || holds_water_source(s)) << s;
 
     // FlowingFluid.canHoldAnyFluid: a LiquidBlockContainer, or a block of #washed_away_by_fluids.
-    const auto facts = [](std::string_view spec) { return st::kFluidFacts[state_of(spec)]; };
+    const u32 hold_facts = st::kHoldsFluid | st::kFluidContainer | st::kTakesWater | st::kCreativeOnly;
+    const auto facts = [&](std::string_view spec) { return st::kFluidFacts[state_of(spec)] & hold_facts; };
     EXPECT_EQ(facts("minecraft:air"), st::kHoldsFluid);
     EXPECT_EQ(facts("minecraft:water"), st::kHoldsFluid);
     EXPECT_EQ(facts("minecraft:lava"), st::kHoldsFluid);
@@ -241,6 +243,19 @@ TEST(Fluids, AStateHoldsWhatTheJarSays) {
     EXPECT_EQ(facts("minecraft:stone"), 0);
     EXPECT_EQ(facts("minecraft:oak_door"), 0);
     EXPECT_EQ(facts("minecraft:glass"), 0);
+    // What a fluid beside it does not run off over (#blocks_fluid_flow: what blocks motion, and
+    // signs), and what is no wall to one that falls beside it (an IceBlock): FlowingFluid.getFlow.
+    const auto flow = [](std::string_view spec) { return st::kFluidFacts[state_of(spec)] & (st::kBlocksFlow | st::kIce); };
+    EXPECT_EQ(flow("minecraft:stone"), st::kBlocksFlow);
+    EXPECT_EQ(flow("minecraft:oak_slab"), st::kBlocksFlow);
+    EXPECT_EQ(flow("minecraft:oak_sign"), st::kBlocksFlow);
+    EXPECT_EQ(flow("minecraft:ice"), st::kBlocksFlow | st::kIce);
+    EXPECT_EQ(flow("minecraft:frosted_ice"), st::kBlocksFlow | st::kIce);
+    EXPECT_EQ(flow("minecraft:packed_ice"), st::kBlocksFlow);
+    EXPECT_EQ(flow("minecraft:air"), 0);
+    EXPECT_EQ(flow("minecraft:water"), 0);
+    EXPECT_EQ(flow("minecraft:torch"), 0);
+    EXPECT_EQ(flow("minecraft:cobweb"), 0);
 
     // The block of a fluid: of a ported class, set by a command, placed by no item.
     const BlockInfo& info = block_info_of(water);
@@ -561,4 +576,106 @@ TEST(Fluids, TheSearchRemembersAndFindsTheSame) {
     }
     EXPECT_GT(compared, 300u);
     EXPECT_GT(somewhere, 100u);
+}
+
+// FlowingFluid.getFlow: which way a cell of fluid runs - what carries an entity that is in it.
+// (That an entity is carried as on a vanilla server is the physics recording's to say:
+// tests/unit/physics_test.cpp. These are the cases, each by the rule that makes it.)
+TEST(Fluids, ACellRunsTowardsWhereThereIsLess) {
+    Land land;
+    const auto flow = [&](i32 x, i32 y, i32 z) {
+        std::array<double, 3> out{};
+        fluid_flow(land.dim, fluid_of(land.at(x, y, z)), x, y, z, out.data());
+        return out;
+    };
+    const std::array<double, 3> none{0.0, 0.0, 0.0};
+    const auto east = [](const std::array<double, 3>& v) { return std::fabs(v[0] - 1.0) < 1e-12 && v[1] == 0.0 && v[2] == 0.0; };
+    // A channel that runs east, walled in: more of it to the west, less to the east.
+    for (i32 x = -1; x <= 5; ++x)
+        for (i32 z = -1; z <= 1; ++z) land.put(x, kY, z, "minecraft:stone");
+    for (i32 i = 0; i < 5; ++i) land.put(i, kY, 0, "minecraft:water[level=" + std::to_string(i) + "]");
+    EXPECT_TRUE(east(flow(0, kY, 0)));  // the source: only the east has less
+    EXPECT_TRUE(east(flow(2, kY, 0)));
+    EXPECT_TRUE(east(flow(4, kY, 0)));  // the last: its west has more (a wall says nothing)
+    // A pool of sources: nowhere - and not at its rim either, where the air beside it has ground under it.
+    for (i32 x = 8; x <= 10; ++x)
+        for (i32 z = 8; z <= 10; ++z) land.put(x, kY, z, "minecraft:water");
+    EXPECT_EQ(flow(9, kY, 9), none);
+    EXPECT_EQ(flow(8, kY, 8), none);
+    // Falling beside a wall: straight down. Between walls of ice (no side of which is one): nowhere.
+    for (const char* wall : {"minecraft:stone", "minecraft:ice"}) {
+        for (i32 y = kY; y <= kY + 2; ++y) {
+            for (const auto& [dx, dz] : {std::pair{-1, 0}, std::pair{1, 0}, std::pair{0, -1}, std::pair{0, 1}})
+                land.put(-8 + dx, y, -8 + dz, wall);
+            land.put(-8, y, -8, y == kY + 2 ? "minecraft:water" : "minecraft:water[level=8]");
+        }
+        EXPECT_EQ(flow(-8, kY, -8), std::string_view(wall) == "minecraft:ice" ? none : (std::array<double, 3>{0.0, -1.0, 0.0}))
+            << wall;
+        EXPECT_EQ(flow(-8, kY + 2, -8), none) << wall;  // (the source on top of it does not fall)
+    }
+    // Beside what neither holds a fluid up nor takes it (a ladder) with water under it: over the edge.
+    land.put(-8, kY, 8, "minecraft:stone");
+    land.put(-8, kY + 1, 8, "minecraft:water");
+    for (const auto& [dx, dz] : {std::pair{-1, 0}, std::pair{0, -1}, std::pair{0, 1}})
+        land.put(-8 + dx, kY + 1, 8 + dz, "minecraft:stone");
+    land.put(-7, kY + 1, 8, "minecraft:ladder[facing=west]");
+    EXPECT_EQ(flow(-8, kY + 1, 8), none);  // (nothing under the ladder yet)
+    land.put(-7, kY, 8, "minecraft:water");
+    EXPECT_TRUE(east(flow(-8, kY + 1, 8)));
+    // Lava and water do not pull at each other.
+    land.put(20, kY, 0, "minecraft:lava");
+    land.put(21, kY, 0, "minecraft:water[level=3]");
+    for (const auto& [dx, dz] : {std::pair{-1, 0}, std::pair{0, -1}, std::pair{0, 1}})
+        land.put(20 + dx, kY, dz, "minecraft:stone");
+    EXPECT_EQ(flow(20, kY, 0), none);
+}
+
+// Which sections hold a fluid is kept to the block (Chunk::fluid_sections): an entity's tick
+// reads no cell where there is none, and so it has to be told of the first and of the last.
+TEST(Fluids, TheSectionsThatHoldAFluidAreKnown) {
+    Land land;
+    const auto wet = [&](i32 x0, i32 y0, i32 z0, i32 x1, i32 y1, i32 z1) {
+        return (land.dim.holds(x0, y0, z0, x1, y1, z1) & Dimension::kFluids) != 0;
+    };
+    EXPECT_FALSE(wet(-8, -64, -8, 8, 40, 8));
+    land.put(3, 20, 3, "minecraft:water");
+    land.put(4, 20, 3, "minecraft:oak_slab[waterlogged=true]");
+    EXPECT_TRUE(wet(3, 20, 3, 3, 20, 3));
+    EXPECT_TRUE(wet(-8, 16, -8, 8, 31, 8));
+    EXPECT_FALSE(wet(-8, 32, -8, 8, 40, 8));   // the section above
+    EXPECT_FALSE(wet(-8, -64, -8, 8, 15, 8));  // ...and the ones below
+    EXPECT_FALSE(wet(16, 16, 0, 31, 31, 15));  // the chunk beside
+    land.put(3, 20, 3, "minecraft:air");
+    EXPECT_TRUE(wet(-8, 16, -8, 8, 31, 8));  // the slab's water is still there
+    land.put(4, 20, 3, "minecraft:oak_slab");
+    EXPECT_FALSE(wet(-8, 16, -8, 8, 31, 8));
+    land.put(4, 20, 3, "minecraft:lava[level=6]");
+    EXPECT_TRUE(wet(4, 20, 3, 4, 20, 3));
+    land.put(4, 20, 3, "minecraft:stone");
+    EXPECT_FALSE(wet(-8, -64, -8, 8, 40, 8));
+}
+
+// Whether one who stands there is in water, and whether its eyes are (world::water_around: a
+// player's swimming is made of it).
+TEST(Fluids, InWaterToTheEyes) {
+    Land land;
+    const auto around = [&](double y, float height, float eyes) {
+        return water_around(land.dim, entity_box(0.5, y, 0.5, 0.6f, height), 0.5, y + static_cast<double>(eyes), 0.5);
+    };
+    const double feet = static_cast<double>(kY);
+    EXPECT_FALSE(around(feet, 1.8f, 1.62f).in);
+    land.put(0, kY, 0, "minecraft:water");
+    EXPECT_TRUE(around(feet, 1.8f, 1.62f).in);
+    EXPECT_FALSE(around(feet, 1.8f, 1.62f).eyes);      // up to the waist
+    EXPECT_FALSE(around(feet + 0.9, 1.8f, 1.62f).in);  // a source stands eight ninths high: over it
+    EXPECT_TRUE(around(feet + 0.88, 1.8f, 1.62f).in);
+    EXPECT_TRUE(around(feet, 0.6f, 0.4f).eyes);         // lying in it
+    EXPECT_FALSE(around(feet + 0.5, 0.6f, 0.4f).eyes);  // (its eyes over the eight ninths)
+    land.put(0, kY + 1, 0, "minecraft:stone");
+    EXPECT_TRUE(around(feet + 0.5, 0.6f, 0.4f).eyes) << "a source under what closes it from above fills its cell to the eye";
+    land.put(0, kY + 1, 0, "minecraft:water");
+    EXPECT_TRUE(around(feet, 1.8f, 1.62f).eyes);
+    land.put(0, kY, 0, "minecraft:lava");
+    land.put(0, kY + 1, 0, "minecraft:air");
+    EXPECT_FALSE(around(feet, 1.8f, 1.62f).in);  // lava is not water
 }

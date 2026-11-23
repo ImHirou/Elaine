@@ -263,8 +263,8 @@ across workers.
 ### What is not there yet
 
 Read off a diff against a vanilla 26.3 server (`tools/vanilla/entity_probe.py`: two bots, one
-watching the other walk, turn, sneak, sprint, jump, leave and return). Walking, turning, the head
-lagging a tick, sneaking, sprinting flags, options, range, leaving: the same bytes. What differs:
+watching the other walk, turn, sneak, sprint, jump, swim, leave and return). Walking, turning, the head
+lagging a tick, sneaking, sprinting flags, swimming (the flag and the pose), options, range, leaving: the same bytes. What differs:
 
 - `update_attributes` (a player's own creative reach comes from there too), the locator bar
   (`waypoint`): not sent. Nor are footsteps (`sound`, to those who hear a player walk).
@@ -1391,8 +1391,7 @@ tick queue under load and the random pass belong with the first claim that any o
 - **Of the fluids.** Bubble columns: water over soul sand or magma is water. Ice does not
   melt. A block of an imported world that holds water and is of a class that is not ported (a
   trapdoor, leaves, a candle) neither takes water nor gives any. Fire: lava's random tick sets fire to what burns around it, and there is no fire - a
-  gap with a name (`RANDOM_TICK_GAPS`), so lava lights nothing. What water does to what is in it - an item, a mob, a player - is not
-  there either: see "Physics". A block of an imported world that is not placeable here and
+  gap with a name (`RANDOM_TICK_GAPS`), so lava lights no block (what falls into it burns: see "Physics"). A block of an imported world that is not placeable here and
   gives way to water (a lever, a rail) goes without a drop: what a block drops is known for
   the blocks that can be placed.
 - **Of the plants**: everything that grows or spreads (saplings, crops, stems, mushrooms,
@@ -1449,7 +1448,10 @@ again, method for method:
   `LivingEntity.aiStep` and `travelInAir` with no input, `Entity.push` and `pushEntities`;
 - `applyEffectsFromBlocks`: the blocks a box passes through
   (`BlockGetter.forEachBlockIntersectedBetween`), and what three of them do - a cobweb, the side
-  of a honey block, the top of a slime block.
+  of a honey block, the top of a slime block - and the two fluids;
+- in a fluid ("In water and lava" below): `Entity.updateFluidInteraction` over 26.x's
+  `EntityFluidInteraction`, `FlowingFluid.getFlow`, `ItemEntity.setFluidMovement`,
+  `LivingEntity.travelInWater` and `travelInLava`, the fire of `Entity.baseTick`.
 
 Reading is not proof, so there is a recording. `tools/vanilla/physics_probe.py record` starts
 the vanilla server, freezes it (`/tick freeze`), builds a small fixture per scenario, summons
@@ -1464,15 +1466,25 @@ same blocks at the same coordinates, runs the same ticks and compares bits. All 
 (What a recording cannot show is the sign of a zero - NBT stores `-0.0` as `0.0` - and what
 happens inside a tick.)
 
+Two more recordings were made beside the first, each when its subject was ported: 16 scenarios
+of falling blocks, and 60 of what is in water and lava and on fire (`physics_fluids.bin`, 4 600
+states, which carry `Fire` and an item's `Health` as well). A fixture of fluid has to be the
+fluid as it stands when it has run out - sources in walls, or every level of a channel written
+out - because the game ticks while it is recorded and the unit test builds the blocks once: so
+`record` lets the game run a hundred ticks before it summons anything, and stops if the bot is
+told of a block of such a plot changing (the first try at "water over soul sand" did: it was a
+bubble column a moment later).
+
 The tables it needs come from the jar too (`tools/mcgen/gen_physics.py`): a byte per block
-state (what kind of collision shape, whether it reaches out of its block, which of 12
+state (what kind of collision shape, whether it reaches out of its block, which of 13
 "materials" - friction, speed and jump factor, bounce, what it does to an entity), and 210
 collision shapes as the grids of cells vanilla holds them as - each shape's own coordinates and
 cells, written out by the extractor (`VoxelShape.getCoords`; of the 183 shapes of several boxes,
 42 have lines no box ends on: a piston's head, a straw bed). The generator stops rather than guess: at a placeable
 block whose shape depends on who asks, at a block hook that acts on entities and is not
 ported, at a living entity class that declares a movement method the port was not written
-against, at a new answer to `getMoveSimulationType`.
+against - in the air or in a fluid - at a new answer to `getMoveSimulationType`, at a block
+that holds a fluid and is not the whole of its cell to what is inside it.
 
 ### Shortcuts are tested against the long way
 
@@ -1523,6 +1535,59 @@ client would not notice it missing, but it is what a vanilla server sends
 (`physics_probe.py wire`: of four items put down a tick apart, one is told a fall of 0.04 and
 then none, over and over, the next two 0.08 and 0.12, the fourth nothing at all - and the
 same four patterns come out of this server).
+
+### In water and lava
+
+Every tick an entity looks at the fluids around it (`phys::update_fluids`:
+`Entity.updateFluidInteraction`). The cells its box is in - a thousandth less on every side -
+are asked for their fluid; of water and of lava it keeps how high each stands over its feet,
+and whether it is in water at all, which ends its fall. Then a current carries it: every cell
+says which way its fluid runs (`world::fluid_flow`, `FlowingFluid.getFlow`: towards where there
+is less of it, a block down past the edge of what does not hold it up, straight down beside a
+wall when it falls), the answers are added up, and the entity gets a push of a fixed size
+along the sum - 0.014 a tick in water, a sixth of that in lava, 0.0045 at the least for what
+lies still. Two things about it are in vanilla's order because the order is the result: the
+cells are walked x, then y, then z, and a current counts for less while the entity is less
+than 0.4 deep *as far as the walk has found by then*.
+
+Who looks when is the entity's class, and is copied: an item looks twice a tick, before it
+moves and after (so a current pushes it twice, and it is told to its viewers every tick it is
+in a fluid); what lives looks in its base tick and, if that did not find it in water, once more
+inside its move; a primed TNT looks last, has no base tick, and so is never "in lava" (which
+is "not its first tick, and lava about"); a falling block never looks. What follows from the
+look: an item more than a tenth deep floats up instead of falling (`ItemEntity.setFluidMovement`),
+what lives travels by `travelInWater` or `travelInLava` - sinks by a sixteenth of gravity,
+keeps four fifths of its speed sideways, and is lifted out against a bank (`jumpOutOfFluid`).
+Four classes have a say of their own, read from the jar into a table by type
+(`gen_physics.py`): what a current does not carry, the axolotl's, frog's and nautilus's
+`travelInWater`, the polar bear's and skeleton horse's `getWaterSlowDown`, a breeze's
+threshold. And one thing that is no brain though it lives in one: a mob's `MoveControl` adds
+to its velocity every tick whatever the mob wants - a frog and a nautilus float up by 0.005
+in water, a drowned sinks by 0.008 off the ground, in the air too. The recording showed it
+(five scenarios differed by exactly that), so it is a number of the type.
+
+A section without fluid costs none of this: `Chunk::fluid_sections` is kept exact
+(`Section::fluids`, vanilla's `hasFluid` - which is what vanilla asks first as well), it is
+one more bit of `Dimension::holds`, and a tick that finds it clear reads no cell.
+
+**Fire** is a number of the body (`Body::fire_ticks`, `Entity.remainingFireTicks`). The blocks
+an entity passes are asked for their fluid as well as for themselves (`Entity.checkInsideBlocks`):
+lava lights it for fifteen seconds and hurts it, water puts it out - collected step by step as
+`InsideBlockEffectApplier` does, lava before water within a step. `phys` only says so: what
+has health is the game's business, and only an item has any (`Game::tick_item`: five points,
+four for each cell of lava, one for each second it burns - an item in lava is gone in its
+second tick there, to the tick vanilla's is, unless its stack is of what does not burn).
+Everything else burns and lives: the flag its viewers see is set as `Entity.baseTick` sets it,
+`Fire` is saved with the rest of what a tag said, and nothing takes damage.
+
+A **player** is moved by its client, but whether it swims is the server's to say
+(`Game::update_swimming`: `Entity.updateSwimming`, `Player.updatePlayerPose`): one that sprints
+with its eyes under water - as of its last tick's look - swims, the flag and the pose that
+others are shown, for as long as it sprints in water; never while it flies.
+
+What a client is told of all that was compared with a vanilla server: an item in a pool, in a
+channel, in lava - every move, in order (`block_probe.py`, section `afloat`) - and a player
+sprinting in a tank of water (`entity_probe.py`: the same `set_entity_data`, byte for byte).
 
 ### What clients are told
 
@@ -1616,12 +1681,22 @@ latter, and one cache miss an item was two thirds of the pass.
 
 ### Compared with vanilla, and what is not there
 
-- Fluids: nothing floats, nothing is carried - not in an imported world's water, not in the
-  water of a waterlogged block.
+- In a fluid: a mob sinks. On a vanilla server most of them float - a `FloatGoal`, which is a
+  jump as chance has it, so a brain - and here they walk on the bottom. No bubble columns (the
+  block is not there). The strider, which walks on lava, and the turtle, whose `MoveControl`
+  gives it a speed of its own in water and out of it (a turtle cannot be made to stand still
+  on a vanilla server, so there is nothing to record), are among those that are not moved.
+  Nobody drowns, and no air is counted. No sounds yet: the splash, the hiss of a fire going
+  out, an item burning. Particles: none anywhere.
+- A fall that is faster than a block a tick looks ahead for what breaks it, and water does
+  (`ClipContext.Fluid.WATER`). Vanilla keeps the shape of each fluid state as it was first
+  asked for (`FlowingFluid.getShape`, a map by state): whether a cell under more water counts
+  as full there depends on what an earlier fall happened to ask. Here it is what the cell is.
 - A brain. `living_tick` is `LivingEntity.travel` with no input: a mob falls, slides, steps
   where it is pushed, and stands. The classes that move in a way of their own - what flies,
   swims, hangs, climbs or flops (`gen_physics.OWN_MOVEMENT`) - are not moved at all.
-- Damage: no fall damage, no suffocation; what falls out of the world is removed at once.
+- Damage: no fall damage, no suffocation, nothing from fire or lava but to an item; what falls
+  out of the world is removed at once.
 - A player is moved by its client. It pushes the mobs it walks into, and is not pushed back
   here (vanilla gives it a velocity that its viewers are told).
 - With several neighbours at once, `pushEntities` adds their pushes in the order of our grid's
@@ -2522,7 +2597,7 @@ Roughly in dependency order:
    shape"). Next: plants and what else needs something to stand on, and the blocks that
    answer a click - doors, trapdoors, fence gates. Fluid ticks are there, water and lava flow
    ("Water and lava"), the water of a waterlogged block with them, and the sponge takes it up;
-   next of the fluids: buckets, and what a fluid does to what is in it. Then redstone, the other block entities. And what the first four still lack:
+   what is in them floats, sinks, is carried and burns ("In water and lava"); next of the fluids: buckets. Then redstone, the other block entities. And what the first four still lack:
    experience orbs.
 8. **Commands**: tags into the world - block entity data, `/summon`'s tag
    (the SNBT reader is there) - `facing`, then the commands that wait for their subject. **Chat**: signed (see "Chat").

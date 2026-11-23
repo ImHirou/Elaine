@@ -24,6 +24,7 @@
 #pragma once
 
 #include "world/block.hpp"
+#include "world/collide.hpp"
 #include "world/dimension.hpp"
 
 namespace world {
@@ -69,6 +70,20 @@ inline constexpr u8 kFlowOrder[4] = {kNorth, kEast, kSouth, kWest};
 // FlowingFluid.getHeight: how high a fluid stands in its cell at (x, y, z) - the whole of it
 // under more of the same, else its own height.
 float fluid_height(const Dimension& d, FluidState f, i32 x, i32 y, i32 z);
+
+// FlowingFluid.getFlow: which way the fluid `f` of the cell (x, y, z) runs - towards where there is
+// less of it, and down the side of what it falls beside - as a vector of length one, or none.
+// What carries an entity that is in it (phys/physics.cpp).
+void fluid_flow(const Dimension& d, FluidState f, i32 x, i32 y, i32 z, double out[3]);
+
+// EntityFluidInteraction.update for one who only asks where it is - a player, whom its client
+// moves: is the box `box` in water (a fluid of #water whose top is not below the box, less a
+// thousandth), and is the point (x, eye_y, z) in it - by FluidState.getHeightForCamera, which
+// is the whole cell for a source under what closes it from above?
+struct InWater {
+    bool in = false, eyes = false;
+};
+InWater water_around(const Dimension& d, const Aabb& box, double x, double eye_y, double z);
 
 // FlowingFluid.getNewLiquid: what the cell at (x, y, z), which holds `state`, should hold of this
 // fluid by what is around it - a source between two sources, a falling column under the fluid,

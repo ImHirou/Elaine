@@ -6,6 +6,7 @@
 #include <cmath>
 
 #include "world/block.hpp"
+#include "world/fluid.hpp"
 
 #include PROTO_GEN_PHYSICS_HPP
 
@@ -25,6 +26,10 @@ ALWAYS_INLINE i32 floor_i(double v) {  // Mth.floor
     const i32 i = static_cast<i32>(v);
     return v < static_cast<double>(i) ? i - 1 : i;
 }
+ALWAYS_INLINE i32 ceil_i(double v) {  // Mth.ceil
+    const i32 i = static_cast<i32>(v);
+    return v > static_cast<double>(i) ? i + 1 : i;
+}
 ALWAYS_INLINE bool mth_equal(double a, double b) { return std::fabs(b - a) < 9.999999747378752e-6; }  // Mth.equal
 ALWAYS_INLINE const gp::Material& material(BlockState s) { return gp::kMaterials[gp::kState[s] >> gp::kMaterialShift]; }
 ALWAYS_INLINE BlockState block_at(const World& w, BlockXyz p) { return w.open ? world::kAir : w.blocks.block(p.x, p.y, p.z); }
@@ -39,11 +44,13 @@ ALWAYS_INLINE void look_around(World& w, const Kind& k, const Motion& m) {
     if (UNLIKELY(!(rx < 64.0 && ry < 64.0 && rz < 64.0))) {  // (or a velocity that is not a number)
         w.near = world::kAskSections;
         w.open = false;
+        w.wet = true;
         return;
     }
     w.near = w.blocks.holds(floor_i(m.pos[0] - rx) - 2, floor_i(m.pos[1] - ry) - 2, floor_i(m.pos[2] - rz) - 2,
                             floor_i(m.pos[0] + rx) + 2, floor_i(m.pos[1] + height + ry) + 2, floor_i(m.pos[2] + rz) + 2);
     w.open = !(w.near & world::Dimension::kBlocks);
+    w.wet = (w.near & world::Dimension::kFluids) != 0;
 }
 ALWAYS_INLINE Aabb box_of(const Kind& k, const double pos[3]) {
     return world::entity_box(pos[0], pos[1], pos[2], k.width, k.height);
@@ -88,11 +95,129 @@ void check_supporting_block(World& w, const Kind& k, const Motion& m, Body& b, b
     b.on_ground_no_blocks = !present;
 }
 
-// Entity.getBlockSpeedFactor: the block it is in, or else the one it stands on (soul sand, honey).
+// Entity.getBlockSpeedFactor: the block it is in, or else the one it stands on (soul sand, honey) -
+// but in water (the block: not water in something), and in a bubble column, that block's alone.
 float block_speed_factor(const World& w, const Kind& k, const Motion& m, const Body& b) {
-    const float here = material(block_at(w, {floor_i(m.pos[0]), floor_i(m.pos[1]), floor_i(m.pos[2])})).speed_factor;
-    if (static_cast<double>(here) != 1.0) return here;
+    const gp::Material& in = material(block_at(w, {floor_i(m.pos[0]), floor_i(m.pos[1]), floor_i(m.pos[2])}));
+    if (static_cast<double>(in.speed_factor) != 1.0 || (in.flags & gp::kOwnSpeedFactor)) return in.speed_factor;
     return material(block_at(w, on_pos(w, m, b, k.below_offset))).speed_factor;
+}
+
+// Vec3.normalize: nothing, for what is shorter than 1e-5.
+ALWAYS_INLINE void normalize(double v[3]) {
+    const double length = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    if (length < 9.999999747378752e-6) {
+        v[0] = v[1] = v[2] = 0.0;
+        return;
+    }
+    v[0] = v[0] / length, v[1] = v[1] / length, v[2] = v[2] / length;
+}
+
+// Entity.updateFluidInteraction, with EntityFluidInteraction.update inside it: the cells the
+// entity's box is in (a thousandth less on every side) are asked for their fluid, and of each
+// fluid - water, lava - how high it stands over the entity's feet is kept; a fluid that carries
+// the entity adds up which way each of its cells runs (FlowingFluid.getFlow), weaker where the
+// entity is less than 0.4 deep - by the depth known so far, so the order of the cells is
+// vanilla's: x, then y, then z. Then the entity is in water or not (and falls no further if it
+// is), and the two currents each give it a push (CurrentAccumulator.applyTo): of a fixed size,
+// whatever the sum - but none for a sum of next to nothing, and one of 0.0045 at least for what
+// lies nearly still. True if any fluid was there.
+bool update_fluids(World& w, const Kind& k, Motion& m, Body& b) {
+    struct Current {
+        double height = 0, sum[3] = {0, 0, 0};
+        u32 count = 0;
+    } current[2];  // FluidTags.WATER, LAVA: fluid::kWaterFamily, kLavaFamily
+    double height[2] = {0, 0};
+    bool any = false;
+    if (UNLIKELY(w.wet)) {
+        const Aabb whole = box_of(k, m.pos);
+        const Aabb box = world::inflated(whole, -0.001, -0.001, -0.001);  // Entity.getFluidInteractionBox
+        const i32 x0 = floor_i(box.min[0]), y0 = floor_i(box.min[1]), z0 = floor_i(box.min[2]);
+        const i32 x1 = ceil_i(box.max[0]) - 1, y1 = ceil_i(box.max[1]) - 1, z1 = ceil_i(box.max[2]) - 1;
+        const double feet = whole.min[1];
+        for (i32 x = x0; x <= x1; ++x) {
+            for (i32 y = y0; y <= y1; ++y) {
+                for (i32 z = z0; z <= z1; ++z) {
+                    const world::FluidState f = world::fluid_of(w.blocks.block(x, y, z));
+                    if (LIKELY(!f)) continue;
+                    const double top = static_cast<double>(y) + static_cast<double>(world::fluid_height(w.blocks, f, x, y, z));
+                    if (top < box.min[1]) continue;
+                    any = true;
+                    const u32 tag = world::fluid_family(f);
+                    height[tag] = std::max(top - feet, height[tag]);
+                    if (!k.pushed_by_fluid) continue;
+                    double flow[3];
+                    world::fluid_flow(w.blocks, f, x, y, z, flow);
+                    Current& c = current[tag];
+                    c.height = std::max(height[tag], c.height);
+                    if (c.height < 0.4) flow[0] = flow[0] * c.height, flow[1] = flow[1] * c.height, flow[2] = flow[2] * c.height;
+                    c.sum[0] = c.sum[0] + flow[0], c.sum[1] = c.sum[1] + flow[1], c.sum[2] = c.sum[2] + flow[2];
+                    ++c.count;
+                }
+            }
+        }
+    }
+    b.water_height = height[world::fluid::kWaterFamily];
+    b.lava_height = height[world::fluid::kLavaFamily];
+    const bool in_water = b.water_height > 0;
+    if (in_water) {
+        b.fall_distance = 0;  // resetFallDistance
+        if (!b.in_water && !b.first_tick) b.splashed = true;
+    }
+    b.in_water = in_water;
+    if (!k.pushed_by_fluid || !any) return any;
+    const double scale[2] = {0.014, w.lava_flow_scale};  // Entity.WATER_FLOW_SCALE, LAVA_SLOW / FAST_FLOW_SCALE
+    for (const u32 tag : {static_cast<u32>(world::fluid::kWaterFamily), static_cast<u32>(world::fluid::kLavaFamily)}) {
+        const Current& c = current[tag];
+        if (!(height[tag] > 0) || c.count == 0) continue;
+        if (c.sum[0] * c.sum[0] + c.sum[1] * c.sum[1] + c.sum[2] * c.sum[2] < 9.999999747378752e-6) continue;
+        double impulse[3] = {c.sum[0], c.sum[1], c.sum[2]};
+        normalize(impulse);  // (a player's is the mean of the cells instead)
+        for (double& v : impulse) v = v * scale[tag];
+        if (std::fabs(m.vel[0]) < 0.003 && std::fabs(m.vel[2]) < 0.003 &&
+            std::sqrt(impulse[0] * impulse[0] + impulse[1] * impulse[1] + impulse[2] * impulse[2]) < 0.0045000000000000005) {
+            normalize(impulse);
+            for (double& v : impulse) v = v * 0.0045000000000000005;
+        }
+        // Entity.addDeltaMovement: only what is a number
+        if (std::isfinite(impulse[0]) && std::isfinite(impulse[1]) && std::isfinite(impulse[2]))
+            m.vel[0] = m.vel[0] + impulse[0], m.vel[1] = m.vel[1] + impulse[1], m.vel[2] = m.vel[2] + impulse[2];
+    }
+    return any;
+}
+
+// Entity.isInLava(): not in its first tick, whatever it is in.
+ALWAYS_INLINE bool in_lava(const Body& b) { return !b.first_tick && b.lava_height > 0; }
+
+// Entity.baseTick, what of it is here: the look at the fluids around (and the push of their
+// currents), the fire it is on, half the fall gone in lava, out of the world, and the first tick
+// over.
+ALWAYS_INLINE Fate base_tick(World& w, const Kind& k, Motion& m, Body& b) {
+    update_fluids(w, k, m, b);
+    if (UNLIKELY(b.fire_ticks > 0)) {
+        if (b.fire_immune) {
+            b.fire_ticks = 0;  // clearFire
+        } else {
+            if (b.fire_ticks % 20 == 0 && !in_lava(b)) b.burned = true;  // hurtServer(onFire, 1)
+            b.fire_ticks = b.fire_ticks - 1;
+        }
+    }
+    if (in_lava(b)) b.fall_distance = b.fall_distance * 0.5;
+    b.shows_fire = b.fire_ticks > 0;  // (lit later in this tick, by lava: seen from the next)
+    // checkBelowWorld (LivingEntity.onBelowWorld hurts it until it dies: nothing has health, gone)
+    if (UNLIKELY(m.pos[1] < static_cast<double>(w.blocks.min_y() - 64))) return Fate::kGone;
+    b.first_tick = false;
+    return Fate::kStays;
+}
+
+// Level.containsAnyLiquid: is there a fluid in any cell the box reaches into? (BlockGetter.findBlocksIn)
+bool contains_liquid(const World& w, const Aabb& box) {
+    if (!w.wet) return false;
+    for (i32 x = floor_i(box.min[0]); x <= floor_i(box.max[0]); ++x)
+        for (i32 y = floor_i(box.min[1]); y <= floor_i(box.max[1]); ++y)
+            for (i32 z = floor_i(box.min[2]); z <= floor_i(box.max[2]); ++z)
+                if (world::fluid_of(w.blocks.block(x, y, z))) return true;
+    return false;
 }
 
 // Entity.restituteMovementAfterCollisions: what a collision does to the velocity - gone along
@@ -298,11 +423,60 @@ void honey_inside(const Kind& k, Motion& m, Body& b, i32 bx, i32 by, i32 bz) {
     b.fall_distance = 0;
 }
 
+// InsideBlockEffectApplier.StepBasedCollector, of what the two fluids do to what is in them:
+// LavaFluid.entityInside (LAVA_IGNITE, and Entity.lavaHurt after it), WaterFluid.entityInside
+// (EXTINGUISH). The blocks a leg passes are its steps; within a step lava comes before water,
+// whichever cell was passed first - so an entity in both ends the tick burning or not by the
+// order of the steps, and every block that is not air is one, with a fluid or without.
+struct FluidEffects {
+    bool counting;  // is there fluid about at all? (Else no step is counted: nothing is collected.)
+    i32 last_step = -1;
+    u32 lava = 0;        // cells of lava in this step
+    bool water = false;  // ...and whether one of water
+};
+ALWAYS_INLINE void flush(FluidEffects& fx, Body& b) {
+    if (fx.lava && !b.fire_immune) {
+        if (b.fire_ticks < 300) b.fire_ticks = 300;  // lavaIgnite: igniteForSeconds(15)
+        b.lava_hurts = static_cast<u16>(std::min<u32>(b.lava_hurts + fx.lava, 0xFFFF));
+    }
+    if (fx.water) b.fire_ticks = std::min(0, b.fire_ticks);  // Entity.clearFire
+    fx.lava = 0, fx.water = false;
+}
+ALWAYS_INLINE void advance_step(FluidEffects& fx, Body& b, i32 step) {
+    if (fx.last_step == step) return;
+    fx.last_step = step;
+    flush(fx, b);
+}
+
+// Entity.collidedWithFluid: does the entity's box, on its way from `from` to `to`, meet the
+// fluid of the cell (x, y, z), which stands `height` high in it? AABB.collidedAlongVector: the
+// way of the box's centre against the fluid's box grown by half the entity's size, less 1e-7.
+bool collided_with_fluid(const Kind& k, const double from[3], const double to[3], i32 x, i32 y, i32 z, float height) {
+    const Aabb at_from = box_of(k, from);
+    double centre[3], end[3], lo[3], hi[3];
+    const double cell_lo[3] = {static_cast<double>(x), static_cast<double>(y), static_cast<double>(z)};
+    // Fluid.getAABB: the top is a float sum
+    const double cell_hi[3] = {static_cast<double>(x) + 1.0, static_cast<double>(static_cast<float>(y) + height),
+                               static_cast<double>(z) + 1.0};
+    for (u32 a = 0; a < 3; ++a) {
+        centre[a] = at_from.min[a] + 0.5 * (at_from.max[a] - at_from.min[a]);  // Mth.lerp(0.5, min, max)
+        end[a] = centre[a] + (to[a] - from[a]);
+        const double grow = (at_from.max[a] - at_from.min[a]) * 0.5 - 1.0e-7;
+        lo[a] = cell_lo[a] - grow, hi[a] = cell_hi[a] + grow;
+    }
+    const auto contains = [&](const double p[3]) {
+        return p[0] >= lo[0] && p[0] < hi[0] && p[1] >= lo[1] && p[1] < hi[1] && p[2] >= lo[2] && p[2] < hi[2];
+    };
+    if (contains(end) || contains(centre)) return true;
+    double hit[3];
+    return clip_box(lo, hi, centre, end, hit);
+}
+
 // Entity.checkInsideBlocks(from, to, ...) for one straight leg: every block the box passes
-// through that is not air is told (BlockState.entityInside), once a tick. Returns the
-// iterations it took, plus one.
+// through that is not air is told (BlockState.entityInside), once a tick, and so is the fluid
+// in it, if the box met that. Returns the iterations it took, plus one.
 i32 check_inside_leg(World& w, const Kind& k, Motion& m, Body& b, const double from[3], const double to[3], i32 max_iterations,
-                     Seen& told) {
+                     Seen& told, FluidEffects& fx) {
     // (deflate(1.0E-5f); the box at the target is what decides `isPrecise`, which no block here asks for)
     const Aabb at_target = world::inflated(box_of(k, to), -9.999999747378752e-6, -9.999999747378752e-6, -9.999999747378752e-6);
     i32 last = 0;
@@ -312,14 +486,24 @@ i32 check_inside_leg(World& w, const Kind& k, Motion& m, Body& b, const double f
         const BlockState s = w.blocks.block(x, y, z);  // (not block_at: a movement of last tick may lie outside this tick's air)
         if (LIKELY(s == world::kAir)) return true;
         const u8 inside = material(s).inside;
-        if (LIKELY(inside == gp::kInsideNone))
-            return true;  // (every block's getEntityInsideCollisionShape here is the full block)
+        // (Every block's getEntityInsideCollisionShape here is the full block - mcgen sees to
+        // it that none which holds a fluid, or does something to what is in it, has another -
+        // so the box is in every block it is asked about, and each is asked once.)
+        if (LIKELY(inside == gp::kInsideNone && !fx.counting)) return true;
         if (!told.add(x, y, z)) return true;
+        if (fx.counting) advance_step(fx, b, iteration);
         if (inside == gp::kInsideWeb) {  // WebBlock.entityInside: Entity.makeStuckInBlock
             b.fall_distance = 0;
             b.stuck[0] = 0.25, b.stuck[1] = 0.05000000074505806, b.stuck[2] = 0.25;
-        } else {
+        } else if (inside != gp::kInsideNone) {
             honey_inside(k, m, b, x, y, z);
+        }
+        if (const world::FluidState f = world::fluid_of(s);
+            UNLIKELY(f) && collided_with_fluid(k, from, to, x, y, z, world::fluid_height(w.blocks, f, x, y, z))) {
+            if (world::fluid_family(f) == world::fluid::kLavaFamily)
+                ++fx.lava;
+            else
+                fx.water = true;
         }
         return true;
     });
@@ -328,8 +512,12 @@ i32 check_inside_leg(World& w, const Kind& k, Motion& m, Body& b, const double f
 
 // Entity.applyEffectsFromBlocks(List<Movement>)
 void apply_effects(World& w, const Kind& k, Motion& m, Body& b, const Movement* movements, u32 count) {
-    if (b.no_physics) return;                           // isAffectedByBlocks
-    if (LIKELY(!w.blocks.has_entity_blocks())) return;  // no block in the dimension does anything to an entity in or on it
+    if (b.no_physics) return;  // isAffectedByBlocks
+    // No block in the dimension does anything to an entity in or on it, and there is no fluid
+    // about? (What is left of the method then - a fire that is out is counted as out - changes
+    // nothing: nothing here counts a fire below nothing.)
+    if (LIKELY(!w.blocks.has_entity_blocks() && !w.wet)) return;
+    u32 found;
     {
         // ...or none where it has been this tick: the sections that its box touched on the way,
         // with a block to spare all round (the block it stands on is under its feet).
@@ -341,11 +529,12 @@ void apply_effects(World& w, const Kind& k, Motion& m, Body& b, const Movement* 
             }
         }
         const double half = static_cast<double>(k.width / 2.0f), height = static_cast<double>(k.height);
-        if (!(w.blocks.holds(floor_i(lo[0] - half) - 1, floor_i(lo[1]) - 2, floor_i(lo[2] - half) - 1, floor_i(hi[0] + half) + 1,
-                             floor_i(hi[1] + height) + 1, floor_i(hi[2] + half) + 1) &
-              world::Dimension::kEntityBlocks))
-            return;
+        found = w.blocks.holds(floor_i(lo[0] - half) - 1, floor_i(lo[1]) - 2, floor_i(lo[2] - half) - 1,
+                               floor_i(hi[0] + half) + 1, floor_i(hi[1] + height) + 1, floor_i(hi[2] + half) + 1);
+        if (!(found & (world::Dimension::kEntityBlocks | world::Dimension::kFluids))) return;
     }
+    const bool was_on_fire = !b.fire_immune && b.fire_ticks > 0;  // Entity.isOnFire
+    const i32 fire_before = b.fire_ticks;
     if (b.on_ground) {  // Block.stepOn
         const BlockState s = block_at(w, on_pos(w, m, b, 0.2f));
         if (material(s).flags & gp::kStepSlime) {  // SlimeBlock.stepOn
@@ -359,6 +548,7 @@ void apply_effects(World& w, const Kind& k, Motion& m, Body& b, const Movement* 
     // checkInsideBlocks(movements, collector)
     w.scratch.told.clear();
     Seen told{w.scratch.told};
+    FluidEffects fx{(found & world::Dimension::kFluids) != 0};
     for (u32 i = 0; i < count; ++i) {
         const Movement& mv = movements[i];
         const double delta[3] = {mv.to[0] - mv.from[0], mv.to[1] - mv.from[1], mv.to[2] - mv.from[2]};
@@ -370,14 +560,21 @@ void apply_effects(World& w, const Kind& k, Motion& m, Body& b, const Movement* 
                 if (delta[axis] == 0) continue;
                 double to[3];  // Vec3.relative(axis.getPositive(), axisMove)
                 for (u32 a = 0; a < 3; ++a) to[a] = pos[a] + delta[axis] * (a == axis ? 1.0 : 0.0);
-                left -= check_inside_leg(w, k, m, b, pos, to, left, told);
+                left -= check_inside_leg(w, k, m, b, pos, to, left, told, fx);
                 pos[0] = to[0], pos[1] = to[1], pos[2] = to[2];
             }
         } else {
-            left -= check_inside_leg(w, k, m, b, mv.from, mv.to, 16, told);
+            left -= check_inside_leg(w, k, m, b, mv.from, mv.to, 16, told, fx);
         }
-        if (left <= 0) check_inside_leg(w, k, m, b, mv.to, mv.to, 1, told);
+        if (left <= 0) check_inside_leg(w, k, m, b, mv.to, mv.to, 1, told, fx);
     }
+    if (!fx.counting) return;
+    flush(fx, b);  // insideEffectCollector.applyAndClear
+    // (No rain.) A fire that went out here hisses; and one that is out, and was not lit in this
+    // tick, is counted as out (Entity.getFireImmuneTicks is nothing, but for a player).
+    const bool on_fire = !b.fire_immune && b.fire_ticks > 0;
+    if (was_on_fire && !on_fire) b.extinguished = true;
+    if (!on_fire && !(b.fire_ticks > fire_before)) b.fire_ticks = 0;
 }
 
 // Entity.moveTowardsClosestSpace: an item inside a block is shot out through the nearest side
@@ -456,8 +653,11 @@ void move(World& w, const Kind& k, Motion& m, Body& b, double dx, double dy, dou
     b.vertical_collision_below = b.vertical_collision && dy < 0;
     b.on_ground = b.vertical_collision_below;
     check_supporting_block(w, k, m, b, b.on_ground, mv);
-    // checkFallDamage
-    if (mv[1] < 0) b.fall_distance = b.fall_distance - static_cast<double>(static_cast<float>(mv[1]));
+    // checkFallDamage - LivingEntity's first: one that is not in water looks at the fluids around
+    // it once more, where it is now (and is pushed once more, if it is in any). Then Entity's: a
+    // fall is not counted in water.
+    if (k.living && !b.in_water) update_fluids(w, k, m, b);
+    if (!b.in_water && mv[1] < 0) b.fall_distance = b.fall_distance - static_cast<double>(static_cast<float>(mv[1]));
     if (b.on_ground) b.fall_distance = 0;  // (Block.fallOn first: damage, which nothing takes)
     if ((moved_vertically && b.vertical_collision) || b.horizontal_collision) restitute(w, k, m, b, x_hit, z_hit, mv);
     const double factor = static_cast<double>(block_speed_factor(w, k, m, b));
@@ -490,13 +690,23 @@ void apply_effects_from_last_movements(World& w, const Kind& k, Motion& m, Body&
 }
 
 Fate item_tick(World& w, Motion& m, Body& b, u32 tick_count, i32 id, float (*random_float)(void*), void* rng) {
-    // Entity.baseTick: checkBelowWorld
-    if (UNLIKELY(m.pos[1] < static_cast<double>(w.blocks.min_y() - 64))) return Fate::kGone;
+    look_around(w, kItem, m);
+    if (UNLIKELY(base_tick(w, kItem, m, b) == Fate::kGone)) return Fate::kGone;
     const double old_pos[3] = {m.pos[0], m.pos[1], m.pos[2]};
     const double old_vel[3] = {m.vel[0], m.vel[1], m.vel[2]};
-    if (!b.no_gravity)
+    // In water, or in lava, more than a tenth of a block deep: it floats up - ItemEntity.setFluidMovement,
+    // a little faster sideways in water than in lava. Else it falls.
+    const double sideways = b.in_water && b.water_height > 0.10000000149011612  ? 0.9900000095367432
+                            : in_lava(b) && b.lava_height > 0.10000000149011612 ? 0.949999988079071
+                                                                                : 0.0;
+    if (UNLIKELY(sideways != 0.0)) {
+        m.vel[0] = m.vel[0] * sideways;
+        m.vel[1] = m.vel[1] + static_cast<double>(m.vel[1] < 0.05999999865889549 ? 5.0e-4f : 0.0f);
+        m.vel[2] = m.vel[2] * sideways;
+    } else if (!b.no_gravity) {
         m.vel[0] = m.vel[0] + 0.0, m.vel[1] = m.vel[1] + -kItem.gravity, m.vel[2] = m.vel[2] + 0.0;  // applyGravity
-    look_around(w, kItem, m);
+    }
+    if (UNLIKELY(w.wet)) look_around(w, kItem, m);  // (a current may have given it a velocity that reaches further)
 
     const Aabb box = box_of(kItem, m.pos);
     b.no_physics = !w.open && !world::no_collision(w.blocks, world::inflated(box, -1.0e-7, -1.0e-7, -1.0e-7), w.near);
@@ -517,6 +727,9 @@ Fate item_tick(World& w, Motion& m, Body& b, u32 tick_count, i32 id, float (*ran
     } else {
         apply_effects_from_last_movements(w, kItem, m, b);
     }
+    // It looks at the fluids once more, where it is now (the current pushes it a second time):
+    // an item in a fluid is told to its viewers every tick.
+    if (update_fluids(w, kItem, m, b)) b.needs_sync = true;
     // Its velocity changed by more than a tenth of a block a tick: viewers hear of it at once.
     const double dx = m.vel[0] + -old_vel[0], dy = m.vel[1] + -old_vel[1], dz = m.vel[2] + -old_vel[2];
     if (dx * dx + dy * dy + dz * dz > 0.01) b.needs_sync = true;
@@ -532,6 +745,10 @@ void tnt_tick(World& w, Motion& m, Body& b) {
     const double drag = static_cast<double>(0.98f);  // getAirDrag
     m.vel[0] = m.vel[0] * drag, m.vel[1] = m.vel[1] * drag, m.vel[2] = m.vel[2] * drag;
     if (b.on_ground) m.vel[0] = m.vel[0] * 0.7, m.vel[1] = m.vel[1] * -0.5, m.vel[2] = m.vel[2] * 0.7;
+    // PrimedTnt.tick ends - while its fuse burns - with a look at the fluids around it, and the
+    // push of their currents. (It has no base tick: its first tick is never over, so it makes no
+    // splash and is never "in lava".)
+    update_fluids(w, kTnt, m, b);
 }
 
 void falling_move(World& w, Motion& m, Body& b) {
@@ -542,17 +759,82 @@ void falling_move(World& w, Motion& m, Body& b) {
     apply_effects_from_blocks(w, kFallingBlock, m, b, old_pos);
 }
 
+namespace {
+
+// LivingEntity.getFluidFallingAdjustedMovement: in a fluid it sinks by a sixteenth of gravity a
+// tick - and, once it nearly lies still, by 0.003 flat.
+ALWAYS_INLINE double fluid_falling_adjusted(double gravity, bool falling, double y) {
+    if (gravity == 0) return y;  // (nothing sprints)
+    if (falling && std::fabs(y - 0.005) >= 0.003 && std::fabs(y - gravity / 16.0) < 0.003) return -0.003;
+    return y - gravity / 16.0;
+}
+
+// LivingEntity.jumpOutOfFluid: against a wall, with room above it, it is lifted out.
+ALWAYS_INLINE void jump_out_of_fluid(World& w, const Kind& k, Motion& m, const Body& b, double old_y) {
+    if (!b.horizontal_collision) return;
+    // Entity.isFree: no block in the way of its box moved there, and no fluid in it
+    const Aabb box = world::moved(box_of(k, m.pos), m.vel[0], ((m.vel[1] + 0.6000000238418579) - m.pos[1]) + old_y, m.vel[2]);
+    if (world::no_collision(w.blocks, box, world::kAskSections) && !contains_liquid(w, box)) m.vel[1] = 0.30000001192092896;
+}
+
+// LivingEntity.travelInFluid with no input: travelInWater - or what its class has in its place -
+// and travelInLava.
+void travel_in_fluid(World& w, const Kind& k, Motion& m, Body& b) {
+    const bool falling = !(m.vel[1] > 0);
+    const double old_y = m.pos[1];
+    const double gravity = b.no_gravity ? 0.0 : k.gravity;  // getEffectiveGravity
+    // moveRelative adds Vec3.ZERO for no input.
+    m.vel[0] = m.vel[0] + 0.0, m.vel[1] = m.vel[1] + 0.0, m.vel[2] = m.vel[2] + 0.0;
+    move(w, k, m, b, m.vel[0], m.vel[1], m.vel[2]);
+    if (b.in_water) {
+        if (k.water_travel != gp::kWaterDefault) {
+            // Axolotl, Frog, AbstractNautilus: nine tenths of it is left, and that is all.
+            m.vel[0] = m.vel[0] * 0.9, m.vel[1] = m.vel[1] * 0.9, m.vel[2] = m.vel[2] * 0.9;
+            return;
+        }
+        // (No water_movement_efficiency: mcgen holds every type's default to nothing. No climbing.)
+        const double slow = static_cast<double>(k.water_slow_down);
+        const double y = m.vel[1] * 0.800000011920929;
+        m.vel[0] = m.vel[0] * slow, m.vel[2] = m.vel[2] * slow;
+        m.vel[1] = fluid_falling_adjusted(gravity, falling, y);
+    } else {
+        if (b.lava_height <= k.jump_threshold) {  // isInShallowFluid(FluidTags.LAVA)
+            const double y = m.vel[1] * 0.800000011920929;
+            m.vel[0] = m.vel[0] * 0.5, m.vel[2] = m.vel[2] * 0.5;
+            m.vel[1] = fluid_falling_adjusted(gravity, falling, y);
+        } else {
+            m.vel[0] = m.vel[0] * 0.5, m.vel[1] = m.vel[1] * 0.5, m.vel[2] = m.vel[2] * 0.5;
+        }
+        if (gravity != 0) m.vel[0] = m.vel[0] + 0.0, m.vel[1] = m.vel[1] + -gravity / 4.0, m.vel[2] = m.vel[2] + 0.0;
+    }
+    jump_out_of_fluid(w, k, m, b, old_y);
+}
+
+}  // namespace
+
 Fate living_tick(World& w, const Kind& k, Motion& m, Body& b) {
-    // Entity.baseTick: checkBelowWorld -> LivingEntity.onBelowWorld hurts it until it dies. Nothing has health: gone.
-    if (UNLIKELY(m.pos[1] < static_cast<double>(w.blocks.min_y() - 64))) return Fate::kGone;
+    look_around(w, k, m);
+    if (UNLIKELY(base_tick(w, k, m, b) == Fate::kGone)) return Fate::kGone;
     const double old_pos[3] = {m.pos[0], m.pos[1], m.pos[2]};
     // LivingEntity.aiStep: what is left of a velocity under 0.003 a tick is dropped.
     if (std::fabs(m.vel[0]) < 0.003) m.vel[0] = 0;
     if (std::fabs(m.vel[2]) < 0.003) m.vel[2] = 0;
     if (std::fabs(m.vel[1]) < 0.003) m.vel[1] = 0;
-    look_around(w, k, m);
+    // Mob.serverAiStep, what of it is no brain: MoveControl.tick, which lets a frog float up in
+    // water and a drowned sink - every tick, whatever the mob is after.
+    if (UNLIKELY(k.control_in_water != 0) && b.in_water)
+        m.vel[0] = m.vel[0] + 0.0, m.vel[1] = m.vel[1] + k.control_in_water, m.vel[2] = m.vel[2] + 0.0;
+    if (UNLIKELY(k.control_off_ground != 0) && !b.on_ground)
+        m.vel[0] = m.vel[0] + 0.0, m.vel[1] = m.vel[1] + k.control_off_ground, m.vel[2] = m.vel[2] + 0.0;
+    if (UNLIKELY(w.wet)) look_around(w, k, m);  // (a current may have given it a velocity that reaches further)
 
-    // travel -> travelInAir, with no input.
+    // travel: in a fluid - LivingEntity.shouldTravelInFluid: it is in water or lava (nothing here
+    // stands on either) - travelInFluid; else travelInAir. With no input.
+    if (UNLIKELY(b.in_water || in_lava(b))) {
+        travel_in_fluid(w, k, m, b);
+        apply_effects_from_blocks(w, k, m, b, old_pos);
+        return Fate::kStays;
+    }
     const auto modified = [](float friction, float modifier) {  // LivingEntity.computeModifiedFriction
         return std::clamp(1.0f - (1.0f - friction) * modifier, 0.0f, 1.0f);
     };
@@ -592,6 +874,19 @@ float drew(void* flag) {  // an item at rest draws no random number: only one st
 
 }  // namespace
 
+Kind living_kind(u32 type) {
+    const proto::gen::entity_type::Info& info = proto::gen::entity_type::kInfo[type];
+    const gp::EntityPhysics& how = gp::kEntity[type];
+    Kind k = living_kind(info.width, info.height, how.step_height, how.gravity);
+    k.pushed_by_fluid = how.pushed_by_fluid;
+    k.water_travel = how.water_travel;
+    k.water_slow_down = how.water_slow_down;
+    k.jump_threshold = how.jump_threshold;
+    k.control_in_water = how.control_in_water;
+    k.control_off_ground = how.control_off_ground;
+    return k;
+}
+
 bool same_state(const Motion& a, const Body& x, const Motion& b, const Body& y) {
     for (u32 i = 0; i < 3; ++i) {
         if (!same_bits(a.pos[i], b.pos[i])) return false;
@@ -604,6 +899,11 @@ bool same_state(const Motion& a, const Body& x, const Motion& b, const Body& y) 
         x.vertical_collision_below != y.vertical_collision_below || x.no_physics != y.no_physics ||
         x.no_gravity != y.no_gravity || x.needs_sync != y.needs_sync || x.sync_position != y.sync_position ||
         x.moves != y.moves || x.finals != y.finals)
+        return false;
+    if (x.in_water != y.in_water || x.first_tick != y.first_tick || x.splashed != y.splashed ||
+        !same_bits(x.water_height, y.water_height) || !same_bits(x.lava_height, y.lava_height) || x.fire_ticks != y.fire_ticks ||
+        x.fire_immune != y.fire_immune || x.shows_fire != y.shows_fire || x.burned != y.burned ||
+        x.extinguished != y.extinguished || x.lava_hurts != y.lava_hurts)
         return false;
     if (x.has_support && (x.support[0] != y.support[0] || x.support[1] != y.support[1] || x.support[2] != y.support[2]))
         return false;

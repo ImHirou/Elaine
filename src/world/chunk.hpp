@@ -193,6 +193,9 @@ struct Chunk {
     // its cell, one that acts on an entity in it or on it, one that breaks a fall.
     // (Dimension::holds: what collision queries and entity physics ask before reading blocks.)
     u32 filled_sections = 0, large_sections = 0, entity_sections = 0, fall_sections = 0;
+    // ...and, kept exact, the sections that hold a fluid (Section::fluids is not nothing: vanilla's
+    // LevelChunkSection.hasFluid, which is what an entity asks before it looks for fluid around it).
+    u32 fluid_sections = 0;
     // ---- block ticks. Which chunks are simulated is the game's to say, by the players' simulation
     // distance: how many of them have this chunk within it (random ticks: ChunkLevel.isEntityTicking),
     // and how many within one chunk more (scheduled ticks: isBlockTicking).

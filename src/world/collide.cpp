@@ -7,6 +7,7 @@
 #include <limits>
 
 #include "world/block.hpp"
+#include "world/fluid.hpp"
 
 #include PROTO_GEN_PHYSICS_HPP
 
@@ -569,8 +570,9 @@ bool supporting_block(const Dimension& w, const Aabb& box, double x, double y, d
 
 namespace {
 
-// BlockGetter.clip: does the line from `from` to `to` hit a block? `boxes_of(state, out)` gives
-// the shape a block has for this kind of line, as boxes in block coordinates.
+// BlockGetter.clip: does the line from `from` to `to` hit a block? `boxes_of(state, x, y, z)` gives
+// the shape the block there has for this kind of line - or the fluid in it - as boxes in block
+// coordinates.
 template <class Shape>
 ALWAYS_INLINE bool clip_impl(const Dimension& w, const double from[3], const double to[3], Shape&& boxes_of) {
     if (from[0] == to[0] && from[1] == to[1] && from[2] == to[2]) return false;
@@ -581,7 +583,7 @@ ALWAYS_INLINE bool clip_impl(const Dimension& w, const double from[3], const dou
     const auto hits_block = [&](i32 x, i32 y, i32 z) {
         const BlockState s = w.block(x, y, z);
         if (LIKELY(s == kAir) || !long_enough) return false;
-        for (const Box& b : boxes_of(s)) {
+        for (const Box& b : boxes_of(s, x, y, z)) {
             const double lo[3] = {x + b.min[0], y + b.min[1], z + b.min[2]}, hi[3] = {x + b.max[0], y + b.max[1], z + b.max[2]};
             if (probe[0] >= lo[0] && probe[0] < hi[0] && probe[1] >= lo[1] && probe[1] < hi[1] && probe[2] >= lo[2] &&
                 probe[2] < hi[2])
@@ -629,7 +631,7 @@ constexpr Box kFullBlock[1] = {{{0.0, 0.0, 0.0}, {1.0, 1.0, 1.0}}};
 }  // namespace
 
 bool clip_hits(const Dimension& w, const double from[3], const double to[3]) {
-    return clip_impl(w, from, to, [](BlockState s) {
+    return clip_impl(w, from, to, [](BlockState s, i32, i32, i32) {
         bool dynamic = false;
         return collision_boxes(s, dynamic);
     });
@@ -641,11 +643,19 @@ bool clip_hits_fall_resetting(const Dimension& w, const double from[3], const do
     if (!(w.holds(floor_i(std::min(from[0], to[0])) - 1, floor_i(std::min(from[1], to[1])) - 1,
                   floor_i(std::min(from[2], to[2])) - 1, floor_i(std::max(from[0], to[0])) + 1,
                   floor_i(std::max(from[1], to[1])) + 1, floor_i(std::max(from[2], to[2])) + 1) &
-          Dimension::kFallBlocks))
+          (Dimension::kFallBlocks | Dimension::kFluids)))
         return false;
-    return clip_impl(w, from, to, [](BlockState s) {
-        const bool resets = physics::kMaterials[physics::kState[s] >> physics::kMaterialShift].flags & physics::kFallResetting;
-        return std::span<const Box>(kFullBlock, resets ? 1u : 0u);
+    // ClipContext.Fluid.WATER: the water of a cell is hit too, as high as it stands in it. (Vanilla
+    // keeps the shape of a fluid state as it was first asked for - FlowingFluid.getShape, a map by
+    // state - so whether a cell under more water counts as full there depends on what was asked
+    // before; here it is what the cell is.)
+    Box water{{0.0, 0.0, 0.0}, {1.0, 1.0, 1.0}};
+    return clip_impl(w, from, to, [&](BlockState s, i32 x, i32 y, i32 z) {
+        if (physics::kMaterials[physics::kState[s] >> physics::kMaterialShift].flags & physics::kFallResetting)
+            return std::span<const Box>(kFullBlock, 1u);
+        if (!holds_water(s)) return std::span<const Box>();
+        water.max[1] = static_cast<double>(fluid_height(w, fluid_of(s), x, y, z));
+        return std::span<const Box>(&water, 1u);
     });
 }
 

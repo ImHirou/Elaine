@@ -225,8 +225,12 @@ void Game::apply_entity_tag(u32 slot, EntityTag&& t) {
     if (t.no_gravity) ents_.set_no_gravity(row, true);
     if (t.glowing) ents_.set_shared_flag(row, 6, true);    // Entity.FLAG_GLOWING
     if (t.invisible) ents_.set_shared_flag(row, 5, true);  // FLAG_INVISIBLE
-    if (slot < movers_.size() && movers_[slot].kind != proto::gen::physics::kMoverNone)
+    if (slot < movers_.size() && movers_[slot].kind != proto::gen::physics::kMoverNone) {
         movers_[slot].body.fall_distance = t.fall_distance;
+        movers_[slot].body.fire_ticks = t.cold.fire;  // (from here on the body's: Game::fire_of)
+        // Entity.load: onGround is what the tag says - what it stands on, its first move finds.
+        if (t.on_ground) movers_[slot].body.on_ground = true;
+    }
     if (!t.has_cold) return;
     const bool worn = std::any_of(std::begin(t.cold.worn), std::end(t.cold.worn), [](const ItemStack& s) { return !s.empty(); });
     entity::Cold& c = ents_.make_cold(row);
@@ -267,6 +271,7 @@ u32 Game::summon(u32 type, double x, double y, double z, nbt::Tag tag, std::stri
 void Game::write_cold_tag(u32 row, nbt::Writer& w) const {
     if (ents_.shared_flags[row] & (1u << 6)) w.put_byte("Glowing", 1);
     if (ents_.type[row] == entity_type::kArmorStand && (ents_.shared_flags[row] & (1u << 5))) w.put_byte("Invisible", 1);
+    if (const i32 fire = fire_of(row)) w.put_short("Fire", static_cast<i16>(fire));
     const entity::Cold* c = ents_.cold(row);
     if (!c) return;
     const entity_type::Info& info = entity_type::kInfo[ents_.type[row]];
@@ -274,7 +279,6 @@ void Game::write_cold_tag(u32 row, nbt::Writer& w) const {
     if (c->bits & cold::kNameVisible) w.put_byte("CustomNameVisible", 1);
     if (c->bits & cold::kSilent) w.put_byte("Silent", 1);
     if (c->bits & cold::kInvulnerable) w.put_byte("Invulnerable", 1);
-    if (c->fire) w.put_short("Fire", c->fire);
     if (c->air != 300) w.put_int("Air", c->air);
     if (c->portal_cooldown) w.put_int("PortalCooldown", c->portal_cooldown);
     if (c->ticks_frozen) w.put_int("TicksFrozen", c->ticks_frozen);

@@ -53,7 +53,10 @@ MATERIAL_FLAGS = [
     ("kClimbable", 0x8, "#climbable"),
     ("kFallResetting", 0x10, "#fall_damage_resetting: a fast fall through it starts over"),
     ("kStepSlime", 0x20, "SlimeBlock.stepOn: what stands on it nearly still loses most of its horizontal speed"),
+    ("kOwnSpeedFactor", 0x40, "the block of water, a bubble column: what is in it is slowed by it alone, whatever is under it "
+                              "(Entity.getBlockSpeedFactor)"),
 ]
+OWN_SPEED_FACTOR = ("minecraft:water", "minecraft:bubble_column")
 INSIDE = ["kInsideNone", "kInsideWeb", "kInsideHoney"]
 
 # How an entity type moves. Everything is read off its class chain (gamedata/entities.json):
@@ -63,28 +66,68 @@ MOVERS = ["kMoverNone", "kMoverItem", "kMoverTnt", "kMoverLiving", "kMoverArmorS
 # it, then decide whether its types still move as plain LivingEntity.travel does.
 MOVE_METHODS = ("travel", "getDefaultGravity", "maxUpStep", "move", "omnidirectionalAirMover", "pushEntities", "isPushable", "doPush",
                 "push", "getAirDrag", "getEntityBounciness", "getBlockSpeedFactor", "onClimbable", "isEffectiveAi", "isImmobile",
-                "makeBoundingBox", "jumpFromGround", "getJumpPower", "checkFallDamage", "getFlyingSpeed", "isAffectedByFluids")
+                "makeBoundingBox", "jumpFromGround", "getJumpPower", "checkFallDamage", "getFlyingSpeed", "isAffectedByFluids",
+                # ...and in a fluid
+                "isPushedByFluid", "travelInFluid", "travelInWater", "travelInLava", "getWaterSlowDown", "canStandOnFluid",
+                "getFluidJumpThreshold", "getLiquidCollisionShape", "updateFluidInteraction", "jumpInLiquid")
 LIVING_DECLARES = {
-    "AbstractCubeMob": {"jumpFromGround", "push"}, "AbstractHorse": {"isImmobile", "isPushable", "onClimbable"},
+    "AbstractCubeMob": {"jumpFromGround", "push"}, "AbstractFish": {"travelInWater"},
+    "AbstractHorse": {"isImmobile", "isPushable", "onClimbable"}, "AbstractNautilus": {"isPushedByFluid", "travelInWater"},
+    "AgeableWaterCreature": {"isPushedByFluid"},
     "Allay": {"checkFallDamage", "travel"}, "ArmorStand": {"doPush", "isEffectiveAi", "isPushable", "pushEntities", "travel"},
-    "Bat": {"checkFallDamage", "doPush", "isPushable", "pushEntities"}, "Bee": {"checkFallDamage", "omnidirectionalAirMover"},
-    "Camel": {"travel"}, "Creaking": {"isPushable", "push"}, "Fox": {"isImmobile"},
-    "Ghast": {"checkFallDamage", "onClimbable", "travel"}, "HappyGhast": {"checkFallDamage", "onClimbable", "travel"},
-    "IronGolem": {"doPush"}, "Llama": {"isImmobile"}, "MagmaCube": {"jumpFromGround"}, "Mannequin": {"isEffectiveAi", "isImmobile"},
-    "Mob": {"isEffectiveAi"}, "Parrot": {"checkFallDamage", "doPush", "isPushable", "omnidirectionalAirMover"},
+    "Axolotl": {"isPushedByFluid", "travelInWater"},
+    "Bat": {"checkFallDamage", "doPush", "isPushable", "pushEntities"},
+    "Bee": {"checkFallDamage", "jumpInLiquid", "omnidirectionalAirMover"}, "Breeze": {"getFluidJumpThreshold"},
+    "Camel": {"travel"}, "Creaking": {"isPushable", "push"}, "Dolphin": {"travelInWater"},
+    "Drowned": {"isPushedByFluid", "travelInWater"}, "Fox": {"isImmobile"}, "Frog": {"isPushedByFluid", "travelInWater"},
+    "Ghast": {"checkFallDamage", "onClimbable", "travel"}, "Guardian": {"travelInWater"},
+    "HappyGhast": {"checkFallDamage", "onClimbable", "travel"},
+    "IronGolem": {"doPush"}, "Llama": {"isImmobile"}, "MagmaCube": {"jumpFromGround", "jumpInLiquid"},
+    "Mannequin": {"isEffectiveAi", "isImmobile"},
+    "Mob": {"isEffectiveAi", "jumpInLiquid"}, "Parrot": {"checkFallDamage", "doPush", "isPushable", "omnidirectionalAirMover"},
     "Phantom": {"checkFallDamage", "onClimbable", "travel"},
-    "Player": {"getBlockSpeedFactor", "getFlyingSpeed", "isAffectedByFluids", "isEffectiveAi", "isImmobile", "onClimbable", "travel"},
+    "Player": {"getBlockSpeedFactor", "getFlyingSpeed", "isAffectedByFluids", "isEffectiveAi", "isImmobile", "isPushedByFluid",
+               "onClimbable", "travel"},
+    "PolarBear": {"getWaterSlowDown"},
     "Rabbit": {"getJumpPower", "jumpFromGround"}, "Ravager": {"isImmobile"}, "Shulker": {"makeBoundingBox", "move", "push"},
-    "Sniffer": {"jumpFromGround"}, "Spider": {"onClimbable"}, "Squid": {"getDefaultGravity", "travel"}, "Strider": {"checkFallDamage"},
-    "SulfurCube": {"doPush", "maxUpStep", "omnidirectionalAirMover"}, "Warden": {"doPush", "isPushable"},
+    "SkeletonHorse": {"getWaterSlowDown"},
+    "Sniffer": {"jumpFromGround"}, "Spider": {"onClimbable"}, "Squid": {"getDefaultGravity", "travel"},
+    "Strider": {"canStandOnFluid", "checkFallDamage", "getLiquidCollisionShape"},
+    "SulfurCube": {"doPush", "getFluidJumpThreshold", "maxUpStep", "omnidirectionalAirMover", "travelInFluid"},
+    "Turtle": {"isPushedByFluid", "travelInWater"}, "Warden": {"doPush", "isPushable"}, "WaterAnimal": {"isPushedByFluid"},
 }
+# What the classes that are moved here say of a fluid themselves (each read in the jar):
+#   isPushedByFluid false: a current does not carry it
+#   travelInWater: Axolotl, Frog, AbstractNautilus - moveRelative, move, and nine tenths of the velocity is left
+#                  (kWaterGlide: no gravity, no fall)
+#   getWaterSlowDown: what a tick in water leaves of its horizontal speed (0.8 in LivingEntity)
+#   getFluidJumpThreshold: how deep "shallow" ends - 0.4, or nothing for what has its eyes lower; a breeze's eye height
+# Drowned.isPushedByFluid and travelInWater ask whether it swims, and it swims only when its brain wants it to:
+# LivingEntity's. jumpInLiquid (Mob, MagmaCube, Bee) is what a jump does in a fluid, and nothing jumps.
+# Strider walks on lava - canStandOnFluid, and a collision shape of lava that depends on who asks: OWN_MOVEMENT.
+# Turtle: its MoveControl gives it a speed that is not its attribute's, in water and out of it - a turtle on a
+# vanilla server cannot be made to stand still, so there is no recording to hold a port to: OWN_MOVEMENT.
+NOT_PUSHED_BY_FLUID = {"Axolotl", "Frog", "AbstractNautilus", "AgeableWaterCreature", "WaterAnimal"}
+WATER_TRAVEL = {"Axolotl": "kWaterGlide", "Frog": "kWaterGlide", "AbstractNautilus": "kWaterGlide"}
+WATER_TRAVELS = ["kWaterDefault", "kWaterGlide"]
+# What a mob's MoveControl adds to its velocity every tick, whatever the mob wants - before it travels
+# (Mob.serverAiStep). Not a brain: it is how the mob sinks and floats. (up while it is in water, down while
+# it is not on the ground):
+#   SmoothSwimmingMoveControl with applyGravity - Frog, AbstractNautilus: 0.005 up in water
+#   Drowned.DrownedMoveControl: 0.008 down off the ground, in the air too, for as long as it does not want to
+#   swim (which takes a target, or the search for land: a brain)
+# The recording shows them (physics_probe.py: fluid_frog_*, fluid_nautilus_pool, fluid_drowned_*).
+MOVE_CONTROL = {"Frog": (0.005, 0.0), "AbstractNautilus": (0.005, 0.0), "Drowned": (0.0, -0.008)}
+WATER_SLOW_DOWN = {"PolarBear": 0.98, "SkeletonHorse": 0.96}
+EYE_HIGH_JUMP_THRESHOLD = {"Breeze"}
+FLUID_AS_LIVING = {"Drowned", "MagmaCube", "Mob", "Bee"}   # (declare one of the fluid methods, and move as LivingEntity does)
 # Classes that move in a way of their own - by one of the methods above, or by writing their
 # velocity in tick / aiStep / customServerAiStep (AbstractFish and Dolphin flop, Blaze, Chicken
 # and the wither fall slowly, a bat hangs, a vex passes through walls, a spider climbs what it
 # runs into). Their types are left where they are put, as before there was physics.
 OWN_MOVEMENT = {"Allay", "Bat", "Bee", "Camel", "Creaking", "Ghast", "HappyGhast", "Mannequin", "Parrot", "Phantom", "Shulker", "Squid",
                 "SulfurCube", "AbstractFish", "Blaze", "Chicken", "Dolphin", "EnderDragon", "Guardian", "Vex", "WitherBoss", "Spider",
-                "Player"}
+                "Strider", "Turtle", "Player"}
 # Entity.getMoveSimulationType(): the classes that declare it, and those of them that answer
 # SERVER_AND_CLIENT - what a client moves by itself between the server's updates. (The dragon
 # does while it dies; a player answers AUTHORITATIVE_SIDE_AND_SERVER.)
@@ -211,6 +254,14 @@ def emit(hdr: str, version: str, ext_blocks: list, st: dict, shapes: list, grids
         f |= flag["kSuppressesBounce"] if bid in no_bounce else 0
         f |= flag["kClimbable"] if bid in climbable else 0
         f |= flag["kFallResetting"] if bid in fall_reset else 0
+        f |= flag["kOwnSpeedFactor"] if name in OWN_SPEED_FACTOR else 0
+        # Entity.checkInsideBlocks takes an entity for inside a block when it meets the shape the
+        # block has for that - the whole cell, but for a few classes. The port asks none: it
+        # tells every block the entity's box passes, and the fluid in it. That is the same thing
+        # as long as no block with another shape holds a fluid.
+        if "getEntityInsideCollisionShape" in gb["hooks"] and ("LiquidBlockContainer" in gb["interfaces"] or "LiquidBlock" in gb["class"]):
+            die(f"{name}: holds a fluid, and {gb['hooks']['getEntityInsideCollisionShape']}.getEntityInsideCollisionShape is not "
+                "the whole block: phys::check_inside_leg does not ask")
         inside = "kInsideNone"
         if name in placeable:
             for hook in ENTITY_HOOKS:
@@ -359,11 +410,30 @@ struct Shape {
                 # What the port takes for granted about a living entity: the attributes that
                 # scale friction, drag and bounce are at their defaults.
                 expect = {"minecraft:friction_modifier": 1.0, "minecraft:air_drag_modifier": 1.0, "minecraft:bounciness": 0.0,
-                          "minecraft:movement_efficiency": 0.0, "minecraft:explosion_knockback_resistance": 0.0, "minecraft:scale": 1.0}
+                          "minecraft:movement_efficiency": 0.0, "minecraft:explosion_knockback_resistance": 0.0, "minecraft:scale": 1.0,
+                          "minecraft:water_movement_efficiency": 0.0, "minecraft:burning_time": 1.0}
                 for key, value in expect.items():
                     if attrs.get(key) != value:
                         die(f"{name}: default {key} is {attrs.get(key)}, the physics port assumes {value}")
-        rows[entity_ids[name.split(":", 1)[1]]] = (name, mover, gravity, step, bool(set(chain) & CLIENT_SIMULATED))
+        # ...and in a fluid: what its classes say (the tables above), each class of the chain that
+        # declares a fluid method being one the port knows.
+        fluid_methods = set(MOVE_METHODS[MOVE_METHODS.index("isPushedByFluid"):])
+        if mover in ("kMoverLiving", "kMoverArmorStand"):
+            for c in chain:
+                if declared.get(c, set()) & fluid_methods and c not in (
+                        NOT_PUSHED_BY_FLUID | set(WATER_TRAVEL) | set(WATER_SLOW_DOWN) | EYE_HIGH_JUMP_THRESHOLD | FLUID_AS_LIVING):
+                    die(f"{name}: {c} declares {sorted(declared[c] & fluid_methods)}, and the port has no word for it")
+        eye = t.get("eye_height")
+        if not isinstance(eye, (int, float)) or not isinstance(t.get("fire_immune"), bool):
+            die(f"{name}: gamedata/entities.json has no eye_height / fire_immune for it - run: mcgen.py gamedata")
+        water = next((WATER_TRAVEL[c] for c in chain if c in WATER_TRAVEL), "kWaterDefault")
+        slow = next((WATER_SLOW_DOWN[c] for c in chain if c in WATER_SLOW_DOWN), 0.8)
+        # Entity.getFluidJumpThreshold: (double) eyeHeight >= 0.4 ? 0.4 : 0.0 - Breeze's: its eye height
+        threshold = float(eye) if set(chain) & EYE_HIGH_JUMP_THRESHOLD else (0.4 if float(eye) >= 0.4 else 0.0)
+        control = next((MOVE_CONTROL[c] for c in chain if c in MOVE_CONTROL), (0.0, 0.0))
+        rows[entity_ids[name.split(":", 1)[1]]] = (name, mover, gravity, step, bool(set(chain) & CLIENT_SIMULATED),
+                                                   t["fire_immune"], not (set(chain) & NOT_PUSHED_BY_FLUID), water, slow, threshold,
+                                                   control)
     if sorted(rows) != list(range(len(entity_ids))):
         die("gamedata/entities.json does not list every entity type")
     o.append("""
@@ -371,17 +441,31 @@ struct Shape {
 """)
     for i, name in enumerate(MOVERS):
         o.append(f"inline constexpr unsigned char {name} = {i};\n")
+    o.append("// LivingEntity.travelInWater, and the classes that have one of their own (gen_physics.WATER_TRAVEL)\n")
+    for i, name in enumerate(WATER_TRAVELS):
+        o.append(f"inline constexpr unsigned char {name} = {i};\n")
     o.append("""struct EntityPhysics {
     unsigned char mover;   // kMover*: whose tick moves it. kMoverNone: nothing here does (it stays where it is put)
     bool simulated;        // Entity.getMoveSimulationType() is SERVER_AND_CLIENT: a client moves it by itself between updates
     float step_height;     // LivingEntity.maxUpStep(): the step_height attribute's default
     double gravity;        // Entity.getDefaultGravity(): a constant of its class, or the gravity attribute's default
+    // ---- in a fluid
+    bool fire_immune;      // EntityType.fireImmune()
+    bool pushed_by_fluid;  // Entity.isPushedByFluid(): a current carries it
+    unsigned char water_travel;  // kWater*: its travelInWater
+    float water_slow_down; // LivingEntity.getWaterSlowDown()
+    double jump_threshold; // Entity.getFluidJumpThreshold(): a fluid no deeper than this is shallow
+    // What its MoveControl adds to its vertical velocity every tick, before it travels:
+    double control_in_water;    // ...while it is in water (a frog floats up)
+    double control_off_ground;  // ...while it is not on the ground (a drowned sinks, and falls faster)
 };
 """)
     o.append(f"inline constexpr EntityPhysics kEntity[entity_type::kCount] = {{\n")
     for i in range(len(rows)):
-        name, mover, gravity, step, simulated = rows[i]
-        o.append(f"    {{{mover}, {'true' if simulated else 'false'}, {cfloat32(step)}, {cdouble(gravity)}}},  // {name.split(':', 1)[1]}\n")
+        name, mover, gravity, step, simulated, fire_immune, pushed, water, slow, threshold, control = rows[i]
+        o.append(f"    {{{mover}, {'true' if simulated else 'false'}, {cfloat32(step)}, {cdouble(gravity)}, "
+                 f"{'true' if fire_immune else 'false'}, {'true' if pushed else 'false'}, {water}, {cfloat32(slow)}, "
+                 f"{cdouble(threshold)}, {cdouble(control[0])}, {cdouble(control[1])}}},  // {name.split(':', 1)[1]}\n")
     o.append("};\n\n}  // namespace proto::gen::physics\n")
     stats = {"materials": len(materials), "shapes_grid": sum(k == 3 for k in kinds),
              "movers": sum(r[1] != "kMoverNone" for r in rows.values())}

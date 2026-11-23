@@ -3654,6 +3654,143 @@ def lava_meets_water(srv: Server):
     assert a.level_events[1:] == [(LAVA_FIZZ, pos, 0, False) for pos in ((-9, -60, 12), (8, -60, 12), (20, -60, 12), (-10, -60, -10))]
 
 
+def tag_numbers(shown_tag: str) -> list:
+    """The numbers of a tag as /data get shows it - "[-8.5d, 1.0E-4d]", "300s" - as Python has them."""
+    return [float(n) if any(ch in n for ch in ".E") else int(n) for n in re.findall(r"(-?[0-9][0-9.E-]*)[dfsbL]?", shown_tag)]
+
+
+@test()
+def afloat(srv: Server):
+    """What is in water and lava moves as on a vanilla server - to the bit: three things out of
+    the recording the unit test replays (tools/vanilla/physics_probe.py: fluid_item_pool_bottom,
+    fluid_stand_channel, fluid_item_lava_pool), built here where they were recorded, ticked by
+    the game itself and read back with /data get. An item floats up from the bottom of a pool; a
+    current pushes an armor stand along a channel; an item that falls into lava is lit, has one
+    point of its five left and is gone a tick later. (Three that never lie on the ground: an item
+    that does moves every fourth tick, and which is its entity id's to say.) Then a pig: in lava
+    it burns, for everyone to see, and lives (nothing takes damage here); in water it is put out."""
+    a = wet_start(srv)
+    got = run_command(a, "tp -992.5 -60 1008.5", ticks=40)
+    assert len(got["teleports"]) == 1, got
+    item = '{Item:{id:"minecraft:stone",count:1},PickupDelay:32767s}'
+    ITEM_POS, ITEM_MOTION = [-1000.7, -45.36049717167888, 992.6], [0.0, 0.01720995705604936, 0.0]     # after sixty ticks
+    lines = [
+        # a pool of water, three by three and two deep, in a wall of stone
+        "fill -1004 -47 989 -998 -47 995 stone", "fill -1003 -46 990 -999 -45 994 stone", "fill -1002 -46 991 -1000 -45 993 water",
+        # a channel: a source, and the water as it stands once it has run to the wall, a level less each block
+        "fill -1004 -33 1005 -998 -33 1011 stone", "fill -1004 -32 1007 -998 -32 1009 stone",
+        *[f"setblock {-1003 + i} -32 1008 water[level={i}]" for i in range(5)],
+        # a pit of lava
+        "fill -996 -47 1013 -990 -47 1019 stone", "fill -995 -46 1014 -991 -45 1018 stone", "fill -994 -46 1015 -992 -45 1017 lava",
+        f"summon item -1000.7 -46.0 992.6 {item}", "summon armor_stand -1002.5 -32.0 1008.5 {OnGround:1b}",
+    ]
+    for line in lines:
+        said = run_command(a, line)["said"]
+        assert len(said) == 1 and said[0].get("translate", "").endswith(".success"), (line, said)
+
+    def data(selector: str, path: str) -> list:
+        said = run_command(a, f"data get entity {selector} {path}")["said"]
+        assert len(said) == 1 and "with" in said[0], (selector, path, said)
+        return tag_numbers(shown(said[0]["with"][-1]))
+
+    # Sixty ticks: nothing of the fixtures flows (they are what a flow leaves), and the two are
+    # where the vanilla server had them - every bit of every double.
+    assert step_game(a, 60) == {}
+    assert data("@e[type=item,limit=1]", "Pos") == ITEM_POS
+    assert data("@e[type=item,limit=1]", "Motion") == ITEM_MOTION
+    assert data("@e[type=armor_stand,limit=1]", "Pos") == [-998.5799993581122, -32.0, 1008.5]
+    assert data("@e[type=armor_stand,limit=1]", "Motion") == [0.055999918352491976, -0.005, 0.0]
+    seen = next(iter(of_type(a, "kItem").values()))
+    assert abs(seen.pos[1] - ITEM_POS[1]) < 1e-3 and abs(seen.pos[0] - ITEM_POS[0]) < 1e-3, seen.pos    # ...and Alice was told as much
+
+    # Lava: the item falls for five ticks, is in it in the sixth - lit, four of its five points gone - and burns up in the seventh.
+    run_command(a, "kill @e[type=item]")
+    run_command(a, f"summon item -992.5 -43.5 1016.5 {item}")
+    step_game(a, 5)
+    assert data("@e[type=item,limit=1]", "Pos") == [-992.5, -44.08423810120649, 1016.5]
+    assert (data("@e[type=item,limit=1]", "Fire"), data("@e[type=item,limit=1]", "Health")) == ([0], [5])
+    step_game(a, 1)
+    assert data("@e[type=item,limit=1]", "Pos") == [-992.5, -44.312553350325814, 1016.5]
+    assert (data("@e[type=item,limit=1]", "Fire"), data("@e[type=item,limit=1]", "Health")) == ([300], [1])
+    step_game(a, 1)
+    assert not of_type(a, "kItem")
+    assert run_command(a, "data get entity @e[type=item,limit=1]")["said"] == [failure(tr("argument.entity.notfound.entity"))]
+    # ...but not what is of netherite (ItemStack.canBeHurtBy: its damage_resistant): it floats.
+    run_command(a, 'summon item -992.5 -43.5 1016.5 {Item:{id:"minecraft:netherite_ingot",count:1},PickupDelay:32767s}')
+    step_game(a, 40)
+    assert (data("@e[type=item,limit=1]", "Fire"), data("@e[type=item,limit=1]", "Health")) == ([0], [5])
+    assert -46.0 <= data("@e[type=item,limit=1]", "Pos")[1] < -44.1
+
+    # A pig in the lava: it burns - the flag everyone is shown - and goes on burning; in the water it is put out.
+    run_command(a, "summon pig -992.5 -45.0 1016.5")
+    step_game(a, 3)
+    pig = next(iter(of_type(a, "kPig").values()))
+    assert pig.data[D_FLAGS] == (BYTE, 0x01) and data("@e[type=pig,limit=1]", "Fire") == [300], pig.data
+    step_game(a, 40)
+    assert data("@e[type=pig,limit=1]", "Fire") == [300] and of_type(a, "kPig")
+    run_command(a, "tp @e[type=pig] -1000.5 -44.5 992.5")
+    step_game(a, 2)
+    assert data("@e[type=pig,limit=1]", "Fire") == [0] and pig.data[D_FLAGS] == (BYTE, 0), pig.data
+
+
+@test()
+def a_player_swims(srv: Server):
+    """A player that sprints with its eyes under water swims: the flag and the pose others are
+    shown (Entity.updateSwimming, Player.updatePlayerPose - the server's to say, from where the
+    player is). It swims on for as long as it sprints in water, and not at all while it flies."""
+    a, b = srv.client(), srv.client()
+    join(a, "Alice")
+    jb = join(b, "Bob")
+    a.expect("player_info_update")
+    for cl in (a, b):
+        cl.send("player_loaded")
+    settle(a, b)
+    make_op(srv, a, "Alice")
+    idb = jb["login"]["entity_id"]
+    eb = a.entities[idb]
+    x, y, z = (int(math.floor(v)) for v in jb["teleport"]["pos"])
+    for cl in (a, b):       # (the tank's blocks are not what this is about)
+        cl.ignore = {"block_update", "section_blocks_update", "light_update"}
+    SPRINTING, SWIMMING = 0x08, 0x10
+
+    def sprint(on: bool) -> None:
+        b.send("player_command", varint(idb) + varint(1 if on else 2) + varint(0))
+        settle(b, a, ticks=3)
+
+    # On dry land a sprint is a sprint.
+    sprint(True)
+    assert eb.data[D_FLAGS] == (BYTE, SPRINTING) and eb.data.get(D_POSE, (POSE_T, mc.POSE["kStanding"]))[1] == mc.POSE["kStanding"]
+    sprint(False)
+    # A tank of glass around Bob, full of water: his eyes are under it.
+    run_command(a, f"fill {x - 2} {y - 1} {z - 2} {x + 2} {y + 3} {z + 2} glass")
+    run_command(a, f"fill {x - 1} {y} {z - 1} {x + 1} {y + 2} {z + 1} water")
+    settle(b, a, ticks=3)
+    assert eb.data[D_FLAGS] == (BYTE, 0)                 # in water, and not swimming: nobody sprints
+    sprint(True)
+    assert eb.data[D_FLAGS] == (BYTE, SPRINTING | SWIMMING) and eb.data[D_POSE] == (POSE_T, mc.POSE["kSwimming"]), eb.data
+    assert b.own_data[D_POSE] == (POSE_T, mc.POSE["kSwimming"])                                 # Bob is told too
+    sprint(False)
+    assert eb.data[D_FLAGS] == (BYTE, 0) and eb.data[D_POSE] == (POSE_T, mc.POSE["kStanding"]), eb.data
+    # Only his feet in water: he sprints, and swims no more than on land.
+    run_command(a, f"fill {x - 1} {y + 1} {z - 1} {x + 1} {y + 2} {z + 1} air")
+    settle(b, a, ticks=3)
+    sprint(True)
+    assert eb.data[D_FLAGS] == (BYTE, SPRINTING) and eb.data[D_POSE] == (POSE_T, mc.POSE["kStanding"]), eb.data
+    # Under water again while he sprints: he swims - and stops when the water is gone from around him.
+    run_command(a, f"fill {x - 1} {y + 1} {z - 1} {x + 1} {y + 2} {z + 1} water")
+    settle(b, a, ticks=4)
+    assert eb.data[D_FLAGS] == (BYTE, SPRINTING | SWIMMING) and eb.data[D_POSE] == (POSE_T, mc.POSE["kSwimming"]), eb.data
+    run_command(a, f"fill {x - 1} {y} {z - 1} {x + 1} {y + 2} {z + 1} air")
+    settle(b, a, ticks=4)
+    assert eb.data[D_FLAGS] == (BYTE, SPRINTING) and eb.data[D_POSE] == (POSE_T, mc.POSE["kStanding"]), eb.data
+    # One who flies does not swim (Player.updateSwimming).
+    sprint(False)
+    run_command(a, f"fill {x - 1} {y} {z - 1} {x + 1} {y + 2} {z + 1} water")
+    b.send("player_abilities", b"\x02")
+    sprint(True)
+    assert eb.data[D_FLAGS] == (BYTE, SPRINTING) and eb.data[D_POSE] == (POSE_T, mc.POSE["kStanding"]), eb.data
+
+
 @test()
 def water_flows_on_after_a_restart():
     """A fluid's tick waits with its chunk as a block's does, a restart long if need be: water set
@@ -5961,7 +6098,7 @@ def entity_tags():
         def looks(c: Client) -> None:
             pig = one(of_type(c, "kPig"))
             assert pig.data[NAME] == (OPTIONAL_TEXT, "Bob") and pig.data[VISIBLE] == (BOOL, True), pig.data
-            assert pig.data[SILENT] == (BOOL, True) and pig.data[D_FLAGS] == (BYTE, 0x40), pig.data      # glowing
+            assert pig.data[SILENT] == (BOOL, True) and pig.data[D_FLAGS] == (BYTE, 0x41), pig.data      # glowing, and on fire
             assert pig.data[MOB["kMobFlags"]] == (BYTE, 1), pig.data                                        # NoAI
             stand = one(of_type(c, "kArmorStand"))
             assert stand.data[STAND["kClientFlags"]] == (BYTE, 4 | 8) and stand.data[D_FLAGS] == (BYTE, 0x20), stand.data
@@ -5975,7 +6112,7 @@ def entity_tags():
 
         # ---- a pig with a name; an armor stand that was posed and dressed.
         got = run_command(a, 'summon pig 8.5 -60 12.5 {CustomName:"Bob",CustomNameVisible:1b,NoAI:1b,Silent:1b,Glowing:1b,'
-                             'Tags:["x","y","x"],Rotation:[90f,0f],data:{from:"a test"},foo:1b}')
+                             'Tags:["x","y","x"],Rotation:[90f,0f],data:{from:"a test"},foo:1b,Fire:20000s}')
         assert len(got["said"]) == 1 and got["said"][0]["translate"] == "commands.summon.success", got
         assert shown(got["said"][0]["with"][0]) == "Bob"                    # it is called by its name
         run_command(a, 'summon armor_stand 10.5 -60 12.5 {ShowArms:1b,NoBasePlate:1b,Invisible:1b,Pose:{Head:[10f,20f,30f],'
@@ -5984,6 +6121,8 @@ def entity_tags():
         looks(a)
         assert data("@e[type=pig,limit=1]", "CustomName") == '"Bob"' and data("@e[type=pig,limit=1]", "Tags") in ('["x", "y"]', '["y", "x"]')
         assert data("@e[type=pig,limit=1]", "NoAI") == "1b" and data("@e[type=pig,limit=1]", "data") == '{from: "a test"}'
+        burning = int(data("@e[type=pig,limit=1]", "Fire")[:-1])            # (it burns down a tick at a time, and nothing hurts it)
+        assert 19000 < burning < 20000, burning
         assert data("@e[tag=y,limit=1]", "Rotation") == "[90.0f, 0.0f]"              # ...and found by its tag, and by its name
         assert data("@e[name=Bob,limit=1]", "Silent") == "1b"
         assert data("@e[type=armor_stand,limit=1]", "Pose") == "{Head: [10.0f, 20.0f, 30.0f]}"
@@ -6021,6 +6160,9 @@ def entity_tags():
         c.send("player_loaded")
         settle(c, ticks=6)
         looks(c)
+        make_op(srv, c, "Carol")
+        said = run_command(c, "data get entity @e[type=pig,limit=1] Fire")["said"]
+        assert 18000 < int(shown(said[0]["with"][-1])[:-1]) < burning, said    # the fire it was on, burnt further down
         assert one(of_type(c, "kItem")).data[D_ITEM][1] == (I["kDiamond"], 3, {"kRarity": 3})
         assert srv.stop() == 0, srv.read_log()
         srv = None

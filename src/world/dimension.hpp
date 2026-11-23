@@ -95,9 +95,9 @@ class Dimension {
     bool has_entity_blocks() const { return entity_blocks_; }
     // The same, asked of the sections that the cells [x0, x1] x [y0, y1] x [z0, z1] lie in: do
     // they hold anything but air (kBlocks), a shape that reaches out of its cell (kLarge), a
-    // block that acts on an entity (kEntityBlocks), one that breaks a fall (kFallBlocks)? A
-    // query's cells lie in one section, rarely in eight; this is a mask per chunk.
-    static constexpr u32 kBlocks = 1, kLarge = 2, kEntityBlocks = 4, kFallBlocks = 8;
+    // block that acts on an entity (kEntityBlocks), one that breaks a fall (kFallBlocks), a
+    // fluid (kFluids)? A query's cells lie in one section, rarely in eight; this is a mask per chunk.
+    static constexpr u32 kBlocks = 1, kLarge = 2, kEntityBlocks = 4, kFallBlocks = 8, kFluids = 16;
     ALWAYS_INLINE u32 holds(i32 x0, i32 y0, i32 z0, i32 x1, i32 y1, i32 z1) const {
         const i32 s0 = std::max((y0 - min_y_) >> 4, 0), s1 = std::min((y1 - min_y_) >> 4, static_cast<i32>(sections_) - 1);
         if (s0 > s1) return 0;
@@ -108,7 +108,8 @@ class Dimension {
                 const Chunk* c = map_.find(cx, cz);
                 if (UNLIKELY(!c)) continue;
                 out |= ((c->filled_sections & mask) ? kBlocks : 0) | ((c->large_sections & mask) ? kLarge : 0) |
-                       ((c->entity_sections & mask) ? kEntityBlocks : 0) | ((c->fall_sections & mask) ? kFallBlocks : 0);
+                       ((c->entity_sections & mask) ? kEntityBlocks : 0) | ((c->fall_sections & mask) ? kFallBlocks : 0) |
+                       ((c->fluid_sections & mask) ? kFluids : 0);
             }
         }
         return out;

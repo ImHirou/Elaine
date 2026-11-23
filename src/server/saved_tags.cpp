@@ -503,7 +503,8 @@ Game::Saved Game::save_entity(u32 row, base::ByteBuf& out) {
     const entity::Cold* const told = ents_.cold(row);
     const entity::Cold& c = told ? *told : none;
     namespace cold = entity::cold;
-    w.put_short("Fire", is_player ? -20 : c.fire);  // remainingFireTicks: a player's rest at -getFireImmuneTicks()
+    // remainingFireTicks: a player's rest at -getFireImmuneTicks()
+    w.put_short("Fire", is_player ? -20 : static_cast<i16>(fire_of(row)));
     w.put_short("Air", static_cast<i16>(c.air));
     w.put_byte("OnGround", (ents_.flags[row] & entity::flag::kOnGround) != 0);
     w.put_byte("Invulnerable", (c.bits & cold::kInvulnerable) != 0);

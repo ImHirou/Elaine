@@ -37,8 +37,10 @@ drains; water set beside a source and beside lava that flowed, lava over a pit o
 soul soil beside blue ice - obsidian, cobblestone, stone and basalt, each with its hiss; a torch
 in its way. Then the water in blocks that hold it: a wet slab leaking to its sides, a wet top
 slab leaking downwards, stairs between two sources, a wet lantern whose floor goes. Then the
-sponge: set into spread water, set dry with water beside it, set beside a wet slab. Last, TNT on
-five sides of a block of redstone.
+sponge: set into spread water, set dry with water beside it, set beside a wet slab. Then what is
+afloat: an item set into a pool, into a channel that carries it, into lava - where it burns, or,
+being of netherite, floats - and every move of it that the bots are told. Last, TNT on five sides
+of a block of redstone.
 
 `vanilla` starts the reference server under the rules in AGENTS.md (from .cache/vanilla-server/,
 the cached jar, Java 25; gamemode=creative, level-type=flat, spawn-protection=0,
@@ -77,6 +79,9 @@ Reading the diff:
   * The chunks whose blocks changed in a tick are told one after another, in an order that is
     nobody's rule: vanilla walks a hash set of chunk holders (by identity), this server sorts
     them. Where a step's changes lie in two chunks, each chunk's are compared in their order.
+  * An item that is followed (the steps of what is afloat) is told every tick it is in a fluid:
+    its moves are compared in their order, each with what it says, and not by the tick they are
+    stamped with.
   * Sounds this server does not make (a block being placed, footsteps) are left out; so is
     where an item that dropped flies. What an explosion takes and throws about is chance, and
     container_probe.py's subject: once the fuses burn, the explosions are counted.
@@ -104,7 +109,7 @@ from world_probe import PORT, SERVER_DIR, Vanilla  # noqa: E402
 from pace import Lockstep  # noqa: E402
 
 PROBE_WORLD = "block-probe"     # in .cache/vanilla-server/: this probe's, removed and made anew by `vanilla`
-SECTIONS = ("torches", "falling", "random", "stairs", "fences", "plants", "water", "lava", "waterlogged", "sponge", "tnt")
+SECTIONS = ("torches", "falling", "random", "stairs", "fences", "plants", "water", "lava", "waterlogged", "sponge", "afloat", "tnt")
 RANDOM_TICK_SPEED = 4096        # every cell of a section, on average, once a tick
 
 WORLD = {"block_update", "section_blocks_update", "level_event", "add_transient_block", "sound", "explode"}
@@ -147,12 +152,13 @@ def record(port: int, out_path: str, name_a: str, name_b: str, random_ticks, con
     for bot in (a, b):
         bot.begin(lock)
 
-    def step(name: str, action=None, ticks: int = 8, until=None, about=None, loose=False):
+    def step(name: str, action=None, ticks: int = 8, until=None, about=None, loose=False, follow=False):
         """What a frozen game makes of `action` is tick 0; then `ticks` ticks, one by one.
         `until(blocks)`: go on (at most `ticks`) until the block changes B has seen in this
         step satisfy it. `about`: the places a step about random ticks is about - what becomes
         of them is what is compared, not when: its ticks pass twenty at a time. `loose`: a step
-        of explosions - they are counted."""
+        of explosions - they are counted. `follow`: a step about where its items go - every move
+        of them the bots are told is compared, tick by tick."""
         if not wanted():
             return
         mark_a, mark_b = len(a.log), len(b.log)
@@ -178,7 +184,7 @@ def record(port: int, out_path: str, name_a: str, name_b: str, random_ticks, con
                 ran += now
             if until and not until(_blocks(b.log[mark_b:])):
                 print(f"!! {name}: it did not happen within {ticks} ticks")
-        steps.append({"step": name, "about": [list(p) for p in about] if about is not None else None, "loose": loose,
+        steps.append({"step": name, "about": [list(p) for p in about] if about is not None else None, "loose": loose, "follow": follow,
                       "A": [(n, d, t) for (n, d), t in zip(a.log[mark_a:], a.stamps[mark_a:])],
                       "B": [(n, d, t) for (n, d), t in zip(b.log[mark_b:], b.stamps[mark_b:])]})
         print(f"{name}: A {len(a.log) - mark_a}, B {len(b.log) - mark_b} packets")
@@ -643,6 +649,32 @@ def record(port: int, out_path: str, name_a: str, name_b: str, random_ticks, con
         step("the console clears the place", lambda: fill(at(-8, 1, 4), at(8, 2, 20), "minecraft:air"), ticks=8)
         step("and then it is quiet", ticks=10)
 
+    # ---- afloat: items in water and lava, and every move of them that their viewers are told.
+    # None of them lies on the ground while it is watched: an item that does moves every fourth
+    # tick, and which is its entity id's to say - not the same number on two servers.
+    section("afloat")
+    if console and wanted():
+        at = place(26)
+        floor(at)
+
+        def summon(pos: tuple, up: float, stack: str = "minecraft:stone") -> None:
+            console(f"summon minecraft:item {pos[0] + 0.5} {pos[1] + up} {pos[2] + 0.5} "
+                    f'{{Item:{{id:"{stack}",count:1}},PickupDelay:32767s}}')
+
+        step("the console builds a pool, a channel with water run out in it, and a pit of lava", ticks=40, action=lambda: (
+            fill(at(-7, 1, 6), at(-3, 2, 10), "minecraft:stone"), fill(at(-6, 1, 7), at(-4, 2, 9), "minecraft:water"),
+            fill(at(-1, 1, 6), at(5, 1, 8), "minecraft:stone"),
+            [setblock(at(i, 1, 7), f"minecraft:water[level={i}]") for i in range(5)],
+            fill(at(-7, 1, 13), at(-3, 2, 17), "minecraft:stone"), fill(at(-6, 1, 14), at(-4, 2, 16), "minecraft:lava")))
+        step("an item on the bottom of the pool: it floats up", lambda: summon(at(-5, 1, 8), 0.0), ticks=50, follow=True)
+        step("an item in the channel: the water carries it", lambda: summon(at(0, 1, 7), 0.3), ticks=28, follow=True)
+        step("an item over the lava: it falls in and burns", lambda: summon(at(-5, 1, 15), 2.5), ticks=12, follow=True)
+        step("an ingot of netherite in the lava: it sinks, and floats up", ticks=60, follow=True,
+             action=lambda: summon(at(-5, 1, 15), 1.2, "minecraft:netherite_ingot"))
+        step("the console clears the place", ticks=8,
+             action=lambda: (console("kill @e[type=minecraft:item]"), fill(at(-8, 1, 4), at(8, 2, 20), "minecraft:air")))
+        step("and then it is quiet", ticks=10)
+
     # ---- TNT, last, for what it leaves: a signal reaches the six blocks around it in an order
     section("tnt")
     at = place(6)
@@ -714,6 +746,21 @@ def _normalise(rec: dict, who: str) -> dict[str, list]:
             rows.append((kind, f"+{round((ms - first) / tick_ms)}t {text}", *chunk))
 
         about = None if st.get("about") is None else {tuple(p) for p in st["about"]}
+        follow = bool(st.get("follow"))
+        afloat: dict[int, str] = {}     # in a step that follows its items: an item's name, in the order they appeared
+
+        def moving(eid: int) -> str | None:
+            """The entity whose moves this step compares: a falling block always, an item where the step follows them."""
+            kind = kinds.get(eid, "")
+            return kind if kind.startswith("falling") else afloat.get(eid)
+
+        def when(eid: int, ms: int) -> int | None:
+            """Of a falling block, the tick a move came with. Of an item that is followed, none:
+            it is told every tick, so its moves in their order are its ticks - and the tick a
+            packet is stamped with slips by one whenever a bot answers a mark a loop late (what
+            the tracker shows of a tick, it shows in the loop after: pace.py)."""
+            return None if eid in afloat else ms
+
         if st.get("loose"):
             out[st["step"]] = [("explosions", str(sum(name == "explode" for name, _, _ in st[who])))]
             continue
@@ -756,6 +803,9 @@ def _normalise(rec: dict, who: str) -> dict[str, list]:
                     counts[kind] += 1
                     kinds[eid] = f"{kind}{counts[kind]}"
                     dropped.pop(eid, None)      # (an id is used again, by this server soon)
+                    if etype == ITEM_ENTITY and follow:
+                        afloat[eid] = f"afloat{len(afloat) + 1}"
+                        rows.append(("add_entity", f"an item at {_rel(pos, origin)} velocity {velocity}"))
                     if etype == FALLING:
                         row(name, f"a falling block of {data} at {_rel(pos, origin)} velocity {velocity}", ms)
                     elif etype == TNT:
@@ -779,31 +829,31 @@ def _normalise(rec: dict, who: str) -> dict[str, list]:
                         rows.append(("set_entity_data", f"{kinds[eid]} began at {_rel(start[1], origin)}"))
             elif name in ("move_entity_pos", "move_entity_pos_rot"):
                 eid = r.varint()
-                if kinds.get(eid, "").startswith("falling"):
+                if moving(eid):
                     props = r.u8()
                     if props & 2:
                         r.varint()
                     dx, dy, dz = r.i16(), r.i16(), r.i16()
-                    row(name, f"{kinds[eid]} by ({dx}, {dy}, {dz}) ground {props & 1}", ms)
+                    row(name, f"{moving(eid)} by ({dx}, {dy}, {dz}) ground {props & 1}", when(eid, ms))
             elif name == "entity_position_sync":
                 eid = r.varint()
-                if kinds.get(eid, "").startswith("falling"):
+                if moving(eid):
                     if r.u8():      # (as container_probe.py reads it)
                         r.u8()
                     pos = _rel((r.f64(), r.f64(), r.f64()), origin)
-                    row(name, f"{kinds[eid]} at {pos} {r.d[r.i:].hex()}", ms)
+                    row(name, f"{moving(eid)} at {pos} {r.d[r.i:].hex()}", when(eid, ms))
             elif name == "set_entity_motion":
                 eid = r.varint()
-                if kinds.get(eid, "").startswith("falling"):
-                    row(name, f"{kinds[eid]} velocity {tuple(round(v, 4) for v in mc.read_lp_vec3(r))}", ms)
+                if moving(eid):
+                    row(name, f"{moving(eid)} velocity {tuple(round(v, 4) for v in mc.read_lp_vec3(r))}", when(eid, ms))
             elif name == "teleport_entity":
                 eid = r.varint()
-                if kinds.get(eid, "").startswith("falling"):
-                    row(name, f"{kinds[eid]} {r.d[r.i:].hex()}", ms)
+                if moving(eid):
+                    row(name, f"{moving(eid)} {r.d[r.i:].hex()}", when(eid, ms))
             elif name == "remove_entities":
                 for eid in [r.varint() for _ in range(r.varint())]:
-                    if kinds.get(eid, "").startswith("falling"):
-                        row(name, kinds[eid], ms)
+                    if moving(eid):
+                        row(name, moving(eid), when(eid, ms))
             elif name == "disconnect":
                 rows.append((name, hexdata))
         if final:

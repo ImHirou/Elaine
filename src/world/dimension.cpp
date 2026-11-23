@@ -461,6 +461,8 @@ bool Dimension::set_block_raw(Chunk& c, i32 x, i32 y, i32 z, BlockState s) {
         if (traits & 2) c.entity_sections |= 1u << si;
         if (traits & 4) c.fall_sections |= 1u << si;
     }
+    if (UNLIKELY((state::kFlags[old] ^ state::kFlags[s]) & state::kHasFluid))
+        c.fluid_sections = sec.fluids ? c.fluid_sections | 1u << si : c.fluid_sections & ~(1u << si);
     update_heightmaps(c, lx, y, lz, s);
     const bool empty = sec.only_air();
     if (was_empty != empty) {

@@ -115,6 +115,9 @@ class Game {
         u64 loaded_at_tick = 0;
         bool shift = false;   // sneak key held (player_input)
         bool flying = false;  // creative flight active (player_abilities)
+        // EntityFluidInteraction, of the one thing a player's is asked for here: was it in
+        // water, and were its eyes, when its last tick looked (Game::update_swimming).
+        bool in_water = false, eyes_in_water = false;
         // LivingEntity.swingState: the tick the arm last started to swing in, and for how long.
         u64 swing_tick = kNever;
         u8 swing_len = 0;
@@ -291,6 +294,7 @@ class Game {
     void on_player_command(u32 pi, const proto::sb::PlayerCommand& c);
     void on_client_information(u32 pi, const proto::sb::ClientInformation& info);
     void tick_players();
+    void update_swimming(u32 pi);
     void update_pose(u32 pi);
     bool fits(u32 pi, float height) const;
 
@@ -361,7 +365,7 @@ class Game {
         phys::Body body;
     };
     // What the tick of an item at rest reads, and all it reads: by entity slot like movers_, but
-    // 32 bytes to the item where a Mover is 200. With ten thousand items lying about the pass
+    // 32 bytes to the item where a Mover is over 200. With ten thousand items lying about the pass
     // over them is a walk down this array; through movers_ it was a cache miss an item - one
     // load, and 66 % of the pass (perf on a running server; the pass took 1.1 times what the
     // entity tracker took for the same items, now 0.3 times).
@@ -377,6 +381,9 @@ class Game {
     // An item entity without a stack (/summon item): its first tick discards it.
     static constexpr u8 kMoverEmptyItem = 0xFF;
     void start_ticking(u32 slot, u8 mover);
+    phys::World phys_world();
+    u32 took_fire(u32 row, phys::Body& b);
+    i32 fire_of(u32 row) const;
     void stop_ticking(u32 slot);
     void tick_entities();
     void tick_living(u32 slot, u32 row);

@@ -109,8 +109,9 @@ bool supporting_block(const Dimension& w, const Aabb& box, double x, double y, d
 // BlockGetter.clip(new ClipContext(from, to, COLLIDER, Fluid.NONE)).getType() != MISS: does the
 // line from `from` to `to` meet the collision shape of a block?
 bool clip_hits(const Dimension& w, const double from[3], const double to[3]);
-// The same with ClipContext.Block.FALLDAMAGE_RESETTING: a block in #fall_damage_resetting
-// (cobweb, what can be climbed) counts as a full cube, everything else as nothing.
+// The same with ClipContext.Block.FALLDAMAGE_RESETTING and Fluid.WATER: a block in
+// #fall_damage_resetting (cobweb, what can be climbed) counts as a full cube, water as the part
+// of its cell it fills, everything else as nothing.
 bool clip_hits_fall_resetting(const Dimension& w, const double from[3], const double to[3]);
 
 // The same answers the long way round (see top). For tests and for nothing else.

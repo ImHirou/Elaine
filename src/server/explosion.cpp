@@ -99,8 +99,9 @@ void Game::prime_tnt(BlockPos pos, i32 fuse, bool sound) {
 void Game::tick_tnt(u32 slot, u32 row) {
     phys::Body& body = movers_[slot].body;
     phys::Motion m = motion_of(row);
-    phys::World w{world_, phys_scratch_};
+    phys::World w = phys_world();
     phys::tnt_tick(w, m, body);
+    took_fire(row, body);  // (it is immune to fire, and has no base tick: nothing to take)
     // setRequiresPrecisePosition(horizontalCollision || verticalCollision): while it touches a
     // block its viewers get its exact position, not steps of 1/4096.
     const bool touching = body.horizontal_collision || body.vertical_collision;
@@ -231,11 +232,7 @@ void Game::explode(double x, double y, double z, float radius) {
                               ents_.z[row], ents_.y[row] + static_cast<double>(0.25f * 0.85f));
             if (!h.in_reach) continue;
             push(row, h.dir[0] * h.power, h.dir[1] * h.power, h.dir[2] * h.power);
-            const bool proof =
-                (stack.info().flags & world::item_flag::kExplosionProof) &&
-                !(stack.has_patch() &&
-                  item::patches().find(stack.patch(), item::component::kDamageResistant).state == item::Patches::State::kRemoved);
-            if (proof) continue;
+            if (stack.resists(world::item_flag::kExplosionProof)) continue;
             // ExplosionDamageCalculator.getEntityDamageAmount
             const float damage = static_cast<float>((h.power * h.power + h.power) / 2.0 * 7.0 * reach + 1.0);
             i8& health = item_health_[item_of_slot_[slot]];

@@ -333,7 +333,7 @@ void Game::write_entities(u64 chunk, base::ByteBuf& out) {
         }
         // What a tag said of it, as a tag (write_cold_tag): VarInt n + n bytes, n = 0 for nothing.
         base::ByteBuf told;
-        if (ents_.cold(row) || (ents_.shared_flags[row] & ((1u << 5) | (1u << 6)))) {
+        if (ents_.cold(row) || (ents_.shared_flags[row] & ((1u << 5) | (1u << 6))) || fire_of(row) != 0) {
             nbt::Writer w(told);
             w.root(nbt::kCompound);
             write_cold_tag(row, w);

@@ -587,7 +587,7 @@ bool Game::teleport(u32 row, double x, double y, double z, u32 relatives, float 
         if (mv.in_grid) move_in_push_grid(slot, ents_.x[row], ents_.z[row]);
         if (mv.kind != proto::gen::physics::kMoverNone) {
             const entity_type::Info& info = entity_type::kInfo[ents_.type[row]];
-            phys::World w{world_, phys_scratch_};
+            phys::World w = phys_world();
             phys::set_on_ground(w, info.width, info.height, motion_of(row), mv.body, true);
         }
     }

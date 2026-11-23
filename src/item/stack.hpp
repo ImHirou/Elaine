@@ -111,6 +111,14 @@ class ItemStack {
         return has(component::kMaxDamage, world::item_flag::kHasMaxDamage) &&
                has(component::kDamage, world::item_flag::kHasDamage) && !has(component::kUnbreakable, 0);
     }
+    // ItemStack.canBeHurtBy, the other way round, for what an item on the ground meets: an
+    // explosion (item_flag::kExplosionProof), fire and lava (kFireProof). DAMAGE_RESISTANT names
+    // a tag of damage types - the item's own, as long as no patch has taken it away. (One that
+    // a patch gives to an item which has none is not read: such a stack burns like any other.)
+    bool resists(u32 flag) const {
+        if (LIKELY(!(info().flags & flag))) return false;
+        return !patch_ || patches().find(patch_, component::kDamageResistant).state != Patches::State::kRemoved;
+    }
     // ItemStack.validateComponents: what can be worn down is one to a stack.
     bool damageable_and_stackable() const {
         const bool wears = patch_ ? has(component::kMaxDamage, world::item_flag::kHasMaxDamage)

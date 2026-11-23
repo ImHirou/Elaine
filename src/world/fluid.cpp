@@ -2,6 +2,7 @@
 #include "world/fluid.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 
 namespace world {
@@ -149,6 +150,105 @@ u32 source_neighbor_count(const Dimension& d, const FluidRules& r, i32 x, i32 y,
 float fluid_height(const Dimension& d, FluidState f, i32 x, i32 y, i32 z) {
     // hasSameAbove: fluidState.getType().isSame(the fluid above)
     return f && fluid_family(fluid_of(d.block(x, y + 1, z))) == fluid_family(f) ? 1.0f : fluid_own_height(f);
+}
+
+namespace {
+
+// Vec3.normalize: nothing, for what is shorter than 1e-5.
+ALWAYS_INLINE void normalize(double v[3]) {
+    const double length = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    if (length < 9.999999747378752e-6) {
+        v[0] = v[1] = v[2] = 0.0;
+        return;
+    }
+    v[0] = v[0] / length, v[1] = v[1] / length, v[2] = v[2] / length;
+}
+
+// FlowingFluid.isSolidFace: is the block at (x, y, z) a wall to this fluid on the side `dir`?
+bool solid_face(const Dimension& d, u32 family, i32 x, i32 y, i32 z, u32 dir) {
+    const BlockState s = d.block(x, y, z);
+    if (fluid_family(fluid_of(s)) == family) return false;
+    if (dir == kUp) return true;
+    if (state::kFluidFacts[s] & state::kIce) return false;
+    return face_sturdy(s, dir);
+}
+
+}  // namespace
+
+void fluid_flow(const Dimension& d, FluidState f, i32 x, i32 y, i32 z, double out[3]) {
+    const u32 family = fluid_family(f);
+    const float own = fluid_own_height(f);
+    double flow_x = 0, flow_z = 0;
+    // FlowingFluid.affectsFlow: nothing, or more of the same
+    const auto affects = [&](FluidState n) { return !n || fluid_family(n) == family; };
+    for (const u32 dir : kFlowOrder) {
+        const i32 nx = x + kStepX[dir], nz = z + kStepZ[dir];
+        const BlockState beside = d.block(nx, y, nz);
+        const FluidState n = fluid_of(beside);
+        if (!affects(n)) continue;
+        float height = fluid_own_height(n), distance = 0.0f;
+        if (height == 0.0f) {
+            if (!(state::kFluidFacts[beside] & state::kBlocksFlow)) {
+                const FluidState below = fluid_of(d.block(nx, y - 1, nz));
+                if (affects(below)) {
+                    height = fluid_own_height(below);
+                    if (height > 0.0f) distance = own - (height - 0.8888889f);
+                }
+            }
+        } else if (height > 0.0f) {
+            distance = own - height;
+        }
+        if (distance != 0.0f) {
+            flow_x = flow_x + static_cast<double>(static_cast<float>(kStepX[dir]) * distance);
+            flow_z = flow_z + static_cast<double>(static_cast<float>(kStepZ[dir]) * distance);
+        }
+    }
+    out[0] = flow_x, out[1] = 0.0, out[2] = flow_z;
+    if (fluid_falling(f)) {
+        for (const u32 dir : kFlowOrder) {
+            const i32 nx = x + kStepX[dir], nz = z + kStepZ[dir];
+            if (solid_face(d, family, nx, y, nz, dir) || solid_face(d, family, nx, y + 1, nz, dir)) {
+                normalize(out);  // flow.normalize().add(0, -6, 0)
+                out[0] = out[0] + 0.0, out[1] = out[1] + -6.0, out[2] = out[2] + 0.0;
+                break;
+            }
+        }
+    }
+    normalize(out);
+}
+
+InWater water_around(const Dimension& d, const Aabb& whole, double x, double eye_y, double z) {
+    InWater out;
+    const auto floor_of = [](double v) {
+        const i32 i = static_cast<i32>(v);
+        return v < static_cast<double>(i) ? i - 1 : i;
+    };
+    const auto ceil_of = [](double v) {
+        const i32 i = static_cast<i32>(v);
+        return v > static_cast<double>(i) ? i + 1 : i;
+    };
+    const Aabb box = inflated(whole, -0.001, -0.001, -0.001);  // Entity.getFluidInteractionBox
+    const i32 x0 = floor_of(box.min[0]), y0 = floor_of(box.min[1]), z0 = floor_of(box.min[2]);
+    const i32 x1 = ceil_of(box.max[0]) - 1, y1 = ceil_of(box.max[1]) - 1, z1 = ceil_of(box.max[2]) - 1;
+    if (!(d.holds(x0 - 1, y0, z0 - 1, x1 + 1, y1, z1 + 1) & Dimension::kFluids)) return out;  // hasFluidAndLoaded
+    const i32 eye_x = floor_of(x), eye_z = floor_of(z);
+    for (i32 cx = x0; cx <= x1; ++cx) {
+        for (i32 cy = y0; cy <= y1; ++cy) {
+            for (i32 cz = z0; cz <= z1; ++cz) {
+                const FluidState f = fluid_of(d.block(cx, cy, cz));
+                if (LIKELY(!f) || fluid_family(f) != fluid::kWaterFamily) continue;
+                const double bottom = static_cast<double>(cy);
+                const float height = fluid_height(d, f, cx, cy, cz);
+                if (bottom + static_cast<double>(height) < box.min[1]) continue;
+                out.in = true;
+                if (cx != eye_x || cz != eye_z || eye_y < bottom) continue;
+                // FluidState.getHeightForCamera
+                const float camera = fluid_source(f) && face_sturdy(d.block(cx, cy + 1, cz), kDown) ? 1.0f : height;
+                if (!(eye_y > bottom + static_cast<double>(camera))) out.eyes = true;
+            }
+        }
+    }
+    return out;
 }
 
 bool can_be_replaced_with(const Dimension& d, FluidState held, i32 x, i32 y, i32 z, u32 with, u32 dir) {

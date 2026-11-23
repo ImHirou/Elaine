@@ -66,6 +66,37 @@ void Game::start_ticking(u32 slot, u8 mover) {
     mv.kind = mover;
     mv.order = static_cast<u32>(tick_order_.size());
     tick_order_.push_back(slot);
+    // Entity.fireImmune: its type's - and, of an item, its stack's (ItemEntity.fireImmune).
+    const u32 row = ents_.by_slot(slot);
+    mv.body.fire_immune = gp::kEntity[ents_.type[row]].fire_immune ||
+                          (mover == gp::kMoverItem && ents_.item[row].resists(world::item_flag::kFireProof));
+}
+
+// What a tick of physics reads beside the blocks: the dimension's.
+phys::World Game::phys_world() {
+    phys::World w{world_, phys_scratch_};
+    if (UNLIKELY(world_.fast_lava())) w.lava_flow_scale = 0.007;  // Entity.updateFluidInteraction: LAVA_FAST_FLOW_SCALE
+    return w;
+}
+
+// What a tick said of fire and of the fluids it was in, taken: its viewers see it burn as its
+// base tick says (Entity.setSharedFlagOnFire), and what the fire and the lava took of its
+// health is returned - a point for a tick of burning, four for each cell of lava. Nothing here
+// has health but an item, so that is whose business it is (Game::tick_item).
+u32 Game::took_fire(u32 row, phys::Body& b) {
+    const u32 hurt = (b.burned ? 1u : 0u) + 4u * b.lava_hurts;
+    b.burned = b.extinguished = b.splashed = false, b.lava_hurts = 0;
+    ents_.set_shared_flag(row, entity::shared_flag::kOnFire, b.shows_fire);
+    return hurt;
+}
+
+// Entity.remainingFireTicks: of what ticks, its body's; of what does not, what its tag said.
+i32 Game::fire_of(u32 row) const {
+    const u32 slot = ents_.slot[row];
+    if (slot < movers_.size() && movers_[slot].kind != gp::kMoverNone && movers_[slot].kind != kMoverEmptyItem)
+        return movers_[slot].body.fire_ticks;
+    const entity::Cold* c = ents_.cold(row);
+    return c ? c->fire : 0;
 }
 
 // Entity.discard: out of the list at once. Its place stays (a hole) until the list is next packed.
@@ -165,13 +196,10 @@ void Game::push(u32 row, double x, double y, double z) {
 
 // LivingEntity.tick for what has no brain: aiStep's travel, then pushEntities.
 void Game::tick_living(u32 slot, u32 row) {
-    const u32 type = ents_.type[row];
-    const entity_type::Info& info = entity_type::kInfo[type];
-    const gp::EntityPhysics& how = gp::kEntity[type];
-    const phys::Kind kind = phys::living_kind(info.width, info.height, how.step_height, how.gravity);
+    const phys::Kind kind = phys::living_kind(ents_.type[row]);
     Mover& mv = movers_[slot];
     phys::Motion m = motion_of(row);
-    phys::World w{world_, phys_scratch_};
+    phys::World w = phys_world();
     // Standing still already? Then what it was is kept, to see whether this tick changes any of it.
     const bool still = mv.body.on_ground && m.vel[0] == 0 && m.vel[2] == 0;
     phys::Motion motion_before;
@@ -182,6 +210,7 @@ void Game::tick_living(u32 slot, u32 row) {
         return;
     }
     const bool same = still && phys::same_state(motion_before, body_before, m, mv.body);
+    took_fire(row, mv.body);  // (what burns, burns on: nothing takes damage)
     store_motion(row, m, mv.body);
     move_in_push_grid(slot, m.pos[0], m.pos[2]);
     // ArmorStand.pushEntities: minecarts only.

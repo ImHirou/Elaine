@@ -20,7 +20,10 @@
 //     u32 n, n x (i32 entity id, u32 states, states x (u8 flags: 1 on the ground, 2 gone; i32 fuse; f64 x 7))
 //   str: u8 length, bytes.
 // physics_falling.bin is a second recording in the same form: falling blocks (FallingBlockEntity),
-// made when they were ported, beside the first instead of into it.
+// made when they were ported, beside the first instead of into it. physics_fluids.bin is a third:
+// what is in water and lava - and on fire - in the second form of the file, "PHYSVEC2":
+//     ... f64 step height, str entity type ("minecraft:giant"), u8 an item's stack does not burn
+//     ... states x (u8 flags; i32 fuse; f64 x 7; i16 Fire; i16 an item's Health)
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -41,8 +44,12 @@
 
 #include "states.hpp"
 
+#include PROTO_GEN_PHYSICS_HPP
+
 using namespace world;
 namespace blk = proto::gen::block;
+namespace gp = proto::gen::physics;
+namespace entity_type = proto::gen::entity_type;
 
 namespace {
 
@@ -52,11 +59,15 @@ constexpr unsigned char kVectors[] = {
 constexpr unsigned char kFallingVectors[] = {
 #embed "data/physics_falling.bin"
 };
+constexpr unsigned char kFluidVectors[] = {
+#embed "data/physics_fluids.bin"
+};
 
 struct State {
     double pos[3], vel[3], fall;
     bool on_ground, gone;
     i32 fuse;
+    i16 fire = 0, health = 0;  // (the second form: Fire, and an item's Health)
 };
 struct Entity {
     i32 id;
@@ -70,12 +81,15 @@ struct Event {
     u32 tick;
     BlockAtPos block;
 };
-enum class Kind : u8 { kItem, kTnt, kArmorStand, kPig, kFallingBlock };
+enum class Kind : u8 { kItem, kTnt, kArmorStand, kPig, kFallingBlock, kLiving };
 struct Scenario {
     std::string name;
     Kind kind;
     bool on_ground;
     double step_height;
+    u32 type = 0;            // entity_type
+    bool fireproof = false;  // an item's stack does not burn
+    bool burns = false;      // the recording has Fire and Health: they are compared
     std::vector<BlockAtPos> blocks;
     std::vector<Event> events;
     std::vector<Entity> entities;
@@ -125,7 +139,8 @@ struct Ticking {
 std::vector<Scenario> load_vectors(Ticking& ticking, std::span<const unsigned char> vectors = kVectors) {
     VectorReader r(vectors.data(), vectors.size());
     std::vector<Scenario> out;
-    if (std::memcmp(vectors.data(), "PHYSVEC1", 8) != 0) std::abort();
+    const bool second = std::memcmp(vectors.data(), "PHYSVEC2", 8) == 0;
+    if (!second && std::memcmp(vectors.data(), "PHYSVEC1", 8) != 0) std::abort();
     for (int i = 0; i < 8; ++i) r.get<u8>();
     ticking.cx = r.get<i32>(), ticking.cz = r.get<i32>(), ticking.distance = r.get<i32>();
     for (u32 n = r.get<u32>(); n > 0; --n) {
@@ -140,6 +155,19 @@ std::vector<Scenario> load_vectors(Ticking& ticking, std::span<const unsigned ch
         s.kind = static_cast<Kind>(r.get<u8>());
         s.on_ground = r.get<u8>() != 0;
         s.step_height = r.get<double>();
+        static constexpr u32 kTypes[] = {entity_type::kItem, entity_type::kTnt, entity_type::kArmorStand, entity_type::kPig,
+                                         entity_type::kFallingBlock};
+        if (second) {
+            const std::string type = r.str();
+            s.type = entity_type::kCount;
+            for (u32 t = 0; t < entity_type::kCount; ++t)
+                if (type == entity_type::kNames[t]) s.type = t;
+            if (s.type == entity_type::kCount) std::abort();
+            s.fireproof = r.get<u8>() != 0;
+            s.burns = true;
+        } else {
+            s.type = kTypes[static_cast<u32>(s.kind)];
+        }
         for (u32 n = r.get<u32>(); n > 0; --n) {
             BlockAtPos b;
             b.x = r.get<i32>(), b.y = r.get<i32>(), b.z = r.get<i32>();
@@ -164,6 +192,7 @@ std::vector<Scenario> load_vectors(Ticking& ticking, std::span<const unsigned ch
                 for (double& v : st.pos) v = r.get<double>();
                 for (double& v : st.vel) v = r.get<double>();
                 st.fall = r.get<double>();
+                if (second) st.fire = r.get<i16>(), st.health = r.get<i16>();
                 e.states.push_back(st);
             }
             s.entities.push_back(std::move(e));
@@ -186,12 +215,15 @@ phys::Kind kind_of(const Scenario& s) {
     switch (s.kind) {
         case Kind::kItem: return phys::kItem;
         case Kind::kTnt: return phys::kTnt;
-        case Kind::kArmorStand:  // EntityTypes.ARMOR_STAND; its step_height is 0 unless the scenario gave it one
-            return phys::living_kind(0.5f, 1.975f, s.step_height < 0 ? 0.0f : static_cast<float>(s.step_height), 0.08);
-        case Kind::kPig: return phys::living_kind(0.9f, 0.9f, 0.6f, 0.08);  // EntityTypes.PIG
         case Kind::kFallingBlock: return phys::kFallingBlock;
+        case Kind::kArmorStand:
+        case Kind::kPig:
+        case Kind::kLiving: break;
     }
-    return phys::kItem;
+    // What lives, as its type is - but for a step height the scenario gave it (an armor stand's own is none).
+    phys::Kind k = phys::living_kind(s.type);
+    if (s.step_height >= 0) k.max_up_step = static_cast<float>(s.step_height);
+    return k;
 }
 
 float no_random(void*) {
@@ -229,6 +261,7 @@ void replay(const std::vector<Scenario>& scenarios, const Ticking& ticking, std:
         bool gone = false, done = false;
         bool asleep = false;
         phys::ItemRest rest{};
+        i32 health = 5;  // ItemEntity.health
     };
     std::vector<Live> live;
     usize ticks = 0;
@@ -241,6 +274,9 @@ void replay(const std::vector<Scenario>& scenarios, const Ticking& ticking, std:
             const State& s0 = e.states[0];
             for (u32 a = 0; a < 3; ++a) l.m.pos[a] = s0.pos[a], l.m.vel[a] = s0.vel[a];
             l.b.on_ground = sc.on_ground;  // OnGround:1b in the summon; what it stands on is not known yet
+            l.b.fire_ticks = s0.fire;      // Fire in the summon
+            // Entity.fireImmune: the type's - and an item's stack may be one that does not burn.
+            l.b.fire_immune = gp::kEntity[sc.type].fire_immune || sc.fireproof;
             dim.ticking(static_cast<i32>(std::floor(s0.pos[0])) >> 4, static_cast<i32>(std::floor(s0.pos[2])) >> 4);
             ticks = std::max(ticks, e.states.size());
             live.push_back(l);
@@ -295,7 +331,8 @@ void replay(const std::vector<Scenario>& scenarios, const Ticking& ticking, std:
                     for (double& v : l.m.vel) v = v * drag;
                     break;
                 }
-                case Kind::kArmorStand: fate = phys::living_tick(world, l.kind, l.m, l.b); break;
+                case Kind::kArmorStand:
+                case Kind::kLiving: fate = phys::living_tick(world, l.kind, l.m, l.b); break;
                 case Kind::kPig: {
                     fate = phys::living_tick(world, l.kind, l.m, l.b);
                     // LivingEntity.pushEntities: every other pig whose box touches this one's pushes, and is pushed.
@@ -314,11 +351,19 @@ void replay(const std::vector<Scenario>& scenarios, const Ticking& ticking, std:
                     break;
                 }
             }
+            // What a tick tells of fire and lava is the game's to act on. An item has five points
+            // of health (ItemEntity.hurtServer): a tick of burning takes one, every cell of lava it
+            // is in four, and it is gone when none is left.
+            if (l.sc->kind == Kind::kItem) {
+                l.health -= l.b.burned ? 1 : 0;
+                l.health -= 4 * static_cast<i32>(l.b.lava_hurts);
+                if (l.health <= 0) fate = phys::Fate::kGone;
+            }
+            l.b.burned = l.b.extinguished = l.b.splashed = false, l.b.lava_hurts = 0;
             l.gone = fate == phys::Fate::kGone;
             // Game::tick_living: a tick that changed nothing, and nobody pushing.
-            if (at_rest && !l.gone && (l.sc->kind == Kind::kArmorStand || l.sc->kind == Kind::kPig) && !pushed &&
-                body_before.on_ground && before.vel[0] == 0 && before.vel[2] == 0 &&
-                phys::same_state(before, body_before, l.m, l.b))
+            if (at_rest && !l.gone && l.kind.living && !pushed && body_before.on_ground && before.vel[0] == 0 &&
+                before.vel[2] == 0 && phys::same_state(before, body_before, l.m, l.b))
                 l.asleep = true;
         }
         for (Live& l : live) {
@@ -336,14 +381,16 @@ void replay(const std::vector<Scenario>& scenarios, const Ticking& ticking, std:
             bool same = l.b.on_ground == want.on_ground && same_double(l.b.fall_distance, want.fall);
             for (u32 a = 0; a < 3; ++a)
                 same = same && same_double(l.m.pos[a], want.pos[a]) && same_double(l.m.vel[a], want.vel[a]);
+            if (l.sc->burns) same = same && l.b.fire_ticks == want.fire && (l.sc->kind != Kind::kItem || l.health == want.health);
             if (same) continue;
             std::snprintf(
                 text, sizeof text,
-                "tick %u, entity %d:\n      vanilla pos (%.17g, %.17g, %.17g) vel (%.17g, %.17g, %.17g) ground %d fall %.17g\n"
-                "      here    pos (%.17g, %.17g, %.17g) vel (%.17g, %.17g, %.17g) ground %d fall %.17g",
+                "tick %u, entity %d:\n"
+                "      vanilla pos (%.17g, %.17g, %.17g) vel (%.17g, %.17g, %.17g) ground %d fall %.17g fire %d health %d\n"
+                "      here    pos (%.17g, %.17g, %.17g) vel (%.17g, %.17g, %.17g) ground %d fall %.17g fire %d health %d",
                 t, l.ent->id, want.pos[0], want.pos[1], want.pos[2], want.vel[0], want.vel[1], want.vel[2], want.on_ground,
-                want.fall, l.m.pos[0], l.m.pos[1], l.m.pos[2], l.m.vel[0], l.m.vel[1], l.m.vel[2], l.b.on_ground,
-                l.b.fall_distance);
+                want.fall, want.fire, want.health, l.m.pos[0], l.m.pos[1], l.m.pos[2], l.m.vel[0], l.m.vel[1], l.m.vel[2],
+                l.b.on_ground, l.b.fall_distance, l.b.fire_ticks, l.sc->kind == Kind::kItem ? l.health : 0);
             if (diffs[l.scenario].empty()) diffs[l.scenario] = text;
             l.done = true;  // what follows a difference is not worth reading
         }
@@ -403,6 +450,45 @@ TEST(Physics, ReplaysTheFallingBlocksAVanillaServerRecorded) {
     }
     EXPECT_GE(landed, 10u) << "hardly any of them came down: the recording is of something else";
     std::printf("            %zu scenarios, %u recorded states, %u scenarios differ\n", scenarios.size(), states, failed);
+}
+
+// What is in water and lava, and on fire: sinking, floating up, carried by a current, lifted out
+// against a bank, lit and put out - and an item's health, down to the tick it is gone in.
+TEST(Physics, ReplaysTheFluidsAVanillaServerRecorded) {
+    Ticking ticking;
+    const std::vector<Scenario> scenarios = load_vectors(ticking, kFluidVectors);
+    ASSERT_GE(scenarios.size(), 40u);
+    std::vector<std::string> diffs;
+    replay(scenarios, ticking, diffs);
+    u32 states = 0, failed = 0, burned = 0;
+    for (usize i = 0; i < scenarios.size(); ++i) {
+        for (const Entity& e : scenarios[i].entities) {
+            states += static_cast<u32>(e.states.size());
+            burned += e.states.back().gone;
+        }
+        if (diffs[i].empty()) continue;
+        ++failed;
+        ADD_FAILURE() << scenarios[i].name << ": " << diffs[i];
+    }
+    EXPECT_GE(burned, 3u) << "no item burned: the recording is of something else";
+    std::printf("            %zu scenarios, %u recorded states, %u scenarios differ\n", scenarios.size(), states, failed);
+}
+
+TEST(Physics, WhatLiesStillInAFluidIsNotTickedAndComesOutTheSame) {
+    Ticking ticking;
+    const std::vector<Scenario> scenarios = load_vectors(ticking, kFluidVectors);
+    std::vector<std::string> diffs;
+    u64 rested = 0;
+    replay(scenarios, ticking, diffs, true, &rested);
+    u32 failed = 0;
+    for (usize i = 0; i < scenarios.size(); ++i) {
+        if (diffs[i].empty()) continue;
+        ++failed;
+        ADD_FAILURE() << scenarios[i].name << ": " << diffs[i];
+    }
+    EXPECT_GT(rested, 100u) << "nothing came to rest: the test tests nothing";
+    std::printf("            %llu ticks of entities at rest, %u scenarios differ\n", static_cast<unsigned long long>(rested),
+                failed);
 }
 
 // ---------------------------------------------------------------------------- the collision code against itself
@@ -557,8 +643,8 @@ TEST(Physics, AtRestOrNotItIsTheSameTick) {
     Arena a(true);
     phys::Scratch scratch;
     phys::World world{a.dim, scratch};
-    static constexpr phys::Kind kCow = phys::living_kind(0.9f, 1.4f, 0.6f, 0.08);
-    static constexpr phys::Kind kStand = phys::living_kind(0.5f, 1.975f, 0.0f, 0.08);
+    const phys::Kind kCow = phys::living_kind(entity_type::kCow);
+    const phys::Kind kStand = phys::living_kind(entity_type::kArmorStand);
     struct Thing {
         const phys::Kind* kind;
         phys::Motion full, lazy;  // ticked in full every tick; with rest
@@ -591,7 +677,13 @@ TEST(Physics, AtRestOrNotItIsTheSameTick) {
                                              "minecraft:ice",
                                              "minecraft:soul_sand",
                                              "minecraft:white_carpet",
-                                             "minecraft:chest[facing=east]"};
+                                             "minecraft:chest[facing=east]",
+                                             "minecraft:water",
+                                             "minecraft:water[level=3]",
+                                             "minecraft:water[level=8]",
+                                             "minecraft:lava",
+                                             "minecraft:lava[level=4]",
+                                             "minecraft:stone_slab[type=bottom,waterlogged=true]"};
     u64 rested = 0, woken = 0, asked = 0;
     for (u32 tick = 1; tick <= 900; ++tick) {
         // The world changes: a block somewhere in the patch, and often right where something lies.
@@ -656,6 +748,8 @@ TEST(Physics, AtRestOrNotItIsTheSameTick) {
                 << t.lazy.vel[2] << ")";
             t.full_body.needs_sync = t.lazy_body.needs_sync = false;  // (whoever tells the viewers takes it)
             t.full_body.sync_position = t.lazy_body.sync_position = false;
+            for (phys::Body* b : {&t.full_body, &t.lazy_body})  // (...and whoever keeps its health)
+                b->burned = b->extinguished = b->splashed = false, b->lava_hurts = 0;
         }
     }
     EXPECT_GT(rested, 50000u);

@@ -96,6 +96,8 @@ class Sc:
     extra: tuple = ()               # more entities of the same kind in the plot: (pos, motion)
     events: tuple = ()              # (tick, dx, dy, dz, block): set after that tick was recorded, before the next
     on_ground: bool = False         # summoned with OnGround:1b (what it is known to stand on is another matter: see emit)
+    item: str = "minecraft:stone"   # an item's stack
+    fireproof: bool = False         # ...which lava and fire do nothing to (ItemEntity.fireImmune)
 
 
 def column(x, z, y0, y1, block):
@@ -349,6 +351,151 @@ def scenarios() -> list[Sc]:
     S.append(Sc("falling_ice_slide", fb, (-2.0, 0.6, 0.5), (0.3, 0.0, 0.05), floor=ice, ticks=40))
     S.append(Sc("falling_origin", fb, (0.5, 3.0, 0.5), at=(0, 0, 8), ticks=40))
 
+    # ------------------------------------------------------------------ in water and lava
+    # A fixture here is the fluid as it stands once it has run out - sources in walls, or every
+    # level written out - because the game ticks while it is recorded: a fluid that still flowed
+    # would be another world every tick, and the unit test builds the blocks once. `record`
+    # lets the game run before it summons anything, and stops if a block of a plot changes.
+    #
+    # Who is recorded where: a mob with a FloatGoal jumps as chance has it once water stands
+    # more than 0.4 over its feet, so deep water is for what has none - the armor stand, the
+    # giant (no goals at all), the zombified piglin, the skeleton horse - and a pig wades. Walls
+    # two blocks over a mob that strolls: it jumps at what it could climb, speed or none.
+    W, L = "minecraft:water", "minecraft:lava"
+
+    def pool(r, depth, fluid=W, walls=0):
+        """Sources `r` blocks around the middle and `depth` deep, in a wall of stone."""
+        cells = []
+        for y in range(max(depth, walls)):
+            for x in range(-r - 1, r + 2):
+                for z in range(-r - 1, r + 2):
+                    if max(abs(x), abs(z)) == r + 1:
+                        cells.append((x, y, z, stone))
+                    elif y < depth:
+                        cells.append((x, y, z, fluid))
+        return tuple(cells)
+
+    def channel(fluid=W, walls=1):
+        """One block wide along x: a source at the west end, a level less each block (two, of lava) to the east wall."""
+        levels = (0, 1, 2, 3, 4) if fluid == W else (0, 2, 4, 6)
+        cells = []
+        for y in range(walls):
+            cells += [(-3, y, 0, stone), (-2 + len(levels), y, 0, stone)]
+            for i in range(len(levels)):
+                cells += [(-2 + i, y, -1, stone), (-2 + i, y, 1, stone)]
+        return tuple(cells) + tuple((-2 + i, 0, 0, f"{fluid}[level={level}]") for i, level in enumerate(levels))
+
+    def room(walls=1):
+        """Five by five, a source in the middle: water a level less with every block from it."""
+        cells = [(x, y, z, stone) for y in range(walls) for x in range(-3, 4) for z in range(-3, 4) if max(abs(x), abs(z)) == 3]
+        return tuple(cells) + tuple((x, 0, z, f"{W}[level={abs(x) + abs(z)}]") for x in range(-2, 3) for z in range(-2, 3))
+
+    def snake(walls=1):
+        """A channel that turns twice, so that it is long enough for water to run out in: the last cells hold 3, 2 and 1 of 8."""
+        water = {(-2, -2): 0, (-1, -2): 1, (0, -2): 2, (1, -2): 3, (2, -2): 4, (2, -1): 5, (2, 0): 6, (1, 0): 7}
+        dry = {(0, 0), (-1, 0), (-2, 0)}
+        cells = [(x, y, z, stone) for y in range(walls) for x in range(-3, 4) for z in range(-3, 2)
+                 if (x, z) not in water and (x, z) not in dry]
+        return tuple(cells) + tuple((x, 0, z, f"{W}[level={level}]") for (x, z), level in water.items())
+
+    def shaft(height, wall=stone):
+        """A column of falling water, walled in, under its source."""
+        cells = [(x, y, z, wall) for y in range(height) for x, z in ((-1, 0), (1, 0), (0, -1), (0, 1))]
+        return tuple(cells) + tuple((0, y, 0, f"{W}[level=8]") for y in range(height - 1)) + ((0, height - 1, 0, W),)
+
+    def waterfall():
+        """The channel, and a hole in its floor at the east end: the water goes over the edge and down two blocks."""
+        cells = [(-3, 0, 0, stone), (3, 0, 0, stone)]
+        for x in range(-2, 3):
+            cells += [(x, 0, -1, stone), (x, 0, 1, stone)]
+        cells += [(2, -1, 0, f"{W}[level=8]"), (2, -2, 0, f"{W}[level=8]"), (2, -3, 0, stone),
+                  (1, -2, 0, stone), (3, -2, 0, stone), (2, -2, -1, stone), (2, -2, 1, stone)]
+        return tuple(cells) + tuple((-2 + i, 0, 0, f"{W}[level={i}]") for i in range(5))
+
+    # Water beside a ladder that has water under it: what is neither in #blocks_fluid_flow nor
+    # gives way to a fluid, the one case in which FlowingFluid.getFlow looks a block down.
+    ladder = ((0, 0, 0, stone), (-1, 1, 0, stone), (0, 1, -1, stone), (0, 1, 1, stone), (2, 1, 0, stone), (1, 1, -1, stone),
+              (1, 1, 1, stone), (2, 0, 0, stone), (1, 0, -1, stone), (1, 0, 1, stone),
+              (1, 1, 0, "minecraft:ladder[facing=west]"), (1, 0, 0, W), (0, 1, 0, W))
+    cell = ((-1, 0, 0, stone), (1, 0, 0, stone), (0, 0, -1, stone), (0, 0, 1, stone))    # one block of room, walled in
+    roof = tuple((x, 7, z, stone) for x in range(-2, 3) for z in range(-2, 3))            # no sky: what burns in the sun does not
+    # Soul sand under water that flows: under a source it would blow bubbles, and a bubble column is another block.
+    soul = dict(blocks=channel() + ((-2, -1, 0, stone),), floor="minecraft:soul_sand")
+    safe = "Invulnerable:1b,PersistenceRequired:1b"     # lava hurts it and it does not die (nothing here has health)
+    netherite = dict(item="minecraft:netherite_ingot", fireproof=True)
+
+    def fl(name, kind, pos, motion=(0.0, 0.0, 0.0), **kw):
+        S.append(Sc("fluid_" + name, kind, pos, motion, **kw))
+
+    # ...items: they float up, and a current carries them
+    fl("item_pool_drop", "item", (0.5, 4.0, 0.5), blocks=pool(1, 2), ticks=120)
+    fl("item_pool_bottom", "item", (0.3, 0.0, 0.6), blocks=pool(1, 2), ticks=100)
+    fl("item_pool_thrown", "item", (-0.5, 0.8, 0.5), (0.3, 0.1, 0.12), blocks=pool(1, 2), ticks=100)
+    fl("item_fast_dive", "item", (0.5, 7.0, 0.5), (0.0, -1.6, 0.0), blocks=pool(1, 3), ticks=100)
+    fl("item_channel", "item", (-1.5, 0.3, 0.5), blocks=channel(), ticks=140)
+    fl("item_channel_upstream", "item", (2.3, 0.5, 0.5), (-0.25, 0.0, 0.0), blocks=channel(), ticks=140)
+    fl("item_room", "item", (1.3, 0.2, -0.7), blocks=room(), ticks=140)
+    fl("item_snake", "item", (2.5, 0.0, -1.5), blocks=snake(), ticks=160)
+    fl("item_shaft", "item", (0.5, 5.5, 0.5), blocks=shaft(4), ticks=100)
+    fl("item_shaft_ice", "item", (0.5, 5.5, 0.5), blocks=shaft(4, ice), ticks=100)
+    fl("item_ladder_edge", "item", (0.5, 1.3, 0.5), blocks=ladder, ticks=100)
+    fl("item_waterfall", "item", (-1.5, 0.3, 0.5), blocks=waterfall(), ticks=160)
+    fl("item_wet_slab", "item", (0.5, 1.5, 0.5), blocks=cell + ((0, 0, 0, "minecraft:stone_slab[type=bottom,waterlogged=true]"),), ticks=100)
+    fl("item_wet_chest", "item", (0.5, 1.5, 0.5), blocks=cell + ((0, 0, 0, "minecraft:chest[facing=north,waterlogged=true]"),), ticks=80)
+    fl("item_water_comes_and_goes", "item", (0.5, 0.0, 0.5), blocks=cell, ticks=140, events=((30, 0, 0, 0, W), (90, 0, 0, 0, "minecraft:air")))
+    fl("item_soul_sand", "item", (-0.5, 0.3, 0.5), (0.2, 0.0, 0.0), ticks=100, **soul)
+    # ...and burn: in lava at once, on fire a point of five every second
+    fl("item_lava_pool", "item", (0.5, 2.5, 0.5), blocks=pool(1, 2, L), ticks=40)
+    fl("item_lava_first_tick", "item", (0.5, 0.5, 0.5), blocks=pool(1, 2, L), ticks=20)
+    fl("item_fire", "item", (0.5, 2.0, 0.5), nbt="Fire:50s", ticks=80)
+    fl("item_fire_dies", "item", (0.5, 2.0, 0.5), nbt="Fire:130s", ticks=120)
+    fl("item_fire_into_water", "item", (0.5, 3.0, 0.5), nbt="Fire:200s", blocks=pool(1, 2), ticks=80)
+    fl("netherite_lava_pool", "item", (0.5, 2.5, 0.5), blocks=pool(1, 2, L), ticks=120, **netherite)
+    fl("netherite_lava_channel", "item", (-1.5, 0.3, 0.5), blocks=channel(L), ticks=160, **netherite)
+    fl("netherite_fire", "item", (0.5, 2.0, 0.5), nbt="Fire:50s", ticks=30, **netherite)
+
+    # ...primed TNT: it sinks
+    fl("tnt_pool_drop", "tnt", (0.5, 4.0, 0.5), blocks=pool(1, 2), nbt=tnt, ticks=100)
+    fl("tnt_pool_thrown", "tnt", (-0.4, 1.0, 0.5), (0.25, 0.2, 0.1), blocks=pool(1, 2), nbt=tnt, ticks=100)
+    fl("tnt_channel", "tnt", (-1.5, 0.0, 0.5), blocks=channel(), nbt=tnt, ticks=140)
+    fl("tnt_shaft", "tnt", (0.5, 5.0, 0.5), blocks=shaft(4), nbt=tnt, ticks=100)
+    fl("tnt_waterfall", "tnt", (-1.5, 0.0, 0.5), blocks=waterfall(), nbt=tnt, ticks=160)
+    fl("tnt_soul_sand", "tnt", (-0.5, 1.0, 0.5), (0.2, 0.0, 0.0), nbt=tnt, ticks=100, **soul)
+    fl("tnt_lava_pool", "tnt", (0.5, 3.0, 0.5), blocks=pool(1, 2, L), nbt=tnt, ticks=100)
+
+    # ...what lives: it sinks slowly, walks on the bottom, is lifted out against a bank
+    fl("stand_pool_deep", "armor_stand", (0.5, 4.0, 0.5), blocks=pool(1, 3), ticks=140)
+    fl("stand_pool_walk", "armor_stand", (-0.5, 0.0, 0.3), (0.35, 0.0, 0.1), blocks=pool(1, 2), on_ground=True, ticks=80)
+    fl("stand_shore", "armor_stand", (0.6, 0.9, 0.5), (0.3, 0.0, 0.0), blocks=pool(1, 1), ticks=80)
+    fl("stand_fast_dive", "armor_stand", (0.5, 8.0, 0.5), (0.0, -1.7, 0.0), blocks=pool(1, 3), ticks=100)
+    fl("stand_channel", "armor_stand", (-1.5, 0.0, 0.5), blocks=channel(), on_ground=True, ticks=140)
+    fl("stand_room", "armor_stand", (1.4, 0.0, -0.6), blocks=room(), ticks=140)
+    fl("stand_snake", "armor_stand", (2.5, 0.0, -1.5), blocks=snake(), ticks=160)
+    fl("stand_shaft", "armor_stand", (0.5, 5.0, 0.5), blocks=shaft(4), ticks=100)
+    fl("stand_waterfall", "armor_stand", (-1.5, 0.0, 0.5), blocks=waterfall(), ticks=160)
+    fl("stand_soul_sand", "armor_stand", (-0.5, 0.5, 0.5), (0.3, 0.0, 0.0), ticks=80, **soul)
+    fl("stand_water_comes_and_goes", "armor_stand", (0.5, 0.0, 0.5), blocks=cell + tuple((x, 1, z, b) for x, _, z, b in cell), ticks=140,
+       events=((30, 0, 0, 0, W), (31, 0, 1, 0, W), (90, 0, 1, 0, "minecraft:air"), (91, 0, 0, 0, "minecraft:air")))
+    fl("stand_lava_pool", "armor_stand", (0.5, 3.0, 0.5), blocks=pool(1, 2, L), nbt=safe, ticks=100)
+    fl("stand_lava_channel", "armor_stand", (-1.5, 0.0, 0.5), blocks=channel(L), nbt=safe, on_ground=True, ticks=160)
+    fl("stand_fire", "armor_stand", (0.5, 0.0, 0.5), nbt="Fire:60s," + safe, on_ground=True, ticks=80)
+    fl("stand_fire_into_water", "armor_stand", (0.5, 3.0, 0.5), nbt="Fire:100s," + safe, blocks=pool(1, 2), ticks=80)
+    fl("giant_pool", "giant", (0.5, 3.0, 0.5), blocks=pool(2, 2), nbt="PersistenceRequired:1b", ticks=100)
+    fl("giant_room", "giant", (0.8, 0.0, 0.2), blocks=room(), nbt="PersistenceRequired:1b", ticks=100)
+    fl("giant_lava", "giant", (0.5, 1.0, 0.5), blocks=pool(2, 1, L), nbt=safe, ticks=80)
+    fl("piglin_pool", "zombified_piglin", (0.5, 3.5, 0.5), blocks=pool(1, 2, walls=5), nbt=still, ticks=80)
+    fl("piglin_lava", "zombified_piglin", (0.5, 3.5, 0.5), blocks=pool(1, 2, L, walls=5), nbt=still, ticks=80)
+    fl("horse_pool", "skeleton_horse", (0.5, 3.5, 0.5), (0.2, 0.0, 0.1), blocks=pool(1, 2, walls=5), nbt=still, ticks=80)
+    fl("pig_snake", "pig", (2.5, 0.0, -0.5), blocks=snake(walls=2), nbt=still, ticks=120)
+    # ...and what lives in water, where its own class moves it
+    fl("frog_pool", "frog", (0.5, 3.0, 0.5), blocks=pool(1, 2, walls=5), nbt=still, ticks=80)
+    fl("frog_channel", "frog", (-1.5, 0.0, 0.5), blocks=channel(walls=3), nbt=still, ticks=60)
+    fl("nautilus_pool", "nautilus", (0.5, 3.0, 0.5), blocks=pool(1, 2, walls=5), nbt=still, ticks=80)
+    fl("axolotl_pool", "axolotl", (0.5, 3.0, 0.5), blocks=pool(1, 2, walls=5), nbt=still, ticks=80)
+    fl("axolotl_channel", "axolotl", (-1.5, 0.0, 0.5), blocks=channel(walls=3), nbt=still, ticks=60)
+    fl("drowned_pool", "drowned", (0.5, 3.5, 0.5), blocks=pool(1, 2, walls=5) + roof, nbt=still, ticks=80)
+    fl("drowned_drop", "drowned", (0.5, 4.0, 0.5), blocks=roof, nbt=still, ticks=40)
+
     floors = [stone, stone, ice, "minecraft:soul_sand", "minecraft:slime_block", "minecraft:honey_block", "minecraft:packed_ice", "minecraft:mud"]
     obstacles = ["minecraft:stone_slab[type=bottom]", "minecraft:oak_stairs[facing=east,half=bottom]", "minecraft:oak_fence",
                  "minecraft:cobblestone_wall", "minecraft:chest[facing=north]", "minecraft:cobweb", "minecraft:white_carpet",
@@ -474,6 +621,7 @@ class Watcher(Bot):
         super().__init__(PORT, name)
         self.packets: list[tuple[str, str]] = []
         self.ids: dict[str, int] = {}       # uuid (hex) -> entity id
+        self.changes: list[tuple[tuple[int, int, int], int]] = []    # blocks it was told have changed: (pos, state id)
         self.lock = threading.Lock()
         self.alive = True
 
@@ -502,6 +650,12 @@ class Watcher(Bot):
                 eid = r.varint()
                 with self.lock:
                     self.ids[r.take(16).hex()] = eid
+            elif got == "block_update":
+                with self.lock:
+                    self.changes.append(mc.parse_block_update(r))
+            elif got == "section_blocks_update":
+                with self.lock:
+                    self.changes += list(mc.parse_section_blocks_update(r).items())
             if got in mc.ENTITY_PACKETS or got in ("disguised_chat", "system_chat"):
                 with self.lock:
                     self.packets.append((got, data.hex()))
@@ -515,9 +669,14 @@ MOTION = re.compile(r"\bMotion: \[" + NUM + "d, " + NUM + "d, " + NUM + r"d\]")
 GROUND = re.compile(r"\bOnGround: (\d)b")
 FALL = re.compile(r"\bfall_distance: " + NUM + "d")
 FUSE = re.compile(r"\bfuse: (-?\d+)s")
+FIRE = re.compile(r"\bFire: (-?\d+)s")
+HEALTH = re.compile(r"\bHealth: (-?\d+)s")       # an item's (what lives has a float)
 DUMP = re.compile(r"^(e\d+) has the following entity data: (.*)$")
-KIND_ID = {"item": "minecraft:item", "tnt": "minecraft:tnt", "armor_stand": "minecraft:armor_stand", "pig": "minecraft:pig",
-           "falling_block": "minecraft:falling_block"}
+
+
+def type_of(kind: str) -> str:
+    """The entity type of a scenario's kind: its name."""
+    return "minecraft:" + kind
 
 
 RUN = int(time.time()) & 0x7FFFFFFF      # in every UUID: vanilla refuses one it has seen, even on a dead entity
@@ -534,10 +693,19 @@ def record(out_path: str, only: str | None) -> None:
     log_path = Path(out_path).with_suffix(".server.log")
     v = Vanilla(log_path)
     bot = None
+    difficulty = None
     try:
         v.until(r"Done \(", 180)
         v.cmd("tick freeze")
         v.until(r"^The game is frozen", 20)
+        # A monster is not summoned where the game is peaceful (the giant, what is undead): the
+        # world's difficulty is put up for the length of the recording, and back after it.
+        v.cmd("difficulty")
+        was = v.until(r"^The difficulty is (\w+)", 20)[0].group(1).lower()
+        if was == "peaceful":
+            v.cmd("difficulty easy")
+            v.until(r"^The difficulty has been set to Easy", 20)
+            difficulty = was
         bot = Watcher("PhysWatch")
         bot.join()
         threading.Thread(target=bot.run, daemon=True).start()
@@ -573,6 +741,31 @@ def record(out_path: str, only: str | None) -> None:
         if bad:
             raise SystemExit("a fixture command failed:\n  " + "\n  ".join(bad[:10]))
 
+        # ---- fluids: a fixture of them is meant to stand as it was built. The game runs for
+        # a while before anything is summoned - a hundred ticks are three steps of lava - and
+        # from here on no block of such a plot may change but by the scenario's own events:
+        # the bot is told of every change.
+        steady = [sc for sc in scs if sc.name.startswith("fluid_")]
+
+        def flowed() -> None:
+            with bot.lock:
+                changes, bot.changes = bot.changes, []
+            for (x, y, z), state in changes:
+                for sc in steady:
+                    ox, oy, oz = sc.origin
+                    if abs(x - ox) <= 4 and abs(z - oz) <= 4 and oy - 6 <= y <= oy + 12:
+                        if (x, y, z) not in {(ox + dx, oy + dy, oz + dz) for _, dx, dy, dz, _ in sc.events}:
+                            raise SystemExit(f"{sc.name}: the block at {(x - ox, y - oy, z - oz)} of its plot changed (to state "
+                                             f"{state}): a fixture of fluid has to stand still")
+        if steady:
+            time.sleep(1.0)     # the bot hears of the fixtures
+            with bot.lock:
+                bot.changes = []
+            v.cmd("tick step 100")
+            v.until(r"^Stepping 100 tick", 20)
+            time.sleep(100 / 20 + 1.5)
+            flowed()
+
         # ---- entities, in one batch: /summon hands out ids in order
         for si, sc in enumerate(scs):
             ox, oy, oz = sc.origin
@@ -584,7 +777,7 @@ def record(out_path: str, only: str | None) -> None:
                 nbt = [f'Tags:["phys"]', f'CustomName:"{tag}"', f"UUID:{snbt_uuid}",
                        "Motion:[" + ",".join(fixed(m) + "d" for m in motion) + "]"]
                 if sc.kind == "item":
-                    nbt += ['Item:{id:"minecraft:stone",count:1}', "PickupDelay:32767s"]
+                    nbt += [f'Item:{{id:"{sc.item}",count:1}}', "PickupDelay:32767s"]
                 if sc.kind == "falling_block":
                     # Sand, which leaves no item where it cannot become a block again (26.x: a default
                     # state is its block's name alone).
@@ -599,7 +792,7 @@ def record(out_path: str, only: str | None) -> None:
                     nbt.append("attributes:[" + ",".join(attrs) + "]")
                 if extra:
                     nbt.append(extra)
-                v.cmd(f"summon {KIND_ID[sc.kind]} {fixed(apos[0])} {fixed(apos[1])} {fixed(apos[2])} {{{','.join(nbt)}}}")
+                v.cmd(f"summon {type_of(sc.kind)} {fixed(apos[0])} {fixed(apos[1])} {fixed(apos[2])} {{{','.join(nbt)}}}")
                 sc.ents.append({"tag": tag, "uuid": hex_uuid, "pos": apos, "motion": tuple(float(m) for m in motion), "states": []})
                 entities.append((tag, si, ei))
         by_tag = {tag: scs[si].ents[ei] for tag, si, ei in entities}
@@ -649,15 +842,19 @@ def record(out_path: str, only: str | None) -> None:
                 pos, mot = POS.search(nbt), MOTION.search(nbt)
                 state = {"pos": [float(pos.group(i)) for i in (1, 2, 3)], "motion": [float(mot.group(i)) for i in (1, 2, 3)],
                          "on_ground": GROUND.search(nbt).group(1) == "1", "fall": float(FALL.search(nbt).group(1))}
-                fuse = FUSE.search(nbt)
+                fuse, health = FUSE.search(nbt), HEALTH.search(nbt)
                 if fuse:
                     state["fuse"] = int(fuse.group(1))
+                state["fire"] = int(FIRE.search(nbt).group(1))
+                if health:
+                    state["health"] = int(health.group(1))
                 by_tag[tag]["states"].append(state)
             if t == 0 and len(got) != len(entities):
                 raise SystemExit(f"{len(entities) - len(got)} entities were not summoned: {sorted(set(by_tag) - set(got))[:10]}")
             for tag, e in by_tag.items():
                 if tag not in got and t <= ticks_of[tag] and len(e["states"]) == t:
                     e["states"].append(None)        # gone: discarded in this tick
+            flowed()
             if t % 20 == 0:
                 print(f"tick {t} / {max_ticks}: {len(got)} entities", flush=True)
             if t == max_ticks:
@@ -687,7 +884,9 @@ def record(out_path: str, only: str | None) -> None:
             v.cmd("kill @e[tag=phys]")
             for sc in scs:
                 ox, oy, oz = sc.origin
-                v.cmd(f"fill {ox - 3} {oy - 6} {oz - 3} {ox + 3} {oy + 5} {oz + 3} minecraft:air")
+                v.cmd(f"fill {ox - 3} {oy - 6} {oz - 3} {ox + 3} {oy + 8} {oz + 3} minecraft:air")
+            if difficulty:
+                v.cmd(f"difficulty {difficulty}")
             v.cmd("tick unfreeze")
             time.sleep(1.6)     # mobs die
             v.cmd("forceload remove all", "say CLEAN")
@@ -699,8 +898,9 @@ def record(out_path: str, only: str | None) -> None:
             bot.c.close()
         v.stop()
 
-    out = {"version": VERSION, "scenarios": [
+    out = {"version": VERSION, "format": 2, "scenarios": [
         {"name": sc.name, "kind": sc.kind, "origin": sc.origin, "ticks": sc.ticks, "step_height": sc.step_height, "on_ground": sc.on_ground,
+         "fireproof": sc.fireproof,
          "blocks": [list(b) for b in sorted(sc.abs_blocks)], "entities": sc.ents,
          "events": [[when, sc.origin[0] + dx, sc.origin[1] + dy, sc.origin[2] + dz, block] for when, dx, dy, dz, block in sc.events]}
         for sc in scs]}
@@ -710,7 +910,7 @@ def record(out_path: str, only: str | None) -> None:
 
 # ----------------------------------------------------------------------------- emit
 
-KINDS = ["item", "tnt", "armor_stand", "pig", "falling_block"]
+KINDS = ["item", "tnt", "armor_stand", "pig", "falling_block", "living"]    # "living": any other type, by its name
 
 
 def emit(in_path: str, out_path: str) -> None:
@@ -719,8 +919,12 @@ def emit(in_path: str, out_path: str) -> None:
     moved: that is six rounds of an item's four-tick rest, and the file is a third smaller.
 
     A recording need not be of everything: `record --only '^falling_'` and `emit` into
-    tests/unit/data/physics_falling.bin is how the falling blocks were added beside the rest."""
+    tests/unit/data/physics_falling.bin is how the falling blocks were added beside the rest, and
+    `--only '^fluid_|^drowned_'` into physics_fluids.bin what is in water and lava. A recording made
+    since then is written in the second form (PHYSVEC2): the type of what was summoned, by name,
+    and with every state how long it still burns (Fire) and, of an item, its health."""
     rec = json.load(open(in_path))
+    v2 = rec.get("format", 1) >= 2
 
     def text(v: str) -> bytes:
         raw = v.encode()
@@ -733,7 +937,8 @@ def emit(in_path: str, out_path: str) -> None:
     recorded = [sc for sc in rec["scenarios"] if sc["name"] in known]    # (a scenario taken off the list since is left out)
     distance = int(re.search(r"^simulation-distance=(\d+)$", (SERVER_DIR / "server.properties").read_text(), re.M).group(1))
     forced = sorted({(sc["origin"][0] >> 4, sc["origin"][2] >> 4) for sc in recorded if known[sc["name"]].at is not None})
-    o = bytearray(b"PHYSVEC1" + struct.pack("<iiiI", int(BOT_AT[0] // 16), int(BOT_AT[2] // 16), distance, len(forced)))
+    o = bytearray((b"PHYSVEC2" if v2 else b"PHYSVEC1") +
+                  struct.pack("<iiiI", int(BOT_AT[0] // 16), int(BOT_AT[2] // 16), distance, len(forced)))
     for cx, cz in forced:
         o += struct.pack("<iiii", cx - 1, cz - 1, cx + 1, cz + 1)
     o += struct.pack("<I", len(recorded))
@@ -741,7 +946,10 @@ def emit(in_path: str, out_path: str) -> None:
     for sc in recorded:
         step = sc.get("step_height")
         events = sc.get("events", [])
-        o += text(sc["name"]) + struct.pack("<BBd", KINDS.index(sc["kind"]), 1 if sc.get("on_ground") else 0, -1.0 if step is None else step)
+        kind = sc["kind"] if sc["kind"] in KINDS else "living"
+        o += text(sc["name"]) + struct.pack("<BBd", KINDS.index(kind), 1 if sc.get("on_ground") else 0, -1.0 if step is None else step)
+        if v2:
+            o += text(type_of(sc["kind"])) + struct.pack("<B", 1 if sc.get("fireproof") else 0)
         o += struct.pack("<I", len(sc["blocks"]))
         for x, y, z, block in sc["blocks"]:
             o += struct.pack("<iii", x, y, z) + text(block)
@@ -754,7 +962,8 @@ def emit(in_path: str, out_path: str) -> None:
             st = e["states"]
             last = 0
             for t in range(1, len(st)):
-                if st[t] is None or st[t - 1] is None or st[t]["pos"] != st[t - 1]["pos"] or st[t]["on_ground"] != st[t - 1]["on_ground"]:
+                if (st[t] is None or st[t - 1] is None or st[t]["pos"] != st[t - 1]["pos"] or st[t]["on_ground"] != st[t - 1]["on_ground"] or
+                        st[t].get("fire") != st[t - 1].get("fire")):
                     last = t
             keep = max(keep, last)
         keep = max([keep] + [when for when, *_ in events]) + 26
@@ -763,9 +972,11 @@ def emit(in_path: str, out_path: str) -> None:
             o += struct.pack("<iI", e["id"], len(st))
             for s_ in st:
                 if s_ is None:
-                    o += struct.pack("<Bi7d", 2, 0, *([0.0] * 7))
+                    o += struct.pack("<Bi7d", 2, 0, *([0.0] * 7)) + (struct.pack("<hh", 0, 0) if v2 else b"")
                 else:
                     o += struct.pack("<Bi7d", 1 if s_["on_ground"] else 0, s_.get("fuse", 0), *s_["pos"], *s_["motion"], s_["fall"])
+                    if v2:
+                        o += struct.pack("<hh", s_["fire"], s_.get("health", 0))
             states += len(st)
     Path(out_path).write_bytes(bytes(o))
     print(f"wrote {out_path}: {len(recorded)} scenarios, {states} states, {len(o)} bytes")

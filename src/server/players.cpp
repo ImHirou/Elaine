@@ -118,11 +118,51 @@ void Game::tick_players() {
                                                          : kSwimmingHeight);
         }
     }
-    for (u32 pi = 0; pi < n; ++pi) update_pose(pi);
+    for (u32 pi = 0; pi < n; ++pi) {
+        update_swimming(pi);
+        update_pose(pi);
+    }
+}
+
+// Entity.baseTick, the part a player's swimming is made of: wasEyeInWater is what its last look
+// at the fluids found, updateFluidInteraction looks again, and Player.updateSwimming says
+// whether it swims - never while it flies; else (Entity.updateSwimming) it goes on swimming
+// for as long as it sprints in water, and begins when it sprints with its eyes under water in
+// a block that holds water. The flag is what others are shown; the pose follows it.
+void Game::update_swimming(u32 pi) {
+    Player& p = players_[pi];
+    const u8 pose_now = ents_.pose[pi];
+    const bool was_eyes_in_water = p.eyes_in_water;
+    const float height = pose_now == pose::kStanding    ? kStandingHeight
+                         : pose_now == pose::kCrouching ? kCrouchingHeight
+                                                        : kSwimmingHeight;
+    // Avatar.POSES: the eyes of each pose (EntityDimensions.eyeHeight)
+    const float eyes = pose_now == pose::kStanding ? 1.62f : pose_now == pose::kCrouching ? 1.27f : 0.4f;
+    const world::InWater water =
+        world::water_around(world_, world::entity_box(ents_.x[pi], ents_.y[pi], ents_.z[pi], kWidth, height), ents_.x[pi],
+                            ents_.y[pi] + static_cast<double>(eyes), ents_.z[pi]);
+    p.in_water = water.in, p.eyes_in_water = water.eyes;
+    const u32 flags = ents_.shared_flags[pi];
+    const bool sprinting = (flags >> shared_flag::kSprinting) & 1;
+    bool swimming = (flags >> shared_flag::kSwimming) & 1;
+    if (LIKELY(!sprinting && !swimming)) return;
+    if (p.flying)
+        swimming = false;
+    else if (swimming)
+        swimming = sprinting && p.in_water;
+    else  // isUnderWater(), and the fluid of its blockPosition is #water
+        swimming = sprinting && was_eyes_in_water && p.in_water &&
+                   world::holds_water(world_.block(floor_int(ents_.x[pi]), floor_int(ents_.y[pi]), floor_int(ents_.z[pi])));
+    ents_.set_shared_flag(pi, shared_flag::kSwimming, swimming);
 }
 
 // Player.updatePlayerPose, with the poses a creative player on foot can ask for.
 void Game::update_pose(u32 pi) {
+    // getDesiredPose: one that swims (Player.isSwimming: the flag, which nobody has who flies) lies in the water.
+    if (UNLIKELY((ents_.shared_flags[pi] >> shared_flag::kSwimming) & 1)) {
+        if (fits(pi, kSwimmingHeight)) ents_.set_pose(pi, pose::kSwimming);
+        return;
+    }
     const u8 desired = static_cast<u8>(crouching(players_[pi]) ? pose::kCrouching : pose::kStanding);
     // The standing box contains the two smaller ones: where it fits, vanilla's three checks pass.
     if (LIKELY(fits(pi, kStandingHeight))) {

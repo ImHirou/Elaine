@@ -11,6 +11,10 @@
 //   FallingBlockEntity.tick (how it moves)                               ->  falling_move()
 //   LivingEntity.aiStep / travel / travelInAir, with nobody steering     ->  living_tick()
 //   WebBlock / HoneyBlock.entityInside, SlimeBlock.stepOn                ->  inside the effects
+//   Entity.updateFluidInteraction, EntityFluidInteraction.update, CurrentAccumulator.applyTo,
+//   FlowingFluid.getFlow (world/fluid.*); ItemEntity.setFluidMovement; LivingEntity.travelInFluid,
+//   travelInWater, travelInLava, getFluidFallingAdjustedMovement, jumpOutOfFluid, and
+//   travelInWater of the classes that have their own (Kind::water_travel)   ->  in a fluid
 //
 // The functions here are pure: a Motion (position and velocity, which the entity table holds
 // in its columns), a Body (everything else Entity keeps about how it moves) and the blocks.
@@ -21,8 +25,14 @@
 // look redundant are vanilla's and observable in the bits: `v + 0.0` (Vec3.add turns -0 into 0),
 // two multiplications where one would do.
 //
+// In a fluid: every tick an entity looks at the cells its box is in (but a falling block, which
+// never does), and what it finds - how high water and lava stand over its feet - decides how its
+// tick goes on: an item floats up, a living entity sinks slowly, both are carried by the current.
+// A section without fluid costs none of that: World::wet says so before a cell is read.
+//
 // What is NOT here:
-//   * fluids (no block holds one yet): swimming, buoyancy, currents, bubble columns;
+//   * bubble columns; a float goal (a mob with a brain keeps itself up, here it sinks); swimming;
+//     what stands on a fluid (the strider is not moved at all);
 //   * what needs health: fall damage and its sound and particles, suffocation, the void's
 //     damage - a living entity that falls out of the world is removed at once;
 //   * sounds and vibrations of movement (footsteps), the honey block's slide sound and particles;
@@ -42,6 +52,14 @@ struct Kind {
     double gravity;       // Entity.getDefaultGravity()
     float below_offset;   // getBlockPosBelowThatAffectsMyMovement: 0.500001 below the feet, an item 0.999999
     bool living;          // a LivingEntity
+    // ---- in a fluid (gen::physics::kEntity has them by type)
+    bool pushed_by_fluid = true;   // Entity.isPushedByFluid(): a current carries it
+    u8 water_travel = 0;           // gen::physics::kWater*: LivingEntity.travelInWater, or its class's own
+    float water_slow_down = 0.8f;  // LivingEntity.getWaterSlowDown()
+    double jump_threshold = 0.0;   // Entity.getFluidJumpThreshold(): a fluid no deeper than this is shallow
+    // What its MoveControl adds to its vertical velocity every tick, whatever it wants:
+    double control_in_water = 0.0;    // ...while it is in water (a frog: up)
+    double control_off_ground = 0.0;  // ...while it is not on the ground (a drowned: down)
 };
 inline constexpr Kind kItem{0.25f, 0.25f, 0.0f, 0.04, 0.999999f, false};          // EntityTypes.ITEM, ItemEntity
 inline constexpr Kind kTnt{0.98f, 0.98f, 0.0f, 0.04, 0.500001f, false};           // EntityTypes.TNT, PrimedTnt
@@ -50,6 +68,8 @@ inline constexpr Kind kFallingBlock{0.98f, 0.98f, 0.0f, 0.04, 0.500001f, false};
 constexpr Kind living_kind(float width, float height, float step_height, double gravity) {
     return {width, height, step_height, gravity, 0.500001f, true};
 }
+// ...of an entity type (gen::entity_type): its size, and how its class moves in a fluid.
+Kind living_kind(u32 type);
 
 // Position and velocity: Entity.position and deltaMovement. Loaded from the entity table's
 // columns before a tick and stored back after it.
@@ -79,6 +99,20 @@ struct Body {
     bool no_gravity = false;     // Entity.isNoGravity()
     bool needs_sync = false;     // Entity.needsSync: set here; whoever tells the viewers takes it
     bool sync_position = false;  // Entity.syncPosition (a bounce): the same
+    // ---- in a fluid: EntityFluidInteraction as of the entity's last look around it
+    bool in_water = false;    // Entity.wasTouchingWater: isInWater()
+    bool first_tick = true;   // Entity.firstTick: until its first base tick is over (never, for what has none: TNT)
+    bool splashed = false;    // Entity.doWaterSplashEffect ran this tick: set here; whoever makes the sound takes it
+    double water_height = 0;  // getFluidHeight(FluidTags.WATER): how far over its feet water stands
+    double lava_height = 0;   // ...and lava. isInLava() is "not its first tick, and this is not nothing"
+    // ---- fire: lit by the lava it is in, put out by water. What burning does to something that
+    // has health is its keeper's business (an item's health is the game's): told below.
+    i32 fire_ticks = 0;         // Entity.remainingFireTicks
+    bool fire_immune = false;   // Entity.fireImmune(): its type's - an item's also its stack's
+    bool shows_fire = false;    // Entity.setSharedFlagOnFire, as its last base tick set it: what its viewers see
+    bool burned = false;        // set here, as the next two: a tick of burning that hurts by one (Entity.baseTick)
+    bool extinguished = false;  // its fire went out in a block (the hiss: playEntityOnFireExtinguishedSound)
+    u16 lava_hurts = 0;         // Entity.lavaHurt: once for each cell of lava it was found in this tick
     // Entity.movementThisTick and finalMovementsThisTick. Vanilla keeps two lists; the first
     // only ever holds what move() recorded this tick and is emptied into the second before
     // anything reads either, so one array does: `moves` says that last[0] is this tick's and
@@ -103,6 +137,12 @@ struct World {
     // cache line of the chunk: an item on the ground 185 -> 156, one thrown 268 -> 228.)
     u32 near = world::kAskSections;
     bool open = false;
+    // ...and whether there is fluid in them at all (LevelChunkSection.hasFluid: what vanilla asks
+    // too before it looks at a cell - EntityFluidInteraction.hasFluidAndLoaded).
+    bool wet = true;
+    // Entity.updateFluidInteraction: how hard a current of lava pulls - the dimension's
+    // (EnvironmentAttributes.FAST_LAVA: 0.007 there).
+    double lava_flow_scale = 0.0023333333333333335;
 };
 
 // Entity.move(MoverType.SELF, delta).
@@ -115,20 +155,20 @@ void apply_effects_from_last_movements(World& w, const Kind& k, Motion& m, Body&
 
 enum class Fate : u8 { kStays, kGone };  // kGone: discarded (it fell out of the world)
 
-// ItemEntity.tick: gravity, the way out of a block it is stuck in, the move, friction. Not the
-// stack's business (merging, age, pickup). `tick_count`: Entity.tickCount, 1 in its first tick;
-// `id`: Entity.getId() - an item at rest only moves every fourth tick, and which is its id's.
+// ItemEntity.tick: gravity - or the way up, in a fluid - the way out of a block it is stuck in,
+// the move, friction. Not the stack's business (merging, age, pickup, what lava does to it). `tick_count`: Entity.tickCount, 1 in
+// its first tick; `id`: Entity.getId() - an item at rest only moves every fourth tick, and which is its id's.
 // `random_float(rng)`: RandomSource.nextFloat(), drawn only for an item stuck in a block.
 Fate item_tick(World& w, Motion& m, Body& b, u32 tick_count, i32 id, float (*random_float)(void*), void* rng);
-// PrimedTnt.tick: gravity, the move, drag, the hop off the ground. Not the fuse.
+// PrimedTnt.tick: gravity, the move, drag, the hop off the ground, the fluids around it. Not the fuse.
 void tnt_tick(World& w, Motion& m, Body& b);
 // FallingBlockEntity.tick, the part before it looks where it is: gravity, the move, and what the
 // blocks it passed do to it. What follows - landing, or the drag of the air - is the caller's
 // (server/falling.cpp): it depends on the block the entity is.
 void falling_move(World& w, Motion& m, Body& b);
 // LivingEntity.tick for a living entity nobody steers: aiStep with no input - the velocity cut
-// off below 0.003, travelInAir (move, then gravity and friction) - and the blocks' effects.
-// Not pushEntities: that takes the others (push_impulse below).
+// off below 0.003, travelInAir (move, then gravity and friction) or travelInFluid - and the
+// blocks' effects. Not pushEntities: that takes the others (push_impulse below).
 Fate living_tick(World& w, const Kind& k, Motion& m, Body& b);
 
 // ---- at rest

@@ -508,6 +508,8 @@ FLUID_FACT_FLAGS = [
     ("kTakesWater", "...and canPlaceLiquid says yes to a source of water, whoever asks: a SimpleWaterloggedBlock of a ported "
                     "class (a double slab says no; one of a class that is not ported is left as it is)"),
     ("kCreativeOnly", "BarrierBlock: it takes water, and gives it up, only at the hands of a player in creative mode"),
+    ("kBlocksFlow", "#blocks_fluid_flow: a fluid beside it does not run off over its edge (FlowingFluid.getFlow)"),
+    ("kIce", "an IceBlock: no side of it is a wall to a fluid that falls beside it (FlowingFluid.isSolidFace)"),
 ]
 # proto::gen::fluid::kFlags, by fluid state.
 FLUID_STATE_FLAGS = [
@@ -531,6 +533,7 @@ ITEM_FLAGS = [
     ("kEquipRestricted", 0x10, "its EQUIPPABLE lists allowed_entities, and players are not among them"),
     ("kExplosionProof", 0x20, "its DAMAGE_RESISTANT covers explosions: as an item entity it survives them (the nether star)"),
     ("kStandingAndWall", 0x40, "StandingAndWallBlockItem: places its block standing, or the block's wall variant (a torch)"),
+    ("kFireProof", 0x80, "its DAMAGE_RESISTANT covers fire and lava: as an item entity it does not burn (what is of netherite)"),
 ]
 
 # net.minecraft.world.entity.EquipmentSlot, by serialized name -> ordinal. The ordinal is what
@@ -1037,10 +1040,12 @@ def build_block_tables(v: dict, blocks: dict, data: dict, static_regs: dict, van
     washed = tagged("washed_away_by_fluids")
     fluid_facts = bytearray(n)
     wet_stride: dict[str, int] = {}     # a ported block that holds water by itself -> the stride of its `waterlogged`
+    blocks_flow = tagged("blocks_fluid_flow")
     for b in ext_blocks:
         gb = game["blocks"][b["name"]]
         container = "LiquidBlockContainer" in gb["interfaces"]
         f = (ffbit["kHoldsFluid"] if container or b["id"] in washed else 0) | (ffbit["kFluidContainer"] if container else 0)
+        f |= (ffbit["kBlocksFlow"] if b["id"] in blocks_flow else 0) | (ffbit["kIce"] if "IceBlock" in gb["class"] else 0)
         simple = "SimpleWaterloggedBlock" in gb["interfaces"] and ported_of[b["name"]] is not None
         if simple:
             wet = [q for q in gb["properties"] if q["name"] == "waterlogged"]
@@ -1073,8 +1078,8 @@ def build_block_tables(v: dict, blocks: dict, data: dict, static_regs: dict, van
         die(f"canPlaceLiquid / placeLiquid / pickupBlock are declared by {sorted(says)} among the ported classes, the port knows "
             f"{sorted(gen_game.LIQUID_OVERRIDES)}: read the class, then gen_game.LIQUID_OVERRIDES")
     slab = next(b for b in ext_blocks if b["name"] == "minecraft:oak_slab")
-    if (fluid_facts[slab["default_state"]] != ffbit["kHoldsFluid"] | ffbit["kFluidContainer"] | ffbit["kTakesWater"] or
-            fluid_facts[stone] or fluid_facts[0] != ffbit["kHoldsFluid"]):
+    if (fluid_facts[slab["default_state"]] != ffbit["kHoldsFluid"] | ffbit["kFluidContainer"] | ffbit["kTakesWater"] | ffbit["kBlocksFlow"] or
+            fluid_facts[stone] != ffbit["kBlocksFlow"] or fluid_facts[0] != ffbit["kHoldsFluid"]):
         die("kFluidFacts: a slab is no LiquidBlockContainer that takes water, stone holds a fluid, or air does not "
             "(#washed_away_by_fluids)")
 
@@ -1658,6 +1663,12 @@ namespace proto::gen {
             if len(hit) == 1:
                 die(f"{name}: resists one kind of explosion and not the other")
             f |= itf["kExplosionProof"] if hit else 0
+            # ...and canBeHurtBy(fire): ItemEntity.fireImmune asks about in_fire, Entity.baseTick
+            # hurts with on_fire, Entity.lavaHurt with lava - one answer here, so one tag for all.
+            fire = {"minecraft:in_fire", "minecraft:on_fire", "minecraft:lava"} & members
+            if 0 < len(fire) < 3:
+                die(f"{name}: resists {sorted(fire)} and not the rest of in_fire, on_fire and lava")
+            f |= itf["kFireProof"] if fire else 0
         # ItemStack.getAttackAnimation(): the swing others see when the item's holder punches.
         # SwingAnimation.CODEC fills what the component leaves out from SwingAnimation.DEFAULT.
         anim = comps.get("minecraft:attack_animation", {})

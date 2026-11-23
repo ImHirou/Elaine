@@ -146,13 +146,23 @@ void Game::tick_item(u32 slot, u32 row) {
     if (UNLIKELY(ents_.item[row].empty())) return remove_item(slot);  // "if (getItem().isEmpty()) discard()"
     const double ox = ents_.x[row], oy = ents_.y[row], oz = ents_.z[row];
     phys::Motion m = motion_of(row);
-    phys::World w{world_, phys_scratch_};
+    phys::World w = phys_world();
     const u32 tick_count = static_cast<u32>(entity_tick_ - item_born_[k] + 1);  // Entity.tickCount
     const i32 id = ents_.net_id(row);
-    if (UNLIKELY(phys::item_tick(w, m, movers_[slot].body, tick_count, id, &random_float_of, this) == phys::Fate::kGone))
+    phys::Body& body = movers_[slot].body;
+    if (UNLIKELY(phys::item_tick(w, m, body, tick_count, id, &random_float_of, this) == phys::Fate::kGone))
         return remove_item(slot);  // it fell out of the world
-    store_motion(row, m, movers_[slot].body);
+    store_motion(row, m, body);
     move_item_cell(slot, ox, oz);
+    // ItemEntity.hurtServer, for what the tick says of fire: a tick of burning takes one point of
+    // its five (Entity.baseTick), each cell of lava it was in four (Entity.lavaHurt) - and with
+    // none left it is gone, as it would be in the middle of vanilla's tick.
+    if (const u32 hurt = took_fire(row, body); UNLIKELY(hurt != 0)) {
+        i8& health = item_health_[k];
+        health = static_cast<i8>(std::max<i32>(static_cast<i32>(health) - static_cast<i32>(std::min<u32>(hurt, 100u)), -100));
+        ents_.flags[row] |= entity::flag::kSyncVelocity;  // markHurt
+        if (health <= 0) return remove_item(slot);
+    }
 
     // mergeWithNeighbours: every other tick while it goes from block to block, every 40 where it lies.
     const bool moved =
