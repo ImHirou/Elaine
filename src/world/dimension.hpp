@@ -77,6 +77,9 @@ class Dimension {
     Dimension& operator=(const Dimension&) = delete;
 
     u32 type_id() const { return type_id_; }
+    // EnvironmentAttributes.FAST_LAVA and WATER_EVAPORATES of the dimension: the nether's.
+    bool fast_lava() const { return fast_lava_; }
+    bool water_evaporates() const { return water_evaporates_; }
     const std::string& name() const { return name_; }
     i32 min_y() const { return min_y_; }
     i32 max_y() const { return max_y_; }  // inclusive
@@ -288,6 +291,7 @@ class Dimension {
     i32 min_y_, max_y_;
     u32 sections_;
     bool has_sky_;
+    bool fast_lava_, water_evaporates_;
     Layout layout_;
     bool large_shapes_ = false, entity_blocks_ = false;
     bool keep_adopted_ = false;

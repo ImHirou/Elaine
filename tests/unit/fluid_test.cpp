@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <random>
+#include <tuple>
 #include <vector>
 
 #include "proto/frame.hpp"
@@ -22,6 +23,7 @@
 
 #include "states.hpp"
 
+#include PROTO_GEN_DIMENSION_TYPES_HPP
 #include PROTO_GEN_PHYSICS_HPP
 
 using namespace world;
@@ -219,7 +221,15 @@ TEST(Fluids, AStateHoldsWhatTheJarSays) {
     EXPECT_TRUE(info.flags & block_flag::kSettable);
     EXPECT_EQ(info.flags & block_flag::kPlaceMask, block_flag::kPlaceNone);
     EXPECT_FALSE(block_info_of(blk::kStone).flags & block_flag::kSettable);
-    EXPECT_FALSE(block_info_of(lava).flags & block_flag::kSettable);  // lava does not flow yet
+    EXPECT_EQ(block_info_of(lava).kind, proto::gen::block_kind::kLiquid);
+    EXPECT_TRUE(block_info_of(lava).flags & block_flag::kSettable);
+    // How lava flows is the dimension's to say: fast in the nether, and there alone.
+    namespace dimension = proto::gen::dimension;
+    EXPECT_FALSE(dimension::kTypes[proto::reg::dimension_type::kOverworld].fast_lava);
+    EXPECT_FALSE(dimension::kTypes[proto::reg::dimension_type::kOverworld].water_evaporates);
+    EXPECT_TRUE(dimension::kTypes[proto::reg::dimension_type::kTheNether].fast_lava);
+    EXPECT_TRUE(dimension::kTypes[proto::reg::dimension_type::kTheNether].water_evaporates);
+    EXPECT_FALSE(dimension::kTypes[proto::reg::dimension_type::kTheEnd].fast_lava);
 }
 
 TEST(Fluids, WhatPassesBetweenTwoBlocksIsWhatTheirShapesLeaveOpen) {
@@ -357,6 +367,64 @@ TEST(Fluids, ACellBecomesWhatStandsAroundIt) {
     EXPECT_FALSE(can_be_replaced_with(d, flowing(3), 0, 0, 0, fluid::kFlowingWater, kDown));
     EXPECT_TRUE(can_be_replaced_with(d, flowing(3), 0, 0, 0, fluid::kFlowingLava, kDown));
     EXPECT_FALSE(can_be_replaced_with(d, flowing(3), 0, 0, 0, fluid::kFlowingLava, kEast));
+}
+
+TEST(Fluids, LavaIsSlowerAndGivesWayToWater) {
+    Land land;
+    const Dimension& d = land.dim;
+    const FluidRules r = lava_rules(false, false), fast = lava_rules(true, false), converting = lava_rules(false, true);
+    const auto lava = [](u32 amount, bool falling = false) { return fluid::kFlowingOf[fluid::kLavaFamily][falling][amount]; };
+    const FluidState lava_source = fluid::kSourceOf[fluid::kLavaFamily][0];
+    EXPECT_EQ((std::tuple{r.tick_delay, r.drop_off, r.slope_distance}), (std::tuple{30, 2, 2}));
+    EXPECT_EQ((std::tuple{fast.tick_delay, fast.drop_off, fast.slope_distance}), (std::tuple{10, 1, 4}));
+    // Two levels a block: six beside a source, four beside that, two, and no further.
+    land.put(0, kY, 0, "minecraft:lava");
+    EXPECT_EQ(new_liquid(d, r, 1, kY, 0, kAir), lava(6));
+    EXPECT_EQ(new_liquid(d, fast, 1, kY, 0, kAir), lava(7));
+    land.put(1, kY, 0, "minecraft:lava[level=6]");  // two of it left
+    EXPECT_EQ(new_liquid(d, r, 2, kY, 0, kAir), 0);
+    EXPECT_EQ(new_liquid(d, fast, 2, kY, 0, kAir), lava(1));
+    // Water beside the cell is no lava; two sources of lava make no third unless the rule says so.
+    land.put(1, kY, 0, "minecraft:air");
+    land.put(2, kY, 0, "minecraft:lava");
+    EXPECT_EQ(new_liquid(d, r, 1, kY, 0, kAir), lava(6));
+    EXPECT_EQ(new_liquid(d, converting, 1, kY, 0, kAir), lava_source);
+    EXPECT_EQ(new_liquid(d, water_rules(true), 1, kY, 0, kAir), 0);
+    // A way down within two blocks of the cell beside it, and not further: a hole three blocks
+    // off is found, one four blocks off is not.
+    Land hill;
+    hill.put(0, kY, 0, "minecraft:lava");
+    hill.put(3, kFloor, 0, "minecraft:air");
+    Spread s;
+    spread(hill.dim, r, 0, kY, 0, hill.at(0, kY, 0), s);
+    using Ways = std::vector<std::pair<u32, FluidState>>;
+    EXPECT_EQ(ways(s), (Ways{{kEast, lava(6)}}));
+    hill.put(3, kFloor, 0, "minecraft:grass_block");
+    hill.put(4, kFloor, 0, "minecraft:air");
+    spread(hill.dim, r, 0, kY, 0, hill.at(0, kY, 0), s);
+    EXPECT_EQ(ways(s), (Ways{{kNorth, lava(6)}, {kSouth, lava(6)}, {kWest, lava(6)}, {kEast, lava(6)}}));
+
+    // FlowingFluid.getHeight: the whole cell under more of the same, else amount / 9.
+    EXPECT_EQ(fluid_height(d, lava_source, 0, kY, 0), 0.8888889f);
+    EXPECT_EQ(fluid_height(d, lava(4), 0, kY, 0), 0.44444445f);
+    land.put(0, kY + 1, 0, "minecraft:lava[level=7]");
+    EXPECT_EQ(fluid_height(d, lava(1), 0, kY, 0), 1.0f);
+    land.put(0, kY + 1, 0, "minecraft:water");  // water on lava is not more of the same
+    EXPECT_EQ(fluid_height(d, lava(1), 0, kY, 0), 0.11111111f);
+    EXPECT_EQ(fluid_height(d, 0, 0, kY, 0), 0.0f);
+    // LavaFluid.canBeReplacedWith: by water, from any side, if the lava stands at least 4/9 high
+    // in its cell (LavaFluid.MIN_LEVEL_CUTOFF) - never by lava.
+    for (const u32 dir : {kDown, kEast}) {
+        EXPECT_TRUE(can_be_replaced_with(d, lava_source, 5, kY, 5, fluid::kFlowingWater, dir));
+        EXPECT_TRUE(can_be_replaced_with(d, lava(4), 5, kY, 5, fluid::kWater, dir));
+        EXPECT_FALSE(can_be_replaced_with(d, lava(3), 5, kY, 5, fluid::kFlowingWater, dir));
+        EXPECT_FALSE(can_be_replaced_with(d, lava_source, 5, kY, 5, fluid::kFlowingLava, dir));
+        EXPECT_FALSE(can_be_replaced_with(d, lava_source, 5, kY, 5, fluid::kEmpty, dir));
+    }
+    land.put(5, kY + 1, 5, "minecraft:lava[level=6]");  // low, but under more lava: the whole cell
+    EXPECT_TRUE(can_be_replaced_with(d, lava(3), 5, kY, 5, fluid::kFlowingWater, kEast));
+    // Water gives way to lava that comes from above, as to anything that is not water.
+    EXPECT_TRUE(can_be_replaced_with(d, source(), 0, 0, 0, fluid::kFlowingLava, kDown));
 }
 
 TEST(Fluids, ItGoesToTheNearestWayDown) {

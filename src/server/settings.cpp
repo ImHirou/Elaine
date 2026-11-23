@@ -102,6 +102,8 @@ bool set_key(Settings& s, std::string_view k, std::string_view v, std::string& e
         ok = parse_bool(v, s.advance_time);
     else if (k == "water-source-conversion")
         ok = parse_bool(v, s.water_source_conversion);
+    else if (k == "lava-source-conversion")
+        ok = parse_bool(v, s.lava_source_conversion);
     else if (k == "tick-rate")
         ok = parse_float(v, s.tick_rate, 1.0f, 10000.0f);  // (TickCommand: floatArg(1, 10000))
     else

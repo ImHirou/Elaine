@@ -1745,15 +1745,27 @@ struct Type {
     int height;         // blocks; a multiple of 16
     bool has_skylight;
     bool has_ceiling;
+    bool fast_lava;         // EnvironmentAttributes.FAST_LAVA: lava flows as fast and as far as it does in the nether
+    bool water_evaporates;  // EnvironmentAttributes.WATER_EVAPORATES: water that is poured here is gone
 };
 
 """]
+    for path in vanilla.zip.namelist():
+        if path.startswith("data/minecraft/worldgen/biome/") and path.endswith(".json") and any(
+                key in vanilla.zip.read(path) for key in (b"gameplay/fast_lava", b"gameplay/water_evaporates")):
+            die(f"{path}: a biome says how lava flows or whether water stays - Type's two flags are a dimension's")
     out.append(f"inline constexpr Type kTypes[{len(entries)}] = {{\n")
     for name in entries:
         j = json.loads(vanilla.zip.read(f"data/minecraft/dimension_type/{name.split(':', 1)[1]}.json"))
         if j["min_y"] % 16 or j["height"] % 16:
             die(f"{name}: min_y/height are not multiples of 16")
-        out.append(f"    {{{j['min_y']}, {j['height']}, {str(j['has_skylight']).lower()}, {str(j['has_ceiling']).lower()}}},  // {name}\n")
+        # What a dimension type says of an environment attribute is its value there (no biome
+        # says anything of these two); what it does not say is the attribute's default, false.
+        gameplay = [j.get("attributes", {}).get(f"minecraft:gameplay/{key}", False) for key in ("fast_lava", "water_evaporates")]
+        if any(not isinstance(value, bool) for value in gameplay):
+            die(f"{name}: fast_lava / water_evaporates is no plain boolean any more - read EnvironmentAttributes again")
+        out.append(f"    {{{j['min_y']}, {j['height']}, {str(j['has_skylight']).lower()}, {str(j['has_ceiling']).lower()}, "
+                   f"{str(gameplay[0]).lower()}, {str(gameplay[1]).lower()}}},  // {name}\n")
     out.append("};\n\n}  // namespace proto::gen::dimension\n")
     return "".join(out)
 

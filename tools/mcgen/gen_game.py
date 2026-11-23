@@ -168,9 +168,6 @@ PORTED_BLOCKS = {
 # Ported classes whose blocks have no item: they can be in the world, and nothing places them by
 # hand (block_flag::kSettable: what /setblock and /fill may set besides what is placeable).
 ITEMLESS_PORTED = {"LiquidBlock"}
-# The blocks of LiquidBlock whose fluid flows. Lava's rules - its own pace, what it does to water -
-# are not written yet: its block has no hooks, as if the class were not ported.
-LIQUIDS_PORTED = {"minecraft:water"}
 # What a plant stands on: VegetationBlock.mayPlaceOn of its class, asked of the state below it
 # (canSurvive) - a block tag, the tag a field of the block names ("field:<name>"), or one of the
 # two rules that ask for more than a tag. gen.py makes each rule a bit a state (state::kSupport)
@@ -319,8 +316,6 @@ def ported_block(game_block: dict):
     if set(game_block["hooks"]) != hooks:
         die(f"{game_block['name']}: {cls} overrides {sorted(set(game_block['hooks']) ^ hooks)} differently from the version "
             "the server's port was written against - read the class again, then update PORTED_BLOCKS")
-    if cls == "LiquidBlock" and game_block["name"] not in LIQUIDS_PORTED:
-        return None
     return kind, place, item[0] if item else "BlockItem"
 
 

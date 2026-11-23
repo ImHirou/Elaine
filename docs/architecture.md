@@ -1162,7 +1162,7 @@ layout a family, that is the next block's first state plus this state's offset
 (`BlockInfo::next_stage`). Weathering stopped being a kind of block for that - it is whatever
 has a next stage.
 
-### Water (`world/fluid.*`, `server/fluids.cpp`)
+### Water and lava (`world/fluid.*`, `server/fluids.cpp`)
 
 A fluid is nothing of its own in the world. A cell of water is the block `water` at one of
 sixteen levels, a waterlogged slab is a slab - and what either *holds*, which fluid and how
@@ -1205,7 +1205,8 @@ Where a fluid may go is three questions, and each is a table load:
   shut. The unit test holds the table to the method written out over the shapes' grids - every
   pair of shapes, every direction.
 - *Does the fluid that is there give way* (`canBeReplacedWith`)? Water does only to what comes
-  from above and is not water.
+  from above and is not water; lava only to water, and only where it stands at least four
+  ninths high in its cell.
 
 The search for a way down remembers the cells it has looked at. Vanilla does so in two hash
 maps keyed by a short, made for every spread (`FlowingFluid.SpreadContext`); here it is two
@@ -1219,6 +1220,25 @@ What gives way is washed away: it drops what its loot table gives an empty hand,
 and no particles of a block breaking (`WaterFluid.beforeDestroyingBlock`), and the water's
 block takes its place - a torch, a flower, three petals as a stack of three.
 
+Lava is the same algorithm with other numbers (`world::FluidRules`: `LavaFluid`'s answers) -
+thirty ticks a block, two levels a block, a way down within two blocks: three blocks from its
+source and no further; no source between two sources unless `lava-source-conversion` says so;
+in a dimension whose lava is fast (`EnvironmentAttributes.FAST_LAVA`: the nether's type, read
+by mcgen into `dimension::Type`) water's numbers but for the ten ticks. What it reaches burns
+with a hiss and leaves nothing (level event 1501, which a client turns into the sound and the
+smoke). `LavaFluid.getSpreadDelay` - lava that rises in its cell waits four times as long,
+three times in four - is ported and decides nothing, here as there: the block that the tick
+sets asks for its own tick as it is placed (`LiquidBlock.onPlace`), with the plain delay, and
+the tick's second request for the same cell is dropped. (The probe has lava rise and sink
+again to see it: vanilla does the same every time, thirty ticks on.)
+
+Where the two meet, it is the lava that answers. A block of lava looks at what is on it and
+beside it whenever it is placed or a block beside it changes (`LiquidBlock.shouldSpreadLiquid`:
+up, north, south, west, east), and with water there it is obsidian if it was a source and
+cobblestone if it flowed - in the tick the water came, before any water has moved; over soul
+soil and beside blue ice it is basalt. Lava that flows down onto water makes stone of the
+water (`LavaFluid.spreadTo`). Each with the hiss.
+
 A fluid's tick waits with its chunk as a block's does, is saved with it, and counts again
 from the moment the chunk next ticks blocks. Where the chunks that tick end, water ends a
 block short of vanilla's: vanilla's water enters the chunk beyond and waits there, here a
@@ -1226,7 +1246,7 @@ block is set only in chunks that tick.
 
 ### Compared with vanilla
 
-`tools/vanilla/block_probe.py` runs both servers through the same 157 steps - two bots, one
+`tools/vanilla/block_probe.py` runs both servers through the same 174 steps - two bots, one
 building, one watching from three blocks off, and the console - and compares what each bot is
 told: every block change, level event, falling block, primed TNT and dropped item, in the
 order it came and by the tick it came in. It starts the servers itself; vanilla gets a new flat world every time.
@@ -1296,6 +1316,12 @@ In the last recordings nothing differs, in any step, for either bot. What that c
   stands when the hole is filled in; a torch, an end rod and petals washed away, with what
   they drop, while a slab and a fence stand dry; water set five blocks up falling a block
   every five ticks, a pool round where it lands, and the column going from the top;
+- **lava**: the same, thirty ticks a ring and two levels less each, three rings and no more;
+  lava at its edge rising beside a second source and sinking thirty ticks after that is gone;
+  draining when its source goes; a source with water set beside it, and one with water set on
+  it, obsidian in that tick; lava that has flowed, cobblestone; a pit of water under a source,
+  stone thirty ticks on; lava on soul soil beside blue ice, basalt; each with its level event;
+  a torch in its way gone with a hiss and no item;
 - **TNT** on five sides of a block of redstone is primed west, east, up, north, south.
 
 What a recording cannot say is said by the unit tests: the tick queue's order against a model
@@ -1327,12 +1353,11 @@ tick queue under load and the random pass belong with the first claim that any o
 
 ### What is not there
 
-- **Of the fluids.** Lava: its block has no hooks yet, so the lava of an imported world lies
-  as it was saved, and water does not flow into it. The water in a block that holds it: a
-  waterlogged block does not ask for the water's tick when its shape is asked, so the water in
-  a slab, a fence or a wall stays in it, and none flows in. Bubble columns: water over soul
-  sand or magma is water. Ice does not melt, and nothing a fluid does at random happens (lava
-  sets nothing alight). What water does to what is in it - an item, a mob, a player - is not
+- **Of the fluids.** The water in a block that holds it: a waterlogged block does not ask for
+  the water's tick when its shape is asked, so the water in a slab, a fence or a wall stays in
+  it, and none flows in. Bubble columns: water over soul sand or magma is water. Ice does not
+  melt. Fire: lava's random tick sets fire to what burns around it, and there is no fire - a
+  gap with a name (`RANDOM_TICK_GAPS`), so lava lights nothing. What water does to what is in it - an item, a mob, a player - is not
   there either: see "Physics". A block of an imported world that is not placeable here and
   gives way to water (a lever, a rail) goes without a drop: what a block drops is known for
   the blocks that can be placed.
@@ -2461,8 +2486,8 @@ Roughly in dependency order:
    are there (see "Block updates"), so a block class is its own hooks now and no longer a
    missing system; slabs, stairs, fences, panes and walls are done ("A state that is a
    shape"). Next: plants and what else needs something to stand on, and the blocks that
-   answer a click - doors, trapdoors, fence gates. Fluid ticks are there and water flows
-   ("Water"); next of the fluids: lava, water that leaves and enters a waterlogged block,
+   answer a click - doors, trapdoors, fence gates. Fluid ticks are there, water and lava flow
+   ("Water and lava"); next of the fluids: water that leaves and enters a waterlogged block,
    buckets. Then redstone, the other block entities. And what the first four still lack:
    experience orbs.
 8. **Commands**: tags into the world - block entity data, `/summon`'s tag

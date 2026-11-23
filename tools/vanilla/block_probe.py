@@ -32,7 +32,10 @@ console on a floor of stone, sixteen blocks from the bots (what water does to a 
 another matter): a source that spreads a block every five ticks and seven blocks far, and drains
 when it is taken away; two sources and the cell between them; a hole within its reach, and the
 hole filled in; a torch, an end rod, petals, a slab and a fence in its way; water set in the
-air. Last, TNT on five sides of a block of redstone.
+air. Then lava: a source that spreads a block every thirty ticks and three blocks far, and
+drains; water set beside a source and beside lava that flowed, lava over a pit of water, lava on
+soul soil beside blue ice - obsidian, cobblestone, stone and basalt, each with its hiss; a torch
+in its way. Last, TNT on five sides of a block of redstone.
 
 `vanilla` starts the reference server under the rules in AGENTS.md (from .cache/vanilla-server/,
 the cached jar, Java 25; gamemode=creative, level-type=flat, spawn-protection=0,
@@ -98,7 +101,7 @@ from world_probe import PORT, SERVER_DIR, Vanilla  # noqa: E402
 from pace import Lockstep  # noqa: E402
 
 PROBE_WORLD = "block-probe"     # in .cache/vanilla-server/: this probe's, removed and made anew by `vanilla`
-SECTIONS = ("torches", "falling", "random", "stairs", "fences", "plants", "water", "tnt")
+SECTIONS = ("torches", "falling", "random", "stairs", "fences", "plants", "water", "lava", "tnt")
 RANDOM_TICK_SPEED = 4096        # every cell of a section, on average, once a tick
 
 WORLD = {"block_update", "section_blocks_update", "level_event", "add_transient_block", "sound", "explode"}
@@ -269,6 +272,14 @@ def record(port: int, out_path: str, name_a: str, name_b: str, random_ticks, con
     if console:
         def setblock(pos: tuple, what: str) -> None:
             console(f"setblock {pos[0]} {pos[1]} {pos[2]} {what}")
+
+        def fill(lo: tuple, hi: tuple, what: str) -> None:
+            console("fill {} {} {} {} {} {} {}".format(*lo, *hi, what))
+
+        def floor(at) -> None:
+            """A floor of stone for a fluid to lie on, twelve blocks south of the bots: grass
+            under water dies, a random tick."""
+            step("the console lays a floor of stone", lambda: fill(at(-8, 0, 4), at(8, 0, 20), "minecraft:stone"), ticks=4)
 
         step("B builds a stone with a torch on it", lambda: (b.select(0), b.use(at(2, 0, 5)), b.select(1), b.use(at(2, 1, 5))))
         step("the console destroys the stone", lambda: setblock(at(2, 1, 5), "minecraft:air destroy"), ticks=12)
@@ -511,12 +522,6 @@ def record(port: int, out_path: str, name_a: str, name_b: str, random_ticks, con
     # ticks a step, and every step is a `block_update` or a section's worth of them.
     section("water")
     if console and wanted():
-        def fill(lo: tuple, hi: tuple, what: str) -> None:
-            console("fill {} {} {} {} {} {} {}".format(*lo, *hi, what))
-
-        def floor(at) -> None:
-            step("the console lays a floor of stone", lambda: fill(at(-8, 0, 4), at(8, 0, 20), "minecraft:stone"), ticks=4)
-
         at = place(8)
         floor(at)
         step("the console sets water on it: a block every five ticks, seven blocks far",
@@ -558,6 +563,42 @@ def record(port: int, out_path: str, name_a: str, name_b: str, random_ticks, con
              ticks=50)
         step("the console takes it away: the column goes from the top", lambda: setblock(at(0, 6, 12), "minecraft:air"), ticks=120)
         step("and then it is quiet", ticks=10)
+
+    # ---- lava: thirty ticks a step, two levels a block - and what it becomes where it meets water
+    section("lava")
+    if console and wanted():
+        at = place(18)
+        floor(at)
+        step("the console sets lava on it: a block every thirty ticks, three blocks far", lambda: setblock(at(0, 1, 12), "minecraft:lava"),
+             ticks=100)
+        step("...and there it lies", ticks=35)
+        # Lava that rises in its cell: LavaFluid.getSpreadDelay would have it wait four times as
+        # long, three times in four - and the wait counts for nothing, because the block that
+        # is set asks for its own tick first. What rose sinks thirty ticks on, not a hundred and twenty.
+        step("the console sets a second source at the edge of it: the lava there rises", lambda: setblock(at(4, 1, 12), "minecraft:lava"),
+             ticks=32)
+        step("...and takes it away again: what rose sinks thirty ticks after it rose", lambda: setblock(at(4, 1, 12), "minecraft:air"),
+             ticks=130)
+        step("the console takes the source away: the lava sinks and dries up", lambda: setblock(at(0, 1, 12), "minecraft:air"), ticks=160)
+        step("...and is gone", ticks=35)
+        at = place(20)
+        floor(at)
+        step("the console sets lava, and water beside it: obsidian", ticks=3,
+             action=lambda: (setblock(at(-6, 1, 8), "minecraft:lava"), setblock(at(-5, 1, 8), "minecraft:water")))
+        step("...takes the water away, sets lava again, and water on it: obsidian", ticks=3,
+             action=lambda: (setblock(at(-5, 1, 8), "minecraft:air"), setblock(at(-6, 1, 10), "minecraft:lava"),
+                             setblock(at(-6, 2, 10), "minecraft:water")))
+        step("...and takes that water away", lambda: setblock(at(-6, 2, 10), "minecraft:air"), ticks=3)
+        step("the console sets lava, a torch two blocks from it, and digs a pit, fills it with water and sets lava over it", ticks=32,
+             action=lambda: (setblock(at(0, 1, 12), "minecraft:lava"), setblock(at(0, 1, 14), "minecraft:torch"),
+                             setblock(at(6, 0, 16), "minecraft:water"), setblock(at(6, 1, 16), "minecraft:lava")))
+        step("the console sets water beside the lava that has flowed: cobblestone", lambda: setblock(at(2, 1, 12), "minecraft:water"), ticks=3)
+        step("...and takes it away; thirty ticks on the lava has reached the torch", lambda: setblock(at(2, 1, 12), "minecraft:air"), ticks=32)
+        step("the console sets soul soil, blue ice beside it, and lava on the soil: basalt", ticks=3,
+             action=lambda: (setblock(at(-6, 0, 16), "minecraft:soul_soil"), setblock(at(-5, 1, 16), "minecraft:blue_ice"),
+                             setblock(at(-6, 1, 16), "minecraft:lava")))
+        step("the console clears the place", lambda: fill(at(-8, 1, 4), at(8, 2, 20), "minecraft:air"), ticks=6)
+        step("and then it is quiet", ticks=35)
 
     # ---- TNT, last, for what it leaves: a signal reaches the six blocks around it in an order
     section("tnt")

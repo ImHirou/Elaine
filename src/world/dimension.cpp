@@ -79,6 +79,8 @@ Dimension::Dimension(u32 type_id, std::string name, ChunkGenerator& gen, i32 com
       max_y_(dim::kTypes[type_id].min_y + dim::kTypes[type_id].height - 1),
       sections_(static_cast<u32>(dim::kTypes[type_id].height) / 16),
       has_sky_(dim::kTypes[type_id].has_skylight),
+      fast_lava_(dim::kTypes[type_id].fast_lava),
+      water_evaporates_(dim::kTypes[type_id].water_evaporates),
       layout_{min_y_, min_y_ >> 4, sections_, has_sky_},
       light_(map_, layout_),
       workers_(workers ? *workers : own_workers_),

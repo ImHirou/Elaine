@@ -145,14 +145,18 @@ u32 source_neighbor_count(const Dimension& d, const FluidRules& r, i32 x, i32 y,
     return count;
 }
 
+float fluid_height(const Dimension& d, FluidState f, i32 x, i32 y, i32 z) {
+    // hasSameAbove: fluidState.getType().isSame(the fluid above)
+    return f && fluid_family(fluid_of(d.block(x, y + 1, z))) == fluid_family(f) ? 1.0f : fluid_own_height(f);
+}
+
 bool can_be_replaced_with(const Dimension& d, FluidState held, i32 x, i32 y, i32 z, u32 with, u32 dir) {
-    (void)d, (void)x, (void)y, (void)z;
     switch (fluid_family(held)) {
         // WaterFluid: only what comes from above, and is not water, takes water's place.
         case fluid::kWaterFamily: return dir == kDown && fluid::kFamily[with] != fluid::kWaterFamily;
-        // LavaFluid: water takes the place of lava that is low enough. Lava does not flow here
-        // yet, and what would become of it is its own to say: it is left alone.
-        case fluid::kLavaFamily: return false;
+        // LavaFluid: water takes the place of lava that stands high enough in its cell.
+        case fluid::kLavaFamily:
+            return fluid_height(d, held, x, y, z) >= kLavaCutoff && fluid::kFamily[with] == fluid::kWaterFamily;
         default: return true;  // EmptyFluid
     }
 }

@@ -93,6 +93,7 @@ class Game {
     static constexpr u32 kUpdateAll = kUpdateNeighbors | kUpdateClients;
     static constexpr i32 kUpdateLimit = 512;              // Block.UPDATE_LIMIT: how deep one change's shape updates may nest
     static constexpr u32 kLevelEventDestroyBlock = 2001;  // LevelEvent.PARTICLES_AND_SOUND_DESTROY_BLOCK: `data` is the state
+    static constexpr u32 kLevelEventLavaFizz = 1501;      // LevelEvent.LAVA_FIZZ: a hiss and smoke where lava met something
 
     struct Player {
         u32 reactor = 0, slot = 0, gen = 0;
@@ -521,6 +522,7 @@ class Game {
     void spread_fluid(const world::FluidRules& r, proto::BlockPos pos, world::BlockState state, world::FluidState held);
     void spread_to_sides(const world::FluidRules& r, proto::BlockPos pos, world::BlockState state, world::FluidState held);
     void spread_to(const world::FluidRules& r, proto::BlockPos pos, world::BlockState state, u32 dir, world::FluidState becomes);
+    i32 spread_delay(const world::FluidRules& r, proto::BlockPos pos, world::FluidState old, world::FluidState becomes);
     bool should_spread_liquid(proto::BlockPos pos, world::BlockState state);
     void liquid_changed(world::BlockState state, proto::BlockPos pos);
     void liquid_shape_changed(world::BlockState state, proto::BlockPos pos, world::BlockState neighbour);

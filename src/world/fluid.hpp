@@ -54,10 +54,21 @@ inline constexpr i32 kMaxSlopeDistance = 4;
 constexpr FluidRules water_rules(bool converts) {
     return {fluid::kWaterFamily, fluid::kWater, fluid::kFlowingWater, converts, 5, 1, 4};
 }
+// LavaFluid: a step every 30 ticks, two levels a block, a way down within 2 - and as water
+// where lava is fast (the nether: every 10 ticks, one level, within 4).
+constexpr FluidRules lava_rules(bool fast, bool converts) {
+    return {fluid::kLavaFamily, fluid::kLava, fluid::kFlowingLava, converts, fast ? 10 : 30, fast ? 1 : 2, fast ? 4 : 2};
+}
+// LavaFluid.MIN_LEVEL_CUTOFF: lava at least this high in its cell gives way to water.
+inline constexpr float kLavaCutoff = 0.44444445f;
 
 // Direction.Plane.HORIZONTAL: the order a fluid looks around in - which decides where it goes
 // when two ways are as good.
 inline constexpr u8 kFlowOrder[4] = {kNorth, kEast, kSouth, kWest};
+
+// FlowingFluid.getHeight: how high a fluid stands in its cell at (x, y, z) - the whole of it
+// under more of the same, else its own height.
+float fluid_height(const Dimension& d, FluidState f, i32 x, i32 y, i32 z);
 
 // FlowingFluid.getNewLiquid: what the cell at (x, y, z), which holds `state`, should hold of this
 // fluid by what is around it - a source between two sources, a falling column under the fluid,

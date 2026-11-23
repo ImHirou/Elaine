@@ -47,6 +47,7 @@ struct Settings {
     // water-source-conversion: the game rule of that name - does water between two sources of
     // it, over solid ground or a third, become a source itself (FlowingFluid.getNewLiquid)?
     bool water_source_conversion = true;
+    bool lava_source_conversion = false;  // lava-source-conversion: the same of lava
     // tick-rate: ticks a second, what vanilla's /tick rate sets (1 to 10000) - until there is a /tick.
     // What is counted in seconds (keep-alives, autosaves, chunk-unload-seconds) stays in seconds.
     float tick_rate = 20.0f;

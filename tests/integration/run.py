@@ -3535,6 +3535,61 @@ def water_washes_away(srv: Server):
     assert (8, -60, 13) not in got and got[(9, -60, 13)] == water + 2 and got[(7, -60, 13)] == water + 2, got
 
 
+LAVA_FIZZ = 1501    # LevelEvent.LAVA_FIZZ
+
+
+@test()
+def lava_flows(srv: Server):
+    """Lava is water at a pace of its own (LavaFluid): a block every thirty game ticks, two levels
+    less each block - three blocks from its source, and no further."""
+    a = wet_start(srv)
+    lava, source = mc.BLOCK["kLava"], (8, -60, 12)
+    got = run_command(a, "setblock 8 -60 12 lava")
+    assert got["said"] == [tr("commands.setblock.success", 8, -60, 12)] and got["blocks"] == {source: lava}, got
+    assert step_game(a, 29) == {}
+    assert step_game(a, 1) == {pos: lava + 2 for pos in ring(source, 1)}
+    for d in (2, 3):
+        assert step_game(a, 30) == {pos: lava + 2 * d for pos in ring(source, d)}, d
+    assert step_game(a, 45) == {}                   # two levels left give none away
+    assert not a.level_events
+
+
+@test()
+def lava_meets_water(srv: Server):
+    """Lava that has water beside it or on it is stone of a kind where it stands - obsidian if it
+    was a source, cobblestone if it flowed (LiquidBlock.shouldSpreadLiquid: the lava's answer, in
+    the tick the water comes); lava that comes down on water makes stone of the water
+    (LavaFluid.spreadTo); over soul soil and beside blue ice it is basalt. Each with a hiss."""
+    a = wet_start(srv)
+    water, lava = mc.BLOCK["kWater"], mc.BLOCK["kLava"]
+    # What takes thirty ticks first: lava that is to flow, and lava over a pit of water.
+    run_command(a, "setblock -10 -60 12 lava")
+    for line in ("setblock 8 -61 -10 water", "setblock 8 -60 -10 lava"):
+        run_command(a, line)
+    got = step_game(a, 30)
+    assert got == {pos: lava + 2 for pos in ring((-10, -60, 12), 1)} | {(8, -61, -10): mc.BLOCK["kStone"]}, got
+    assert a.level_events == [(LAVA_FIZZ, (8, -61, -10), 0, False)], a.level_events
+    # Water beside lava that flowed: cobblestone, at once.
+    got = run_command(a, "setblock -8 -60 12 water")
+    assert got["blocks"] == {(-8, -60, 12): water, (-9, -60, 12): mc.BLOCK["kCobblestone"]}, got
+    # ...beside a source: obsidian. And on one.
+    run_command(a, "setblock 8 -60 12 lava")
+    got = run_command(a, "setblock 9 -60 12 water")
+    assert got["blocks"] == {(9, -60, 12): water, (8, -60, 12): mc.BLOCK["kObsidian"]}, got
+    run_command(a, "setblock 20 -60 12 lava")
+    got = run_command(a, "setblock 20 -59 12 water")
+    assert got["blocks"] == {(20, -59, 12): water, (20, -60, 12): mc.BLOCK["kObsidian"]}, got
+    # Water under lava is nothing to the lava where it stands (it looks up and around).
+    run_command(a, "setblock 20 -61 0 water")
+    assert run_command(a, "setblock 20 -60 0 lava")["blocks"] == {(20, -60, 0): lava}
+    # Over soul soil, beside blue ice: basalt.
+    for line in ("setblock -10 -61 -10 soul_soil", "setblock -9 -60 -10 blue_ice"):
+        run_command(a, line)
+    got = run_command(a, "setblock -10 -60 -10 lava")
+    assert got["said"] == [tr("commands.setblock.success", -10, -60, -10)] and got["blocks"] == {(-10, -60, -10): mc.BLOCK["kBasalt"]}, got
+    assert a.level_events[1:] == [(LAVA_FIZZ, pos, 0, False) for pos in ((-9, -60, 12), (8, -60, 12), (20, -60, 12), (-10, -60, -10))]
+
+
 @test()
 def water_flows_on_after_a_restart():
     """A fluid's tick waits with its chunk as a block's does, a restart long if need be: water set
