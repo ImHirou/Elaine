@@ -1233,6 +1233,17 @@ struct UseItem {  // ServerboundUseItemPacket: hand, sequence, the player's rota
     }
 };
 
+struct PickItemFromEntity {  // the middle click on an entity: its network id, and whether ctrl was held
+    i32 id;
+    bool include_data;
+    static PickItemFromEntity decode(Reader& r) {
+        PickItemFromEntity p;
+        p.id = static_cast<i32>(r.varint());
+        p.include_data = r.boolean();
+        return p;
+    }
+};
+
 struct SetCarriedItem {
     i16 slot;  // hotbar index 0..8
     static SetCarriedItem decode(Reader& r) { return {static_cast<i16>(r.be16())}; }

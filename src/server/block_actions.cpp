@@ -2,8 +2,9 @@
 // What a (creative) player can do to blocks, and how the result reaches everyone who sees it.
 //
 // The rules are vanilla's, read from the 26.3 jar; each function names the method it follows:
-//   ServerGamePacketListenerImpl.handlePlayerAction / handleUseItemOn / handlePickItemFromBlock
-//   ServerPlayerGameMode.handleBlockBreakAction / destroyBlock / useItemOn
+//   ServerGamePacketListenerImpl.handlePlayerAction / handleUseItemOn / handleUseItem /
+//     handlePickItemFromBlock / handlePickItemFromEntity / tryPickItem
+//   ServerPlayerGameMode.handleBlockBreakAction / destroyBlock / useItemOn / useItem
 //   BlockItem.place, BlockPlaceContext, CollisionGetter.isUnobstructed
 //   ChunkHolder.broadcastChanges, ServerGamePacketListenerImpl.tick (the acknowledgement)
 //
@@ -226,7 +227,13 @@ void Game::on_use_item_on(u32 pi, const sb::UseItemOn& u) {
         // swing again in the same tick, which no client can tell from one.
         last_use_face_ = u.direction;
         Used used = takes_click && !unknown ? use_block(pi, pos, clicked, held, u.hand) : Used::kPass;
-        if (used == Used::kPass && !unknown && !held.empty() && place_block(pi, u, held)) used = Used::kSuccess;
+        // ...then the item's useOn: of a block item BlockItem.place, of an egg SpawnEggItem.useOn.
+        if (used == Used::kPass && !unknown && !held.empty()) {
+            if (held.info().kind == gen::item_kind::kSpawnEgg)
+                used = use_spawn_egg(pi, u, held);
+            else if (place_block(pi, u, held))
+                used = Used::kSuccess;
+        }
         // (SUCCESS_SERVER: the client did not know it would - a sign whose editor opens - and is
         // shown its own arm with everybody else.)
         if (used != Used::kPass) swing(pi, u.hand, {}, used == Used::kSuccessServer);
@@ -252,7 +259,8 @@ void Game::on_use_item(u32 pi, const sb::UseItem& u) {
     if (std::isfinite(u.yaw)) ents_.yaw[pi] = wrap_degrees(u.yaw);
     if (std::isfinite(u.pitch)) ents_.pitch[pi] = std::clamp(wrap_degrees(u.pitch), -90.0f, 90.0f);
     // Item.use of what it holds: a bucket's. (The stack is copied: what it does may give the
-    // inventory another.) Nothing else implemented answers anything but PASS.
+    // inventory another.) Nothing else implemented answers anything but PASS: a spawn
+    // egg's SpawnEggItem.use - at water further away than a click on a block reaches - is not ported yet.
     const ItemStack held = u.hand == 0 ? inv.selected_item() : inv.items[inv::kOffhand];
     const Used used = held.info().kind == gen::item_kind::kBucket ? use_bucket(pi, held) : Used::kPass;
     if (used == Used::kPass) return;
@@ -437,7 +445,45 @@ void Game::on_pick_block(u32 pi, const sb::PickItemFromBlock& pk) {
     }
     if (block.item == 0) return;  // air, and what has no item: an empty stack, nothing to pick
     // With ctrl a creative player also gets the block entity's data; there are no block entities.
-    p.menu.pick(ItemStack(block.item, 1), true);  // everyone is creative
+    pick_item(pi, ItemStack(block.item, 1));
+}
+
+// handlePickItemFromEntity + Entity.getPickResult: the middle click on an entity. A mob gives its
+// spawn egg (Mob.getPickResult: SpawnEggItem.byId; a mob that has none, nothing), an armor stand
+// its item. The other classes that answer - boats, minecarts, item frames, paintings, an end
+// crystal, a leash knot - are nothing this server simulates, and give nothing. (With ctrl an
+// operator would be shown the profile of a player it picked, FetchProfileCommand.printForAvatar:
+// not here.)
+void Game::on_pick_entity(u32 pi, const sb::PickItemFromEntity& pk) {
+    const u32 row = ents_.by_net_id(pk.id);  // Level.getEntityOrPart: an ender dragon has no parts here
+    if (row == kNone) return;
+    const u32 type = ents_.type[row];
+    const u32 item = entity_type::kInfo[type].mob       ? world::spawn_egg_of(type)
+                     : type == entity_type::kArmorStand ? gen::item::kArmorStand
+                                                        : 0;
+    if (item == 0) return;
+    // Player.isWithinEntityInteractionRange(entity, 3.0): from the eyes to its box, within the
+    // entity interaction range (3, and 2 more in creative: ServerPlayer's
+    // CREATIVE_ENTITY_INTERACTION_RANGE_MODIFIER) and 3 more.
+    const entity_type::Info& info = entity_type::kInfo[type];
+    const world::Aabb box = world::entity_box(ents_.x[row], ents_.y[row], ents_.z[row], info.width, info.height);
+    const double eye[3] = {ents_.x[pi], ents_.y[pi] + static_cast<double>(crouching(players_[pi]) ? kEyeCrouching : kEyeStanding),
+                           ents_.z[pi]};
+    double d2 = 0;
+    for (u32 a = 0; a < 3; ++a) {
+        const double d = std::max(std::max(box.min[a] - eye[a], eye[a] - box.max[a]), 0.0);
+        d2 += d * d;
+    }
+    constexpr double kRange = 3.0 + 2.0 + 3.0;
+    if (!(d2 < kRange * kRange)) return;
+    pick_item(pi, ItemStack(item, 1));
+}
+
+// tryPickItem: the stack into the hand - selecting the hotbar slot that has it, fetching it from
+// further back, or (creative) making one - and the client told.
+void Game::pick_item(u32 pi, const ItemStack& stack) {
+    Player& p = players_[pi];
+    p.menu.pick(stack, true);  // everyone is creative
     send(pi, cb::SetHeldSlot{p.menu.inv.selected});
     p.menu.send_changes(out(pi), p.threshold);
     dirty_[pi] |= kEquipDirty;

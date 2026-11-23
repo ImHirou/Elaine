@@ -534,6 +534,21 @@ ALWAYS_INLINE bool supporting_impl(const Dimension& w, const Aabb& box, double x
     return found;
 }
 
+template <bool kLiteral>
+ALWAYS_INLINE double spawn_offset_impl(const Dimension& w, i32 x, i32 y, i32 z, bool moved_up, const Aabb& box,
+                                       std::vector<Collider>& colliders) {
+    // new AABB(spawnPos), and the block under it as well when moved up
+    const double bx = static_cast<double>(x), by = static_cast<double>(y), bz = static_cast<double>(z);
+    Aabb cells{{bx, by, bz}, {bx + 1.0, by + 1.0, bz + 1.0}};
+    if (moved_up) cells = expand_towards(cells, 0.0, -1.0, 0.0);
+    colliders.clear();
+    block_collisions<kLiteral>(w, cells, kAskSections, [&](const Collider& c) {
+        colliders.push_back(c);
+        return false;
+    });
+    return 1.0 + collide_axis(colliders, box, 1, moved_up ? -2.0 : -1.0);
+}
+
 }  // namespace
 
 void collide(const Dimension& w, const Aabb& box, const double move[3], float max_up_step, bool on_ground, double out[3],
@@ -549,6 +564,10 @@ bool supporting_block(const Dimension& w, const Aabb& box, double x, double y, d
     return supporting_impl<false>(w, box, x, y, z, out, near);
 }
 
+double spawn_offset(const Dimension& w, i32 x, i32 y, i32 z, bool moved_up, const Aabb& box, CollideScratch& scratch) {
+    return spawn_offset_impl<false>(w, x, y, z, moved_up, box, scratch.colliders);
+}
+
 namespace slow {
 
 void collide(const Dimension& w, const Aabb& box, const double move[3], float max_up_step, bool on_ground, double out[3]) {
@@ -562,6 +581,11 @@ bool no_collision(const Dimension& w, const Aabb& box) {
 
 bool supporting_block(const Dimension& w, const Aabb& box, double x, double y, double z, i32 out[3]) {
     return supporting_impl<true>(w, box, x, y, z, out, kAskSections);
+}
+
+double spawn_offset(const Dimension& w, i32 x, i32 y, i32 z, bool moved_up, const Aabb& box) {
+    std::vector<Collider> colliders;
+    return spawn_offset_impl<true>(w, x, y, z, moved_up, box, colliders);
 }
 
 }  // namespace slow

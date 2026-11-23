@@ -653,6 +653,17 @@ TEST(Packets, UseItemAndPickItemFromEntityLayouts) {
     Reader cut(use, sizeof use - 1);
     sb::UseItem::decode(cut);
     EXPECT_FALSE(cut.ok);
+
+    // ServerboundPickItemFromEntityPacket: the entity's id (VarInt), includeData (bool).
+    const u8 pick[] = {0x96, 0x01, 0x01};  // 150, with ctrl
+    Reader rp(pick, sizeof pick);
+    const auto p = sb::PickItemFromEntity::decode(rp);
+    EXPECT_TRUE(rp.done());
+    EXPECT_EQ(p.id, 150);
+    EXPECT_TRUE(p.include_data);
+    Reader rc(pick, 2);
+    sb::PickItemFromEntity::decode(rc);
+    EXPECT_FALSE(rc.ok);
 }
 
 TEST(Packets, ChunkBatchReceivedLayout) {

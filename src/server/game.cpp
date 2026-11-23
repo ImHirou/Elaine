@@ -747,6 +747,11 @@ HOT void Game::on_packet(u32 pi, const u8* body, u32 n) {
             if (rd.ok) on_pick_block(pi, pk);
             break;
         }
+        case sbid::kPickItemFromEntity: {
+            const auto pk = sb::PickItemFromEntity::decode(rd);
+            if (rd.ok) on_pick_entity(pi, pk);
+            break;
+        }
         case sbid::kChatCommand:
         case sbid::kChatCommandSigned: {
             const auto c = id == sbid::kChatCommand ? sb::ChatCommand::decode(rd) : sb::ChatCommand::decode_signed(rd);

@@ -100,7 +100,7 @@ def load_item_table() -> dict[str, dict]:
         out[name] = {"block": int(block), "equip_sound": int(sound), "max_stack": int(stack), "flags": int(flags, 16), "equip_slot": int(slot),
                      "attack_swing": (int(swing, 16) >> 6, int(swing, 16) & 0x3F),   # (SwingAnimationType, ticks)
                      "fuel_ticks": int(fuel), "fuel_ticks_fast": int(fuel_fast), "remainder": int(remainder),
-                     "kind": kind}   # the class whose use the server implements: "kBucket", or "kPlain"
+                     "kind": kind}   # the class whose use the server implements: "kBucket", "kSpawnEgg", or "kPlain"
     assert len(out) == ITEM["kCount"], (len(out), ITEM["kCount"])
     return out
 

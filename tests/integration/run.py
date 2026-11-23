@@ -6267,8 +6267,10 @@ def entity_tags():
 
         # ---- an item that is something, and that nobody picks up; a fuse; a block that falls.
         run_command(a, 'summon item 8.5 -60 15.5 {Item:{id:"diamond",count:3,components:{rarity:"epic"}},PickupDelay:32767}')
-        run_command(a, "summon tnt 12.5 -60 15.5 {fuse:2000s,NoGravity:1b}")
+        run_command(a, "summon tnt 12.5 -58 15.5 {fuse:2000s,NoGravity:1b}")
+        run_command(a, "summon cow 6.5 -58 12.5 {NoGravity:1b}")     # what moves, told not to fall: it stays in the air
         settle(a, ticks=6)
+        assert one(of_type(a, "kTnt")).pos == (12.5, -58.0, 15.5) and one(of_type(a, "kCow")).pos == (6.5, -58.0, 12.5)
         item = one(of_type(a, "kItem"))
         assert item.data[D_ITEM][1] == (I["kDiamond"], 3, {"kRarity": 3}), item.data
         assert a.slots == [None] * 46                                       # never picked up
@@ -6289,12 +6291,199 @@ def entity_tags():
         said = run_command(c, "data get entity @e[type=pig,limit=1] Fire")["said"]
         assert 18000 < int(shown(said[0]["with"][-1])[:-1]) < burning, said    # the fire it was on, burnt further down
         assert one(of_type(c, "kItem")).data[D_ITEM][1] == (I["kDiamond"], 3, {"kRarity": 3})
+        assert one(of_type(c, "kCow")).pos == (6.5, -58.0, 12.5)   # ...and still does
         assert srv.stop() == 0, srv.read_log()
         srv = None
     finally:
         if srv:
             srv.stop()
         shutil.rmtree(world, ignore_errors=True)
+
+
+@test()
+def spawn_eggs(srv: Server):
+    """A spawn egg on a block makes what its entity_data names, where vanilla puts it: on top of the
+    block that was clicked, beside it, into a plant - coming down on a slab, on a fence - looking a
+    way of its own, with the stack's name and custom data and the egg's own tag on it; an egg of
+    nothing, or of what this server cannot make, makes nothing; a falling block's tag is an
+    operator's to give. use_item is acknowledged and turns whoever holds something. (What a vanilla
+    server makes of the same eggs is compared by tools/vanilla/command_probe.py, section eggs.)"""
+    a, b = srv.client(), srv.client()
+    join(a, "Alice", view=3)
+    join(b, "Bob", view=3)
+    a.expect("player_info_update")
+    for cl in (a, b):
+        cl.send("player_loaded")
+    settle(a, b)
+    make_op(srv, a, "Alice")
+    NAME, OPTIONAL_TEXT = mc.DATA["kCustomName"], mc.SERIALIZER["kOptionalComponent"]
+    MOB = mc._constants("entities.hpp", "mob")
+    seq = [0]
+
+    def egg(line: str | None = None) -> None:
+        """In Alice's hand: a pig's egg, or what /give makes of `line`."""
+        give(a, 36, 0, 0)
+        if line is None:
+            give(a, 36, I["kPigSpawnEgg"], 1)
+        else:
+            run_command(a, f"give @s {line}")
+
+    def use(c: Client, pos: tuple, face: int, cursor: tuple = (0.5, 1.0, 0.5)) -> dict:
+        """`c` clicks a face of a block: what Bob was shown appear meanwhile, {entity id: Entity}."""
+        collect(b)  # what Bob was told before, taken first: a /kill frees ids, which the next entity gets
+        before = set(b.entities)
+        seq[0] += 1
+        click(c, pos, face, seq=seq[0], cursor=cursor)
+        collect(c)
+        if c is not b:
+            collect(b)
+        return {i: e for i, e in b.entities.items() if i not in before}
+
+    def one(found: dict):
+        assert len(found) == 1, found
+        return next(iter(found.values()))
+
+    def data(selector: str, path: str) -> str:
+        said = run_command(a, f"data get entity {selector} {path}")["said"]
+        assert len(said) == 1 and "with" in said[0], said
+        return shown(said[0]["with"][-1])
+
+    def acks(c: Client, ticks: int = 2) -> list:
+        """Let `ticks` server ticks pass: the block_changed_acks they brought."""
+        out = []
+        for i in range(ticks):
+            token = 0xACC000 + i
+            c.send("ping_request", struct.pack(">q", token))
+            while True:
+                name, r = c.recv()
+                if name == "pong_response":
+                    assert r.i64() == token
+                    break
+                if name == "block_changed_ack":
+                    out.append(r.varint())
+                else:
+                    assert name in ("block_update", "section_blocks_update", "light_update", "player_info_update"), f"unexpected {name}"
+        return out
+
+    # ---- on top of the grass, south of Alice: in the middle of the block above, looking a way
+    # of its own with its head the same way - and Bob sees her arm swing.
+    egg()
+    mark = len(b.entity_log)
+    pig = one(use(a, (8, -61, 11), 1))
+    assert pig.type == mc.ENTITY_TYPE["kPig"] and pig.spawned[0] == (8.5, -60.0, 11.5), (pig.type, pig.spawned)
+    # (The head as an angle packed into a byte, Mth.packDegrees; the yaw may have come in full since.)
+    assert pig.pitch == 0 and pig.head == math.floor(pig.yaw * 256 / 360), (pig.yaw, pig.head)
+    assert any(n == "swing_animation" and eid == a.entity_id for n, eid, _ in b.entity_log[mark:]), b.entity_log[mark:]
+    heads = [pig.head]
+    # ...against the side of a stone: beside it, on the ground.
+    run_command(a, "setblock 11 -60 11 stone")
+    pig = one(use(a, (11, -60, 11), 4, cursor=(0.0, 0.5, 0.5)))
+    assert pig.spawned[0] == (10.5, -60.0, 11.5), pig.spawned
+    heads.append(pig.head)
+    # ...on top of a bottom slab and of a fence: it comes down on them.
+    run_command(a, "setblock 8 -60 13 stone_slab")
+    pig = one(use(a, (8, -60, 13), 1))
+    assert pig.spawned[0] == (8.5, -59.5, 13.5), pig.spawned
+    heads.append(pig.head)
+    run_command(a, "setblock 6 -60 13 oak_fence")
+    pig = one(use(a, (6, -60, 13), 1))
+    assert pig.spawned[0] == (6.5, -58.5, 13.5), pig.spawned
+    heads.append(pig.head)
+    # ...into a plant, which stops nothing: where the plant is.
+    run_command(a, "setblock 10 -60 13 short_grass")
+    pig = one(use(a, (10, -60, 13), 1, cursor=(0.5, 0.5, 0.5)))
+    assert pig.spawned[0] == (10.5, -60.0, 13.5), pig.spawned
+    heads.append(pig.head)
+    assert len(set(heads)) > 1, heads     # a way drawn at random each time
+    run_command(a, "kill @e[type=pig]")
+
+    # ---- what the stack says: a name, and custom data, which become the pig's.
+    egg('pig_spawn_egg[custom_name="Bob",custom_data={a:1}]')
+    pig = one(use(a, (8, -61, 11), 1))
+    assert pig.data[NAME] == (OPTIONAL_TEXT, "Bob"), pig.data
+    assert data("@e[type=pig,limit=1]", "data") == "{a: 1}"
+    run_command(a, "kill @e[type=pig]")
+    # ...and the egg's own tag over that: the data merged, its rotation instead of a random one.
+    egg('pig_spawn_egg[custom_name="Bob",custom_data={a:1},entity_data={id:"minecraft:pig",NoAI:1b,Rotation:[90f,0f],'
+        'data:{b:2}}]')
+    pig = one(use(a, (8, -61, 11), 1))
+    assert pig.yaw == 90.0 and pig.head == 64, (pig.yaw, pig.head)
+    assert pig.data[NAME] == (OPTIONAL_TEXT, "Bob") and pig.data[MOB["kMobFlags"]] == (BYTE, 1), pig.data   # NoAI
+    assert data("@e[type=pig,limit=1]", "data") == "{a: 1, b: 2}"
+    run_command(a, "kill @e[type=pig]")
+    # ...where it puts it: Pos.
+    egg('pig_spawn_egg[entity_data={id:"minecraft:pig",Pos:[12.5d,-60d,6.5d]}]')
+    assert one(use(a, (8, -61, 11), 1)).spawned[0] == (12.5, -60.0, 6.5)
+    run_command(a, "kill @e[type=pig]")
+    # ...another type.
+    egg('pig_spawn_egg[entity_data={id:"minecraft:cow"}]')
+    assert one(use(a, (8, -61, 11), 1)).type == mc.ENTITY_TYPE["kCow"]
+    run_command(a, "kill @e[type=cow]")
+    # ...none at all, a baby (another body to the physics), no place: nothing, and no swing.
+    for line in ("pig_spawn_egg[!entity_data]", 'pig_spawn_egg[entity_data={id:"minecraft:pig",Age:-100}]',
+                 'pig_spawn_egg[entity_data={id:"minecraft:pig",Pos:[1d,2d]}]'):
+        egg(line)
+        mark = len(b.entity_log)
+        assert use(a, (8, -61, 11), 1) == {}, line
+        assert not any(n == "swing_animation" for n, _, _ in b.entity_log[mark:]), line
+
+    # ---- a falling block's tag only an operator's egg puts on it: Bob's egg of floating stone
+    # makes a block of sand that falls and lands; Alice's, the stone, and it floats.
+    stone = varint(mc.ENTITY_TYPE["kFallingBlock"]) + mc.nbt({"BlockState": {"Name": "minecraft:stone"}, "NoGravity": mc.Byte(1)})
+    b.send("set_creative_mode_slot", struct.pack(">h", 36) + mc.item_stack(I["kPigSpawnEgg"], 1, {"kEntityData": stone}))
+    seq[0] += 1
+    click(b, (6, -61, 8), 1, seq=seq[0])
+    landed = collect(b, ticks=5)
+    assert landed.get((6, -60, 8)) == mc.BLOCK["kSand"], landed
+    egg('pig_spawn_egg[entity_data={id:"minecraft:falling_block",BlockState:{Name:"minecraft:stone"},NoGravity:1b}]')
+    fell = one(use(a, (10, -61, 6), 1))
+    assert fell.type == mc.ENTITY_TYPE["kFallingBlock"] and fell.object_data == mc.BLOCK["kStone"], (fell.type, fell.object_data)
+
+    # ---- use_item (an egg into the air): acknowledged; Alice turns for Bob, and nothing appears.
+    egg()
+    collect(b)
+    before = set(b.entities)
+    a.send("use_item", varint(0) + varint(500) + struct.pack(">ff", 45.0, 0.0))
+    assert acks(a) == [500]
+    collect(b)
+    assert b.entities[a.entity_id].yaw == 45.0 and set(b.entities) == before
+    # With nothing in hand: acknowledged all the same, but it turns nobody.
+    give(a, 36, 0, 0)
+    a.send("use_item", varint(0) + varint(501) + struct.pack(">ff", -90.0, 0.0))
+    assert acks(a) == [501]
+    collect(b)
+    assert b.entities[a.entity_id].yaw == 45.0
+
+
+@test()
+def pick_entity(srv: Server):
+    """The middle click on an entity: a mob gives its spawn egg and an armor stand its item, into the
+    hand as a picked block is; an item on the ground, a mob out of reach, an id of nothing give nothing."""
+    c = srv.client()
+    join(c, "Alice", view=3)
+    c.send("player_loaded")
+    settle(c)
+    make_op(srv, c, "Alice")
+    run_command(c, "summon pig 8.5 -60 11.5")
+    run_command(c, "summon armor_stand 10.5 -60 8.5")
+    run_command(c, 'summon item 6.5 -60 8.5 {Item:{id:"diamond",count:1},PickupDelay:32767}')
+    run_command(c, "summon pig 8.5 -60 20.5")        # twelve blocks away: out of reach
+    settle(c)
+    pigs = sorted(of_type(c, "kPig").values(), key=lambda e: e.spawned[0][2])
+    near, far = pigs[0].id, pigs[1].id
+    stand, item = next(iter(of_type(c, "kArmorStand"))), next(iter(of_type(c, "kItem")))
+
+    def pick(eid: int) -> list:
+        mark = len(c.menu_log)
+        c.send("pick_item_from_entity", varint(eid) + b"\x00")
+        settle(c, ticks=2)
+        return c.menu_log[mark:]
+
+    assert pick(near) == [("set_held_slot", 0), ("container_set_slot", 36, plain("kPigSpawnEgg"))]
+    assert pick(near) == [("set_held_slot", 0)]                 # in hand already: only the answer
+    got = pick(stand)
+    assert got and got[0][0] == "set_held_slot" and c.slots[36 + c.held_slot] == plain("kArmorStand"), got
+    assert pick(item) == [] and pick(far) == [] and pick(4000) == []
 
 
 @test()

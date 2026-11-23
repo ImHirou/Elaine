@@ -63,10 +63,13 @@ from pace import Lockstep, console_of  # noqa: E402
 
 LOGGED = {"system_chat", "player_chat", "disguised_chat", "set_time", "ticking_state", "ticking_step", "command_suggestions", "block_update", "section_blocks_update", "player_position", "sound", "stop_sound", "add_entity",
           "remove_entities", "entity_event", "commands", "disconnect", "set_entity_data", "container_set_slot",
-          "set_player_inventory", "take_item_entity", "open_screen", "block_entity_data", "open_sign_editor", "level_event"}
+          "set_player_inventory", "take_item_entity", "open_screen", "block_entity_data", "open_sign_editor", "level_event",
+          "set_held_slot"}
 # The sounds a recording keeps beside the one of an item given: what a lock and a sign say.
 SIGN_SOUNDS = {mc.SOUND[k]: k for k in ("kBlockChestLocked", "kItemDyeUse", "kItemInkSacUse", "kItemGlowInkSacUse",
                                         "kItemHoneycombWaxOn", "kBlockSignWaxedInteractFail")}
+# What the eggs of the section "eggs" make.
+EGG_KINDS = {mc.ENTITY_TYPE[k] for k in ("kPolarBear", "kIronGolem", "kCreeper")}
 UUID_RX = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -104,8 +107,8 @@ class Prober(Actor):
                     b"\x7f" + mc.varint(1) + b"\x00\x01" + mc.varint(0))
 
 
-SECTIONS = ("basics", "blocks", "give", "moving", "entities", "nbt", "signs", "tellraw", "sounds", "talking", "time", "tick",
-            "permissions")
+SECTIONS = ("basics", "blocks", "give", "moving", "entities", "nbt", "signs", "eggs", "tellraw", "sounds", "talking", "time",
+            "tick", "permissions")
 
 
 def record(port: int, out_path: str, name_a: str, name_b: str, console: str, only: set | None = None) -> None:
@@ -528,6 +531,89 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str, onl
     run("setblock ~ ~ ~2 air")
     step("A takes its diamond again", lambda: a.give(36, "kDiamond", 1))
 
+    # ---- spawn eggs: where what an egg makes appears - on top of the block that was clicked,
+    # beside it, into a plant, down on a slab or a fence - with the stack's name and the egg's own
+    # tag on it; and the middle click on a mob, which gives its egg. The mobs are ones a flat world
+    # does not make by itself (EGG_KINDS); and no step lets a tick pass while one is there, so no
+    # goal of vanilla's moves or turns it before it is asked where it is (data get) and killed.
+    # (Nor one that does something while it dies, as vanilla's do for twenty ticks: a snow golem
+    # leaves snow.) What Mob.finalizeSpawn draws - its variant, whether it is left-handed - and the
+    # sound a mob makes as it appears are vanilla's only (docs/architecture.md, "Spawn eggs").
+    section("eggs")
+    run("tp @s ~ ~ ~ 0 0")
+    egg_seq = [2000]
+
+    def egg_on(dx: int, dy: int, dz: int, face: int) -> None:
+        egg_seq[0] += 1
+        a.c.send("use_item_on", mc.varint(0) + mc.pack_block_pos(ox + dx, oy + dy, oz + dz) + mc.varint(face) +
+                 struct.pack(">fff", 0.5, 0.5, 0.5) + b"\x00\x00" + mc.varint(egg_seq[0]))
+
+    def hatch(name: str, egg: str | None, dx: int, dy: int, dz: int, face: int, kind: str, paths=("Pos", "Rotation[1]")) -> None:
+        """A uses an egg (an item, or None: what /give put in its hand) on a face of a block; what came
+        of it is asked for, then killed."""
+        step(name, lambda: ((a.give(36, egg) if egg else None), egg_on(dx, dy, dz, face)), ticks=0)
+        for path in paths:
+            run(f"data get entity @e[type={kind},limit=1,sort=nearest] {path}", ticks=0)
+        run(f"kill @e[type={kind}]", ticks=0)
+
+    def given(line: str) -> None:
+        # (Two steps: vanilla runs a command as a task of its own, ahead of a packet read in the same loop.)
+        step("A empties its hand", lambda: a.give(36, None), ticks=0)
+        step("A's hand: " + line, lambda: a.say("give @s " + line), ticks=0)
+
+    def last_shown(kind: str) -> int:
+        """The id of the last entity of this kind that A was shown: each server's own."""
+        etype = mc.ENTITY_TYPE[kind]
+        for name, hexdata in reversed(a.log):
+            if name == "add_entity":
+                r = mc.Reader(bytes.fromhex(hexdata))
+                eid = r.varint()
+                r.take(16)
+                if r.varint() == etype:
+                    return eid
+        raise SystemExit(f"A was shown no {kind}")
+
+    hatch("A's egg on top of the grass", "kPolarBearSpawnEgg", 0, -1, 3, 1, "polar_bear")
+    run("setblock ~-2 ~ ~4 stone", ticks=0)
+    hatch("...against the east side of a stone", "kPolarBearSpawnEgg", -2, 0, 4, 5, "polar_bear")
+    run("setblock ~ ~ ~4 stone_slab", ticks=0)
+    hatch("...on top of a bottom slab", "kPolarBearSpawnEgg", 0, 0, 4, 1, "polar_bear")
+    run("setblock ~1 ~ ~3 oak_fence", ticks=0)
+    hatch("...on top of a fence", "kPolarBearSpawnEgg", 1, 0, 3, 1, "polar_bear")
+    run("setblock ~-1 ~ ~3 short_grass", ticks=0)
+    hatch("...into a plant", "kPolarBearSpawnEgg", -1, 0, 3, 1, "polar_bear")
+    run("setblock ~2 ~ ~5 stone", ticks=0)
+    run("setblock ~2 ~1 ~5 stone", ticks=0)
+    hatch("an iron golem beside a pillar it overlaps", "kIronGolemSpawnEgg", 1, -1, 5, 1, "iron_golem")
+    given('polar_bear_spawn_egg[custom_name="Ursa",custom_data={a:1}]')
+    hatch("an egg with a name and custom data", None, 0, -1, 3, 1, "polar_bear", ("CustomName", "data"))
+    given('polar_bear_spawn_egg[custom_data={a:1},entity_data={id:"minecraft:polar_bear",NoAI:1b,Rotation:[90f,0f],'
+          'data:{b:2},Tags:["egg"]}]')
+    hatch("an egg with a tag of its own", None, 0, -1, 3, 1, "polar_bear", ("Rotation", "NoAI", "data", "Tags"))
+    given(f'polar_bear_spawn_egg[entity_data={{id:"minecraft:polar_bear",Pos:[{ox + 2}.5d,-55d,{oz + 3}.5d]}}]')
+    hatch("an egg whose tag says where", None, 0, -1, 3, 1, "polar_bear")
+    given('polar_bear_spawn_egg[entity_data={id:"minecraft:iron_golem"}]')
+    hatch("an egg that names another type", None, 0, -1, 3, 1, "iron_golem")
+    given("polar_bear_spawn_egg[!entity_data]")
+    hatch("an egg that names none", None, 0, -1, 3, 1, "polar_bear")
+    if wanted():    # (vanilla's is peaceful, where a monster's egg makes nothing; this server has no difficulty)
+        type_on_console("difficulty easy")
+    hatch("a creeper's egg", "kCreeperSpawnEgg", 0, -1, 3, 1, "creeper")
+    if wanted():
+        type_on_console("difficulty peaceful")
+    # The middle click: a mob's egg, an armor stand's item, into a hand that is empty.
+    step("A's egg on the grass again", lambda: (a.give(36, "kPolarBearSpawnEgg"), egg_on(0, -1, 3, 1)), ticks=0)
+    step("A picks the polar bear", lambda: (a.give(36, None), a.c.send("pick_item_from_entity",
+                                                                       mc.varint(last_shown("kPolarBear")) + b"\x00")), ticks=0)
+    run("kill @e[type=polar_bear]", ticks=0)
+    run("summon armor_stand ~ ~ ~3", ticks=0)
+    step("A picks the armor stand", lambda: (a.give(36, None), a.c.send("pick_item_from_entity",
+                                                                        mc.varint(last_shown("kArmorStand")) + b"\x00")), ticks=0)
+    run("kill @e[type=armor_stand]", ticks=0)
+    for block in ("~-2 ~ ~4", "~ ~ ~4", "~1 ~ ~3", "~-1 ~ ~3", "~2 ~ ~5", "~2 ~1 ~5"):
+        run(f"setblock {block} air", ticks=0)
+    step("A takes its diamond again", lambda: a.give(36, "kDiamond", 1))
+
     section("tellraw")
     run("tellraw @s \"quoted\"")
     run("tellraw @s 'single'")
@@ -919,6 +1005,15 @@ ENTITY_KEYS = {"Pos", "Motion", "Rotation", "fall_distance", "Fire", "Air", "OnG
                "playerGameType", "Dimension", "SelectedItem", "equipment", "NoGravity"}
 
 
+def _canonical(v) -> str:
+    """A value with its maps in one order: what two servers mean that put the same map out differently."""
+    if isinstance(v, dict):
+        return "{" + ", ".join(f"{k!r}: {_canonical(v[k])}" for k in sorted(v, key=str)) + "}"
+    if isinstance(v, (list, tuple)):
+        return "[" + ", ".join(_canonical(x) for x in v) + "]"
+    return repr(v)
+
+
 def _entries(shown: str) -> dict[str, str]:
     """The entries of a compound as `/data get` shows it: "{a: 1b, b: [x, y], c: {d: "e, f"}}"."""
     assert shown.startswith("{") and shown.endswith("}"), shown
@@ -1077,6 +1172,10 @@ def _normalise(rec: dict, who: str, commands: set | None) -> tuple[dict[str, lis
                 if holder != 0:
                     if holder - 1 in SIGN_SOUNDS:
                         sound, pitch_free = SIGN_SOUNDS[holder - 1], False
+                    elif st.get("section") == "eggs":
+                        # Mob.playAmbientSound as an egg's mob appears: vanilla's, not this server's.
+                        rows.append(("  (not compared)", f"sound {holder - 1}: what a mob says as it appears"))
+                        continue
                     elif holder - 1 != mc.SOUND["kEntityItemPickup"]:
                         continue     # a sound of the world (footsteps, a block placed), not of a command
                     else:
@@ -1119,6 +1218,22 @@ def _normalise(rec: dict, who: str, commands: set | None) -> tuple[dict[str, lis
                 pos = tuple(round(v - o, 3) for v, o in zip((r.f64(), r.f64(), r.f64()), origin))
                 if etype == mc.ENTITY_TYPE["kArmorStand"]:
                     appeared.append((name, f"armor stand at {pos}"))
+                elif st.get("section") == "eggs" and etype in EGG_KINDS:
+                    # What an egg made: where, and that it looks straight ahead with its head the
+                    # way its body looks - which way that is was drawn at random. (Not what a
+                    # vanilla /kill drops, nor a player shown again.)
+                    mc.read_lp_vec3(r)
+                    pitch, yaw, head = r.i8(), r.i8(), r.i8()
+                    kind = next(k for k, v in mc.ENTITY_TYPE.items() if v == etype)
+                    appeared.append((name, f"{kind} at {pos} pitch {pitch} head {'the way it looks' if head == yaw else head}"))
+            elif name in ("set_held_slot", "container_set_slot") and st.get("section") == "eggs":
+                if name == "set_held_slot":
+                    rows.append((name, f"slot {r.varint()}"))
+                else:
+                    # (Compared as values: vanilla writes a patch's components, and a tag's entries,
+                    # in the order of its maps; this server keeps one form of each - docs/architecture.md.)
+                    container, _state, slot = r.varint(), r.varint(), r.i16()
+                    rows.append((name, f"container {container} slot {slot} {_canonical(mc.read_item(r))}"))
             elif name == "commands":
                 tree = parse_tree(r)
                 rows.append(("  (not compared)", f"a command tree: {sorted(tree['children'])}"))

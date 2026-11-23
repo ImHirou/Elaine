@@ -461,7 +461,7 @@ class Game {
     static text::Text item_display_name(const ItemStack& stack);
     void select(const cmd::Selector& sel, const cmd::Source& source, bool players_only, std::vector<u32>& slots);
     bool teleport(u32 row, double x, double y, double z, u32 relatives, float yaw, float pitch);
-    u32 summon(u32 type, double x, double y, double z);
+    u32 summon(u32 type, double x, double y, double z, float yaw = 0.0f);
     // ---- an entity out of a tag (server/entity_tags.cpp)
     struct EntityTag {
         entity::Cold cold;
@@ -480,7 +480,7 @@ class Game {
     };
     static bool read_entity_tag(u32 type, nbt::Tag tag, EntityTag& out, std::string& why);
     void apply_entity_tag(u32 slot, EntityTag&& tag);
-    u32 summon(u32 type, double x, double y, double z, nbt::Tag tag, std::string& why);
+    u32 summon(u32 type, double x, double y, double z, nbt::Tag tag, std::string& why, float yaw = 0.0f);
     void write_cold_tag(u32 row, nbt::Writer& w) const;
 
     // ---- what the game holds, as the tags vanilla saves it as (server/saved_tags.cpp)
@@ -587,6 +587,8 @@ class Game {
     // ---- buckets (server/buckets.cpp)
     Used use_bucket(u32 pi, const ItemStack& held);
     bool empty_bucket(u32 pi, u32 content, proto::BlockPos pos, const world::ClipHit* hit);
+    // ---- spawn eggs (server/spawn_eggs.cpp)
+    Used use_spawn_egg(u32 pi, const proto::sb::UseItemOn& u, const ItemStack& held);
     // ---- signs (server/signs.cpp)
     static bool sign_kind(u32 kind);
     static u32 sign_facing(world::BlockState s);    // of the two that hang on a wall: a Direction
@@ -633,6 +635,8 @@ class Game {
     void on_use_item_on(u32 pi, const proto::sb::UseItemOn& u);
     void on_use_item(u32 pi, const proto::sb::UseItem& u);
     void on_pick_block(u32 pi, const proto::sb::PickItemFromBlock& pk);
+    void on_pick_entity(u32 pi, const proto::sb::PickItemFromEntity& pk);
+    void pick_item(u32 pi, const ItemStack& stack);
     bool client_loaded(const Player& p) const { return tick_ >= p.loaded_at_tick; }
     bool crouching(const Player& p) const { return p.shift && !p.flying; }
     bool within_reach(u32 pi, proto::BlockPos pos, double buffer = 1.0) const;

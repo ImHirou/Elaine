@@ -127,7 +127,8 @@ std::string_view item_name(u32 item);
 std::string_view item_text_key(u32 item);  // the translation key of its default ITEM_NAME component
 u32 item_rarity(u32 item);                 // Rarity ordinal of its default RARITY: common, uncommon, rare, epic
 std::string_view entity_type_name(u32 type);
-bool summonable(u32 type);  // EntityType.canSummon()
+bool summonable(u32 type);   // EntityType.canSummon()
+u32 spawn_egg_of(u32 type);  // SpawnEggItem.byId: the egg that makes this entity type, 0 if none does
 // Block.getStateDefinition(): a block's properties in order. The state with value index v_i of
 // property i is first_state + sum(v_i * stride_i).
 struct BlockProperty {

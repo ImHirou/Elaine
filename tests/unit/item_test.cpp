@@ -13,6 +13,7 @@
 #include "nbt/snbt.hpp"
 #include "nbt_bytes.hpp"
 #include "proto/packets.hpp"
+#include "world/block.hpp"
 
 #include PROTO_GEN_ENTITIES_HPP
 #include PROTO_GEN_ITEMS_HPP
@@ -581,6 +582,31 @@ TEST(Components, CustomDataIsACompound) {
     const ItemStack b = with_patch(it::kStone, 1, untrusted_patch({{comp::kCustomData, kept}}));
     EXPECT_NE(a.patch(), 0u);
     EXPECT_EQ(a.patch(), b.patch());
+}
+
+TEST(ItemStack, ASpawnEggNamesWhatItMakes) {
+    // SpawnEggItem.getType reads the ENTITY_DATA of the stack, its item's by default; byId is the
+    // other way round. Every egg names a type /summon may make, and that type's egg is the egg.
+    namespace et = proto::gen::entity_type;
+    u32 eggs = 0;
+    for (u32 i = 0; i < world::item_count(); ++i) {
+        if (world::item_info(i).kind != proto::gen::item_kind::kSpawnEgg) {
+            EXPECT_EQ(item::default_of(i, comp::kEntityData).has, false) << world::item_name(i);
+            continue;
+        }
+        ++eggs;
+        const item::Patches::Found data = item::effective(ItemStack(i, 1), comp::kEntityData);
+        ASSERT_EQ(data.state, item::Patches::State::kSet) << world::item_name(i);
+        Reader r(data.value);
+        const u32 type = r.varint();
+        EXPECT_TRUE(r.ok && world::summonable(type)) << world::item_name(i);
+        EXPECT_EQ(world::spawn_egg_of(type), i) << world::item_name(i);
+        EXPECT_EQ(r.bytes(r.remaining()).size(), 2u) << world::item_name(i);  // and an empty tag: {id} alone
+    }
+    EXPECT_GT(eggs, 80u);
+    EXPECT_EQ(world::spawn_egg_of(et::kPig), it::kPigSpawnEgg);
+    EXPECT_EQ(world::spawn_egg_of(et::kArmorStand), 0u);
+    EXPECT_EQ(world::spawn_egg_of(et::kCount), 0u);
 }
 
 TEST(Components, EntityDataHasATypeInFront) {

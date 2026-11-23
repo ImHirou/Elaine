@@ -148,6 +148,7 @@ set(MC_GAME_SOURCES
   src/server/players.cpp
   src/server/saved_tags.cpp
   src/server/signs.cpp
+  src/server/spawn_eggs.cpp
   src/server/time.cpp
 )
 add_library(core STATIC

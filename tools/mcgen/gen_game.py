@@ -339,11 +339,14 @@ def ported_block(game_block: dict):
 # Item classes whose use the server implements, as PORTED_BLOCKS is for blocks: the class -> its
 # ItemInfo::kind and every hook of Item it overrides. A hook another version adds stops the
 # generator until somebody has read it. (BlockItem and its kin place blocks: ItemInfo::block.)
-ITEM_KINDS = ["kPlain", "kBucket"]
+ITEM_KINDS = ["kPlain", "kSpawnEgg", "kBucket"]
 PORTED_ITEMS = {
     # use: the bucket emptied where its holder looks, or filled (server/buckets.cpp). What it
     # holds is BucketItem.content - the fluid whose bucket it is (fluid::kBucket).
     "BucketItem": ("kBucket", {"use"}),
+    # useOn: the egg on a block (server/spawn_eggs.cpp). use: thrown into the air or at water far
+    # away - not ported yet (world::clip is there for it). shouldPrintOpWarning: the client's tooltip.
+    "SpawnEggItem": ("kSpawnEgg", {"useOn", "use", "shouldPrintOpWarning"}),
 }
 
 
