@@ -7,7 +7,7 @@ namespace world {
 
 namespace {
 
-constexpr u8 kVersion = 3, kVersionWithoutFluidTicks = 2, kVersionWithoutTicks = 1;
+constexpr u8 kVersion = 4, kVersionWithoutPostProcess = 3, kVersionWithoutFluidTicks = 2, kVersionWithoutTicks = 1;
 constexpr u8 kLit = 1, kModified = 2, kTerrain = 4;
 enum : u8 { kAbsent = 0, kUniform = 1, kFolded = 2, kArray = 3 };
 
@@ -77,6 +77,14 @@ std::span<const u8> copy_into(ChunkArena& arena, std::span<const u8> bytes) {
     return {to, bytes.size()};
 }
 
+// Chunk::post_process: whole marks, each in a section the chunk has.
+bool post_process_valid(std::span<const u8> marks, u32 sections) {
+    if (marks.size() % 4) return false;
+    for (usize i = 0; i < marks.size(); i += 4)
+        if (load_le<u32>(marks.data() + i) >> 12 >= sections) return false;
+    return true;
+}
+
 }  // namespace
 
 void encode_chunk(const Chunk& c, const ChunkParts& parts, base::ByteBuf& out) {
@@ -124,8 +132,8 @@ void encode_chunk(const Chunk& c, const ChunkParts& parts, base::ByteBuf& out) {
         put_layer(out, c.sky_layer(li));
         put_layer(out, c.block_layer(li));
     }
-    const std::span<const u8> tail[5] = {
-        parts.block_entities, parts.entities, {c.keep.bytes, c.keep.len}, parts.ticks, parts.fluid_ticks};
+    const std::span<const u8> tail[6] = {parts.block_entities, parts.entities,    {c.keep.bytes, c.keep.len},
+                                         parts.ticks,          parts.fluid_ticks, {c.post_process.bytes, c.post_process.len}};
     for (const std::span<const u8> part : tail) {
         p = out.reserve(4 + part.size());
         store_le<u32>(p, static_cast<u32>(part.size()));
@@ -135,7 +143,7 @@ void encode_chunk(const Chunk& c, const ChunkParts& parts, base::ByteBuf& out) {
 }
 
 void encode_kept(const Chunk& c, base::ByteBuf& out) {
-    u8* p = out.reserve(12 + 20 + c.keep.len);  // the header, five lengths, what is kept
+    u8* p = out.reserve(12 + 24 + c.keep.len);  // the header, six lengths, what is kept
     *p++ = kVersion;
     *p++ = 0;
     store_le<i32>(p, c.x);
@@ -148,7 +156,8 @@ void encode_kept(const Chunk& c, base::ByteBuf& out) {
     if (c.keep.len) std::memcpy(p + 22, c.keep.bytes, c.keep.len);
     store_le<u32>(p + 22 + c.keep.len, 0);  // scheduled ticks
     store_le<u32>(p + 26 + c.keep.len, 0);  // ...of its fluids
-    out.commit(p + 30 + c.keep.len);
+    store_le<u32>(p + 30 + c.keep.len, 0);  // what is left to do when it first ticks
+    out.commit(p + 34 + c.keep.len);
 }
 
 bool load_chunk(std::span<const u8> blob, i32 cx, i32 cz, const Layout& l, ChunkGenerator& gen, LoadedChunk& out,
@@ -232,7 +241,14 @@ bool load_chunk(std::span<const u8> blob, i32 cx, i32 cz, const Layout& l, Chunk
         c.keep = {static_cast<u32>(keep.size()), const_cast<u8*>(keep.data())};
         if (version > kVersionWithoutTicks) out.parts.ticks = copy_into(out.arena, in.bytes());
         if (version > kVersionWithoutFluidTicks) out.parts.fluid_ticks = copy_into(out.arena, in.bytes());
+        if (version > kVersionWithoutPostProcess) {
+            // (Of a chunk whose blocks the generator has just made, the marks are the generator's.)
+            const std::span<const u8> marks = copy_into(out.arena, in.bytes());
+            if (terrain) c.post_process = {static_cast<u32>(marks.size()), const_cast<u8*>(marks.data())};
+        }
         if (!in.ok) return fail("a chunk that ends too early");
+        if (!post_process_valid({c.post_process.bytes, c.post_process.len}, l.sections))
+            return fail("marks of blocks that are none");
         if (!ticks_valid(out.parts.ticks, state::kBlockCount, l.sections * 16) ||
             !ticks_valid(out.parts.fluid_ticks, kFluidTickTypes, l.sections * 16))
             return fail("scheduled ticks that are none");

@@ -181,6 +181,12 @@ struct Chunk {
     BiomeSection* biomes = nullptr;  // [sections_count], or null while every section has one biome
     LightQueue* queued = nullptr;
     KeptData keep;
+    // What generation left to be done when the chunk first ticks (ProtoChunk.postProcessing): the
+    // blocks whose fluid is to be let flow, 4 bytes each - section << 12 | x | y << 4 | z << 8,
+    // little-endian, in the order they were marked within a section, sections from the bottom.
+    // Gone once it is done (Dimension::post_processed); kept with the chunk until then.
+    KeptData post_process;
+    bool post_listed = false;  // it is in Dimension::to_post_process()
     // The chunk's block entities, in no order. A handful at most in nearly every chunk that has
     // any: finding one by position is a scan of this array.
     BlockEntityRef* block_entities = nullptr;

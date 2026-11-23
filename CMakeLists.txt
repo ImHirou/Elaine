@@ -281,6 +281,12 @@ if(MC_TESTS)
   endif()
 endif()
 
+# What tools/vanilla/terrain_probe.py asks the generator with. Built when the probe is run, not with `all`.
+add_executable(terrain_dump EXCLUDE_FROM_ALL tools/vanilla/terrain_dump.cpp)
+target_link_libraries(terrain_dump PRIVATE core mc_core_flags)
+mc_needs_generated(terrain_dump)
+mc_lto_cache(terrain_dump)
+
 if(MC_BENCH)
   add_executable(bench bench/bench.cpp bench/world_bench.cpp bench/entity_bench.cpp bench/item_bench.cpp
     bench/nbt_bench.cpp bench/game_bench.cpp bench/command_bench.cpp bench/physics_bench.cpp)

@@ -2253,14 +2253,45 @@ whole, so that a difference is told block by block; of the rest there is a hash.
 some anywhere, one for each of the overworld's 56 biomes, and more where the surface step builds
 icebergs and pillars.
 
+### Held to a vanilla server (`tools/vanilla/terrain_probe.py`)
+
+The scripts above call vanilla's classes one by one, with what this port believes they are
+handed. Whether a server hands them that - which neighbours' biomes, which status a chunk has
+while it is made, what a worker thread did before - is a question for a server. A chunk a client
+is sent does not answer it: its water has begun to run, in whatever order the chunks around it
+began to tick. But a server makes more chunks than it shows. Around what a player sees lie rings
+of chunks that got as far as some earlier status, and they are saved as they stand - `terrain`,
+`initialize_light` - with the heightmaps generation goes by and the list of what is still to be
+let flow.
+
+So the probe writes a world by hand (the seed, the overworld's generator, no structures), puts a
+data pack into it that is every biome of the jar without its features - a chunk's trees and ores
+reach into the chunks beside it, also into one that is still bare - lets vanilla run it with a bot
+at four places, and reads the region files. `terrain_dump` makes the same chunks with the
+generator here. Biomes are compared of every chunk vanilla got to them in; blocks, heightmaps and
+marks, in their order, of every chunk that was saved before anything ran in it.
+
+### After generation: what is let flow (`Chunk::post_process`)
+
+The aquifers and the carvers mark fluid that stands beside something it would run into
+(`ProtoChunk.markPosForPostProcessing`). Vanilla ticks each marked block once when the chunk
+first becomes one that runs its ticks (`ChunkMap.prepareTickingChunk`,
+`LevelChunk.postProcessGeneration`) - not when it is made: a chunk in view and beyond the
+simulation distance stands as generated. Here the marks go with the chunk (four bytes a block;
+on disk a part of the chunk, since version 4 of its bytes), the dimension lists a chunk that has
+marks when it begins to run its ticks, and the game does it (`Game::post_process_chunks`): the
+fluid's own tick, at once, whether or not the game is frozen. Most marks find nothing to do -
+water against the wall of another aquifer - and where one does, what it starts is ordinary
+flowing water from then on.
+
 ### What is there, and what is not
 
 There: biomes, and all of the `terrain` status - the shape of the ground with its aquifers
 (`doFill`); the surface, bedrock, deepslate and the ore veins (`buildSurface`); the caves and
 canyons of the carvers (`generateCarvers`).
 
-Not there yet: letting the marked water flow, the world's spawn point, features, structures. A
-world of terrain has its ground and no tree on it. Beyond those: only
+Not there yet: the world's spawn point (players appear at the origin, on whatever is there),
+features, structures. A world of terrain has its ground and no tree on it. Beyond those: only
 the overworld, only the preset `normal`; an imported vanilla world does not go on with this
 generator yet.
 

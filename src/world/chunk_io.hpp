@@ -2,8 +2,8 @@
 // A chunk as bytes: what a region file holds for it (deflated there, world/region.hpp), and the
 // chunk outside the world that a worker makes of those bytes.
 //
-//   u8  version (3; a chunk of version 2 is one without the last part, of version 1 without the
-//       last two)
+//   u8  version (4; a chunk of version 3 is one without the last part, of version 2 without the
+//       last two, of version 1 without the last three)
 //   u8  flags     1 lit: its light is final, lighting it again is not needed
 //                 2 modified: something changed it since the generator made it
 //                 4 terrain: sections and light follow. Without: nothing was stored of its blocks
@@ -21,6 +21,9 @@
 //   u32 n + bytes     what an import kept and nobody reads (world/anvil.hpp)
 //   u32 n + bytes     its scheduled ticks (world/ticks.hpp), as delays from the moment it is saved
 //   u32 n + bytes     the scheduled ticks of its fluids: the same, with a fluid's id for a block's
+//   u32 n + bytes     what generation left to do when the chunk first ticks (Chunk::post_process):
+//                     u32 section << 12 | x | y << 4 | z << 8 a block. Not a part the caller hands in:
+//                     it is the chunk's, as what an import kept is
 // Little-endian. State and biome ids are this version's: a world names the data version it was
 // saved by, and another version has to convert it.
 //

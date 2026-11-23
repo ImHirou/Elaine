@@ -54,7 +54,10 @@ u16 climate_biome(i32 leaf);
 // 4x4x4 cells. `sampler` is a context of its own (vanilla makes one for a chunk's biomes, with
 // caches). `out` takes `sections` x 64 biomes, each section's by y << 4 | z << 2 | x. (Vanilla
 // sets a section's cells x, then y, then z: the order its palette is in.)
-void fill_biomes(Sampler& sampler, i32 chunk_x, i32 chunk_z, i32 min_y, u32 sections, u16* out);
+// `tied`, if it is asked for: of each cell, whether a second biome is exactly as near its climate
+// as the one it got - where the answer is the search's before it, and in vanilla, for a chunk's
+// first such cell, whatever its thread searched last.
+void fill_biomes(Sampler& sampler, i32 chunk_x, i32 chunk_z, i32 min_y, u32 sections, u16* out, u8* tied = nullptr);
 
 // The biomes a chunk's terrain is made by: the chunk's own cells and one ring of the cells of the
 // chunks around it - what vanilla reads of its neighbours through a WorldGenRegion. The biome of

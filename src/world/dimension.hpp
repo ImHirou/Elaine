@@ -136,6 +136,15 @@ class Dimension {
     // last emptied the lists.
     std::vector<Chunk*>& ready() { return ready_; }
     std::vector<Chunk*>& stopped() { return stopped_; }
+    // Chunks that have begun to run their ticks with something of their generation still to do
+    // (Chunk::post_process): the game does it and says so. A chunk that leaves is taken off the list.
+    std::vector<Chunk*>& to_post_process() { return post_process_; }
+    void post_processed(Chunk& c) {
+        std::free(c.post_process.bytes);
+        c.post_process = {};
+        c.post_listed = false;
+        c.dirty = true;
+    }
 
     bool persistent() const { return store_.persistent(); }
     ChunkStore& store() { return store_; }
@@ -315,7 +324,7 @@ class Dimension {
     u64 versions_ = 0;
     u64 tick_ = 0;
     std::vector<Adopted> adopted_;
-    std::vector<Chunk*> ready_, stopped_;
+    std::vector<Chunk*> ready_, stopped_, post_process_;
 };
 
 }  // namespace world

@@ -141,6 +141,7 @@ void Game::run(const std::atomic<bool>& stop) {
         for (u32 ri = 0; ri < reactors_.size(); ++ri) drain(ri);
         if (UNLIKELY(!joining_.empty())) admit_joining();
         if (UNLIKELY(!suggestion_requests_.empty())) answer_suggestions();
+        if (UNLIKELY(!world_.to_post_process().empty())) post_process_chunks();
         // TickRateManager.tick, the first thing of tickServer: a `/tick freeze` among this tick's
         // packets holds this tick already, one from the console (below) the next. What a frozen
         // game leaves out is what ServerLevel.tick and Level.tickBlockEntities ask runsNormally()

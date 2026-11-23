@@ -265,6 +265,7 @@ class Game {
     void on_chunk_batch_received(u32 pi, float desired);
     bool chunk_tracked(u32 pi, i32 cx, i32 cz) const;
     void pump_chunks(u64 tick_start_ns);
+    void post_process_chunks();
     void tend_chunks();
     void save_chunk(world::Chunk& c, bool leaving);
     void save_world();

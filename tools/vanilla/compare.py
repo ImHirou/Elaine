@@ -11,7 +11,8 @@ The probes that record a scripted session (command_probe.py, component_probe.py,
 inventory_probe.py, entity_probe.py, swing_probe.py) take a server that runs already, and its
 console. This starts both servers at once, records each probe on both side by side, and stops
 both at the end, whatever happened. block_probe.py starts its two servers itself; it is run here
-on both at once too, before the others (vanilla's port is the same).
+on both at once too, before the others (vanilla's port is the same). So is terrain_probe.py, whose
+vanilla runs in a world of terrain and whose other side is no server but the generator.
 
 A probe waits for no clock. It freezes the game of the server it records and lets it take the
 ticks its script asks for, as fast as the server goes (tools/vanilla/pace.py: `/tick`, which both
@@ -111,7 +112,7 @@ class Server:
 # Probes that start the two servers themselves - `vanilla <out> <names>`, `ours <exe> <out> <names>` - in
 # worlds of their own and with rules of their own: run here both at once, before the shared servers are up
 # (vanilla's port is the same).
-SELF_STARTING = {"block_probe"}
+SELF_STARTING = {"block_probe", "terrain_probe"}
 
 
 def report(probe: str, recordings: dict, work: Path, verbose: bool, took: float, kind: str = "") -> int:
@@ -154,7 +155,7 @@ def both_at_once(record) -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("probes", nargs="+", help="command_probe, component_probe, container_probe, ..., block_probe")
+    ap.add_argument("probes", nargs="+", help="command_probe, component_probe, container_probe, ..., block_probe, terrain_probe")
     ap.add_argument("-k", action="append", default=[], metavar="WORD", help="only the parts of a probe named so (repeatable)")
     ap.add_argument("-v", action="store_true", help="print the diffs in full")
     ap.add_argument("--exe", default=str(ROOT / "build" / "release" / "elaine"))

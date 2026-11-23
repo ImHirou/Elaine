@@ -98,6 +98,7 @@ Dimension::~Dimension() {
         free_block_entities(c);
         std::free(c.biomes);
         std::free(c.keep.bytes);
+        std::free(c.post_process.bytes);
         light_.release_chunk(c);
     });
 }
@@ -128,6 +129,12 @@ Chunk& Dimension::adopt(LoadedChunk& lc) {
         c->keep.bytes = static_cast<u8*>(std::malloc(from.keep.len));
         if (UNLIKELY(!c->keep.bytes)) std::abort();
         std::memcpy(c->keep.bytes, from.keep.bytes, from.keep.len);
+    }
+    c->post_listed = false;
+    if (from.post_process.len) {
+        c->post_process.bytes = static_cast<u8*>(std::malloc(from.post_process.len));
+        if (UNLIKELY(!c->post_process.bytes)) std::abort();
+        std::memcpy(c->post_process.bytes, from.post_process.bytes, from.post_process.len);
     }
     c->status = ChunkStatus::Generated;
     c->frame_version = ++versions_;
@@ -174,9 +181,14 @@ void Dimension::refresh_active(Chunk& c) {
 // Something that decides what ticks in the chunk changed: whether it ticks at all, who simulates
 // it, which of its sections have random ticks to run.
 void Dimension::status_changed(Chunk& c) {
-    // ServerLevel.startTickingChunk: the ticks it was loaded with count from now
-    // (LevelChunk.unpackTicks: the blocks', then the fluids').
+    // ChunkMap.prepareTickingChunk: what generation left to do in the chunk is done - by the game,
+    // which is handed the chunk (to_post_process) - and, ServerLevel.startTickingChunk, the ticks
+    // it was loaded with count from now (LevelChunk.unpackTicks: the blocks', then the fluids').
     if (c.block_ticking()) {
+        if (c.post_process.len && !c.post_listed) {
+            c.post_listed = true;
+            post_process_.push_back(&c);
+        }
         if (c.block_ticks && c.block_ticks->saved_n) ticks_.unpack(c, static_cast<i64>(time_));
         if (c.fluid_ticks && c.fluid_ticks->saved_n) fluid_ticks_.unpack(c, static_cast<i64>(time_));
     }
@@ -346,6 +358,7 @@ void Dimension::unload(Chunk& c) {
     fluid_ticks_.release(c);
     std::erase(ready_, &c);
     std::erase(stopped_, &c);
+    if (c.post_listed) std::erase(post_process_, &c);
     DCHECK(std::none_of(changes_.begin(), changes_.end(), [&](const BlockChange& b) { return b.chunk == &c; }));
     DCHECK(!c.light_listed);
     light_.unload_chunk(c);
@@ -355,6 +368,7 @@ void Dimension::unload(Chunk& c) {
     free_block_entities(c);
     std::free(c.biomes);
     std::free(c.keep.bytes);
+    std::free(c.post_process.bytes);
     map_.remove(c.x, c.z);
     c.~Chunk();
     chunk_pool_.free(&c);

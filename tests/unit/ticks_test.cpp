@@ -478,13 +478,17 @@ TEST(ScheduledTicks, AChunkSavedBeforeThereWereTicksIsStillRead) {
     ASSERT_TRUE(load_chunk({}, 2, 3, layout, gen, made, err));
     base::ByteBuf now;
     encode_chunk(made.chunk, {}, now);
-    ASSERT_EQ(now.data[0], 3);
-    // Version 2 is version 3 without its last part - the fluids' ticks - and version 1 without
-    // the last two.
-    std::vector<u8> old(now.data, now.data + now.len - 8), older(now.data, now.data + now.len - 4);
+    ASSERT_EQ(now.data[0], 4);
+    // Version 3 is version 4 without its last part - what is left to do when the chunk first
+    // ticks - version 2 without the fluids' ticks before that, and version 1 without the blocks'.
+    std::vector<u8> old(now.data, now.data + now.len - 12), older(now.data, now.data + now.len - 8),
+        before(now.data, now.data + now.len - 4);
     old[0] = 1;
     older[0] = 2;
-    LoadedChunk from_old, from_older, from_new;
+    before[0] = 3;
+    LoadedChunk from_old, from_older, from_before, from_new;
+    ASSERT_TRUE(load_chunk(before, 2, 3, layout, gen, from_before, err)) << err;
+    EXPECT_EQ(from_before.chunk.post_process.len, 0u);
     ASSERT_TRUE(load_chunk(old, 2, 3, layout, gen, from_old, err)) << err;
     EXPECT_TRUE(from_old.parts.ticks.empty());
     EXPECT_EQ(from_old.chunk.sections[0].ticking, 256u);  // counted when it is read: the grass on top
@@ -497,8 +501,28 @@ TEST(ScheduledTicks, AChunkSavedBeforeThereWereTicksIsStillRead) {
     LoadedChunk short_one, later_one;
     EXPECT_FALSE(load_chunk(older, 2, 3, layout, gen, short_one, err));
     std::vector<u8> later(now.data, now.data + now.len);
-    later[0] = 4;
+    later[0] = 5;
     EXPECT_FALSE(load_chunk(later, 2, 3, layout, gen, later_one, err));
+    // What generation left to do goes with the chunk - section << 12 | x | y << 4 | z << 8, four
+    // bytes a block - and marks in a section the chunk does not have, or half a mark, refuse it.
+    u8 marks[] = {0x21, 0x43, 0x00, 0x00, 0xFF, 0x7F, 0x01, 0x00};  // section 4 and section 23
+    made.chunk.post_process = {sizeof marks, marks};
+    base::ByteBuf marked;
+    encode_chunk(made.chunk, {}, marked);
+    LoadedChunk with_marks;
+    ASSERT_TRUE(load_chunk({marked.data, marked.len}, 2, 3, layout, gen, with_marks, err)) << err;
+    ASSERT_EQ(with_marks.chunk.post_process.len, sizeof marks);
+    EXPECT_EQ(0, std::memcmp(with_marks.chunk.post_process.bytes, marks, sizeof marks));
+    marks[6] = 0x80;  // section 0x18: one more than there are
+    base::ByteBuf too_high;
+    encode_chunk(made.chunk, {}, too_high);
+    LoadedChunk refused_marks;
+    EXPECT_FALSE(load_chunk({too_high.data, too_high.len}, 2, 3, layout, gen, refused_marks, err));
+    made.chunk.post_process = {6, marks};
+    base::ByteBuf half;
+    encode_chunk(made.chunk, {}, half);
+    EXPECT_FALSE(load_chunk({half.data, half.len}, 2, 3, layout, gen, refused_marks, err));
+    made.chunk.post_process = {};
     // With ticks: they come back as bytes, for the world to take; ticks that are none refuse the chunk.
     const u8 one[] = {1, 1, 0, 0, 0, /* what */ 0x21, 0x43, 0x02, 0x00, /* delay */ 5, 0, 0, 0, /* priority */ 0xFF};
     base::ByteBuf with;

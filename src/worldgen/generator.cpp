@@ -76,6 +76,19 @@ bool OverworldGenerator::generate_whole(world::LoadedChunk& out) {
     CarverBiomes carver_biomes{w.uncached};
     carve(world_, chunk, carver_biomes, w.mask, t);
     for (u32 si = 0; si < Terrain::kSections; ++si) c.sections[si].assign(out.alloc, &t.blocks[si * 4096]);
+    // What is to be let flow when the chunk first ticks (world::Chunk::post_process).
+    usize marks = 0;
+    for (const std::vector<u16>& of : t.post_process) marks += of.size();
+    c.post_process = {};
+    if (marks) {
+        u8* p = static_cast<u8*>(out.arena.alloc(marks * 4));
+        c.post_process = {static_cast<u32>(marks * 4), p};
+        for (u32 si = 0; si < Terrain::kSections; ++si)
+            for (const u16 mark : t.post_process[si]) {
+                store_le<u32>(p, si << 12 | mark);
+                p += 4;
+            }
+    }
     return true;
 }
 

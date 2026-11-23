@@ -274,6 +274,34 @@ void Game::pump_chunks(u64 tick_start_ns) {
     world_.ready().clear();
 }
 
+// LevelChunk.postProcessGeneration, for the chunks that have begun to run their ticks
+// (ChunkMap.prepareTickingChunk): each block generation marked is ticked once, here and now -
+// the water an aquifer left standing beside a cave begins to run - and a block that is no liquid
+// takes the shape its neighbours give it. Once a chunk: the marks are gone with it. A game that
+// is frozen does this too; what the first tick asks for then waits.
+void Game::post_process_chunks() {
+    std::vector<world::Chunk*>& chunks = world_.to_post_process();
+    for (usize i = 0; i < chunks.size(); ++i) {
+        world::Chunk& c = *chunks[i];
+        const u32 count = c.post_process.len / 4;
+        for (u32 k = 0; k < count; ++k) {
+            const u32 mark = load_le<u32>(c.post_process.bytes + 4 * k);
+            const BlockPos pos{c.x * 16 + static_cast<i32>(mark & 15),
+                               world_.min_y() + static_cast<i32>(mark >> 12) * 16 + static_cast<i32>(mark >> 4 & 15),
+                               c.z * 16 + static_cast<i32>(mark >> 8 & 15)};
+            const world::BlockState state = world_.block(pos.x, pos.y, pos.z);
+            const world::FluidState held = world::fluid_of(state);
+            if (held) tick_fluid(pos, world::fluid_type(held));
+            // LiquidBlock.tick is a bubble column over what makes one, which is not there yet.
+            if (world::block_info_of(state).kind == proto::gen::block_kind::kLiquid) continue;
+            const world::BlockState shaped = update_from_neighbour_shapes(state, pos);
+            if (shaped != state) set_block(pos, shaped, kUpdateKnownShape | kUpdateSkipContainer);  // (flags 276)
+        }
+        world_.post_processed(c);
+    }
+    chunks.clear();
+}
+
 // One chunk to disk - if anything about it changed, or anything stands in it - and, when it
 // leaves, what the game holds for it out of the game.
 void Game::save_chunk(world::Chunk& c, bool leaving) {

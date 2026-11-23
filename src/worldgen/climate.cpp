@@ -204,7 +204,7 @@ void fill_biome_grid(Sampler& sampler, i32 chunk_x, i32 chunk_z, i32 min_y, u32 
 
 u16 climate_biome(i32 leaf) { return wg::kClimate[leaf].first; }
 
-void fill_biomes(Sampler& sampler, i32 chunk_x, i32 chunk_z, i32 min_y, u32 sections, u16* out) {
+void fill_biomes(Sampler& sampler, i32 chunk_x, i32 chunk_z, i32 min_y, u32 sections, u16* out, u8* tied_cells) {
     // MultiNoiseBiomeSource.createResolverForChunk: the six functions over the chunk's cells, one
     // volume each, in this order.
     const Volume v{4, static_cast<i32>(sections) * 4, 4, chunk_x * 16, min_y, chunk_z * 16, 4, 4, 4};
@@ -231,9 +231,12 @@ void fill_biomes(Sampler& sampler, i32 chunk_x, i32 chunk_z, i32 min_y, u32 sect
             for (i32 y = 0; y < 4; ++y) {
                 for (i32 z = 0; z < 4; ++z) {
                     const u32 i = v.index(x, static_cast<i32>(s) * 4 + y, z);
-                    last = climate_search(
-                        climate_target(temperature[i], vegetation[i], continents[i], erosion[i], depth[i], ridges[i]), last);
-                    out[s * 64 + static_cast<u32>(y << 4 | z << 2 | x)] = climate_biome(last);
+                    const ClimateTarget t =
+                        climate_target(temperature[i], vegetation[i], continents[i], erosion[i], depth[i], ridges[i]);
+                    last = climate_search(t, last);
+                    const u32 cell = s * 64 + static_cast<u32>(y << 4 | z << 2 | x);
+                    out[cell] = climate_biome(last);
+                    if (tied_cells) tied_cells[cell] = tied(0, t, last, distance(wg::kClimate[last], t));
                 }
             }
         }

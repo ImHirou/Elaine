@@ -388,6 +388,78 @@ def a_world_of_terrain(srv: Server):
     assert len(seen) > 1 and "minecraft:the_void" not in seen, seen
 
 
+def flowing(ch: dict) -> bool:
+    """Whether a chunk holds water or lava that has run: a state of them that is no source."""
+    water, lava = mc.BLOCK["kWater"], mc.BLOCK["kLava"]
+    for section in ch["sections"]:
+        blocks = section["blocks"]
+        states = blocks["palette"] if blocks["palette"] else {mc.paletted_get(blocks, i) for i in range(4096)}
+        if any(water < s <= water + 15 or lava < s <= lava + 15 for s in states):
+            return True
+    return False
+
+
+@test(alone=True)
+def a_world_of_terrain_comes_back():
+    """A world of terrain that is stopped and started again is the same world, chunk for chunk - it is
+    read, not made anew - and what generation left to be done is done once: the water an aquifer left
+    standing beside a cave runs when its chunk first ticks, and a chunk that has not ticked yet keeps
+    its marks through the restart. (The game stands still: what the first tick of a fluid asks for is
+    not run, so what a client is sent does not depend on when it looks.)"""
+    world = tempfile.mkdtemp(prefix="world-terrain-")
+    srv = None
+    try:
+        srv = Server(EXE, world=world, level_type="minecraft:normal", level_seed=7, simulation_distance=2)
+        srv.console("tick freeze")
+        srv.wait_log("The game is frozen")
+        a = srv.client()
+        ja = join(a, "Alice", view=6)
+        a.send("player_loaded")
+        settle(a)
+        cx, cz = ja["center"]
+        # Bob comes to look when all of it is there.
+        b = srv.client()
+        jb = join(b, "Bob", view=6)
+        assert jb["center"] == (cx, cz)
+        settle(b)
+        before = frames(b)
+        far = lambda pos: max(abs(pos[0] - cx), abs(pos[1] - cz))
+        # Within the simulation distance and one chunk more the chunks run their ticks, and there
+        # water has begun to run (in this world: a chunk north of the spawn); further out nothing
+        # has, but for what ran across a border.
+        ran = sorted(pos for pos in b.chunks if flowing(b.chunks[pos]))
+        assert ran and all(far(pos) <= 4 for pos in ran), ran
+        assert srv.stop() == 0, srv.read_log()
+        os.unlink(srv.log.name)
+
+        srv = Server(EXE, world=world, simulation_distance=2)     # (what kind of world it is, the world says)
+        assert "a new" not in srv.read_log(), srv.read_log()
+        srv.console("tick freeze")
+        srv.wait_log("The game is frozen")
+        c = srv.client()
+        jc = join(c, "Carol", view=6)
+        assert jc["center"] == (cx, cz) and jc["login"]["seed"] == hashed_seed(7) and jc["login"]["is_flat"] is False
+        c.send("player_loaded")
+        settle(c)
+        after = frames(c)
+        assert set(after) == set(before)
+        differ = sorted(pos for pos in before if before[pos] != after[pos])
+        assert not differ, f"chunks that came back different: {differ}"
+        # Carol goes where no chunk has ticked yet: the marks those chunks were saved with are run
+        # now (seven chunks east there is water that has somewhere to go).
+        x, y, z = jc["teleport"]["pos"]
+        c.send("move_player_pos", struct.pack(">dddB", x + 16.0 * 7, y, z, 1))
+        c.sync_chunks(6, (cx + 7, cz))
+        ran_now = {(pos[0] >> 4, pos[2] >> 4) for pos in collect(c)} | {pos for pos in c.chunks if flowing(c.chunks[pos])}
+        assert any(pos[0] - cx >= 6 for pos in ran_now), sorted(ran_now)
+        assert srv.stop() == 0, srv.read_log()
+        os.unlink(srv.log.name)
+    finally:
+        if srv:
+            srv.stop()
+        shutil.rmtree(world, ignore_errors=True)
+
+
 @test()
 def join_offline_compressed(srv: Server):
     c = srv.client()
