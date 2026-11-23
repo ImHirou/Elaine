@@ -37,6 +37,7 @@
 #include "server/game.hpp"
 
 #include PROTO_GEN_PHYSICS_HPP
+#include PROTO_GEN_STATIC_IDS_HPP
 
 namespace server {
 
@@ -79,15 +80,40 @@ phys::World Game::phys_world() {
     return w;
 }
 
-// What a tick said of fire and of the fluids it was in, taken: its viewers see it burn as its
-// base tick says (Entity.setSharedFlagOnFire), and what the fire and the lava took of its
-// health is returned - a point for a tick of burning, four for each cell of lava. Nothing here
-// has health but an item, so that is whose business it is (Game::tick_item).
-u32 Game::took_fire(u32 row, phys::Body& b) {
-    const u32 hurt = (b.burned ? 1u : 0u) + 4u * b.lava_hurts;
-    b.burned = b.extinguished = b.splashed = false, b.lava_hurts = 0;
+// What a tick said of fire and of the fluids it was in, taken. Its viewers see it burn as its
+// base tick says (Entity.setSharedFlagOnFire), and hear it: the splash as it went into water
+// (Entity.doWaterSplashEffect: where it was at that moment - `before` the tick's move, or where
+// it is now), the hiss of a fire going out in a block (playEntityOnFireExtinguishedSound).
+// What the fire and the lava took of its health is returned: nothing here has health but an
+// item, so that is whose business it is (Game::tick_item).
+//
+// The order is the tick's: what lives looks at the fluids again inside its move, before the
+// blocks' effects, an item after them.
+Game::Burnt Game::took_fire(u32 row, phys::Body& b, const double before[3], bool living) {
+    const Burnt burnt{b.burned, b.lava_hurts};
+    if (UNLIKELY(b.splashed || b.extinguished)) {
+        static constexpr u32 kSplash[] = {gen::sound::kEntityGenericSplash, gen::sound::kEntityHostileSplash,
+                                          gen::sound::kEntityAxolotlSplash};
+        static_assert(gp::kSplashGeneric == 0 && gp::kSplashHostile == 1 && gp::kSplashAxolotl == 2);
+        const gp::EntityPhysics& how = gp::kEntity[ents_.type[row]];
+        const entity::Cold* cold = ents_.cold(row);
+        const bool silent = cold && (cold->bits & entity::cold::kSilent);  // Entity.playSound: "if (!isSilent())"
+        const auto splash = [&](const double at[3]) {
+            if (silent) return;
+            play_sound(kSplash[how.splash], how.sound_source, at[0], at[1], at[2], b.splash_volume,
+                       1.0f + (random_float() - random_float()) * 0.4f);
+        };
+        const double now[3] = {ents_.x[row], ents_.y[row], ents_.z[row]};
+        if (b.splashed == phys::kSplashedBefore) splash(before);
+        if (b.splashed == phys::kSplashedAfter && living) splash(now);
+        if (b.extinguished)  // (this one asks nobody whether it is silent)
+            play_sound(gen::sound::kEntityGenericExtinguishFire, how.sound_source, now[0], now[1], now[2], 0.7f,
+                       1.6f + (random_float() - random_float()) * 0.4f);
+        if (b.splashed == phys::kSplashedAfter && !living) splash(now);
+    }
+    b.burned = b.extinguished = false, b.splashed = 0, b.splash_volume = 0, b.lava_hurts = 0;
     ents_.set_shared_flag(row, entity::shared_flag::kOnFire, b.shows_fire);
-    return hurt;
+    return burnt;
 }
 
 // Entity.remainingFireTicks: of what ticks, its body's; of what does not, what its tag said.
@@ -200,6 +226,7 @@ void Game::tick_living(u32 slot, u32 row) {
     Mover& mv = movers_[slot];
     phys::Motion m = motion_of(row);
     phys::World w = phys_world();
+    const double before[3] = {m.pos[0], m.pos[1], m.pos[2]};
     // Standing still already? Then what it was is kept, to see whether this tick changes any of it.
     const bool still = mv.body.on_ground && m.vel[0] == 0 && m.vel[2] == 0;
     phys::Motion motion_before;
@@ -210,8 +237,8 @@ void Game::tick_living(u32 slot, u32 row) {
         return;
     }
     const bool same = still && phys::same_state(motion_before, body_before, m, mv.body);
-    took_fire(row, mv.body);  // (what burns, burns on: nothing takes damage)
     store_motion(row, m, mv.body);
+    took_fire(row, mv.body, before, true);  // (what burns, burns on: nothing takes damage)
     move_in_push_grid(slot, m.pos[0], m.pos[2]);
     // ArmorStand.pushEntities: minecarts only.
     const bool pushed = mv.kind == gp::kMoverLiving && push_entities(row, kind.width, kind.height);

@@ -20,6 +20,7 @@
 #include "server/game.hpp"
 
 #include PROTO_GEN_PHYSICS_HPP
+#include PROTO_GEN_STATIC_IDS_HPP
 
 namespace server {
 
@@ -156,10 +157,21 @@ void Game::tick_item(u32 slot, u32 row) {
     move_item_cell(slot, ox, oz);
     // ItemEntity.hurtServer, for what the tick says of fire: a tick of burning takes one point of
     // its five (Entity.baseTick), each cell of lava it was in four (Entity.lavaHurt) - and with
-    // none left it is gone, as it would be in the middle of vanilla's tick.
-    if (const u32 hurt = took_fire(row, body); UNLIKELY(hurt != 0)) {
-        i8& health = item_health_[k];
-        health = static_cast<i8>(std::max<i32>(static_cast<i32>(health) - static_cast<i32>(std::min<u32>(hurt, 100u)), -100));
+    // none left it is gone, as it would be in the middle of vanilla's tick, the rest of which
+    // does not reach it. Lava that hurts is heard (ItemEntity.shouldPlayLavaHurtSound: as it
+    // burns up, and every tenth tick of its life).
+    const double began[3] = {ox, oy, oz};
+    if (const Burnt burnt = took_fire(row, body, began, false); UNLIKELY(burnt.burned || burnt.lava != 0)) {
+        i32 health = item_health_[k] - (burnt.burned ? 1 : 0);
+        const entity::Cold* cold = ents_.cold(row);
+        const bool silent = cold && (cold->bits & entity::cold::kSilent);
+        for (u32 i = 0; i < burnt.lava && health > 0; ++i) {
+            health -= 4;
+            if ((health <= 0 || tick_count % 10 == 0) && !silent)
+                play_sound(gen::sound::kEntityGenericBurn, proto::gen::physics::kEntity[entity_type::kItem].sound_source,
+                           m.pos[0], m.pos[1], m.pos[2], 0.4f, 2.0f + random_float() * 0.4f);
+        }
+        item_health_[k] = static_cast<i8>(std::max(health, -100));
         ents_.flags[row] |= entity::flag::kSyncVelocity;  // markHurt
         if (health <= 0) return remove_item(slot);
     }

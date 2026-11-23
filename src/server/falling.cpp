@@ -95,7 +95,7 @@ void Game::tick_falling(u32 slot, u32 row) {
     const double from[3] = {m.pos[0], m.pos[1], m.pos[2]};  // xo, yo, zo
     phys::World w = phys_world();
     phys::falling_move(w, m, body);
-    took_fire(row, body);  // (lava lights it and nobody sees: it has no base tick, and is gone when it lands)
+    took_fire(row, body, from, false);  // (lava lights it and nobody sees: it has no base tick, and is gone when it lands)
 
     BlockPos pos{floor_int(m.pos[0]), floor_int(m.pos[1]), floor_int(m.pos[2])};  // blockPosition()
     const bool concrete = info.kind == block_kind::kConcretePowder;

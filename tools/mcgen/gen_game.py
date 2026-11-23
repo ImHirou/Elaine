@@ -285,7 +285,9 @@ SOUNDS = ["block.chest.open", "block.chest.close", "entity.tnt.primed", "entity.
           "block.copper_chest.close", "block.copper_chest_weathered.open", "block.copper_chest_weathered.close",
           "block.copper_chest_oxidized.open", "block.copper_chest_oxidized.close", "block.chest.locked",
           "item.dye.use", "item.ink_sac.use", "item.glow_ink_sac.use", "item.honeycomb.wax_on",
-          "block.sign.waxed_interact_fail"]
+          "block.sign.waxed_interact_fail",
+          "entity.generic.splash", "entity.hostile.splash", "entity.axolotl.splash", "entity.generic.extinguish_fire",
+          "entity.generic.burn", "item.bucket.fill", "item.bucket.empty", "item.bucket.fill_lava", "item.bucket.empty_lava"]
 PARTICLES = ["explosion", "explosion_emitter", "poof", "smoke"]
 
 

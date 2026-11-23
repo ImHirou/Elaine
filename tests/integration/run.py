@@ -3417,6 +3417,37 @@ def placed_in_water():
         shutil.rmtree(world, ignore_errors=True)
 
 
+@test()
+def imported_water_flows_on():
+    """A vanilla world saved in the middle of a flow: the chunk's `fluid_ticks` are read with it
+    (SavedTick: the fluid, where, the ticks until it is due), so the source that was about to
+    spread spreads - that many ticks after its chunk ticks again - and one that nothing was
+    scheduled for stands as it stood. (A tick of a fluid this server does not know, or outside
+    the world, and the list is kept as the tag it is: nothing of it runs, nothing is lost.)"""
+    world = tempfile.mkdtemp(prefix="world-ticks-")
+    srv = None
+    try:
+        due, still = (12, -60, 12), (4, -60, 5)
+        anvil_world(world, extra={(12, 4, 12): "minecraft:water", (4, 4, 5): "minecraft:water"},
+                    fluid_ticks=[{"i": "minecraft:water", "x": 12, "y": -60, "z": 12, "t": 150, "p": 0},
+                                 {"i": "minecraft:water", "x": 40, "y": -60, "z": 12, "t": 1, "p": 0}])      # (another chunk's: passed over)
+        srv = Server(EXE, world=world, start_timeout=30)
+        c = srv.client()
+        join(c, "Alice", view=2)
+        c.send("player_loaded")
+        water = mc.BLOCK["kWater"]
+        got = run_command(c, "list", ticks=175)["blocks"]       # 150 ticks, and five steps of water after them
+        assert {pos: got.get(pos) for pos in ring(due, 1)} == {pos: water + 1 for pos in ring(due, 1)}, got
+        assert {pos: got.get(pos) for pos in ring(due, 4)} == {pos: water + 4 for pos in ring(due, 4)}, got
+        assert not any(pos in got for pos in ring(still, 1)), got
+        assert srv.stop() == 0, srv.read_log()
+        os.unlink(srv.log.name)
+    finally:
+        if srv:
+            srv.stop()
+        shutil.rmtree(world, ignore_errors=True)
+
+
 # ----------------------------------------------------------------------------- fluids
 
 def step_game(c: Client, ticks: int) -> dict:
@@ -3670,7 +3701,7 @@ def afloat(srv: Server):
     that does moves every fourth tick, and which is its entity id's to say.) Then a pig: in lava
     it burns, for everyone to see, and lives (nothing takes damage here); in water it is put out."""
     a = wet_start(srv)
-    got = run_command(a, "tp -992.5 -60 1008.5", ticks=40)
+    got = run_command(a, "tp -996.5 -45 1004.5", ticks=40)      # in the air between the fixtures: within hearing of each
     assert len(got["teleports"]) == 1, got
     item = '{Item:{id:"minecraft:stone",count:1},PickupDelay:32767s}'
     ITEM_POS, ITEM_MOTION = [-1000.7, -45.36049717167888, 992.6], [0.0, 0.01720995705604936, 0.0]     # after sixty ticks
@@ -3712,8 +3743,13 @@ def afloat(srv: Server):
     step_game(a, 1)
     assert data("@e[type=item,limit=1]", "Pos") == [-992.5, -44.312553350325814, 1016.5]
     assert (data("@e[type=item,limit=1]", "Fire"), data("@e[type=item,limit=1]", "Health")) == ([300], [1])
+    assert not a.sounds                     # (lava that hurts an item is heard as it burns up, and every tenth tick of its life)
     step_game(a, 1)
     assert not of_type(a, "kItem")
+    AMBIENT, NEUTRAL = 8, 6                 # SoundSource: an item's sounds, a pig's
+    assert [(s[0], s[1]) for s in a.sounds] == [(mc.SOUND["kEntityGenericBurn"], AMBIENT)], a.sounds
+    assert abs(a.sounds[0][3] - 0.4) < 1e-6 and 2.0 <= a.sounds[0][4] <= 2.4 and abs(a.sounds[0][2][1] - -44.5) < 0.2, a.sounds
+    a.sounds.clear()
     assert run_command(a, "data get entity @e[type=item,limit=1]")["said"] == [failure(tr("argument.entity.notfound.entity"))]
     # ...but not what is of netherite (ItemStack.canBeHurtBy: its damage_resistant): it floats.
     run_command(a, 'summon item -992.5 -43.5 1016.5 {Item:{id:"minecraft:netherite_ingot",count:1},PickupDelay:32767s}')
@@ -3728,9 +3764,14 @@ def afloat(srv: Server):
     assert pig.data[D_FLAGS] == (BYTE, 0x01) and data("@e[type=pig,limit=1]", "Fire") == [300], pig.data
     step_game(a, 40)
     assert data("@e[type=pig,limit=1]", "Fire") == [300] and of_type(a, "kPig")
+    assert not a.sounds
     run_command(a, "tp @e[type=pig] -1000.5 -44.5 992.5")
     step_game(a, 2)
     assert data("@e[type=pig,limit=1]", "Fire") == [0] and pig.data[D_FLAGS] == (BYTE, 0), pig.data
+    # ...with a splash as it finds itself in it, and the hiss of its fire.
+    assert [(s[0], s[1]) for s in a.sounds] == [(mc.SOUND["kEntityGenericSplash"], NEUTRAL),
+                                                (mc.SOUND["kEntityGenericExtinguishFire"], NEUTRAL)], a.sounds
+    assert abs(a.sounds[1][3] - 0.7) < 1e-6 and 1.2 <= a.sounds[1][4] <= 2.0, a.sounds
 
 
 @test()
@@ -6368,7 +6409,8 @@ def anvil_container(palette: list, indices: list, least_bits: int) -> dict:
 
 
 def anvil_chunk(cx: int, cz: int, blocks: dict | None = None, block_entities: list | None = None, biomes=None,
-                status: str = "minecraft:full", ground: str = "minecraft:sandstone", light: dict | None = None) -> dict:
+                status: str = "minecraft:full", ground: str = "minecraft:sandstone", light: dict | None = None,
+                fluid_ticks: list | None = None) -> dict:
     """A chunk of flat ground (bedrock, three of `ground`) with `blocks` {(x, y, z): state} in its
     lowest section - coordinates in the chunk, y from the bottom of the world; a state is a block's
     name, or {id, properties}. `light`: {"sky"/"block": {section Y: bytes}} makes it a lit chunk."""
@@ -6391,6 +6433,8 @@ def anvil_chunk(cx: int, cz: int, blocks: dict | None = None, block_entities: li
              "block_entities": block_entities or [], "structures": {"References": {}, "starts": {}}, "Heightmaps": {}}
     if light:
         chunk["isLightOn"] = mc.Byte(1)
+    if fluid_ticks is not None:     # SavedTick.codec: the fluid by name, where, the ticks until it is due, its priority
+        chunk["fluid_ticks"] = fluid_ticks
     return chunk
 
 
@@ -6411,10 +6455,11 @@ def anvil_region(path: str, chunks: dict) -> None:
         f.write(header + body)
 
 
-def anvil_world(path: str, extra: dict | None = None) -> dict:
+def anvil_world(path: str, extra: dict | None = None, fluid_ticks: list | None = None) -> dict:
     """The world: nine chunks of a flat desert around the origin's north-east, with things in the
-    first (and `extra`: more of them, {(x, y, z): state}); one chunk in the region across the
-    origin; one that vanilla had not finished."""
+    first (and `extra`: more of them, {(x, y, z): state}; `fluid_ticks`: the ticks of its fluids
+    that were scheduled when it was saved); one chunk in the region across the origin; one that
+    vanilla had not finished."""
     import gzip
     version = mc.META["world_version"]
     os.makedirs(os.path.join(path, "data", "minecraft"))
@@ -6466,7 +6511,7 @@ def anvil_world(path: str, extra: dict | None = None) -> dict:
     # A chunk that says its light is right: it is believed. (No server would compute this light.)
     odd_light = {"sky": {-4: bytes([0x00] * 512 + [0xFF] * 1536), -3: bytes([0xFF] * 2048)}, "block": {-4: bytes([0x55] * 2048)}}
     region = {(x, z): anvil_chunk(x, z) for x in range(3) for z in range(3)}
-    region[(0, 0)] = anvil_chunk(0, 0, things, block_entities, two_biomes)
+    region[(0, 0)] = anvil_chunk(0, 0, things, block_entities, two_biomes, fluid_ticks=fluid_ticks)
     region[(2, 2)] = anvil_chunk(2, 2, light=odd_light)
     region[(3, 3)] = anvil_chunk(3, 3, status="minecraft:features", ground="minecraft:stone")
     overworld = os.path.join(path, "dimensions", "minecraft", "overworld")

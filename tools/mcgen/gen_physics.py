@@ -69,31 +69,37 @@ MOVE_METHODS = ("travel", "getDefaultGravity", "maxUpStep", "move", "omnidirecti
                 "makeBoundingBox", "jumpFromGround", "getJumpPower", "checkFallDamage", "getFlyingSpeed", "isAffectedByFluids",
                 # ...and in a fluid
                 "isPushedByFluid", "travelInFluid", "travelInWater", "travelInLava", "getWaterSlowDown", "canStandOnFluid",
-                "getFluidJumpThreshold", "getLiquidCollisionShape", "updateFluidInteraction", "jumpInLiquid")
+                "getFluidJumpThreshold", "getLiquidCollisionShape", "updateFluidInteraction", "jumpInLiquid",
+                # ...and what is heard of it there
+                "getSwimSplashSound", "getSwimHighSpeedSplashSound", "getSoundSource", "doWaterSplashEffect",
+                "shouldPlayLavaHurtSound", "playEntityOnFireExtinguishedSound")
 LIVING_DECLARES = {
-    "AbstractCubeMob": {"jumpFromGround", "push"}, "AbstractFish": {"travelInWater"},
+    "AbstractCubeMob": {"getSoundSource", "jumpFromGround", "push"}, "AbstractFish": {"travelInWater"},
     "AbstractHorse": {"isImmobile", "isPushable", "onClimbable"}, "AbstractNautilus": {"isPushedByFluid", "travelInWater"},
     "AgeableWaterCreature": {"isPushedByFluid"},
     "Allay": {"checkFallDamage", "travel"}, "ArmorStand": {"doPush", "isEffectiveAi", "isPushable", "pushEntities", "travel"},
-    "Axolotl": {"isPushedByFluid", "travelInWater"},
+    "Axolotl": {"getSwimSplashSound", "isPushedByFluid", "travelInWater"},
     "Bat": {"checkFallDamage", "doPush", "isPushable", "pushEntities"},
     "Bee": {"checkFallDamage", "jumpInLiquid", "omnidirectionalAirMover"}, "Breeze": {"getFluidJumpThreshold"},
-    "Camel": {"travel"}, "Creaking": {"isPushable", "push"}, "Dolphin": {"travelInWater"},
+    "Camel": {"travel"}, "Creaking": {"isPushable", "push"}, "Dolphin": {"getSwimSplashSound", "travelInWater"},
+    "EnderDragon": {"getSoundSource"},
     "Drowned": {"isPushedByFluid", "travelInWater"}, "Fox": {"isImmobile"}, "Frog": {"isPushedByFluid", "travelInWater"},
-    "Ghast": {"checkFallDamage", "onClimbable", "travel"}, "Guardian": {"travelInWater"},
-    "HappyGhast": {"checkFallDamage", "onClimbable", "travel"},
+    "Ghast": {"checkFallDamage", "getSoundSource", "onClimbable", "travel"}, "Guardian": {"travelInWater"},
+    "HappyGhast": {"checkFallDamage", "getSoundSource", "onClimbable", "travel"}, "Hoglin": {"getSoundSource", "getSwimSplashSound"},
     "IronGolem": {"doPush"}, "Llama": {"isImmobile"}, "MagmaCube": {"jumpFromGround", "jumpInLiquid"},
     "Mannequin": {"isEffectiveAi", "isImmobile"},
-    "Mob": {"isEffectiveAi", "jumpInLiquid"}, "Parrot": {"checkFallDamage", "doPush", "isPushable", "omnidirectionalAirMover"},
-    "Phantom": {"checkFallDamage", "onClimbable", "travel"},
-    "Player": {"getBlockSpeedFactor", "getFlyingSpeed", "isAffectedByFluids", "isEffectiveAi", "isImmobile", "isPushedByFluid",
-               "onClimbable", "travel"},
+    "Mob": {"isEffectiveAi", "jumpInLiquid"}, "Monster": {"getSoundSource", "getSwimSplashSound"},
+    "Parrot": {"checkFallDamage", "doPush", "getSoundSource", "isPushable", "omnidirectionalAirMover"},
+    "Phantom": {"checkFallDamage", "getSoundSource", "onClimbable", "travel"},
+    "Player": {"doWaterSplashEffect", "getBlockSpeedFactor", "getFlyingSpeed", "getSoundSource", "getSwimHighSpeedSplashSound",
+               "getSwimSplashSound", "isAffectedByFluids", "isEffectiveAi", "isImmobile", "isPushedByFluid", "onClimbable", "travel"},
     "PolarBear": {"getWaterSlowDown"},
-    "Rabbit": {"getJumpPower", "jumpFromGround"}, "Ravager": {"isImmobile"}, "Shulker": {"makeBoundingBox", "move", "push"},
+    "Rabbit": {"getJumpPower", "getSoundSource", "jumpFromGround"}, "Ravager": {"isImmobile"},
+    "Shulker": {"getSoundSource", "makeBoundingBox", "move", "push"},
     "SkeletonHorse": {"getWaterSlowDown"},
     "Sniffer": {"jumpFromGround"}, "Spider": {"onClimbable"}, "Squid": {"getDefaultGravity", "travel"},
     "Strider": {"canStandOnFluid", "checkFallDamage", "getLiquidCollisionShape"},
-    "SulfurCube": {"doPush", "getFluidJumpThreshold", "maxUpStep", "omnidirectionalAirMover", "travelInFluid"},
+    "SulfurCube": {"doPush", "getFluidJumpThreshold", "getSoundSource", "maxUpStep", "omnidirectionalAirMover", "travelInFluid"},
     "Turtle": {"isPushedByFluid", "travelInWater"}, "Warden": {"doPush", "isPushable"}, "WaterAnimal": {"isPushedByFluid"},
 }
 # What the classes that are moved here say of a fluid themselves (each read in the jar):
@@ -119,6 +125,13 @@ WATER_TRAVELS = ["kWaterDefault", "kWaterGlide"]
 # The recording shows them (physics_probe.py: fluid_frog_*, fluid_nautilus_pool, fluid_drowned_*).
 MOVE_CONTROL = {"Frog": (0.005, 0.0), "AbstractNautilus": (0.005, 0.0), "Drowned": (0.0, -0.008)}
 WATER_SLOW_DOWN = {"PolarBear": 0.98, "SkeletonHorse": 0.96}
+# What is heard of it: the splash as it goes into water (getSwimSplashSound; the one at high speed is a player's
+# alone), and among which sounds a client counts it (getSoundSource: SoundSource by ordinal - NEUTRAL, but what is
+# hostile; an item is AMBIENT, a rabbit HOSTILE only as the killer rabbit, a variant nothing here is).
+SPLASHES = ["kSplashGeneric", "kSplashHostile", "kSplashAxolotl"]     # entity.generic.splash, entity.hostile.splash, entity.axolotl.splash
+SPLASH = {"Monster": "kSplashHostile", "Hoglin": "kSplashHostile", "Axolotl": "kSplashAxolotl"}
+SOUND_SOURCE = {"Monster": 5, "Hoglin": 5, "AbstractCubeMob": 5, "ItemEntity": 8}
+SOUND_AS_ENTITY = {"Rabbit"}
 EYE_HIGH_JUMP_THRESHOLD = {"Breeze"}
 FLUID_AS_LIVING = {"Drowned", "MagmaCube", "Mob", "Bee"}   # (declare one of the fluid methods, and move as LivingEntity does)
 # Classes that move in a way of their own - by one of the methods above, or by writing their
@@ -421,7 +434,8 @@ struct Shape {
         if mover in ("kMoverLiving", "kMoverArmorStand"):
             for c in chain:
                 if declared.get(c, set()) & fluid_methods and c not in (
-                        NOT_PUSHED_BY_FLUID | set(WATER_TRAVEL) | set(WATER_SLOW_DOWN) | EYE_HIGH_JUMP_THRESHOLD | FLUID_AS_LIVING):
+                        NOT_PUSHED_BY_FLUID | set(WATER_TRAVEL) | set(WATER_SLOW_DOWN) | EYE_HIGH_JUMP_THRESHOLD | FLUID_AS_LIVING |
+                        set(SPLASH) | set(SOUND_SOURCE) | SOUND_AS_ENTITY):
                     die(f"{name}: {c} declares {sorted(declared[c] & fluid_methods)}, and the port has no word for it")
         eye = t.get("eye_height")
         if not isinstance(eye, (int, float)) or not isinstance(t.get("fire_immune"), bool):
@@ -431,15 +445,20 @@ struct Shape {
         # Entity.getFluidJumpThreshold: (double) eyeHeight >= 0.4 ? 0.4 : 0.0 - Breeze's: its eye height
         threshold = float(eye) if set(chain) & EYE_HIGH_JUMP_THRESHOLD else (0.4 if float(eye) >= 0.4 else 0.0)
         control = next((MOVE_CONTROL[c] for c in chain if c in MOVE_CONTROL), (0.0, 0.0))
+        splash = next((SPLASH[c] for c in chain if c in SPLASH), "kSplashGeneric")
+        source = next((SOUND_SOURCE[c] for c in chain if c in SOUND_SOURCE), 6)
         rows[entity_ids[name.split(":", 1)[1]]] = (name, mover, gravity, step, bool(set(chain) & CLIENT_SIMULATED),
                                                    t["fire_immune"], not (set(chain) & NOT_PUSHED_BY_FLUID), water, slow, threshold,
-                                                   control)
+                                                   control, splash, source)
     if sorted(rows) != list(range(len(entity_ids))):
         die("gamedata/entities.json does not list every entity type")
     o.append("""
 // ---- how an entity type moves
 """)
     for i, name in enumerate(MOVERS):
+        o.append(f"inline constexpr unsigned char {name} = {i};\n")
+    o.append("// Entity.getSwimSplashSound (gen_physics.SPLASH)\n")
+    for i, name in enumerate(SPLASHES):
         o.append(f"inline constexpr unsigned char {name} = {i};\n")
     o.append("// LivingEntity.travelInWater, and the classes that have one of their own (gen_physics.WATER_TRAVEL)\n")
     for i, name in enumerate(WATER_TRAVELS):
@@ -458,14 +477,18 @@ struct Shape {
     // What its MoveControl adds to its vertical velocity every tick, before it travels:
     double control_in_water;    // ...while it is in water (a frog floats up)
     double control_off_ground;  // ...while it is not on the ground (a drowned sinks, and falls faster)
+    // ---- what is heard of it
+    unsigned char splash;        // kSplash*: Entity.getSwimSplashSound()
+    unsigned char sound_source;  // Entity.getSoundSource(): a SoundSource, by ordinal
 };
 """)
     o.append(f"inline constexpr EntityPhysics kEntity[entity_type::kCount] = {{\n")
     for i in range(len(rows)):
-        name, mover, gravity, step, simulated, fire_immune, pushed, water, slow, threshold, control = rows[i]
+        name, mover, gravity, step, simulated, fire_immune, pushed, water, slow, threshold, control, splash, source = rows[i]
         o.append(f"    {{{mover}, {'true' if simulated else 'false'}, {cfloat32(step)}, {cdouble(gravity)}, "
                  f"{'true' if fire_immune else 'false'}, {'true' if pushed else 'false'}, {water}, {cfloat32(slow)}, "
-                 f"{cdouble(threshold)}, {cdouble(control[0])}, {cdouble(control[1])}}},  // {name.split(':', 1)[1]}\n")
+                 f"{cdouble(threshold)}, {cdouble(control[0])}, {cdouble(control[1])}, {splash}, {source}}},  "
+                 f"// {name.split(':', 1)[1]}\n")
     o.append("};\n\n}  // namespace proto::gen::physics\n")
     stats = {"materials": len(materials), "shapes_grid": sum(k == 3 for k in kinds),
              "movers": sum(r[1] != "kMoverNone" for r in rows.values())}

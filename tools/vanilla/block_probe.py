@@ -38,8 +38,9 @@ soul soil beside blue ice - obsidian, cobblestone, stone and basalt, each with i
 in its way. Then the water in blocks that hold it: a wet slab leaking to its sides, a wet top
 slab leaking downwards, stairs between two sources, a wet lantern whose floor goes. Then the
 sponge: set into spread water, set dry with water beside it, set beside a wet slab. Then what is
-afloat: an item set into a pool, into a channel that carries it, into lava - where it burns, or,
-being of netherite, floats - and every move of it that the bots are told. Last, TNT on five sides
+afloat: an item set into a pool, into a channel that carries it, dropped into the pool - a
+splash, and the hiss of one that burned - into lava, where it burns up or, being of netherite,
+floats: every move of it that the bots are told, and what they hear. Last, TNT on five sides
 of a block of redstone.
 
 `vanilla` starts the reference server under the rules in AGENTS.md (from .cache/vanilla-server/,
@@ -657,9 +658,9 @@ def record(port: int, out_path: str, name_a: str, name_b: str, random_ticks, con
         at = place(26)
         floor(at)
 
-        def summon(pos: tuple, up: float, stack: str = "minecraft:stone") -> None:
+        def summon(pos: tuple, up: float, stack: str = "minecraft:stone", more: str = "") -> None:
             console(f"summon minecraft:item {pos[0] + 0.5} {pos[1] + up} {pos[2] + 0.5} "
-                    f'{{Item:{{id:"{stack}",count:1}},PickupDelay:32767s}}')
+                    f'{{Item:{{id:"{stack}",count:1}},PickupDelay:32767s{more}}}')
 
         step("the console builds a pool, a channel with water run out in it, and a pit of lava", ticks=40, action=lambda: (
             fill(at(-7, 1, 6), at(-3, 2, 10), "minecraft:stone"), fill(at(-6, 1, 7), at(-4, 2, 9), "minecraft:water"),
@@ -668,6 +669,9 @@ def record(port: int, out_path: str, name_a: str, name_b: str, random_ticks, con
             fill(at(-7, 1, 13), at(-3, 2, 17), "minecraft:stone"), fill(at(-6, 1, 14), at(-4, 2, 16), "minecraft:lava")))
         step("an item on the bottom of the pool: it floats up", lambda: summon(at(-5, 1, 8), 0.0), ticks=50, follow=True)
         step("an item in the channel: the water carries it", lambda: summon(at(0, 1, 7), 0.3), ticks=28, follow=True)
+        step("an item falls into the pool: a splash", lambda: summon(at(-5, 1, 8), 4.0), ticks=13, follow=True)
+        step("a burning item falls into the pool: its fire is out, with a hiss", ticks=13, follow=True,
+             action=lambda: (console("kill @e[type=minecraft:item]"), summon(at(-5, 1, 8), 4.0, more=",Fire:200s")))
         step("an item over the lava: it falls in and burns", lambda: summon(at(-5, 1, 15), 2.5), ticks=12, follow=True)
         step("an ingot of netherite in the lava: it sinks, and floats up", ticks=60, follow=True,
              action=lambda: summon(at(-5, 1, 15), 1.2, "minecraft:netherite_ingot"))

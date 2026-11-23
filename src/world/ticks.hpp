@@ -73,6 +73,19 @@ struct ChunkTicks {
 // many types and this height - or nothing at all. What a worker asks before it hands a chunk on.
 bool ticks_valid(std::span<const u8> bytes, u32 types, u32 height);
 
+// A tick as a chunk is saved with it, from somewhere else than a world: an imported chunk's
+// (SavedTick: what, where in the chunk, the game ticks until it is due, its priority).
+struct SavedTick {
+    u32 type;
+    u8 x, z;  // in the chunk
+    u32 y;    // from the bottom of the world
+    i32 delay;
+    i8 priority;
+};
+// ...and a chunk's worth of them in the form LevelTicks::write gives, appended to `out`: in the
+// order they are handed in, which is the order they will run in where nothing else decides.
+void write_saved_ticks(std::span<const SavedTick> ticks, base::ByteBuf& out);
+
 class LevelTicks {
   public:
     struct Due {

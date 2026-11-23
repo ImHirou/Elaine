@@ -101,7 +101,7 @@ void Game::tick_tnt(u32 slot, u32 row) {
     phys::Motion m = motion_of(row);
     phys::World w = phys_world();
     phys::tnt_tick(w, m, body);
-    took_fire(row, body);  // (it is immune to fire, and has no base tick: nothing to take)
+    took_fire(row, body, m.pos, false);  // (it is immune to fire, and has no base tick: nothing to take)
     // setRequiresPrecisePosition(horizontalCollision || verticalCollision): while it touches a
     // block its viewers get its exact position, not steps of 1/4096.
     const bool touching = body.horizontal_collision || body.vertical_collision;

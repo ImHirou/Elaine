@@ -122,7 +122,7 @@ ALWAYS_INLINE void normalize(double v[3]) {
 // is), and the two currents each give it a push (CurrentAccumulator.applyTo): of a fixed size,
 // whatever the sum - but none for a sum of next to nothing, and one of 0.0045 at least for what
 // lies nearly still. True if any fluid was there.
-bool update_fluids(World& w, const Kind& k, Motion& m, Body& b) {
+bool update_fluids(World& w, const Kind& k, Motion& m, Body& b, u8 when = kSplashedAfter) {
     struct Current {
         double height = 0, sum[3] = {0, 0, 0};
         u32 count = 0;
@@ -162,7 +162,14 @@ bool update_fluids(World& w, const Kind& k, Motion& m, Body& b) {
     const bool in_water = b.water_height > 0;
     if (in_water) {
         b.fall_distance = 0;  // resetFallDistance
-        if (!b.in_water && !b.first_tick) b.splashed = true;
+        if (!b.in_water && !b.first_tick) {
+            // doWaterSplashEffect: as loud as it is fast (nothing here is ridden).
+            b.splashed = when;
+            b.splash_volume =
+                std::min(1.0f, static_cast<float>(std::sqrt(m.vel[0] * m.vel[0] * 0.20000000298023224 + m.vel[1] * m.vel[1] +
+                                                            m.vel[2] * m.vel[2] * 0.20000000298023224)) *
+                                   0.2f);
+        }
     }
     b.in_water = in_water;
     if (!k.pushed_by_fluid || !any) return any;
@@ -193,7 +200,7 @@ ALWAYS_INLINE bool in_lava(const Body& b) { return !b.first_tick && b.lava_heigh
 // currents), the fire it is on, half the fall gone in lava, out of the world, and the first tick
 // over.
 ALWAYS_INLINE Fate base_tick(World& w, const Kind& k, Motion& m, Body& b) {
-    update_fluids(w, k, m, b);
+    update_fluids(w, k, m, b, kSplashedBefore);
     if (UNLIKELY(b.fire_ticks > 0)) {
         if (b.fire_immune) {
             b.fire_ticks = 0;  // clearFire
@@ -901,9 +908,9 @@ bool same_state(const Motion& a, const Body& x, const Motion& b, const Body& y) 
         x.moves != y.moves || x.finals != y.finals)
         return false;
     if (x.in_water != y.in_water || x.first_tick != y.first_tick || x.splashed != y.splashed ||
-        !same_bits(x.water_height, y.water_height) || !same_bits(x.lava_height, y.lava_height) || x.fire_ticks != y.fire_ticks ||
-        x.fire_immune != y.fire_immune || x.shows_fire != y.shows_fire || x.burned != y.burned ||
-        x.extinguished != y.extinguished || x.lava_hurts != y.lava_hurts)
+        x.splash_volume != y.splash_volume || !same_bits(x.water_height, y.water_height) ||
+        !same_bits(x.lava_height, y.lava_height) || x.fire_ticks != y.fire_ticks || x.fire_immune != y.fire_immune ||
+        x.shows_fire != y.shows_fire || x.burned != y.burned || x.extinguished != y.extinguished || x.lava_hurts != y.lava_hurts)
         return false;
     if (x.has_support && (x.support[0] != y.support[0] || x.support[1] != y.support[1] || x.support[2] != y.support[2]))
         return false;

@@ -382,7 +382,11 @@ class Game {
     static constexpr u8 kMoverEmptyItem = 0xFF;
     void start_ticking(u32 slot, u8 mover);
     phys::World phys_world();
-    u32 took_fire(u32 row, phys::Body& b);
+    struct Burnt {
+        bool burned;  // a tick of burning took a point (Entity.baseTick)
+        u32 lava;     // Entity.lavaHurt: once for each cell of lava it was in
+    };
+    Burnt took_fire(u32 row, phys::Body& b, const double before[3], bool living);
     i32 fire_of(u32 row) const;
     void stop_ticking(u32 slot);
     void tick_entities();

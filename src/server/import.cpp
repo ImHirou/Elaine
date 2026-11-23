@@ -19,6 +19,7 @@
 #include "world/block.hpp"
 #include "world/chunk_io.hpp"
 #include "world/region.hpp"
+#include "world/ticks.hpp"
 
 #include PROTO_GEN_DIMENSION_TYPES_HPP
 #include PROTO_GEN_STATIC_IDS_HPP
@@ -387,6 +388,32 @@ void put_u32(base::ByteBuf& out, u32 v) {
 
 }  // namespace
 
+// A vanilla chunk's `fluid_ticks` as ours (SavedTick.codec: `i` the fluid by name, `x` `y` `z`,
+// `t` the game ticks until it is due, `p` its priority): the fluids are ported, so water that
+// vanilla saved in the middle of its flow goes on flowing. A tick that lies in another chunk is
+// passed over, as vanilla passes it over (SavedTick.filterTickListForChunk). False - and nothing
+// taken - if the list holds anything this server cannot make its own: then it is kept as it is.
+static bool convert_fluid_ticks(nbt::Tag list, i32 cx, i32 cz, const world::Layout& l, base::ByteBuf& out) {
+    std::vector<world::SavedTick> ticks;
+    for (const nbt::Tag e : list.elements()) {
+        if (e.type != nbt::kCompound) return false;
+        const std::string_view name = text(e.get("i"));
+        u32 type = 0;
+        for (u32 f = 1; f < world::fluid::kCount; ++f)  // (not the empty one: nothing ticks it)
+            if (name == world::fluid::kNames[f]) type = f;
+        const nbt::Tag x = e.get("x"), y = e.get("y"), z = e.get("z"), delay = e.get("t"), priority = e.get("p");
+        if (!type || !x.numeric() || !y.numeric() || !z.numeric() || !delay.numeric() || !priority.numeric()) return false;
+        if (priority.as_int() < world::kTickPriorityMin || priority.as_int() > world::kTickPriorityMax) return false;
+        if (x.as_int() >> 4 != cx || z.as_int() >> 4 != cz) continue;
+        const i32 up = y.as_int() - l.min_y;
+        if (up < 0 || up >= static_cast<i32>(l.sections * 16)) return false;
+        ticks.push_back({type, static_cast<u8>(x.as_int() & 15), static_cast<u8>(z.as_int() & 15), static_cast<u32>(up),
+                         delay.as_int(), static_cast<i8>(priority.as_int())});
+    }
+    world::write_saved_ticks(ticks, out);
+    return true;
+}
+
 bool import_chunk(nbt::Doc& terrain_doc, nbt::Doc& entities_doc, i32 cx, i32 cz, const world::Layout& l, base::ByteBuf& out,
                   ImportStats& stats, std::string& err) {
     const nbt::Tag terrain = terrain_doc.root(), entity_root = entities_doc.root();
@@ -405,15 +432,19 @@ bool import_chunk(nbt::Doc& terrain_doc, nbt::Doc& entities_doc, i32 cx, i32 cz,
     static constexpr std::string_view kRead[] = {"DataVersion", "Status",         "xPos",       "yPos",     "zPos",
                                                  "sections",    "block_entities", "Heightmaps", "isLightOn"};
     const bool full = terrain.type == nbt::kCompound && text(terrain.get("Status")) == "minecraft:full";
-    base::ByteBuf kept, other, tags;
+    base::ByteBuf kept, other, tags, fluid_ticks;
     u32 entities = 0;
+    bool fluid_ticks_read = false;
     if (full) {
+        if (const nbt::Tag list = terrain.get("fluid_ticks"); list.type == nbt::kList)
+            fluid_ticks_read = convert_fluid_ticks(list, cx, cz, l, fluid_ticks);
         nbt::Writer w(other);
         w.root(nbt::kCompound);
         base::ByteBuf payload;
         u32 n = 0;
         for (const nbt::Tag e : terrain.entries()) {
             if (std::find(std::begin(kRead), std::end(kRead), e.name()) != std::end(kRead)) continue;
+            if (fluid_ticks_read && e.name() == "fluid_ticks") continue;
             payload.clear();
             terrain_doc.write(e, payload);
             w.put_raw(e.name(), e.type, {payload.data, payload.len});
@@ -491,7 +522,7 @@ bool import_chunk(nbt::Doc& terrain_doc, nbt::Doc& entities_doc, i32 cx, i32 cz,
         record::put_block_entities_head(block_entities, converted.count);
         block_entities.append(converted.records.data, converted.records.len);
     }
-    world::encode_chunk(c, {{block_entities.data, block_entities.len}, {}}, out);
+    world::encode_chunk(c, {{block_entities.data, block_entities.len}, {}, {}, {fluid_ticks.data, fluid_ticks.len}}, out);
     ++stats.chunks;
     return true;
 }

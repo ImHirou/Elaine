@@ -28,9 +28,11 @@
 //                    client is told that it is there, and it does nothing.
 //   entities         kept as their tags, with the chunk they were saved in. None is in the world:
 //                    there is no reader for an entity's saved form yet.
-//   the rest         every other entry of the chunk's tag (structures, ticks that were scheduled,
-//                    InhabitedTime...) is kept with the chunk. Heightmaps are not: they follow
-//                    from the blocks.
+//   fluid ticks      `fluid_ticks`, the scheduled ticks of water and lava: read, and due when
+//                    the chunk next ticks - what vanilla saved in the middle of its flow flows on.
+//   the rest         every other entry of the chunk's tag (structures, the scheduled ticks of
+//                    blocks, InhabitedTime...) is kept with the chunk. Heightmaps are not: they
+//                    follow from the blocks.
 // Nothing is dropped that a later export could not write back: what is not read is kept, and what
 // is neither is derived (world::KeptData):
 //

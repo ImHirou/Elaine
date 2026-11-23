@@ -1182,6 +1182,8 @@ namespace proto::gen::fluid {
     fl.append(f"inline constexpr unsigned kCount = {len(fluid_ids)};        // the fluids: the type of a scheduled fluid tick\n")
     for name in sorted(fluid_ids, key=fluid_ids.get):
         fl.append(f"inline constexpr unsigned char {ident(name)} = {fluid_ids[name]};\n")
+    fl.append("// ...by name, as a saved tick names its fluid\ninline constexpr const char* kNames[kCount] = {" +
+              ", ".join(f'"{name}"' for name in sorted(fluid_ids, key=fluid_ids.get)) + "};\n")
     fl.append(f"inline constexpr unsigned kStateCount = {len(fluid_states)};\n\n// kFlags[fluid state]\n")
     for name, why in FLUID_STATE_FLAGS:
         fl.append(f"inline constexpr unsigned char {name} = 0x{fsbit[name]:02X};  // {why}\n")

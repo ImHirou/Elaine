@@ -78,6 +78,8 @@ struct Motion {
     double vel[3];
 };
 
+inline constexpr u8 kSplashedBefore = 1, kSplashedAfter = 2;  // Body::splashed
+
 // One leg of what an entity moved in a tick (Entity.Movement), kept for the blocks it passed through.
 struct Movement {
     double from[3], to[3];
@@ -100,9 +102,13 @@ struct Body {
     bool needs_sync = false;     // Entity.needsSync: set here; whoever tells the viewers takes it
     bool sync_position = false;  // Entity.syncPosition (a bounce): the same
     // ---- in a fluid: EntityFluidInteraction as of the entity's last look around it
-    bool in_water = false;    // Entity.wasTouchingWater: isInWater()
-    bool first_tick = true;   // Entity.firstTick: until its first base tick is over (never, for what has none: TNT)
-    bool splashed = false;    // Entity.doWaterSplashEffect ran this tick: set here; whoever makes the sound takes it
+    bool in_water = false;   // Entity.wasTouchingWater: isInWater()
+    bool first_tick = true;  // Entity.firstTick: until its first base tick is over (never, for what has none: TNT)
+    // Entity.doWaterSplashEffect ran this tick - set here; whoever makes the sound takes it - and
+    // when: kSplashedBefore it moved (where the tick began), kSplashedAfter. With the sound's
+    // volume, which is made of the velocity it had at that moment.
+    u8 splashed = 0;
+    float splash_volume = 0;
     double water_height = 0;  // getFluidHeight(FluidTags.WATER): how far over its feet water stands
     double lava_height = 0;   // ...and lava. isInLava() is "not its first tick, and this is not nothing"
     // ---- fire: lit by the lava it is in, put out by water. What burning does to something that

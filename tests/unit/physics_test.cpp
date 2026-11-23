@@ -359,7 +359,7 @@ void replay(const std::vector<Scenario>& scenarios, const Ticking& ticking, std:
                 l.health -= 4 * static_cast<i32>(l.b.lava_hurts);
                 if (l.health <= 0) fate = phys::Fate::kGone;
             }
-            l.b.burned = l.b.extinguished = l.b.splashed = false, l.b.lava_hurts = 0;
+            l.b.burned = l.b.extinguished = false, l.b.splashed = 0, l.b.splash_volume = 0, l.b.lava_hurts = 0;
             l.gone = fate == phys::Fate::kGone;
             // Game::tick_living: a tick that changed nothing, and nobody pushing.
             if (at_rest && !l.gone && l.kind.living && !pushed && body_before.on_ground && before.vel[0] == 0 &&
@@ -749,7 +749,7 @@ TEST(Physics, AtRestOrNotItIsTheSameTick) {
             t.full_body.needs_sync = t.lazy_body.needs_sync = false;  // (whoever tells the viewers takes it)
             t.full_body.sync_position = t.lazy_body.sync_position = false;
             for (phys::Body* b : {&t.full_body, &t.lazy_body})  // (...and whoever keeps its health)
-                b->burned = b->extinguished = b->splashed = false, b->lava_hurts = 0;
+                b->burned = b->extinguished = false, b->splashed = 0, b->splash_volume = 0, b->lava_hurts = 0;
         }
     }
     EXPECT_GT(rested, 50000u);

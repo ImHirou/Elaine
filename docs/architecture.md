@@ -1410,9 +1410,10 @@ tick queue under load and the random pass belong with the first claim that any o
 - **Comparators** (`updateNeighbourForOutputSignal`) and redstone wire's shape updates at a
   distance (`updateIndirectNeighbourShapes`): neither block exists. A signal is still "a block
   of redstone beside me".
-- **The scheduled ticks of an imported world.** A vanilla chunk's `block_ticks` are kept with
-  the rest of its tags, unread: sand that vanilla had saved in the middle of its two ticks
-  waits for the next change beside it.
+- **The scheduled block ticks of an imported world.** A vanilla chunk's `block_ticks` are kept
+  with the rest of its tags, unread: sand that vanilla had saved in the middle of its two ticks
+  waits for the next change beside it. (Its `fluid_ticks` are read: the fluids are all here, so
+  water that was saved in the middle of its flow flows on.)
 - **The game time across a restart**: it starts at zero. Delays do not mind; the day will.
 - Falling: anvils and pointed dripstone, which hurt what they land on; a falling block's own
   tag from `/summon` (it is sand); concrete powder that falls faster than a block a tick is
@@ -1686,8 +1687,10 @@ latter, and one cache miss an item was two thirds of the pass.
   block is not there). The strider, which walks on lava, and the turtle, whose `MoveControl`
   gives it a speed of its own in water and out of it (a turtle cannot be made to stand still
   on a vanilla server, so there is nothing to record), are among those that are not moved.
-  Nobody drowns, and no air is counted. No sounds yet: the splash, the hiss of a fire going
-  out, an item burning. Particles: none anywhere.
+  Nobody drowns, and no air is counted. What is heard: the splash of what goes into water,
+  the hiss of a fire going out, an item burning up in lava - each compared with vanilla's
+  (`block_probe.py`, `afloat`) - but not a player's splash, which is as loud as a velocity the
+  server does not know, nor anything swimming. Particles: none anywhere.
 - A fall that is faster than a block a tick looks ahead for what breaks it, and water does
   (`ClipContext.Fluid.WATER`). Vanilla keeps the shape of each fluid state as it was first
   asked for (`FlowingFluid.getShape`, a map by state): whether a cell under more water counts
@@ -1911,7 +1914,10 @@ block state is saved as its block's name alone when it is the default one and as
   what it holds come with it. One that names a loot table, or holds a stack this server does
   not read, stays its tag - as every other kind of block entity does: a client is told that
   it is there, and it does nothing, rather than open as if it were something else.
-- **Entities**, and **the rest of a chunk's tag** (structures, scheduled ticks, `InhabitedTime`...):
+- **The scheduled ticks of its fluids** (`fluid_ticks`: `SavedTick`, the fluid by name): read, and
+  due so many ticks after the chunk ticks again - unless the list holds anything that is not a
+  fluid's tick in this world, in which case it is kept as the tag it is.
+- **Entities**, and **the rest of a chunk's tag** (structures, the scheduled ticks of blocks, `InhabitedTime`...):
   kept as tags, with the chunk. No entity of an imported world is in the game yet.
 - **The generator**: a flat world goes on as it was made (its layers and biome are read from
   `world_gen_settings.dat`). For vanilla's terrain there is no generator here: beyond what was

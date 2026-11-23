@@ -291,6 +291,22 @@ void LevelTicks::write(const ChunkTicks* t, i64 now, base::ByteBuf& out) {
     out.commit(p);
 }
 
+void write_saved_ticks(std::span<const SavedTick> ticks, base::ByteBuf& out) {
+    if (ticks.empty()) return;
+    u8* p = out.reserve(5 + ticks.size() * kRecordBytes);
+    *p++ = kVersion;
+    store_le<u32>(p, static_cast<u32>(ticks.size()));
+    p += 4;
+    for (const SavedTick& t : ticks) {
+        store_le<u32>(
+            p, t.type << 17 | t.y << 8 | static_cast<u32>(t.z & 15) << 4 | static_cast<u32>(t.x & 15));  // LevelTicks::pack
+        store_le<i32>(p + 4, t.delay);
+        p[8] = static_cast<u8>(t.priority);
+        p += kRecordBytes;
+    }
+    out.commit(p);
+}
+
 bool ticks_valid(std::span<const u8> bytes, u32 types, u32 height) {
     if (bytes.empty()) return true;
     if (bytes.size() < 5 || bytes[0] != kVersion) return false;
