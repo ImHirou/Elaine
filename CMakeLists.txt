@@ -190,6 +190,7 @@ add_library(core STATIC
   src/worldgen/aquifer.cpp
   src/worldgen/terrain.cpp
   src/worldgen/material.cpp
+  src/worldgen/carver.cpp
   src/worldgen/generator.cpp
   src/phys/physics.cpp
   src/item/components.cpp
@@ -220,6 +221,7 @@ if(MC_SANITIZE)
   # it timed out. Optimized, the sanitizers still see every load and store of it.
   set_source_files_properties(
     src/worldgen/noise.cpp src/worldgen/density.cpp src/worldgen/climate.cpp src/worldgen/aquifer.cpp src/worldgen/terrain.cpp
+    src/worldgen/material.cpp src/worldgen/carver.cpp
     PROPERTIES COMPILE_OPTIONS "-O2")
 endif()
 if(MC_PCH)

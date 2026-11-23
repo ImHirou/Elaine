@@ -2204,6 +2204,35 @@ icebergs of the frozen oceans. Whether an iceberg is two blocks lower is the bio
 temperature, which varies by a noise of its own, the same in every world (`Biome`'s static
 `SimplexNoise`s).
 
+### Caves and canyons (`carver.*`)
+
+The last step of `terrain`. A carver begins in a chunk, by chance, and digs from there for up to
+seven chunks - a room, and tunnels that turn by a few draws a step and split once - so a chunk
+asks each of the 289 chunks within eight of it what begins there. A random source seeded from
+the world's seed, the carver's place in the list and that chunk's position says whether one
+does and where it goes; the tunnel is followed step by step, wherever it leads, until it can no
+longer reach the chunk (`canReach`). All a carver does to the chunk is mark blocks
+(`CarvingMask`).
+
+Then the marks are applied (`applyCarvingMask`): every run of marked blocks, a column at a time
+and each from its top down, is given to the chunk's aquifer as a block of no density, which
+makes it air, water or lava - or leaves it, where a wall holds two waters apart. Bedrock is not
+carved (a tag: a bit a state). Where a run went through grass, the dirt under a carved block is
+given the top of its column by the material rule (`topMaterial`).
+
+That rule wants the block's biome, and here vanilla does not read the cells the chunk was
+filled with: it asks the climate again (`BiomeSource.createUncachedResolver`) - each function by
+value, without caches, which is not to the last bit what filled the chunk. The search that
+follows begins, as every search does, with the leaf the one before ended at, and that is
+whatever vanilla's worker thread searched last: where two biomes are exactly as near, vanilla's
+own answer depends on which chunks its thread made before. Here a chunk begins with none
+(`CarverBiomes`). The unit test, which is held to vanilla's code run on a new thread, first asks
+what that thread had asked - the biome of each chunk around.
+
+Which carvers run is a biome's in vanilla, asked for each of the chunks around. Every biome of
+the overworld names the same three; `gen_worldgen.py` checks that and makes one list of them
+(`kCarvers`), and no biome is asked.
+
 ### Held to the jar
 
 `mcgen.py worldgen golden --emit` runs vanilla's own classes - no world, no server - and writes
@@ -2216,7 +2245,7 @@ as their bits. `tests/unit/worldgen_test.cpp` replays them:
 | `noise` | each noise's layers as the seed made them; its value at points and over volumes |
 | `density` | every function at points and over volumes, each alone, then in sequences on one context with caches |
 | `climate` | searches one after the other (some decided by the one before); the biomes of whole chunks |
-| `terrain` | whole chunks after each step of the `terrain` status: blocks, heightmaps, marks |
+| `terrain` | whole chunks after each step of the `terrain` status: blocks, heightmaps, marks; what the carvers marked |
 
 For the last, the extractor builds a `ProtoChunk` - and the eight around it, for their biomes -
 and calls `NoiseBasedChunkGenerator`'s own (private) steps on it. A few chunks are in the file
@@ -2226,11 +2255,12 @@ icebergs and pillars.
 
 ### What is there, and what is not
 
-There: biomes; the shape of the ground with its aquifers (`doFill`); the surface, bedrock,
-deepslate and the ore veins (`buildSurface`).
+There: biomes, and all of the `terrain` status - the shape of the ground with its aquifers
+(`doFill`); the surface, bedrock, deepslate and the ore veins (`buildSurface`); the caves and
+canyons of the carvers (`generateCarvers`).
 
-Not there yet: the carvers' caves, letting the marked water flow, the world's spawn point,
-features, structures. A world of terrain has its ground and no tree on it. Beyond those: only
+Not there yet: letting the marked water flow, the world's spawn point, features, structures. A
+world of terrain has its ground and no tree on it. Beyond those: only
 the overworld, only the preset `normal`; an imported vanilla world does not go on with this
 generator yet.
 

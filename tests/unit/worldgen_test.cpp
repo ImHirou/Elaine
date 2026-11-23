@@ -18,6 +18,7 @@
 #include "world/block.hpp"
 #include "world/chunk_io.hpp"
 #include "world/region.hpp"
+#include "worldgen/carver.hpp"
 #include "worldgen/climate.hpp"
 #include "worldgen/density.hpp"
 #include "worldgen/generator.hpp"
@@ -536,20 +537,22 @@ void expect_stage(In& in, const Terrain& t, bool whole, const std::string& what)
 }
 
 // Whole chunks, step by step as vanilla's `terrain` status makes them: after the density and the
-// aquifers have said what every block is (doFill), and after the material rule has made the
-// surface of it (buildSurface). The script has a chunk for every biome of the overworld.
+// aquifers have said what every block is (doFill), after the material rule has made the surface
+// of it (buildSurface), and after the carvers (generateCarvers) - of those also what they marked.
+// The script has a chunk for every biome of the overworld.
 TEST(Worldgen, TerrainOfAChunkIsVanillas) {
     In in(kTerrain);
-    in.magic("WGTERR02");
+    in.magic("WGTERR03");
     const Overworld world(in.i64_());
     const u32 chunks = in.num<u32>(), stages = in.num<u32>();
-    ASSERT_EQ(stages, 2u);
-    Sampler sampler(world.noises()), climate(world.noises());
+    ASSERT_EQ(stages, 3u);
+    Sampler sampler(world.noises()), climate(world.noises()), uncached(world.noises(), false);
     const auto terrain = std::make_unique<Terrain>();
     const auto grid = std::make_unique<BiomeGrid>();
+    const auto mask = std::make_unique<CarvingMask>();
     std::vector<u16> own(Terrain::kSections * 64);
     u64 seen[2] = {0, 0};
-    u32 whole = 0;
+    u32 whole = 0, carved = 0;
     for (u32 c = 0; c < chunks; ++c) {
         const i32 cx = in.i32_(), cz = in.i32_();
         const bool all = in.u8_() != 0;
@@ -565,11 +568,34 @@ TEST(Worldgen, TerrainOfAChunkIsVanillas) {
         expect_stage(in, *terrain, all, where + " after doFill");
         build_surface(world, chunk, *grid, *terrain);
         expect_stage(in, *terrain, all, where + " after buildSurface");
+
+        mark_carved(world.seed(), cx, cz, *mask);
+        u32 bits = 0, last_word = 0;
+        for (u32 i = 0; i < std::size(mask->words); ++i) {
+            bits += static_cast<u32>(std::popcount(mask->words[i]));
+            if (mask->words[i]) last_word = i + 1;
+        }
+        u64 hash = kFnv;
+        for (u32 i = 0; i < last_word; ++i)
+            hash = fnv(fnv(hash, static_cast<u32>(mask->words[i])), static_cast<u32>(mask->words[i] >> 32));
+        EXPECT_EQ(bits, in.num<u32>()) << where << ": how many blocks the carvers mark";
+        EXPECT_EQ(hash, in.num<u64>()) << where << ": which blocks the carvers mark";
+        carved += bits != 0;
+        // Which of two biomes that are exactly as near a block has is the one vanilla's thread found
+        // last, and the script's thread had asked this before it came to the blocks: the biome of
+        // each of the 289 chunks around (generateCarvers, where there is no region of chunks to
+        // remember them in).
+        CarverBiomes carver_biomes{uncached};
+        for (i32 dx = -8; dx <= 8; ++dx)
+            for (i32 dz = -8; dz <= 8; ++dz) carver_biomes.at({(cx + dx) * 4, 0, (cz + dz) * 4});
+        if (!mask->empty()) apply_carving_mask(world, chunk, carver_biomes, *mask, *terrain);
+        expect_stage(in, *terrain, all, where + " after generateCarvers");
         if (::testing::Test::HasFailure()) return;  // (one chunk's differences say enough)
     }
     EXPECT_EQ(in.p, in.end) << "the script was not read to its end";
     EXPECT_GE(chunks, 60u);
     EXPECT_EQ(whole, 4u);
+    EXPECT_GE(carved, chunks / 2) << "the carvers came to few of the chunks";
     // Every biome the overworld's climate can give stood in one of them.
     u64 possible[2] = {0, 0};
     for (const proto::gen::worldgen::ClimateNode& n : proto::gen::worldgen::kClimate)
@@ -582,7 +608,7 @@ TEST(Worldgen, TerrainOfAChunkIsVanillas) {
 // neighbour's as the neighbour itself is filled, which the grid finds without filling it.
 TEST(Worldgen, BiomeGridIsWhatTheNeighboursAreFilledWith) {
     In in(kTerrain);
-    in.magic("WGTERR02");
+    in.magic("WGTERR03");
     const Overworld world(in.i64_());
     Sampler sampler(world.noises());
     const auto grid = std::make_unique<BiomeGrid>();
@@ -620,22 +646,28 @@ TEST(Worldgen, BiomeGridIsWhatTheNeighboursAreFilledWith) {
 // the biomes above, as the world keeps them.
 TEST(Worldgen, GeneratorHandsAWorkerItsChunk) {
     In in(kTerrain);
-    in.magic("WGTERR02");
+    in.magic("WGTERR03");
     const i64 seed = in.i64_();
     in.num<u32>();
-    const u32 stages = in.num<u32>();
+    in.num<u32>();
     const i32 cx = in.i32_(), cz = in.i32_();
-    ASSERT_EQ(in.u8_(), 1);
-    // The hash of the first chunk's blocks at its last stage: every stage of a whole chunk is a hash
-    // of blocks, 512 heights and a hash of them, the marks and a hash of them, the blocks deflated.
-    u64 want_blocks = 0;
-    for (u32 s = 0; s < stages; ++s) {
-        want_blocks = in.num<u64>();
-        in.p += 512 * 4 + 8;
-        const u32 marks = in.num<u32>();
-        in.p += marks * 4 + 8;
-        const u32 packed = in.num<u32>();
-        in.p += packed;
+    // The chunk as the steps above make it - a thread that begins a chunk has searched for no biome.
+    u64 want_blocks = kFnv;
+    {
+        const Overworld world(seed);
+        Sampler sampler(world.noises()), climate(world.noises()), uncached(world.noises(), false);
+        const auto terrain = std::make_unique<Terrain>();
+        const auto grid = std::make_unique<BiomeGrid>();
+        const auto mask = std::make_unique<CarvingMask>();
+        std::vector<u16> own(Terrain::kSections * 64);
+        terrain->begin(cx, cz);
+        fill_biome_grid(climate, cx, cz, settings::kMinY, Terrain::kSections, *grid, own.data());
+        NoiseChunk chunk(world, sampler, cx, cz);
+        fill_from_noise(chunk, *terrain);
+        build_surface(world, chunk, *grid, *terrain);
+        CarverBiomes carver_biomes{uncached};
+        carve(world, chunk, carver_biomes, *mask, *terrain);
+        for (const u16 state : terrain->blocks) want_blocks = fnv(want_blocks, state);
     }
 
     OverworldGenerator generator(seed);

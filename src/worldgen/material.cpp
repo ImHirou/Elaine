@@ -80,9 +80,11 @@ bool melts_iceberg_slightly(u16 biome, i32 x, i32 z) {
 struct Context {
     const Overworld& world;
     Sampler& sampler;
-    const BiomeGrid& biomes;
-    const Terrain* terrain;  // (for the surface's slope; null where nothing reads it)
-    Volume expected;         // the blocks the rule will be asked about: where an ore vein's densities are sampled ahead
+    // Where the biome of a block is read: the cells the chunks were filled with (buildSurface), or
+    // the climate asked anew (topMaterial, for a carver).
+    const BiomeGrid* biomes;
+    CarverBiomes* carver_biomes;
+    Volume expected;  // the blocks the rule will be asked about: where an ore vein's densities are sampled ahead
     // Stamps: a thing remembered for a column or for a block is good while its stamp is the current one.
     u64 stamp_xz = 1, stamp_y = 1;
     i32 x = 0, y = 0, z = 0;
@@ -101,9 +103,9 @@ struct Context {
     u64 noise2_stamp[wg::noise::kCount] = {}, noise3_stamp[wg::noise::kCount] = {};
     double noise2[wg::noise::kCount], noise3[wg::noise::kCount];
 
-    Context(const Overworld& w, Sampler& s, const BiomeGrid& b, const Terrain* t, const Volume& v)
-        : world(w), sampler(s), biomes(b), terrain(t), expected(v), preliminary_volume{v.size_x, 1, v.size_z,
-                                                                                       v.min_x,  0, v.min_z} {
+    Context(const Overworld& w, Sampler& s, const BiomeGrid* b, CarverBiomes* c, const Volume& v)
+        : world(w), sampler(s), biomes(b), carver_biomes(c), expected(v), preliminary_volume{v.size_x, 1, v.size_z,
+                                                                                             v.min_x,  0, v.min_z} {
         compile(wg::kMaterialRoot);
     }
 
@@ -157,7 +159,10 @@ struct Context {
         return secondary;
     }
     u16 block_biome() {
-        if (biome < 0) biome = zoomed_biome(biomes, world.zoom_seed(), x, y, z);
+        if (biome < 0) {
+            const QuartCell cell = zoom_cell(world.zoom_seed(), x, y, z);
+            biome = biomes ? biomes->at(cell.x, cell.y, cell.z) : carver_biomes->at(cell);
+        }
         return static_cast<u16>(biome);
     }
     // getMinSurfaceLevel: how far down the surface is built - the terrain's level before its
@@ -207,9 +212,11 @@ struct Context {
         switch (c.op) {
             case ConditionOp::kBiome: {
                 // (A biome that is nowhere around cannot be the block's: BiomeCondition.canNeverMatch.)
-                bool possible = false;
-                for (i32 i = 0; i < c.i1; ++i) possible |= biomes.has(wg::kConditionBiomes[c.i0 + i]);
-                if (!possible) return false;
+                if (biomes) {
+                    bool possible = false;
+                    for (i32 i = 0; i < c.i1; ++i) possible |= biomes->has(wg::kConditionBiomes[c.i0 + i]);
+                    if (!possible) return false;
+                }
                 const u16 b = block_biome();
                 for (i32 i = 0; i < c.i1; ++i)
                     if (wg::kConditionBiomes[c.i0 + i] == b) return true;
@@ -391,7 +398,7 @@ void build_surface(const Overworld& world, NoiseChunk& chunk, const BiomeGrid& b
     const Volume& full = chunk.volume();
     const i32 top_block = (terrain.highest_filled_section() + (kMinY >> 4)) * 16 + 15;
     const Volume narrowed{full.size_x, std::max(top_block - full.min_y + 1, 1), full.size_z, full.min_x, full.min_y, full.min_z};
-    Context context(world, sampler, biomes, &terrain, narrowed);
+    Context context(world, sampler, &biomes, nullptr, narrowed);
     const i32 min_x = terrain.chunk_x * 16, min_z = terrain.chunk_z * 16;
     for (i32 x = 0; x < 16; ++x) {
         for (i32 z = 0; z < 16; ++z) {
@@ -439,12 +446,12 @@ void build_surface(const Overworld& world, NoiseChunk& chunk, const BiomeGrid& b
     scratch.release(mark);
 }
 
-bool top_material(const Overworld& world, NoiseChunk& chunk, const BiomeGrid& biomes, const Terrain& terrain, i32 x, i32 y, i32 z,
+bool top_material(const Overworld& world, NoiseChunk& chunk, CarverBiomes& biomes, const Terrain& terrain, i32 x, i32 y, i32 z,
                   bool under_fluid, u16& out) {
     Sampler& sampler = chunk.sampler();
     Scratch& scratch = sampler.scratch();
     const Scratch::Mark mark = scratch.mark();
-    Context context(world, sampler, biomes, &terrain, Volume{1, 1, 1, x, y, z});
+    Context context(world, sampler, nullptr, &biomes, Volume{1, 1, 1, x, y, z});
     context.update_xz(x, z, gradient_x(terrain, x & 15, z & 15), gradient_z(terrain, x & 15, z & 15));
     context.update_y(1, 1, under_fluid ? y + 1 : kNoWater, y);
     const u32 state = context.apply(wg::kMaterialRoot);

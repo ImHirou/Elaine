@@ -81,8 +81,27 @@ struct BiomeGrid {
 // the neighbour is filled as it would be, for its answer depends on the cell before.
 void fill_biome_grid(Sampler& sampler, i32 chunk_x, i32 chunk_z, i32 min_y, u32 sections, BiomeGrid& grid, u16* own);
 
-// BiomeManager.getBiome: the biome of a block. `zoom_seed` is the world's seed as clients are
-// told it (obfuscate_seed) - a client zooms the same way.
-u16 zoomed_biome(const BiomeGrid& grid, i64 zoom_seed, i32 x, i32 y, i32 z);
+// BiomeManager.getBiome: the cell whose biome a block has. `zoom_seed` is the world's seed as
+// clients are told it (obfuscate_seed) - a client zooms the same way.
+struct QuartCell {
+    i32 x, y, z;
+};
+QuartCell zoom_cell(i64 zoom_seed, i32 x, i32 y, i32 z);
+inline u16 zoomed_biome(const BiomeGrid& grid, i64 zoom_seed, i32 x, i32 y, i32 z) {
+    const QuartCell cell = zoom_cell(zoom_seed, x, y, z);
+    return grid.at(cell.x, cell.y, cell.z);
+}
+
+// The biomes the carvers go by (BiomeSource.createUncachedResolver): not the cells a chunk was
+// filled with, but the climate asked again at the cell, a function at a time and by value - which
+// is not, to the last bit, what filled the chunk. `climate` is a context without caches. `last`
+// is the leaf the search before ended at: vanilla's is whatever its thread searched last, and a
+// chunk here begins with none.
+struct CarverBiomes {
+    Sampler& climate;
+    i32 last = kNoLeaf;
+
+    u16 at(const QuartCell& cell);
+};
 
 }  // namespace worldgen

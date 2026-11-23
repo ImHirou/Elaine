@@ -18,7 +18,9 @@ difference stops the run: the port relies on how the two fit together.
   material   the overworld's material rule - bedrock, ore veins, the surface of each biome,
              deepslate - with every named rule and condition compiled where it is named
              (worldgen/material.cpp).
-  heightmaps which of vanilla's six heightmaps a block state counts for (worldgen_heightmaps.bin).
+  heightmaps which of vanilla's six heightmaps a block state counts for, and whether a carver
+             leaves it be (worldgen_heightmaps.bin).
+  carvers    the caves and canyons every biome of the overworld has, with their numbers.
 """
 from __future__ import annotations
 
@@ -472,8 +474,9 @@ inline constexpr u16 kDefaultFluid = {blocks.state(settings['default_fluid'])}; 
 inline constexpr u16 kLava = {blocks.state('minecraft:lava')};  // (NoiseBasedChunkGenerator.createFluidPicker: below y -54)
 
 // Which of vanilla's heightmaps a block state counts for: a bit a heightmap, by Heightmap.Types' ordinal.
+// And one bit more: the state is of a block a carver leaves be (BlockTags.UNCARVABLE).
 inline constexpr u8 kWorldSurfaceWg = 1, kWorldSurface = 2, kOceanFloorWg = 4, kOceanFloor = 8, kMotionBlocking = 16,
-                    kMotionBlockingNoLeaves = 32;
+                    kMotionBlockingNoLeaves = 32, kUncarvable = 64;
 inline constexpr unsigned char kHeightmaps[] = {{
 #embed "worldgen_heightmaps.bin"
 }};
@@ -491,6 +494,154 @@ def heightmap_bits(version: str) -> bytes:
     if len(column) != states["state_count"] or max(column) > 63:
         die("gen_worldgen: gamedata/states.json: heightmap_opaque is not six bits a state")
     return bytes(column)
+
+
+def resolve_anchor(value: dict, min_y: int, height: int) -> int:
+    """VerticalAnchor.resolveY in a world of the noise settings' height."""
+    if list(value) == ["absolute"]:
+        return value["absolute"]
+    if list(value) == ["above_bottom"]:
+        return min_y + value["above_bottom"]
+    if list(value) == ["below_top"]:
+        return height - 1 + min_y - value["below_top"]
+    die(f"gen_worldgen: a vertical anchor of {value}")
+
+
+def state_bits(version: str, vanilla, blocks: Blocks) -> bytes:
+    """A byte a block state: the heightmaps it counts for, and whether a carver leaves it be (BlockTags.UNCARVABLE)."""
+    bits = bytearray(heightmap_bits(version))
+    tags = vanilla.tags("block")
+    if "minecraft:uncarvable" not in tags:
+        die("gen_worldgen: there is no block tag minecraft:uncarvable: what a carver leaves be is said some other way now")
+
+    def tagged(tag: str, depth: int = 0) -> set[str]:
+        if depth > 16 or tag not in tags:
+            die(f"gen_worldgen: the block tag {tag}: missing, or a cycle")
+        found = set()
+        for value in tags[tag]:
+            value = value["id"] if isinstance(value, dict) else value
+            found |= tagged(value[1:], depth + 1) if value.startswith("#") else {value}
+        return found
+
+    for name in tagged("minecraft:uncarvable"):
+        if name not in blocks.blocks:
+            die(f"gen_worldgen: minecraft:uncarvable names {name}, which is no block")
+        for s in blocks.blocks[name]["states"]:
+            bits[s["id"]] |= 64
+    return bytes(bits)
+
+
+class CarverTables:
+    """The carvers of the overworld (worldgen/carver/*.json), in the order a chunk runs them.
+
+    Which carvers run is a biome's (`carvers`), asked of the biome at each chunk around; every
+    biome of the overworld names the same ones, so the tables are a list and no biome is asked.
+    The generator stops when that is no longer so."""
+
+    def __init__(self, vanilla, biomes: list[str], settings: dict):
+        self.min_y, self.height = settings["noise"]["min_y"], settings["noise"]["height"]
+        lists = {}
+        for name in biomes:
+            biome = json.loads(vanilla.zip.read(f"data/minecraft/worldgen/biome/{name.split(':', 1)[1]}.json"))
+            carvers = biome.get("carvers", [])
+            lists.setdefault(json.dumps([carvers] if isinstance(carvers, str) else carvers), []).append(name)
+        if len(lists) != 1:
+            die("gen_worldgen: the overworld's biomes do not all have the same carvers any more "
+                f"({ {k: len(v) for k, v in lists.items()} }): src/worldgen/carver.cpp runs one list for every chunk")
+        self.names = json.loads(next(iter(lists)))
+        self.rows = []
+        for name in self.names:
+            if not isinstance(name, str):
+                die(f"gen_worldgen: a carver written out in a biome: {name}")
+            self.rows.append(self.carver(name, json.loads(vanilla.zip.read(f"data/minecraft/worldgen/carver/{name.split(':', 1)[1]}.json"))))
+
+    def need(self, what: str, value: dict, fields: set, optional: set = frozenset()) -> None:
+        if not fields <= set(value) or set(value) - fields - optional:
+            die(f"gen_worldgen: {what} has fields {sorted(value)}, the generator knows {sorted(fields | optional)}")
+
+    def floats(self, what: str, value) -> str:
+        """FloatProvider: a number, uniform or trapezoid."""
+        if isinstance(value, (int, float)):
+            return f"{{FloatKind::kConstant, {cfloat(f32(value))}, 0.0f, 0.0f}}"
+        kind = value.get("type")
+        if kind == "minecraft:constant":
+            self.need(what, value, {"type", "value"})
+            return f"{{FloatKind::kConstant, {cfloat(f32(value['value']))}, 0.0f, 0.0f}}"
+        if kind == "minecraft:uniform":
+            self.need(what, value, {"type", "min_inclusive", "max_exclusive"})
+            return f"{{FloatKind::kUniform, {cfloat(f32(value['min_inclusive']))}, {cfloat(f32(value['max_exclusive']))}, 0.0f}}"
+        if kind == "minecraft:trapezoid":
+            self.need(what, value, {"type", "min", "max", "plateau"})
+            return f"{{FloatKind::kTrapezoid, {cfloat(f32(value['min']))}, {cfloat(f32(value['max']))}, {cfloat(f32(value['plateau']))}}}"
+        die(f"gen_worldgen: {what} is a float provider of type {kind}: src/worldgen/carver.cpp has no word for it")
+
+    def heights(self, what: str, value: dict) -> tuple[int, int]:
+        """HeightProvider: uniform between two anchors."""
+        if value.get("type") != "minecraft:uniform":
+            die(f"gen_worldgen: {what} is a height provider of type {value.get('type')}: src/worldgen/carver.cpp has no word for it")
+        self.need(what, value, {"type", "min_inclusive", "max_inclusive"})
+        return (resolve_anchor(value["min_inclusive"], self.min_y, self.height), resolve_anchor(value["max_inclusive"], self.min_y, self.height))
+
+    def carver(self, name: str, value: dict) -> str:
+        kind = value["type"]
+        none = "{FloatKind::kConstant, 0.0f, 0.0f, 0.0f}"
+        lo, hi = self.heights(f"{name}: y", value["y"])
+        probability = cfloat(f32(value["probability"]))
+        if kind == "minecraft:cave":
+            self.need(name, value, {"type", "probability", "y", "count", "thickness", "room_vertical_radius_multiplier",
+                                    "horizontal_radius_multiplier", "vertical_radius_multiplier", "floor_level"},
+                      {"weird_thickness_bias", "start_vertical_radius_multiplier"})
+            count = value["count"]
+            if not isinstance(count, dict) or count.get("type") != "minecraft:very_biased_to_bottom":
+                die(f"gen_worldgen: {name}: a count of {count}: src/worldgen/carver.cpp has only very_biased_to_bottom")
+            self.need(f"{name}: count", count, {"type", "min_inclusive", "max_inclusive"})
+            f = lambda key, default=None: self.floats(f"{name}: {key}", value.get(key, default))
+            return (f"    {{false, {probability}, {lo}, {hi}, {count['min_inclusive']}, {count['max_inclusive']}, {f('thickness')}, "
+                    f"{str(bool(value.get('weird_thickness_bias', False))).lower()},\n     {f('room_vertical_radius_multiplier')}, "
+                    f"{f('horizontal_radius_multiplier')}, {f('vertical_radius_multiplier')},\n     "
+                    f"{f('start_vertical_radius_multiplier', 1.0)}, {f('floor_level')},\n     {none}, {none}, {none}, {none}, 0, 0.0f, 0.0f}},  // {name}\n")
+        if kind == "minecraft:canyon":
+            self.need(name, value, {"type", "probability", "y", "vertical_rotation", "shape"})
+            shape = value["shape"]
+            self.need(f"{name}: shape", shape, {"distance_factor", "thickness", "width_smoothness", "horizontal_radius_factor",
+                                               "vertical_radius_default_factor", "vertical_radius_center_factor", "y_scale"})
+            f = lambda key: self.floats(f"{name}: {key}", shape[key])
+            if not isinstance(shape["width_smoothness"], int) or shape["width_smoothness"] < 1:
+                die(f"gen_worldgen: {name}: a width smoothness of {shape['width_smoothness']}")
+            return (f"    {{true, {probability}, {lo}, {hi}, 0, 0, {f('thickness')}, false,\n     {none}, {none}, {none},\n     {none}, {none},\n     "
+                    f"{self.floats(f'{name}: vertical_rotation', value['vertical_rotation'])}, {f('distance_factor')}, "
+                    f"{f('horizontal_radius_factor')}, {f('y_scale')}, {shape['width_smoothness']}, "
+                    f"{cfloat(f32(shape['vertical_radius_default_factor']))}, {cfloat(f32(shape['vertical_radius_center_factor']))}}},  // {name}\n")
+        die(f"gen_worldgen: {name} is a carver of type {kind}: src/worldgen/carver.cpp has no word for it")
+
+
+def emit_carvers(t: CarverTables) -> str:
+    return """
+// ---------------------------------------------------------------------------------------------
+// The carvers every biome of the overworld has (worldgen/carver), in the order a chunk runs them:
+// CaveWorldCarver and CanyonWorldCarver with what each was made with. A number that is drawn is
+// a FloatProvider: a constant (a), uniform from a up to b, or a trapezoid from a to b with a
+// plateau of c.
+enum class FloatKind : u8 { kConstant, kUniform, kTrapezoid };
+struct FloatProvider {
+    FloatKind kind;
+    float a, b, c;
+};
+struct Carver {
+    bool canyon;  // CanyonWorldCarver; else CaveWorldCarver
+    float probability;
+    i32 min_y, max_y;          // `y`: UniformHeight, its anchors resolved
+    i32 count_min, count_max;  // a cave's `count`: VeryBiasedToBottomInt
+    FloatProvider thickness;   // a cave's, or a canyon's shape's
+    bool weird_thickness_bias;
+    FloatProvider room_vertical_radius_multiplier, horizontal_radius_multiplier, vertical_radius_multiplier;
+    FloatProvider start_vertical_radius_multiplier, floor_level;
+    // CanyonWorldCarver, and its Shape
+    FloatProvider vertical_rotation, distance_factor, horizontal_radius_factor, y_scale;
+    i32 width_smoothness;
+    float vertical_radius_default_factor, vertical_radius_center_factor;
+};
+""" + f"inline constexpr Carver kCarvers[{len(t.rows)}] = {{\n" + "".join(t.rows) + "};\n"
 
 
 RULE_OPS = ["kSequence", "kCondition", "kBlock", "kBandlands", "kOreVein"]
@@ -528,14 +679,7 @@ class MaterialTables:
             die(f"gen_worldgen: {value['type']} has fields {sorted(set(value) - {'type'})}, the generator knows {sorted(fields)}")
 
     def anchor(self, value: dict) -> int:
-        """VerticalAnchor.resolveY in a world of the noise settings' height."""
-        if list(value) == ["absolute"]:
-            return value["absolute"]
-        if list(value) == ["above_bottom"]:
-            return self.min_y + value["above_bottom"]
-        if list(value) == ["below_top"]:
-            return self.height - 1 + self.min_y - value["below_top"]
-        die(f"gen_worldgen: a vertical anchor of {value}")
+        return resolve_anchor(value, self.min_y, self.height)
 
     def rule(self, value, name: str | None = None) -> int:
         if isinstance(value, str):
@@ -796,10 +940,11 @@ inline constexpr BlendedLayer kBlendedLayers[{len(blended)}] = {{
     out.append(emit_settings(settings, blocks))
     material = MaterialTables(vanilla, blocks, noise_index, dict(tables.roots), settings)
     out.append(emit_material(material, blocks))
-    out.append("\n}  // namespace proto::gen::worldgen\n")
     climate, biomes = climate_table(version, vanilla)
+    out.append(emit_carvers(CarverTables(vanilla, biomes, settings)))
+    out.append("\n}  // namespace proto::gen::worldgen\n")
     return {"worldgen.hpp": "".join(out), "worldgen_climate.hpp": emit_climate(hdr, climate),
-            "worldgen_heightmaps.bin": heightmap_bits(version),
+            "worldgen_heightmaps.bin": state_bits(version, vanilla, blocks),
             "_stats": {"noises": len(noises), "noise_layers": len(layers) + len(blended), "density_nodes": len(tables.nodes),
                        "climate_nodes": len(climate), "climate_biomes": len(biomes),
                        "material_rules": len(material.rules), "material_conditions": len(material.conditions)}}

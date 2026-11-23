@@ -4,6 +4,7 @@
 #include <memory>
 
 #include "world/chunk_io.hpp"
+#include "worldgen/carver.hpp"
 #include "worldgen/climate.hpp"
 #include "worldgen/material.hpp"
 
@@ -11,17 +12,19 @@ namespace worldgen {
 
 namespace {
 
-// What a thread makes chunks with: the two contexts a chunk has in vanilla - one for its biomes,
-// one for its terrain - and the terrain while it is made. Kept between chunks: nothing is
-// allocated for the second chunk a thread makes.
+// What a thread makes chunks with: the contexts a chunk has in vanilla - one for its biomes, one
+// for its terrain, and none (a context without caches) for the biomes the carvers ask for - and
+// the terrain while it is made. Kept between chunks: nothing is allocated for the second chunk a
+// thread makes.
 struct Work {
     const Overworld* world;
-    Sampler biomes, terrain_sampler;
+    Sampler biomes, terrain_sampler, uncached;
     Terrain terrain;
     BiomeGrid grid;
+    CarvingMask mask;
     u16 biome[Terrain::kSections * 64];
 
-    explicit Work(const Overworld& w) : world(&w), biomes(w.noises()), terrain_sampler(w.noises()) {}
+    explicit Work(const Overworld& w) : world(&w), biomes(w.noises()), terrain_sampler(w.noises()), uncached(w.noises(), false) {}
 };
 
 Work& work_for(const Overworld& world) {
@@ -70,6 +73,8 @@ bool OverworldGenerator::generate_whole(world::LoadedChunk& out) {
     NoiseChunk chunk(world_, w.terrain_sampler, c.x, c.z);
     fill_from_noise(chunk, t);
     build_surface(world_, chunk, w.grid, t);
+    CarverBiomes carver_biomes{w.uncached};
+    carve(world_, chunk, carver_biomes, w.mask, t);
     for (u32 si = 0; si < Terrain::kSections; ++si) c.sections[si].assign(out.alloc, &t.blocks[si * 4096]);
     return true;
 }

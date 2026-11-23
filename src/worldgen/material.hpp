@@ -27,7 +27,7 @@ void build_surface(const Overworld& world, NoiseChunk& chunk, const BiomeGrid& b
 
 // MaterialSystem.topMaterial: what the rule makes of one block as the top of its column - the
 // grass a carver puts back on the dirt it lays bare. False: nothing.
-bool top_material(const Overworld& world, NoiseChunk& chunk, const BiomeGrid& biomes, const Terrain& terrain, i32 x, i32 y, i32 z,
+bool top_material(const Overworld& world, NoiseChunk& chunk, CarverBiomes& biomes, const Terrain& terrain, i32 x, i32 y, i32 z,
                   bool under_fluid, u16& out);
 
 }  // namespace worldgen

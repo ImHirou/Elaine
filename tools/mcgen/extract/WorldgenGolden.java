@@ -55,6 +55,10 @@ import net.minecraft.world.level.levelgen.NoiseChunk;
 import net.minecraft.world.level.levelgen.NoiseGeneratorSettings;
 import net.minecraft.world.level.levelgen.NoiseSettings;
 import net.minecraft.world.level.levelgen.RandomState;
+import net.minecraft.world.level.levelgen.WorldGenerationContext;
+import net.minecraft.world.level.levelgen.carver.WorldCarver;
+import net.minecraft.world.level.chunk.CarvingMask;
+import net.minecraft.world.level.biome.Biomes;
 import net.minecraft.world.level.levelgen.material.rule.MaterialRule;
 import net.minecraft.world.level.levelgen.blending.Blender;
 import net.minecraft.world.level.levelgen.PositionalRandomFactory;
@@ -624,7 +628,7 @@ final class WorldgenGolden {
     static final class ChunkMaker {
         final WorldgenRef.World world;
         final NoiseBasedChunkGenerator generator;
-        final java.lang.reflect.Method doFill, doCreateBiomes, buildSurface;
+        final java.lang.reflect.Method doFill, doCreateBiomes, buildSurface, generateCarvers;
         final Aquifer.FluidPicker fluidPicker;
         final PalettedContainerFactory containers;
         final MultiNoiseBiomeSource biomeSource;
@@ -642,6 +646,9 @@ final class WorldgenGolden {
             buildSurface = NoiseBasedChunkGenerator.class.getDeclaredMethod("buildSurface", ChunkAccess.class, NoiseChunk.class, RandomState.class,
                 BiomeManager.class, java.util.Set.class, MaterialRule.class);
             buildSurface.setAccessible(true);
+            generateCarvers = NoiseBasedChunkGenerator.class.getDeclaredMethod("generateCarvers", ChunkAccess.class, Blender.class, NoiseChunk.class,
+                RandomState.class, BiomeManager.class, net.minecraft.server.level.WorldGenRegion.class, MaterialRule.class);
+            generateCarvers.setAccessible(true);
             fluidPicker = (Aquifer.FluidPicker) ((java.util.function.Supplier<?>) WorldgenRef.field(generator, "globalFluidPicker")).get();
             containers = PalettedContainerFactory.create(world.registries());
         }
@@ -679,6 +686,31 @@ final class WorldgenGolden {
                 for (ProtoChunk chunk : row)
                     for (LevelChunkSection section : chunk.getSections()) section.getBiomes().getAll(biomes::add);
             return biomes;
+        }
+
+        /**
+         * What the carvers mark in a chunk, found as generateCarvers finds it: every carver of every chunk
+         * within eight, each from the seed of its chunk. (The carvers are the same for every biome of the
+         * overworld; gen_worldgen.py stops when they are not.)
+         */
+        CarvingMask carved(int cx, int cz) {
+            NoiseSettings noise = world.settings().noiseSettings();
+            WorldGenerationContext context = new WorldGenerationContext(generator, LevelHeightAccessor.create(noise.minY(), noise.height()));
+            CarvingMask mask = new CarvingMask(context.getMinGenY() + 1, context.getMinGenY() + context.getGenDepth() - 1 - 7);
+            WorldgenRandom random = new WorldgenRandom(new LegacyRandomSource(0L));
+            ChunkPos pos = new ChunkPos(cx, cz);
+            Iterable<Holder<WorldCarver>> carvers = world.registries().lookupOrThrow(Registries.BIOME).getOrThrow(Biomes.PLAINS).value().getGenerationSettings().getCarvers();
+            for (int dx = -8; dx <= 8; ++dx)
+                for (int dz = -8; dz <= 8; ++dz) {
+                    ChunkPos source = new ChunkPos(cx + dx, cz + dz);
+                    int index = 0;
+                    for (Holder<WorldCarver> carver : carvers) {
+                        random.setLargeFeatureSeed(world.seed() + index, source.x(), source.z());
+                        if (carver.value().isStartChunk(random)) carver.value().carve(context, random, pos, source, mask);
+                        ++index;
+                    }
+                }
+            return mask;
         }
 
         /** NoiseBasedChunkGenerator.createNoiseChunk, where no structure is near and no old chunk to blend with. */
@@ -779,8 +811,9 @@ final class WorldgenGolden {
     }
 
     /**
-     * A chunk through the steps of the `terrain` status, each written as it ends. Returns in how many
-     * columns the surface step put blocks on top of the terrain: icebergs, the pillars of the eroded badlands.
+     * A chunk through the steps of the `terrain` status, each written as it ends; before the last, what the
+     * carvers mark. Returns in how many columns the surface step put blocks on top of the terrain: icebergs,
+     * the pillars of the eroded badlands.
      */
     static int make(ChunkMaker maker, Out o, int cx, int cz, boolean whole) throws Exception {
         MaterialRule rule = maker.world.settings().materialRule().value();
@@ -793,6 +826,22 @@ final class WorldgenGolden {
         maker.buildSurface.invoke(maker.generator, chunk, noiseChunk, maker.world.state(), maker.biomeManager(around, cx, cz), maker.possibleBiomes(around), rule);
         if (o != null) stage(o, chunk, whole);
         int[] after = surface(chunk);
+        if (o != null) {
+            long[] words = ((java.util.BitSet) WorldgenRef.field(maker.carved(cx, cz), "mask")).toLongArray();
+            int bits = 0;
+            long hash = 0xcbf29ce484222325L;
+            for (long word : words) {
+                bits += Long.bitCount(word);
+                hash = fnv(fnv(hash, (int) word), (int) (word >>> 32));
+            }
+            o.i32(bits);
+            o.i64(hash);
+            // The step itself, on a thread that has searched for no biome: it asks the biome of every chunk
+            // around (there is no region of chunks here to remember them in), then that of blocks it lays bare.
+            BiomeManager biomes = maker.biomeManager(around, cx, cz);
+            fresh(unused -> maker.generateCarvers.invoke(maker.generator, chunk, Blender.empty(), noiseChunk, maker.world.state(), biomes, null, rule));
+            stage(o, chunk, whole);
+        }
         noiseChunk.close();
         int raised = 0;
         for (int i = 0; i < 256; ++i) raised += after[i] > before[i] ? 1 : 0;
@@ -801,7 +850,7 @@ final class WorldgenGolden {
 
     static int terrain(Path file, WorldgenRef.World world) throws Exception {
         Out o = new Out();
-        o.magic("WGTERR02");
+        o.magic("WGTERR03");
         o.i64(world.seed());
         Random script = new Random(20261127L);
         ChunkMaker maker = new ChunkMaker(world);
@@ -825,7 +874,7 @@ final class WorldgenGolden {
         }
         System.err.println("worldgen: golden terrain: " + chunks.size() + " chunks, " + every.size() + " biomes; chunks whose surface is built up:" + added);
         o.i32(chunks.size());
-        o.i32(2);  // stages: after doFill, after buildSurface
+        o.i32(3);  // stages: after doFill, after buildSurface, after generateCarvers
         for (int n = 0; n < chunks.size(); ++n) {
             int cx = chunks.get(n)[0], cz = chunks.get(n)[1];
             o.i32(cx);

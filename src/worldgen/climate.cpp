@@ -87,7 +87,7 @@ ALWAYS_INLINE double fiddled_distance(i64 seed, i32 x, i32 y, i32 z, double dx, 
 
 i32 climate_search(const ClimateTarget& target, i32 last) { return search(0, target, last); }
 
-u16 zoomed_biome(const BiomeGrid& grid, i64 zoom_seed, i32 x, i32 y, i32 z) {
+QuartCell zoom_cell(i64 zoom_seed, i32 x, i32 y, i32 z) {
     const i32 ax = x - 2, ay = y - 2, az = z - 2;
     const i32 px = ax >> 2, py = ay >> 2, pz = az >> 2;
     const double fx = static_cast<double>(ax & 3) / 4.0, fy = static_cast<double>(ay & 3) / 4.0,
@@ -103,7 +103,20 @@ u16 zoomed_biome(const BiomeGrid& grid, i64 zoom_seed, i32 x, i32 y, i32 z) {
             least = d;
         }
     }
-    return grid.at((nearest & 4) == 0 ? px : px + 1, (nearest & 2) == 0 ? py : py + 1, (nearest & 1) == 0 ? pz : pz + 1);
+    return {(nearest & 4) == 0 ? px : px + 1, (nearest & 2) == 0 ? py : py + 1, (nearest & 1) == 0 ? pz : pz + 1};
+}
+
+u16 CarverBiomes::at(const QuartCell& cell) {
+    // Climate.Sampler.sample: the six functions at the cell's block, each by itself.
+    const i32 x = cell.x << 2, y = cell.y << 2, z = cell.z << 2;
+    const float temperature = climate.value(wg::root::kRouterTemperature, x, y, z);
+    const float vegetation = climate.value(wg::root::kRouterVegetation, x, y, z);
+    const float continents = climate.value(wg::root::kRouterContinents, x, y, z);
+    const float erosion = climate.value(wg::root::kRouterErosion, x, y, z);
+    const float depth = climate.value(wg::root::kRouterDepth, x, y, z);
+    const float ridges = climate.value(wg::root::kRouterRidges, x, y, z);
+    last = climate_search(climate_target(temperature, vegetation, continents, erosion, depth, ridges), last);
+    return climate_biome(last);
 }
 
 void fill_biome_grid(Sampler& sampler, i32 chunk_x, i32 chunk_z, i32 min_y, u32 sections, BiomeGrid& grid, u16* own) {
