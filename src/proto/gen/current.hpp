@@ -25,6 +25,7 @@
 #define PROTO_GEN_CHAT_TYPES_HPP "proto/gen/v777/chat_types.hpp"  // how a chat message of each type reads (server/chat.cpp only)
 #define PROTO_GEN_TIMELINES_HPP "proto/gen/v777/timelines.hpp"              // world clocks, timelines, time markers (server/clock.cpp only)
 #define PROTO_GEN_PHYSICS_HPP "proto/gen/v777/physics.hpp"  // what entity physics reads off a block state and an entity type
+#define PROTO_GEN_WORLDGEN_HPP "proto/gen/v777/worldgen.hpp"  // the overworld's generator: noises (src/worldgen only)
 
 namespace proto {
 namespace ids = gen::ids;

@@ -201,10 +201,9 @@ struct XoroshiroRandom : RandomDefaults<XoroshiroRandom> {
 struct XoroshiroPositional {
     u64 lo, hi;
     ALWAYS_INLINE XoroshiroRandom at(i32 x, i32 y, i32 z) const { return {static_cast<u64>(position_seed(x, y, z)) ^ lo, hi}; }
-    XoroshiroRandom from_hash_of(std::string_view name) const {
-        const Seed128 s = seed_from_hash_of(name);
-        return {s.lo ^ lo, s.hi ^ hi};
-    }
+    XoroshiroRandom from_hash_of(std::string_view name) const { return from_hash(seed_from_hash_of(name)); }
+    // ...of a name whose hash is known (the generated tables hold those of every noise).
+    XoroshiroRandom from_hash(Seed128 s) const { return {s.lo ^ lo, s.hi ^ hi}; }
     XoroshiroRandom from_seed(i64 seed) const { return {static_cast<u64>(seed) ^ lo, static_cast<u64>(seed) ^ hi}; }
 };
 

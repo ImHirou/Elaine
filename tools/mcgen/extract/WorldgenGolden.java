@@ -7,6 +7,9 @@
 //
 //   random.bin   the random sources: sequences of calls on each kind of source, the seeds
 //                positions and names hash to, how a seed is read and how it is hidden from clients
+//   noise.bin    every noise of the overworld for one seed: what the seed made of each layer
+//                (permutation, offsets), its value at points, and what it adds to a buffer over
+//                a volume - the two ways vanilla samples a noise, which are not the same bits
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -25,6 +28,10 @@ import net.minecraft.world.level.levelgen.SingleThreadedRandomSource;
 import net.minecraft.world.level.levelgen.WorldOptions;
 import net.minecraft.world.level.levelgen.WorldgenRandom;
 import net.minecraft.world.level.levelgen.XoroshiroRandomSource;
+import net.minecraft.world.level.levelgen.densityfunction.DensityBuffer;
+import net.minecraft.world.level.levelgen.densityfunction.DensityVolume;
+import net.minecraft.world.level.levelgen.synth.Noise;
+import net.minecraft.world.level.levelgen.synth.SmearedPerlinNoise;
 
 final class WorldgenGolden {
     /** A file in the making. */
@@ -195,7 +202,7 @@ final class WorldgenGolden {
         return r;
     }
 
-    static int random(Path file) throws IOException {
+    static int random(Path file, WorldgenRef.World world) throws IOException {
         Out o = new Out();
         o.magic("WGRAND01");
         Random script = new Random(20261123L);
@@ -271,13 +278,114 @@ final class WorldgenGolden {
         return o.save(file);
     }
 
+    // ------------------------------------------------------------------------------- noise
+
+    /** Scales a density function gives a noise: 1, a quarter, thirds, what the terrain's blend uses. */
+    static final double[] SCALES = {1.0, 0.25, 4.0 / 3.0, 1500.0, 684.412 * 0.25, 0.3, 2.0, 25.0};
+
+    /** What a test fills a buffer with before a noise is added to it: any numbers, the same on both sides. */
+    static float prefill(int kind, int index) {
+        return kind == 0 ? 0f : (float) index * 0.125f - 3f;
+    }
+
+    static DensityVolume volume(Random script, int shape) {
+        // Where a world is: near its middle, mostly; at its border, where a noise wraps, now and then.
+        int far = script.nextInt(4) == 0 ? 29_999_000 : 20_000;
+        int x = script.nextInt(2 * far) - far, y = script.nextInt(384) - 64, z = script.nextInt(2 * far) - far;
+        return switch (shape) {
+            case 0 -> new DensityVolume(4, 12, 3, x, y, z, 1, 1, 1);           // blocks
+            case 1 -> new DensityVolume(3, 7, 3, x & ~3, y & ~7, z & ~3, 4, 8, 4);  // the corners of cells
+            default -> new DensityVolume(2, 1, 2, x & ~3, 0, z & ~3, 4, 1, 4);      // a slice
+        };
+    }
+
+    static int noise(Path file, WorldgenRef.World world) throws Exception {
+        Out o = new Out();
+        o.magic("WGNOIS01");
+        o.i64(world.seed());
+        Random script = new Random(20261124L);
+        o.i32(world.noises().size());
+        for (java.util.Map.Entry<String, Noise> e : world.noises().entrySet()) {
+            Noise noise = e.getValue();
+            o.str(e.getKey());
+            // What the seed made of it: every layer's permutation and offsets.
+            Object[] layers = (Object[]) WorldgenRef.field(noise, "layers");
+            o.u8(noise.getClass().getName().endsWith("SmearedPerlin") ? 1 : 0);
+            o.i32(layers.length);
+            for (Object layer : layers) {
+                Object perlin = WorldgenRef.field(layer, "noise");
+                o.f64((Double) WorldgenRef.field(layer, "frequency"));
+                o.f32((Float) WorldgenRef.field(layer, "amplitude"));
+                o.f64(perlin instanceof SmearedPerlinNoise ? (Double) WorldgenRef.field(perlin, "fudgeYScale") : 0.0);
+                o.f64((Double) WorldgenRef.field(perlin, "offsetX"));
+                o.f64((Double) WorldgenRef.field(perlin, "offsetY"));
+                o.f64((Double) WorldgenRef.field(perlin, "offsetZ"));
+                for (byte b : (byte[]) WorldgenRef.field(perlin, "perms")) o.u8(b);
+            }
+            // Its value at points: fractions, whole blocks times a scale, and far out where it wraps.
+            final int points = 48;
+            o.i32(points);
+            for (int i = 0; i < points; ++i) {
+                double x, y, z;
+                switch (i % 4) {
+                    case 0 -> {
+                        x = script.nextDouble() * 2000 - 1000;
+                        y = script.nextDouble() * 512 - 128;
+                        z = script.nextDouble() * 2000 - 1000;
+                    }
+                    case 1 -> {
+                        double scale = SCALES[script.nextInt(SCALES.length)];
+                        x = (script.nextInt(200000) - 100000) * scale;
+                        y = (script.nextInt(384) - 64) * scale;
+                        z = (script.nextInt(200000) - 100000) * scale;
+                    }
+                    case 2 -> {
+                        x = (script.nextBoolean() ? 1 : -1) * (2.9e7 + script.nextDouble() * 1e7);
+                        y = script.nextDouble() * 4e7 - 2e7;
+                        z = (script.nextBoolean() ? 1 : -1) * (1.6e7 + script.nextDouble() * 1e6);
+                    }
+                    default -> {
+                        x = script.nextInt(64) - 32;
+                        y = script.nextInt(64) - 32;
+                        z = script.nextInt(64) - 32;
+                    }
+                }
+                o.f64(x);
+                o.f64(y);
+                o.f64(z);
+                o.f32(noise.get(x, y, z));
+                o.f32(noise.get(x, z));
+            }
+            // ...and added to a buffer over a volume, which is how a chunk is filled.
+            final int volumes = 3;
+            o.i32(volumes);
+            for (int shape = 0; shape < volumes; ++shape) {
+                DensityVolume v = volume(script, shape);
+                double xzScale = SCALES[script.nextInt(SCALES.length)], yScale = SCALES[script.nextInt(SCALES.length)];
+                float amplitude = script.nextBoolean() ? 1f : script.nextFloat() * 4f;
+                int kind = script.nextInt(2);
+                for (int n : new int[] {v.sizeX(), v.sizeY(), v.sizeZ(), v.minBlockX(), v.minBlockY(), v.minBlockZ(), v.stepBlockX(), v.stepBlockY(), v.stepBlockZ()}) o.i32(n);
+                o.f64(xzScale);
+                o.f64(yScale);
+                o.f32(amplitude);
+                o.u8(kind);
+                DensityBuffer buffer = DensityBuffer.createUnpooled(v.size());
+                for (int i = 0; i < v.size(); ++i) buffer.set(i, prefill(kind, i));
+                noise.addToVolume(buffer, v, xzScale, yScale, amplitude);
+                for (int i = 0; i < v.size(); ++i) o.f32(buffer.get(i));
+            }
+        }
+        return o.save(file);
+    }
+
     interface Writer {
-        int write(Path file) throws Exception;
+        int write(Path file, WorldgenRef.World world) throws Exception;
     }
 
     static final java.util.Map<String, Writer> FILES = new java.util.LinkedHashMap<>();
 
     static {
         FILES.put("random", WorldgenGolden::random);
+        FILES.put("noise", WorldgenGolden::noise);
     }
 }

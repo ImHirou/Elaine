@@ -9,17 +9,24 @@
 #include <gtest/gtest.h>
 
 #include <bit>
+#include <cstring>
 #include <string>
 #include <variant>
+#include <vector>
 
+#include "worldgen/noise.hpp"
 #include "worldgen/random.hpp"
 
 using namespace worldgen;
+namespace wg = proto::gen::worldgen;
 
 namespace {
 
 constexpr unsigned char kRandom[] = {
 #embed "data/worldgen_random.bin"
+};
+constexpr unsigned char kNoise[] = {
+#embed "data/worldgen_noise.bin"
 };
 
 // A script being read.
@@ -255,4 +262,73 @@ TEST(Worldgen, RandomSourcesDrawWhatVanillaDraws) {
         }
     }
     EXPECT_EQ(in.p, in.end) << "the script was not read to its end";
+}
+
+// The noise the script names: one of the registry's, or one of old_blended_noise's three.
+const Noise* find_noise(const Noises& noises, std::string_view name) {
+    if (name == "blended:min_limit") return &noises.blended_min_limit();
+    if (name == "blended:max_limit") return &noises.blended_max_limit();
+    if (name == "blended:main") return &noises.blended_main();
+    for (u32 i = 0; i < wg::noise::kCount; ++i)
+        if (wg::kNoises[i].name == name) return &noises[i];
+    return nullptr;
+}
+
+// What WorldgenGolden.prefill puts into a buffer before a noise is added to it.
+float prefill(u32 kind, u32 index) { return kind == 0 ? 0.0f : static_cast<float>(index) * 0.125f - 3.0f; }
+
+TEST(Worldgen, NoisesAreWhatTheSeedMakesThem) {
+    In in(kNoise);
+    in.magic("WGNOIS01");
+    const i64 seed = in.i64_();
+    const Noises noises(seed);
+    const u32 count = in.num<u32>();
+    ASSERT_EQ(count, wg::noise::kCount + 3);
+    u32 layers = 0, points = 0, cells = 0;
+    for (u32 n = 0; n < count; ++n) {
+        const std::string name = in.str();
+        const Noise* noise = find_noise(noises, name);
+        ASSERT_NE(noise, nullptr) << name;
+        ASSERT_EQ(noise->smeared, in.u8_() != 0) << name;
+        ASSERT_EQ(noise->count, in.num<u32>()) << name;
+        // Each layer: its place in the stack, and what the seed drew for it.
+        for (u32 i = 0; i < noise->count; ++i, ++layers) {
+            const Layer& l = noise->layers[i];
+            ASSERT_EQ(bits(l.frequency), in.f64_bits()) << name << " layer " << i;
+            ASSERT_EQ(bits(l.amplitude), in.f32_bits()) << name << " layer " << i;
+            ASSERT_EQ(bits(l.noise.fudge_y_scale), in.f64_bits()) << name << " layer " << i;
+            ASSERT_EQ(bits(l.noise.offset_x), in.f64_bits()) << name << " layer " << i;
+            ASSERT_EQ(bits(l.noise.offset_y), in.f64_bits()) << name << " layer " << i;
+            ASSERT_EQ(bits(l.noise.offset_z), in.f64_bits()) << name << " layer " << i;
+            ASSERT_EQ(std::memcmp(l.noise.perms, in.p, 256), 0) << name << " layer " << i << ": the permutation";
+            in.p += 256;
+        }
+        // Its value at points...
+        for (u32 k = in.num<u32>(), i = 0; i < k; ++i, ++points) {
+            const double x = in.f64_(), y = in.f64_(), z = in.f64_();
+            ASSERT_EQ(bits(noise->get(x, y, z)), in.f32_bits()) << name << " at " << x << ", " << y << ", " << z;
+            ASSERT_EQ(bits(noise->get(x, z)), in.f32_bits()) << name << " at " << x << ", " << z << " (two coordinates)";
+        }
+        // ...and over volumes.
+        for (u32 k = in.num<u32>(), i = 0; i < k; ++i) {
+            Volume v;
+            v.size_x = in.i32_(), v.size_y = in.i32_(), v.size_z = in.i32_();
+            v.min_x = in.i32_(), v.min_y = in.i32_(), v.min_z = in.i32_();
+            v.step_x = in.i32_(), v.step_y = in.i32_(), v.step_z = in.i32_();
+            const double xz_scale = in.f64_(), y_scale = in.f64_();
+            const float amplitude = in.f32_();
+            const u32 kind = in.u8_();
+            std::vector<float> buffer(v.size());
+            for (u32 j = 0; j < v.size(); ++j) buffer[j] = prefill(kind, j);
+            noise->add_to_volume(buffer.data(), v, xz_scale, y_scale, amplitude);
+            for (u32 j = 0; j < v.size(); ++j, ++cells)
+                ASSERT_EQ(bits(buffer[j]), in.f32_bits())
+                    << name << ": volume " << i << " (from " << v.min_x << ", " << v.min_y << ", " << v.min_z << ", scales "
+                    << xz_scale << " and " << y_scale << "), cell " << j;
+        }
+    }
+    EXPECT_EQ(in.p, in.end) << "the script was not read to its end";
+    EXPECT_GT(layers, 300u);
+    EXPECT_EQ(points, count * 48);
+    EXPECT_EQ(cells, count * (4 * 12 * 3 + 3 * 7 * 3 + 2 * 2));
 }

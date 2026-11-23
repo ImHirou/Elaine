@@ -184,6 +184,7 @@ add_library(core STATIC
   src/world/dimension.cpp
   src/world/collide.cpp
   src/worldgen/random.cpp
+  src/worldgen/noise.cpp
   src/phys/physics.cpp
   src/item/components.cpp
   src/item/codec.cpp

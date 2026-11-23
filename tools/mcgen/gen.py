@@ -51,6 +51,7 @@ import worldgen
 import gen_commands
 import gen_game
 import gen_physics
+import gen_worldgen
 import mcgen
 from mcgen import ROOT, die, javap, jar_for, vdir, version_info
 
@@ -2439,6 +2440,8 @@ def generate_into(version: str, out: Path, reports: Path | None = None) -> dict:
     tables["static_ids.hpp"] = gen_game.emit_static_ids(hdr, static_regs)
     tables["command_data.hpp"] = gen_commands.emit_command_data(hdr, d, static_regs, blocks)
     tables["lang.hpp"] = gen_commands.emit_lang(hdr, version)
+    tables.update(gen_worldgen.emit(hdr, version, data))
+    stats.update(tables.pop("_stats"))
     for name, content in tables.items():
         save(name, content)
     stats["files"] = len(saved)

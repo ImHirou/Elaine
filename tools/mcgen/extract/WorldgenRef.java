@@ -56,6 +56,7 @@ import net.minecraft.world.level.levelgen.RandomState;
 import net.minecraft.world.level.levelgen.densityfunction.DensityFunction;
 import net.minecraft.world.level.levelgen.densityfunction.DensitySampler;
 import net.minecraft.world.level.levelgen.synth.GradientNoise;
+import net.minecraft.world.level.levelgen.synth.Noise;
 
 public final class WorldgenRef {
     static final List<String> problems = new ArrayList<>();
@@ -256,27 +257,86 @@ public final class WorldgenRef {
         for (Field f : Graph.fields(v.getClass())) find(path + "." + f.getName(), f.get(v), out, seen);
     }
 
-    record Program(Graph graph, JsonObject roots, JsonObject noises) {}
+    /** A (private) field of `o`, wherever in its classes it is declared. */
+    static Object field(Object o, String name) throws Exception {
+        for (Class<?> k = o.getClass(); k != null; k = k.getSuperclass())
+            try {
+                Field f = k.getDeclaredField(name);
+                f.setAccessible(true);
+                return f.get(o);
+            } catch (NoSuchFieldException e) {
+                // in a superclass, then
+            }
+        throw new NoSuchFieldException(o.getClass().getName() + "." + name);
+    }
 
-    static Program compile(RegistryAccess registries, NoiseGeneratorSettings settings, long seed) throws Exception {
-        RandomState state = RandomState.create(registries.lookupOrThrow(Registries.NOISE), seed, settings);
+    interface Visitor {
+        void visit(Object o) throws Exception;
+    }
+
+    /** Every vanilla object under `v`, once each. */
+    static void walk(Object v, IdentityHashMap<Object, Boolean> seen, Visitor visitor) throws Exception {
+        if (v == null || v instanceof String || v instanceof Number || v instanceof Boolean || v instanceof Enum<?>) return;
+        if (seen.put(v, true) != null) return;
+        if (v.getClass().isArray()) {
+            if (!v.getClass().getComponentType().isPrimitive())
+                for (int i = 0, n = Array.getLength(v); i < n; ++i) walk(Array.get(v, i), seen, visitor);
+            return;
+        }
+        if (v instanceof Collection<?> c) {
+            for (Object e : c) walk(e, seen, visitor);
+            return;
+        }
+        if (!Dump.vanilla(v.getClass()) || OPAQUE.contains(v.getClass().getName()) || v instanceof Holder<?>) return;
+        visitor.visit(v);
+        for (Field f : Graph.fields(v.getClass())) walk(f.get(v), seen, visitor);
+    }
+
+    /** The overworld of one seed: its random state, what it compiled, and its noises by name. */
+    record World(long seed, NoiseGeneratorSettings settings, RandomState state, Map<String, DensitySampler> samplers, Map<String, Noise> noises) {}
+
+    static World world(RegistryAccess registries, long seed) throws Exception {
+        NoiseGeneratorSettings settings = registries.lookupOrThrow(Registries.NOISE_SETTINGS).getOrThrow(NoiseGeneratorSettings.OVERWORLD).value();
+        var registry = registries.lookupOrThrow(Registries.NOISE);
+        RandomState state = RandomState.create(registry, seed, settings);
         Map<String, DensitySampler> samplers = new LinkedHashMap<>();
         for (Map.Entry<String, DensityFunction> e : roots(settings).entrySet()) samplers.put(e.getKey(), state.getSampler(e.getValue()));
-        Graph g = new Graph();
-        // A noise is made once per RandomState and shared by every sampler that names it.
-        Field f = RandomState.class.getDeclaredField("noiseInstances");
-        f.setAccessible(true);
-        Map<?, ?> instances = (Map<?, ?>) f.get(state);
-        Map<String, Object> byName = new java.util.TreeMap<>();
-        for (Map.Entry<?, ?> e : instances.entrySet()) {
-            String name = ((ResourceKey<?>) e.getKey()).identifier().toString();
-            g.names.put(e.getValue(), name);
-            byName.put(name, e.getValue());
+        // A noise is made once per RandomState and shared by whatever names it: every noise of
+        // the registry, whether a density function asked for it or not (the nether's two are
+        // made another way, by the nether's own generator).
+        Map<String, Noise> noises = new java.util.TreeMap<>();
+        for (var key : registry.listElementIds().toList()) {
+            if (key.identifier().getPath().startsWith("nether/")) continue;
+            noises.put(key.identifier().toString(), state.getOrCreateNoise(key));
         }
+        // old_blended_noise makes three stacks of its own, from the seed of "minecraft:terrain":
+        // Lerp(Clamp(ConstAdd(main)), minLimit, maxLimit) - BlendedNoise.compileSampler.
+        IdentityHashMap<Object, Boolean> seen = new IdentityHashMap<>();
+        for (DensitySampler sampler : samplers.values())
+            walk(sampler, seen, o -> {
+                if (!o.getClass().getName().endsWith("LerpFunction$Sampler")) return;
+                Object first = field(o, "first"), second = field(o, "second");
+                if (!first.getClass().getName().endsWith("NoiseFunction$Sampler")) return;
+                Object min = field(first, "noise"), max = field(second, "noise");
+                if (!min.getClass().getName().endsWith("NoiseStack$SmearedPerlin")) return;
+                Object main = field(field(field(field(o, "alpha"), "input"), "left"), "noise");
+                noises.put("blended:min_limit", (Noise) min);
+                noises.put("blended:max_limit", (Noise) max);
+                noises.put("blended:main", (Noise) main);
+            });
+        if (!noises.containsKey("blended:main")) problem("old_blended_noise is not compiled into Lerp(Clamp(ConstAdd(main)), min, max) any more");
+        return new World(seed, settings, state, samplers, noises);
+    }
+
+    record Program(Graph graph, JsonObject roots, JsonObject noises) {}
+
+    static Program dump(World w) {
+        Graph g = new Graph();
+        for (Map.Entry<String, Noise> e : w.noises().entrySet()) g.names.put(e.getValue(), e.getKey());
         JsonObject roots = new JsonObject();
-        for (Map.Entry<String, DensitySampler> e : samplers.entrySet()) roots.add(e.getKey(), g.value(e.getValue()));
+        for (Map.Entry<String, DensitySampler> e : w.samplers().entrySet()) roots.add(e.getKey(), g.value(e.getValue()));
         JsonObject noises = new JsonObject();
-        for (Map.Entry<String, Object> e : byName.entrySet()) noises.add(e.getKey(), g.value(e.getValue()));
+        for (Map.Entry<String, Noise> e : w.noises().entrySet()) noises.add(e.getKey(), g.value(e.getValue()));
         return new Program(g, roots, noises);
     }
 
@@ -306,8 +366,7 @@ public final class WorldgenRef {
     }
 
     static JsonObject program(RegistryAccess registries) throws Exception {
-        NoiseGeneratorSettings settings = registries.lookupOrThrow(Registries.NOISE_SETTINGS).getOrThrow(NoiseGeneratorSettings.OVERWORLD).value();
-        Program a = compile(registries, settings, SEED_A), b = compile(registries, settings, SEED_B);
+        Program a = dump(world(registries, SEED_A)), b = dump(world(registries, SEED_B));
         Map<String, Class<?>> classes = new LinkedHashMap<>();
         for (Object o : a.graph().ids.keySet()) classes.put(a.graph().nodes.get(a.graph().ids.get(o)).getAsJsonObject().get("c").getAsString(), o.getClass());
         sameProgram(a, b, classes);
@@ -358,8 +417,9 @@ public final class WorldgenRef {
         Path dir = out.resolve("golden");
         Files.createDirectories(dir);
         JsonObject files = new JsonObject();
+        World w = world(registries, SEED_A);
         for (Map.Entry<String, WorldgenGolden.Writer> e : WorldgenGolden.FILES.entrySet())
-            files.addProperty(e.getKey() + ".bin", e.getValue().write(dir.resolve(e.getKey() + ".bin")));
+            files.addProperty(e.getKey() + ".bin", e.getValue().write(dir.resolve(e.getKey() + ".bin"), w));
         JsonObject root = new JsonObject();
         root.addProperty("version", SharedConstants.getCurrentVersion().name());
         root.add("files", files);
