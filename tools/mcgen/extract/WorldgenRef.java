@@ -9,6 +9,8 @@
 //             overlap is gone. The port runs this graph, not the JSON it came from.
 //   climate   the overworld's biome parameter list and the R-tree vanilla searches it with, node
 //             by node in the order the search walks them (a tie goes to whoever comes first).
+//   golden    what vanilla computes, as scripts the unit tests replay (WorldgenGolden.java): only
+//             when it is asked for - the tables are not made of it.
 //
 // A graph is a list of nodes; a node is {"c": class, field: value...}; a value is a number, a
 // string, a list, or {"#": index of another node}. A float is written as the double it widens
@@ -342,16 +344,32 @@ public final class WorldgenRef {
     }
 
     static final Map<String, Section> SECTIONS = new LinkedHashMap<>();
+    /** What a run without arguments writes: what `generate` reads. */
+    static final List<String> TABLES = List.of("program", "climate");
+    static Path out;
 
     static {
         SECTIONS.put("program", WorldgenRef::program);
         SECTIONS.put("climate", WorldgenRef::climate);
+        SECTIONS.put("golden", WorldgenRef::golden);
+    }
+
+    static JsonObject golden(RegistryAccess registries) throws Exception {
+        Path dir = out.resolve("golden");
+        Files.createDirectories(dir);
+        JsonObject files = new JsonObject();
+        for (Map.Entry<String, WorldgenGolden.Writer> e : WorldgenGolden.FILES.entrySet())
+            files.addProperty(e.getKey() + ".bin", e.getValue().write(dir.resolve(e.getKey() + ".bin")));
+        JsonObject root = new JsonObject();
+        root.addProperty("version", SharedConstants.getCurrentVersion().name());
+        root.add("files", files);
+        return root;
     }
 
     public static void main(String[] args) throws Exception {
         final PrintStream stdout = System.out;  // Bootstrap redirects System.out into the game log
-        Path out = Path.of(args[0]);
-        List<String> wanted = args.length > 1 ? List.of(args).subList(1, args.length) : new ArrayList<>(SECTIONS.keySet());
+        out = Path.of(args[0]);
+        List<String> wanted = args.length > 1 ? List.of(args).subList(1, args.length) : TABLES;
         for (String name : wanted)
             if (!SECTIONS.containsKey(name)) {
                 System.err.println("worldgen: no section '" + name + "' (have: " + String.join(", ", SECTIONS.keySet()) + ")");

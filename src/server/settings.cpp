@@ -86,6 +86,8 @@ bool set_key(Settings& s, std::string_view k, std::string_view v, std::string& e
         s.ops_file = std::string(v);
     else if (k == "level-name")
         s.level_name = std::string(v);
+    else if (k == "level-seed")
+        s.level_seed = std::string(v);
     else if (k == "sync-chunk-writes")
         ok = parse_bool(v, s.sync_chunk_writes);
     else if (k == "worker-threads")

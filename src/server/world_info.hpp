@@ -5,8 +5,8 @@
 //     session.lock                     held (fcntl) while a server runs the world: vanilla's file, and
 //                                      vanilla's kind of lock - neither takes a world the other has
 //     world.json                       what this server knows of the world: the format and data
-//                                      version it was saved by, its generator, its spawn - and
-//                                      what time it is: written again with every autosave
+//                                      version it was saved by, its seed, its generator, its spawn -
+//                                      and what time it is: written again with every autosave
 //     chunks/minecraft/overworld/      region files of this server's own format (world/region.hpp)
 //     playerstate/<uuid>.bin           what is kept of a player (server/player_data.hpp)
 //
@@ -37,6 +37,10 @@ struct WorldInfo {
     std::vector<world::FlatGenerator::Layer> layers = world::FlatGenerator::default_layers();
     u16 biome = 0;
     i32 sea_level = -63;  // ChunkGenerator.getSeaLevel(): -63 for a flat world, 63 for the overworld's noise
+    // WorldOptions.seed: what everything a generator draws comes from, and - hashed - what a
+    // client zooms biomes with. A world has one from the day it is made: `level-seed`, or a
+    // random one; an imported world has vanilla's.
+    i64 seed = 0;
     // Where players appear: a block position, and the middle of that block is where they stand.
     // Without one it is (8, top of the generator's ground, 8).
     bool has_spawn = false;

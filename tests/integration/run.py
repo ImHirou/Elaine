@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import hashlib
 import http.server
 import json
 import math
@@ -254,6 +255,21 @@ def join(c: Client, name: str, online: bool = False, view: int = 2, chat: int = 
     out["ticking"] = (c.tick_rate, c.tick_frozen, c.tick_steps)
     out["first_chunk"] = next(e[1][0] for e in c.chunk_log if e[0] == "batch")
     return out
+
+
+def hashed_seed(seed: int) -> int:
+    """What a client is told of a world's seed (BiomeManager.obfuscateSeed): the first eight bytes of
+    the SHA-256 of its eight - Guava's hashLong and asLong, both low byte first."""
+    return struct.unpack("<q", hashlib.sha256(struct.pack("<q", seed)).digest()[:8])[0]
+
+
+def text_seed(text: str) -> int:
+    """The seed a level-seed that is no number stands for: its String.hashCode()."""
+    h = 0
+    units = text.encode("utf-16-be")
+    for i in range(0, len(units), 2):
+        h = (h * 31 + (units[i] << 8 | units[i + 1])) & 0xFFFFFFFF
+    return h - (1 << 32) if h >> 31 else h
 
 
 def check_join(j: dict, name: str, view: int = 2, online: bool = False) -> None:
@@ -6494,9 +6510,11 @@ def the_world_is_kept():
     world = tempfile.mkdtemp(prefix="world-kept-")
     srv = None
     try:
-        srv = Server(EXE, world=world)
+        srv = Server(EXE, world=world, level_seed="Glacier")
         a = srv.client()
-        join(a, "Alice", view=3)
+        ja = join(a, "Alice", view=3)
+        # The world's seed is the one it was made with (WorldOptions.parseSeed: a word is its hashCode).
+        assert text_seed("Glacier") == 1772835215 and ja["login"]["seed"] == hashed_seed(1772835215), ja["login"]
         a.send("player_loaded")
         settle(a)
         made = build_something(a)
@@ -6532,10 +6550,11 @@ def the_world_is_kept():
         regions = os.listdir(os.path.join(world, "chunks", "minecraft", "overworld"))
         assert regions and all(re.fullmatch(r"r\.-?\d+\.-?\d+\.rgn", name) for name in regions), regions
 
-        srv = Server(EXE, world=world)
+        srv = Server(EXE, world=world, level_seed=7)     # (a seed for a new world: this one has its own)
         assert "a new flat world" not in srv.read_log()
         c = srv.client()
-        join(c, "Carol", view=3)
+        jc = join(c, "Carol", view=3)
+        assert jc["login"]["seed"] == hashed_seed(1772835215), jc["login"]
         c.send("player_loaded")
         settle(c, ticks=6)
         after = frames(c)
@@ -6818,9 +6837,10 @@ def a_vanilla_world_is_imported():
         j = join(c, "Alice", view=3)
         c.send("player_loaded")
         settle(c)
-        # The world's own spawn and its own generator: flat, sandstone, desert.
+        # The world's own spawn and its own generator: flat, sandstone, desert - and its own seed.
         assert j["teleport"]["pos"] == (4.5, -60.0, 4.5), j["teleport"]["pos"]
         assert j["login"]["is_flat"] is True
+        assert j["login"]["seed"] == hashed_seed(42), j["login"]["seed"]
         # ...and its own time: the level's ticks go on from where they were, the end's clock with
         # them, and the overworld's - which was stopped - stands.
         now, clocks = c.time_log[0]

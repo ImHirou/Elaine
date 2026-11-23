@@ -686,6 +686,8 @@ bool import_world(const std::string& dir, base::Workers& workers, WorldInfo& inf
     std::vector<u8> gen_bytes;
     nbt::Doc gen_doc;
     if (read_nbt_gz(dir + "/data/minecraft/world_gen_settings.dat", gen_bytes, gen_doc)) {
+        // WorldGenSettings.CODEC: the fields of WorldOptions - the seed first - beside the dimensions.
+        if (const nbt::Tag seed = gen_doc.root().get("data").get("seed"); seed.numeric()) info.seed = seed.as_long();
         const nbt::Tag generator = gen_doc.root().get("data").get("dimensions").get("minecraft:overworld").get("generator");
         if (generator.type == nbt::kCompound && text(generator.get("type")) == "minecraft:flat") {
             const nbt::Tag settings = generator.get("settings"), layers = settings.get("layers");

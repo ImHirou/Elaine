@@ -7,11 +7,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <random>
 
 #include "base/log.hpp"
 #include "server/import.hpp"
 #include "server/world_info.hpp"
 #include "world/block.hpp"
+#include "worldgen/random.hpp"
 
 namespace server {
 
@@ -19,7 +21,14 @@ namespace {
 
 constexpr i64 kFormat = 1;  // of world.json and of the chunk bytes (world/chunk_io.hpp)
 
-bool read_meta(const std::string& path, WorldInfo& out, std::string& err) {
+// WorldOptions.randomSeed(): any 64 bits.
+i64 random_seed() {
+    std::random_device device;
+    return static_cast<i64>(static_cast<u64>(device()) << 32 | device());
+}
+
+// `seeded`: whether the file names the world's seed (one written before worlds had seeds does not).
+bool read_meta(const std::string& path, WorldInfo& out, bool& seeded, std::string& err) {
     yyjson_doc* doc = yyjson_read_file(path.c_str(), 0, nullptr, nullptr);
     if (!doc) {
         err = path + " cannot be read";
@@ -40,6 +49,9 @@ bool read_meta(const std::string& path, WorldInfo& out, std::string& err) {
         ok = false;
     }
     if (ok) {
+        yyjson_val* seed = yyjson_obj_get(root, "seed");
+        seeded = yyjson_is_int(seed);
+        if (seeded) out.seed = yyjson_get_sint(seed);
         yyjson_val* gen = yyjson_obj_get(root, "generator");
         const char* type = yyjson_get_str(yyjson_obj_get(gen, "type"));
         out.flat = !type || std::string_view(type) == "flat";
@@ -114,6 +126,7 @@ std::string world_json(const WorldInfo& info, const WorldTime& now) {
     yyjson_mut_obj_add_int(doc, root, "format", kFormat);
     yyjson_mut_obj_add_int(doc, root, "data_version", proto::gen::kWorldVersion);
     yyjson_mut_obj_add_strcpy(doc, root, "version", std::string(proto::gen::kVersionName).c_str());
+    yyjson_mut_obj_add_sint(doc, root, "seed", info.seed);
     yyjson_mut_val* gen = yyjson_mut_obj_add_obj(doc, root, "generator");
     yyjson_mut_obj_add_str(doc, gen, "type", info.flat ? "flat" : "void");
     yyjson_mut_obj_add_strcpy(doc, gen, "biome", std::string(world::biome_name(info.biome)).c_str());
@@ -157,6 +170,7 @@ WorldInfo::~WorldInfo() {
 bool open_world(const Settings& s, base::Workers& workers, WorldInfo& out, std::string& err) {
     out.biome = static_cast<u16>(proto::reg::worldgen_biome::kPlains);
     if (s.level_name.empty()) {
+        if (!worldgen::parse_seed(s.level_seed, out.seed)) out.seed = random_seed();
         LOG_INFO("level-name is empty: the world is not kept");
         return true;
     }
@@ -182,11 +196,16 @@ bool open_world(const Settings& s, base::Workers& workers, WorldInfo& out, std::
 
     const std::string meta = out.dir + "/world.json";
     if (std::filesystem::exists(meta, ec)) {
-        if (!read_meta(meta, out, err)) return false;
+        bool seeded = false;
+        if (!read_meta(meta, out, seeded, err)) return false;
         LOG_INFO("world %s: %s generator%s", out.dir.c_str(), out.flat ? "flat" : "void",
                  out.imported ? ", imported from vanilla" : "");
-        return true;
+        if (seeded) return true;
+        out.seed = random_seed();  // a world from before worlds had seeds: it has this one from now on
+        return write_meta(meta, out, err);
     }
+    // A world that is made here has the seed the settings name; one that vanilla made has its own.
+    if (!worldgen::parse_seed(s.level_seed, out.seed)) out.seed = random_seed();
     if (std::filesystem::exists(out.dir + "/level.dat", ec)) {
         if (!import_world(out.dir, workers, out, err)) return false;
     } else {

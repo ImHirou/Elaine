@@ -6,6 +6,8 @@ section into .cache/mc/<version>/worldgen/:
 
   program   the overworld's density functions as vanilla compiled them: a graph of sampler objects
   climate   the overworld's biome parameters and the R-tree they are searched with
+  golden    what vanilla computes, as the scripts the unit tests of src/worldgen replay - written
+            only when asked for (`worldgen golden`); `--emit` copies them into tests/unit/data/
 
 The JSON under data/minecraft/worldgen/ in the jar says what a world is made of; these files say
 what vanilla made of that - which is what decides the bits (a division by a constant compiled into
@@ -16,12 +18,14 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
 from mcgen import ROOT, die, find_tool, vdir, version_info, write_stamp
 
-SECTIONS = ("program", "climate")
+SECTIONS = ("program", "climate", "golden")
+TABLES = ("program", "climate")  # what a run without arguments writes, and `generate` reads
 
 
 def out_dir(version: str) -> Path:
@@ -57,9 +61,19 @@ def cmd_worldgen(args) -> None:
     if not args.sections:  # a run of some sections leaves the others as old as they were
         write_stamp(args.version, "worldgen")
     print(f"mcgen: wrote {out.relative_to(ROOT)}/")
+    if getattr(args, "emit", False):
+        if "golden" not in args.sections:
+            die("--emit goes with the golden section: mcgen.py worldgen golden --emit")
+        # The scripts are drawn with fixed seeds: the same bytes every run, so this changes a
+        # tracked file only when the extractor or vanilla changed.
+        dest = ROOT / "tests" / "unit" / "data"
+        for src in sorted((out / "golden").glob("*.bin")):
+            shutil.copyfile(src, dest / f"worldgen_{src.name}")
+            print(f"mcgen: tests/unit/data/worldgen_{src.name}: {src.stat().st_size} bytes")
 
 
 def register(sub) -> None:
     p = sub.add_parser("worldgen", help="RUN the world generation extractor -> .cache/mc/<version>/worldgen/*.json")
-    p.add_argument("sections", nargs="*", help=f"only these sections (default: all of {', '.join(SECTIONS)})")
+    p.add_argument("sections", nargs="*", help=f"only these sections (default: {', '.join(TABLES)}; also: golden)")
+    p.add_argument("--emit", action="store_true", help="with golden: copy the scripts into tests/unit/data/worldgen_*.bin")
     p.set_defaults(fn=cmd_worldgen)

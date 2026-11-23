@@ -10,6 +10,7 @@
 #include "base/log.hpp"
 #include "proto/packets.hpp"
 #include "text/text.hpp"
+#include "worldgen/random.hpp"
 
 #include PROTO_GEN_BLOBS_HPP
 #include PROTO_GEN_DIMENSION_TYPES_HPP
@@ -452,6 +453,7 @@ void Game::finish_join(u32 ri, const InHeader& h, const net::JoinTransport& t, J
     login.dimension = kOverworld;
     login.game_mode = kCreative;
     login.previous_game_mode = -1;
+    login.hashed_seed = static_cast<u64>(worldgen::obfuscate_seed(info_.seed));  // BiomeManager.obfuscateSeed
     login.is_flat = generator_.is_flat();
     login.sea_level = static_cast<u32>(generator_.sea_level());  // a VarInt; -63 for the flat generator
     login.online_mode = s_.online_mode;

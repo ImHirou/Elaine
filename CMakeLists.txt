@@ -183,6 +183,7 @@ add_library(core STATIC
   src/world/generator.cpp
   src/world/dimension.cpp
   src/world/collide.cpp
+  src/worldgen/random.cpp
   src/phys/physics.cpp
   src/item/components.cpp
   src/item/codec.cpp
@@ -246,6 +247,7 @@ if(MC_TESTS)
       tests/unit/command_test.cpp
       tests/unit/chat_test.cpp
       tests/unit/time_test.cpp
+      tests/unit/worldgen_test.cpp
     )
     target_link_libraries(unit_tests PRIVATE core GTest::gtest_main OpenSSL::Crypto)
     if(MC_PCH)
