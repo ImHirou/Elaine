@@ -12,6 +12,8 @@ difference stops the run: the port relies on how the two fit together.
   program    the overworld's density functions as vanilla compiled them: one node per sampler
              object, a child before its parents, with the splines, the lists of an interval
              select and the roots - the functions a generator asks for by name (worldgen/density.cpp).
+  climate    the tree the overworld's biomes are searched in by climate, as vanilla built it
+             (worldgen/climate.cpp).
 """
 from __future__ import annotations
 
@@ -346,6 +348,85 @@ struct Root {
     return "".join(out)
 
 
+def climate_table(version: str, vanilla) -> tuple[list, list]:
+    """The overworld's biome search tree (Climate.RTree) as nodes, a node's children side by side:
+    (nodes, the names of the biomes its leaves give). A node is (mins[7], maxs[7], first child or
+    the leaf's biome, children)."""
+    root = worldgen.load(version, "climate")
+    graph = root["nodes"]
+
+    def node(ref, cls, *fields):
+        n = graph[ref["#"]]
+        if n["c"] != cls or set(n) - {"c"} != set(fields):
+            die(f"gen_worldgen: climate: expected a {cls} of {sorted(fields)}, found a {n['c']} of {sorted(set(n) - {'c'})}")
+        return n
+
+    listed = node(root["list"], "Climate$ParameterList", "values", "index")
+    tree = node(listed["index"], "Climate$RTree", "root", "lastResult")
+    biome_ids = {name: i for i, name in enumerate(vanilla.entries("worldgen/biome"))}  # the registry as clients are sent it
+    nodes: list = [None]
+    used: set = set()
+
+    def space(n) -> tuple[list, list]:
+        ps = [node(p, "Climate$Parameter", "min", "max") for p in n["parameterSpace"]]
+        if len(ps) != 7:  # Climate.PARAMETER_COUNT: six of the climate and the offset
+            die("gen_worldgen: climate: a node's parameter space is not seven parameters")
+        if any(not -32768 <= v <= 32767 for p in ps for v in (p["min"], p["max"])):
+            die("gen_worldgen: climate: a parameter beyond 16 bits (they are fractions of -2..2 times 10000)")
+        return [p["min"] for p in ps], [p["max"] for p in ps]
+
+    def fill(at: int, ref) -> None:
+        n = graph[ref["#"]]
+        if n["c"] == "Climate$RTree$Leaf":
+            leaf = node(ref, "Climate$RTree$Leaf", "parameterSpace", "value")
+            name = leaf["value"].get("holder")
+            if name not in biome_ids:
+                die(f"gen_worldgen: climate: a leaf gives {leaf['value']!r}, which is no biome of the registry")
+            used.add(name)
+            nodes[at] = (*space(leaf), biome_ids[name], 0)
+            return
+        sub = node(ref, "Climate$RTree$SubTree", "parameterSpace", "children")
+        first = len(nodes)
+        nodes.extend([None] * len(sub["children"]))
+        nodes[at] = (*space(sub), first, len(sub["children"]))
+        for i, child in enumerate(sub["children"]):
+            fill(first + i, child)
+
+    fill(0, tree["root"])
+    if len(nodes) > 65535:
+        die("gen_worldgen: climate: more nodes than 16 bits count")
+    if sum(1 for n in nodes if n[3] == 0) != len(listed["values"]):
+        die("gen_worldgen: climate: the tree does not have one leaf a parameter point")
+    return nodes, sorted(used)
+
+
+def emit_climate(hdr: str, nodes: list) -> str:
+    out = [hdr, """
+// The overworld's biomes by climate: the R-tree vanilla searches (Climate.RTree, built over
+// MultiNoiseBiomeSourceParameterList.Preset.OVERWORLD - which is code, not data), node by node as
+// vanilla built it. A node's children lie side by side, in the order the search visits them: who
+// comes first wins a tie. Included by worldgen/climate.cpp only.
+
+#include "base/types.hpp"
+
+namespace proto::gen::worldgen {
+
+// The box of a node in the seven parameters - temperature, humidity, continentalness, erosion,
+// depth, weirdness, offset - in ten-thousandths (Climate.quantizeCoord).
+struct ClimateNode {
+    i16 min[7], max[7];
+    u16 first;     // its first child; a leaf's biome (the network id)
+    u16 children;  // 0: a leaf
+};
+
+"""]
+    out.append(f"inline constexpr ClimateNode kClimate[{len(nodes)}] = {{\n")
+    for mins, maxs, first, children in nodes:
+        out.append(f"    {{{{{', '.join(map(str, mins))}}}, {{{', '.join(map(str, maxs))}}}, {first}, {children}}},\n")
+    out.append("};\n\n}  // namespace proto::gen::worldgen\n")
+    return "".join(out)
+
+
 def emit(hdr: str, version: str, vanilla) -> dict:
     """The generated files, by name - and "_stats"."""
     settings = json.loads(vanilla.zip.read("data/minecraft/worldgen/noise_settings/overworld.json"))
@@ -424,5 +505,7 @@ inline constexpr BlendedLayer kBlendedLayers[{len(blended)}] = {{
     out.append("};\n")
     out.append(emit_program(tables))
     out.append("\n}  // namespace proto::gen::worldgen\n")
-    return {"worldgen.hpp": "".join(out),
-            "_stats": {"noises": len(noises), "noise_layers": len(layers) + len(blended), "density_nodes": len(tables.nodes)}}
+    climate, biomes = climate_table(version, vanilla)
+    return {"worldgen.hpp": "".join(out), "worldgen_climate.hpp": emit_climate(hdr, climate),
+            "_stats": {"noises": len(noises), "noise_layers": len(layers) + len(blended), "density_nodes": len(tables.nodes),
+                       "climate_nodes": len(climate), "climate_biomes": len(biomes)}}

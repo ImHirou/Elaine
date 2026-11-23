@@ -14,6 +14,8 @@
 #include <variant>
 #include <vector>
 
+#include "world/block.hpp"
+#include "worldgen/climate.hpp"
 #include "worldgen/density.hpp"
 #include "worldgen/noise.hpp"
 #include "worldgen/random.hpp"
@@ -31,6 +33,9 @@ constexpr unsigned char kNoise[] = {
 };
 constexpr unsigned char kDensity[] = {
 #embed "data/worldgen_density.bin"
+};
+constexpr unsigned char kClimate[] = {
+#embed "data/worldgen_climate.bin"
 };
 
 // A script being read.
@@ -390,4 +395,68 @@ TEST(Worldgen, DensityFunctionsAnswerAsVanillasSamplers) {
     EXPECT_GT(values, 1400u);
     EXPECT_GT(volumes, 300u);
     EXPECT_GT(cells, 60000u);
+}
+
+// Which biome a climate is. Where two are equally near, the one the search before found stays:
+// the script's searches come in sequences, each begun with nothing found yet.
+TEST(Worldgen, ClimateSearchFindsVanillasBiome) {
+    In in(kClimate);
+    in.magic("WGCLIM01");
+    in.i64_();
+    std::vector<u32> biome;  // the script's biomes as network ids
+    for (u32 n = in.num<u32>(), i = 0; i < n; ++i) {
+        const std::string name = in.str();
+        biome.push_back(world::find_biome(name));
+        ASSERT_NE(biome.back(), world::kNoId) << name;
+    }
+    u32 searches = 0, kept = 0;
+    for (u32 n = in.num<u32>(), s = 0; s < n; ++s) {
+        i32 last = kNoLeaf;
+        for (u32 k = in.num<u32>(), i = 0; i < k; ++i, ++searches) {
+            float c[6];
+            for (float& v : c) v = in.f32_();
+            const ClimateTarget target = climate_target(c[0], c[1], c[2], c[3], c[4], c[5]);
+            const i32 fresh = climate_search(target, kNoLeaf);
+            last = climate_search(target, last);
+            kept += climate_biome(fresh) != climate_biome(last);
+            ASSERT_EQ(climate_biome(last), biome[in.u8_()]) << "sequence " << s << ", search " << i;
+        }
+    }
+    EXPECT_EQ(searches, 24u * 96u);
+    // The script lands on the faces of boxes on purpose: some searches are decided by the one before.
+    EXPECT_GT(kept, 0u);
+}
+
+TEST(Worldgen, BiomesOfAChunkAreVanillas) {
+    In in(kClimate);
+    in.magic("WGCLIM01");
+    const Noises noises(in.i64_());
+    std::vector<u32> biome;
+    for (u32 n = in.num<u32>(), i = 0; i < n; ++i) biome.push_back(world::find_biome(in.str()));
+    for (u32 n = in.num<u32>(), s = 0; s < n; ++s)
+        for (u32 k = in.num<u32>(), i = 0; i < k; ++i) in.p += 6 * 4 + 1;
+
+    const u32 chunks = in.num<u32>();
+    const i32 min_y = in.i32_();
+    const u32 sections = in.num<u32>();
+    ASSERT_EQ(sections, 24u);
+    std::vector<u16> got(sections * 64);
+    Sampler sampler(noises);
+    for (u32 c = 0; c < chunks; ++c) {
+        const i32 cx = in.i32_(), cz = in.i32_();
+        sampler.reset();  // (a chunk's biomes have a context of their own)
+        fill_biomes(sampler, cx, cz, min_y, sections, got.data());
+        for (u32 s = 0; s < sections; ++s)
+            for (u32 x = 0; x < 4; ++x)
+                for (u32 y = 0; y < 4; ++y)
+                    for (u32 z = 0; z < 4; ++z) {
+                        const u32 want = biome[in.u8_()];
+                        ASSERT_EQ(got[s * 64 + (y << 4 | z << 2 | x)], want)
+                            << "chunk " << cx << ", " << cz << ", section " << s << ", cell " << x << ", " << y << ", " << z
+                            << ": " << world::biome_name(got[s * 64 + (y << 4 | z << 2 | x)]) << ", vanilla's is "
+                            << world::biome_name(want);
+                    }
+    }
+    EXPECT_EQ(in.p, in.end) << "the script was not read to its end";
+    EXPECT_EQ(chunks, 40u);
 }

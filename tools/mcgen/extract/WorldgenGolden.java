@@ -10,6 +10,8 @@
 //   density.bin  the density functions: every function vanilla asks a sampler of, at points and
 //                over volumes of the shapes a generator samples in - each by itself, and then in
 //                sequences on one context with caches, where an answer depends on the questions before
+//   climate.bin  which biome a climate is: searches one after the other - an answer depends on
+//                the one before where two biomes are equally near - and the biomes of whole chunks
 //   noise.bin    every noise of the overworld for one seed: what the seed made of each layer
 //                (permutation, offsets), its value at points, and what it adds to a buffer over
 //                a volume - the two ways vanilla samples a noise, which are not the same bits
@@ -21,9 +23,17 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.OptionalLong;
 import java.util.Random;
+import net.minecraft.core.Holder;
+import net.minecraft.core.registries.Registries;
 import net.minecraft.util.Mth;
 import net.minecraft.util.RandomSource;
+import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.biome.BiomeManager;
+import net.minecraft.world.level.biome.BiomeResolver;
+import net.minecraft.world.level.biome.Climate;
+import net.minecraft.world.level.biome.MultiNoiseBiomeSource;
+import net.minecraft.world.level.biome.MultiNoiseBiomeSourceParameterList;
+import net.minecraft.world.level.biome.MultiNoiseBiomeSourceParameterLists;
 import net.minecraft.world.level.levelgen.LegacyRandomSource;
 import net.minecraft.world.level.levelgen.PositionalRandomFactory;
 import net.minecraft.world.level.levelgen.RandomSupport;
@@ -495,6 +505,97 @@ final class WorldgenGolden {
         return o.save(file);
     }
 
+    // ------------------------------------------------------------------------------- climate
+
+    /** Runs `body` on a thread of its own: Climate.RTree remembers a thread's last answer. */
+    static void fresh(WorldgenRef.Visitor body) throws Exception {
+        Exception[] failed = new Exception[1];
+        Thread t = new Thread(() -> {
+            try {
+                body.visit(null);
+            } catch (Exception e) {
+                failed[0] = e;
+            }
+        });
+        t.start();
+        t.join();
+        if (failed[0] != null) throw failed[0];
+    }
+
+    static int climate(Path file, WorldgenRef.World world) throws Exception {
+        Out o = new Out();
+        o.magic("WGCLIM01");
+        o.i64(world.seed());
+        Random script = new Random(20261126L);
+        Holder<MultiNoiseBiomeSourceParameterList> preset =
+            world.registries().lookupOrThrow(Registries.MULTI_NOISE_BIOME_SOURCE_PARAMETER_LIST).getOrThrow(MultiNoiseBiomeSourceParameterLists.OVERWORLD);
+        Climate.ParameterList<Holder<Biome>> list = preset.value().parameters();
+        // The values the faces of the boxes lie at: a climate exactly on one is in two boxes.
+        java.util.TreeSet<Long> faces = new java.util.TreeSet<>();
+        for (var pair : list.values())
+            for (Climate.Parameter p : new Climate.Parameter[] {pair.getFirst().temperature(), pair.getFirst().humidity(), pair.getFirst().continentalness(),
+                                                                pair.getFirst().erosion(), pair.getFirst().depth(), pair.getFirst().weirdness()}) {
+                faces.add(p.min());
+                faces.add(p.max());
+            }
+        Long[] face = faces.toArray(new Long[0]);
+        // Biomes are written as a byte each: their place in the names that come first.
+        java.util.List<String> names = new java.util.ArrayList<>();
+        for (var pair : list.values())
+            if (!names.contains(pair.getSecond().getRegisteredName())) names.add(pair.getSecond().getRegisteredName());
+        o.i32(names.size());
+        for (String name : names) o.str(name);
+
+        // Searches one after the other, each sequence on a thread that has searched nothing: a
+        // climate that wanders, and lands on a face now and then.
+        final int sequences = 24, steps = 96;
+        o.i32(sequences);
+        for (int s = 0; s < sequences; ++s) {
+            o.i32(steps);
+            fresh(unused -> {
+                float[] c = new float[6];
+                for (int i = 0; i < 6; ++i) c[i] = script.nextFloat() * 2.4f - 1.2f;
+                c[4] = script.nextFloat() * 1.2f - 0.1f;  // depth: from above the ground to far below it
+                for (int step = 0; step < steps; ++step) {
+                    for (int i = 0; i < 6; ++i) {
+                        c[i] += (script.nextFloat() - 0.5f) * (script.nextInt(8) == 0 ? 0.3f : 0.01f);
+                        if (script.nextInt(5) == 0) c[i] = (float) face[script.nextInt(face.length)] / 10000.0f;
+                    }
+                    for (float v : c) o.f32(v);
+                    o.u8(names.indexOf(list.findValue(Climate.target(c[0], c[1], c[2], c[3], c[4], c[5])).getRegisteredName()));
+                }
+            });
+        }
+
+        // The biomes of whole chunks, asked as a chunk asks (ChunkGenerator.doCreateBiomes): the six
+        // functions over the chunk's cells on a context of their own, then cell by cell.
+        MultiNoiseBiomeSource source = MultiNoiseBiomeSource.createFromPreset(preset);
+        final int chunks = 40, sections = 24, minSection = -4;
+        java.util.Set<String> seen = new java.util.TreeSet<>();
+        o.i32(chunks);
+        o.i32(minSection * 16);
+        o.i32(sections);
+        for (int n = 0; n < chunks; ++n) {
+            int cx = script.nextInt(6000) - 3000, cz = script.nextInt(6000) - 3000;
+            o.i32(cx);
+            o.i32(cz);
+            fresh(unused -> {
+                Climate.Sampler sampler = world.state().createClimateSampler(SamplerContext.builder().enableCaches().build());
+                BiomeResolver resolver = source.createResolverForChunk(sampler, cx * 4, minSection * 4, cz * 4, 4, sections * 4, 4);
+                for (int section = minSection; section < minSection + sections; ++section)
+                    for (int x = 0; x < 4; ++x)
+                        for (int y = 0; y < 4; ++y)
+                            for (int z = 0; z < 4; ++z) {
+                                String name = resolver.getNoiseBiome(cx * 4 + x, section * 4 + y, cz * 4 + z).getRegisteredName();
+                                seen.add(name);
+                                o.u8(names.indexOf(name));
+                            }
+            });
+        }
+        System.err.println("worldgen: golden climate: " + seen.size() + " biomes in " + chunks + " chunks");
+        return o.save(file);
+    }
+
     interface Writer {
         int write(Path file, WorldgenRef.World world) throws Exception;
     }
@@ -505,5 +606,6 @@ final class WorldgenGolden {
         FILES.put("random", WorldgenGolden::random);
         FILES.put("noise", WorldgenGolden::noise);
         FILES.put("density", WorldgenGolden::density);
+        FILES.put("climate", WorldgenGolden::climate);
     }
 }

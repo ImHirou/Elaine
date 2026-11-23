@@ -186,6 +186,7 @@ add_library(core STATIC
   src/worldgen/random.cpp
   src/worldgen/noise.cpp
   src/worldgen/density.cpp
+  src/worldgen/climate.cpp
   src/phys/physics.cpp
   src/item/components.cpp
   src/item/codec.cpp

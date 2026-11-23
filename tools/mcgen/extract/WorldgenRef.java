@@ -294,7 +294,8 @@ public final class WorldgenRef {
     }
 
     /** The overworld of one seed: its random state, what it compiled, and its noises by name. */
-    record World(long seed, NoiseGeneratorSettings settings, RandomState state, Map<String, DensitySampler> samplers, Map<String, Noise> noises) {}
+    record World(RegistryAccess registries, long seed, NoiseGeneratorSettings settings, RandomState state, Map<String, DensitySampler> samplers,
+                 Map<String, Noise> noises) {}
 
     static World world(RegistryAccess registries, long seed) throws Exception {
         NoiseGeneratorSettings settings = registries.lookupOrThrow(Registries.NOISE_SETTINGS).getOrThrow(NoiseGeneratorSettings.OVERWORLD).value();
@@ -326,7 +327,7 @@ public final class WorldgenRef {
                 noises.put("blended:main", (Noise) main);
             });
         if (!noises.containsKey("blended:main")) problem("old_blended_noise is not compiled into Lerp(Clamp(ConstAdd(main)), min, max) any more");
-        return new World(seed, settings, state, samplers, noises);
+        return new World(registries, seed, settings, state, samplers, noises);
     }
 
     record Program(Graph graph, JsonObject roots, JsonObject noises) {}

@@ -27,6 +27,8 @@
 #define PROTO_GEN_PHYSICS_HPP "proto/gen/v777/physics.hpp"  // what entity physics reads off a block state and an entity type
 #define PROTO_GEN_WORLDGEN_HPP \
     "proto/gen/v777/worldgen.hpp"  // the overworld's generator: noises, density functions (src/worldgen only)
+#define PROTO_GEN_WORLDGEN_CLIMATE_HPP \
+    "proto/gen/v777/worldgen_climate.hpp"  // ...its biomes by climate (worldgen/climate.cpp only)
 
 namespace proto {
 namespace ids = gen::ids;
