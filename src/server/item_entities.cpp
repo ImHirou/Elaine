@@ -86,14 +86,15 @@ u32 Game::add_item(Uuid uuid, float yaw, ItemStack stack, double x, double y, do
     item_of_slot_[slot] = static_cast<u32>(item_slot_.size());
     item_slot_.push_back(slot);
     item_cell_.push_back(item_grid_.add(item_cell_of(x), item_cell_of(z), slot));
-    // Its first tick: this tick's, unless the entities have had theirs already (what an
-    // explosion or a broken chest leaves while they tick is ticked from the next one on).
+    // Its first tick: the next pass over the entities - which is the one after this, if this is
+    // one (what an explosion or a broken chest leaves while they tick is ticked from the next on).
     const u64 first = entity_tick_ + (entities_ticked_ ? 1 : 0);
     item_born_.push_back(first);
     item_age_from_.push_back(first - age);  // (modulo 2^64, as every difference taken from it is)
     // The delay counts down in the item's own tick, which runs before the players': after its
-    // 40th tick an item with a delay of 40 can be taken. kNever: ItemEntity.setNeverPickUp.
-    item_pickup_.push_back(pickup_delay == kNever ? kNever : pickup_delay ? first + pickup_delay - 1 : entity_tick_);
+    // 40th tick an item with a delay of 40 can be taken - entity_tick_, outside a pass, being the
+    // passes there have been. kNever: ItemEntity.setNeverPickUp.
+    item_pickup_.push_back(pickup_delay == kNever ? kNever : first + pickup_delay);
     item_health_.push_back(health);
     start_ticking(slot, proto::gen::physics::kMoverItem);
     return slot;

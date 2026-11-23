@@ -166,13 +166,19 @@ void Game::run(const std::atomic<bool>& stop) {
         track_ns += base::now_ns() - t1;
         if (LIKELY(runs)) run_block_events();  // ...block events after the chunks and the tracker, before the entities
         const u64 t_entities = base::now_ns();
-        if (LIKELY(runs)) tick_entities();
+        if (LIKELY(runs)) {
+            tick_entities();
+            // The pass is done: counted at once, so that whoever asks afterwards - a player that
+            // picks an item up, in this loop or in one of a game that stands - counts the ticks
+            // an entity has had.
+            ++entity_tick_;
+            entities_ticked_ = false;
+        }
         move_ns += base::now_ns() - t_entities;
         sync_menus();
         if (LIKELY(runs)) {
             tick_furnaces();  // block entities tick after the entities
             if (UNLIKELY(!editing_signs_.empty())) tick_signs();
-            ++entity_tick_;
         }
         tick_players();
         // DedicatedServer.tickConnection: the console's lines after the connections' tick - so

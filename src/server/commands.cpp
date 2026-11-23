@@ -1608,6 +1608,16 @@ void Game::init_commands() {
     r.add("teleport <targets:entities> <destination:entity>", cmd::kGamemasters, &C::teleport_cmd);
     r.alias("tp", "teleport", cmd::kGamemasters);
     r.add("tellraw <targets:players> <message:component>", cmd::kGamemasters, &C::tellraw);
+    // TickCommand: what it suggests for a rate and a time is its own (`.suggests`), not the types'.
+    r.add("tick query", cmd::kAdmins, &C::tick_query);
+    r.add("tick rate <rate:float(1,10000)=20>", cmd::kAdmins, &C::tick_rate);
+    r.add("tick step", cmd::kAdmins, &C::tick_step);
+    r.add("tick step stop", cmd::kAdmins, &C::tick_step_stop);
+    r.add("tick step <time:time(1)=1t|1s>", cmd::kAdmins, &C::tick_step);
+    r.add("tick sprint stop", cmd::kAdmins, &C::tick_sprint_stop);
+    r.add("tick sprint <time:time(1)=60s|1d|3d>", cmd::kAdmins, &C::tick_sprint);
+    r.add("tick unfreeze", cmd::kAdmins, &C::tick_freeze);
+    r.add("tick freeze", cmd::kAdmins, &C::tick_freeze);
     // TimeCommand: the same nodes under "time" and under "time of <clock>" (addClockNodes), in
     // that order; "query gametime" is the level's and stands under the first alone.
     for (const std::string& at : {std::string("time"), std::string("time of <clock:clock>")}) {
@@ -1621,16 +1631,6 @@ void Game::init_commands() {
         r.add(at + " query <timeline:timeline> [repetition]", cmd::kGamemasters, &C::time_query_timeline);
         if (at == "time") r.add("time query gametime", cmd::kGamemasters, &C::time_query_gametime);
     }
-    // TickCommand: what it suggests for a rate and a time is its own (`.suggests`), not the types'.
-    r.add("tick query", cmd::kAdmins, &C::tick_query);
-    r.add("tick rate <rate:float(1,10000)=20>", cmd::kAdmins, &C::tick_rate);
-    r.add("tick step", cmd::kAdmins, &C::tick_step);
-    r.add("tick step stop", cmd::kAdmins, &C::tick_step_stop);
-    r.add("tick step <time:time(1)=1t|1s>", cmd::kAdmins, &C::tick_step);
-    r.add("tick sprint stop", cmd::kAdmins, &C::tick_sprint_stop);
-    r.add("tick sprint <time:time(1)=60s|1d|3d>", cmd::kAdmins, &C::tick_sprint);
-    r.add("tick unfreeze", cmd::kAdmins, &C::tick_freeze);
-    r.add("tick freeze", cmd::kAdmins, &C::tick_freeze);
     r.add("deop <targets:profile>", cmd::kAdmins, &C::deop);
     r.add("op <targets:profile>", cmd::kAdmins, &C::op);
     r.add("stop", cmd::kOwners, &C::stop);

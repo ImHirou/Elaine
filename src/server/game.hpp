@@ -688,8 +688,9 @@ class Game {
     std::vector<u32> opaque_free_;
     std::vector<u16> update_pos_, update_state_;
     u64 tick_ = 0;  // MinecraftServer.tickCount: every tick, also one of a game that stands still
-    // The ticks in which the game ran (TickRateManager.runsNormally) and its entities ticked: what
-    // an entity's age is counted in. The same as tick_ in a game that was never frozen.
+    // The passes over the entities there have been - one in every tick of a game that runs
+    // (TickRateManager.runsNormally), none while it is frozen: what an entity's age is counted in.
+    // During a pass it is the passes before this one.
     u64 entity_tick_ = 0;
     // `/tick`: the rate (the `tick-rate` setting until a command says otherwise), frozen, stepping,
     // sprinting. What is counted in seconds is counted in ticks of this rate (MinecraftServer's
@@ -708,7 +709,7 @@ class Game {
     std::vector<u32> item_slot_;      // the entity
     std::vector<u64> item_born_;      // (entity) tick it was created in: Entity.tickCount is tick - born + 1 as it ticks
     std::vector<u64> item_age_from_;  // tick ItemEntity.age counts from (a merge keeps the younger age)
-    std::vector<u64> item_pickup_;    // first tick a player can pick it up in
+    std::vector<u64> item_pickup_;    // the entity tick from which a player can pick it up (after so many passes)
     std::vector<u32> item_cell_;      // its position in its cell of item_grid_
     std::vector<u32> item_of_slot_;   // entity slot -> index into the arrays above, kNone
     // Where the items are, by 2 x 2 block cell and entity slot: what a player's reach or an
@@ -772,7 +773,7 @@ class Game {
     // where one was removed. movers_ is by entity slot.
     std::vector<u32> tick_order_;
     u32 tick_holes_ = 0;
-    bool entities_ticked_ = false;  // this tick's pass over them has begun: what is created now has its first tick in the next
+    bool entities_ticked_ = false;        // the pass over them is under way: what is created now has its first tick in the next
     u32 asleep_ = 0, asleep_living_ = 0;  // how many of them are at rest; how many of those are alive
     std::vector<Mover> movers_;
     std::vector<ItemSleep> item_sleep_;
