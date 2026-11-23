@@ -50,6 +50,10 @@ void Console::run() {
         const ssize_t n = read(STDIN_FILENO, buf, sizeof buf);
         if (n < 0 && errno == EINTR) continue;
         if (n <= 0) return;  // end of input, or not ours to read (EIO: a background job)
+        // The lines of one read are handed over together: what was written at once - a command
+        // and the mark behind it (tools/vanilla/pace.py) - is read by one loop of the game,
+        // never the first line by one and the second by the next.
+        bool any = false;
         for (ssize_t i = 0; i < n; ++i) {
             const char c = buf[i];
             if (c != '\n') {
@@ -65,12 +69,13 @@ void Console::run() {
                 if (u8* p = lines_.alloc(static_cast<u32>(pending.size()))) {
                     std::memcpy(p, pending.data(), pending.size());
                     lines_.commit();
-                    lines_.publish();
+                    any = true;
                 }
             }
             pending.clear();
             overlong = false;
         }
+        if (any) lines_.publish();
     }
 }
 
