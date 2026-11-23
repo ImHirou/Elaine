@@ -2,7 +2,8 @@
 // A chunk as bytes: what a region file holds for it (deflated there, world/region.hpp), and the
 // chunk outside the world that a worker makes of those bytes.
 //
-//   u8  version (2; a chunk of version 1 is one without the last part)
+//   u8  version (3; a chunk of version 2 is one without the last part, of version 1 without the
+//       last two)
 //   u8  flags     1 lit: its light is final, lighting it again is not needed
 //                 2 modified: something changed it since the generator made it
 //                 4 terrain: sections and light follow. Without: nothing was stored of its blocks
@@ -19,6 +20,7 @@
 //   u32 n + bytes     entities: the same
 //   u32 n + bytes     what an import kept and nobody reads (world/anvil.hpp)
 //   u32 n + bytes     its scheduled ticks (world/ticks.hpp), as delays from the moment it is saved
+//   u32 n + bytes     the scheduled ticks of its fluids: the same, with a fluid's id for a block's
 // Little-endian. State and biome ids are this version's: a world names the data version it was
 // saved by, and another version has to convert it.
 //
@@ -36,9 +38,10 @@
 namespace world {
 
 // What is kept with a chunk as bytes of somebody else's making: the game's two parts
-// (server/persist.cpp), and the chunk's scheduled ticks - which Dimension::save writes itself.
+// (server/persist.cpp), and the chunk's scheduled ticks, of its blocks and of its fluids - which
+// Dimension::save writes itself.
 struct ChunkParts {
-    std::span<const u8> block_entities = {}, entities = {}, ticks = {};
+    std::span<const u8> block_entities = {}, entities = {}, ticks = {}, fluid_ticks = {};
 };
 
 // Appends the chunk to `out`. The chunk is only read.

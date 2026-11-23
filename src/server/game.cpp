@@ -216,7 +216,7 @@ void Game::run(const std::atomic<bool>& stop) {
                 static_cast<double>(flush_ns) / kStatsEvery / 1e6, static_cast<double>(block_ns) / kStatsEvery / 1e6,
                 static_cast<double>(sent_bytes) / kStatsEvery / 1024.0, players_.size(), ents_.size(), asleep_,
                 world_.chunk_count(), world_.loading_count(), world_.store().waiting(), world_.random_chunks().size(),
-                static_cast<unsigned long long>(world_.block_ticks().count()),
+                static_cast<unsigned long long>(world_.block_ticks().count() + world_.fluid_ticks().count()),
                 static_cast<double>(world_.memory_bytes()) / (1024.0 * 1024.0));
             busy_ns = worst_ns = track_ns = move_ns = flush_ns = block_ns = sent_bytes = 0;
         }

@@ -96,8 +96,9 @@ void destroy(ChunkTicks* t) {
 }  // namespace
 
 ChunkTicks& LevelTicks::container(Chunk& c) {
-    if (UNLIKELY(!c.block_ticks)) c.block_ticks = new ChunkTicks();
-    return *c.block_ticks;
+    ChunkTicks*& t = c.*slot_;
+    if (UNLIKELY(!t)) t = new ChunkTicks();
+    return *t;
 }
 
 // The chunk's heap holds a tick (again): it is among the chunks collect() looks at.
@@ -117,7 +118,7 @@ void LevelTicks::unlist(ChunkTicks& t) {
     if (t.slot != last) {
         chunks_[t.slot] = chunks_[last];
         next_[t.slot] = next_[last];
-        chunks_[t.slot]->block_ticks->slot = t.slot;
+        (chunks_[t.slot]->*slot_)->slot = t.slot;
     }
     chunks_.pop_back();
     next_.pop_back();
@@ -155,8 +156,9 @@ void LevelTicks::schedule(Chunk& c, i32 x, i32 y, i32 z, u32 type, i64 trigger, 
 }
 
 bool LevelTicks::has(const Chunk& c, i32 x, i32 y, i32 z, u32 type) const {
-    if (!c.block_ticks || static_cast<u32>(y - min_y_) >= height_ || type >= types_) return false;
-    return set_has(*c.block_ticks, pack(x, y, z, type));
+    const ChunkTicks* t = c.*slot_;
+    if (!t || static_cast<u32>(y - min_y_) >= height_ || type >= types_) return false;
+    return set_has(*t, pack(x, y, z, type));
 }
 
 bool LevelTicks::will_tick(i32 x, i32 y, i32 z, u32 type) {
@@ -191,8 +193,8 @@ bool LevelTicks::will_tick(i32 x, i32 y, i32 z, u32 type) {
 void LevelTicks::collect(i64 now, u32 max) {
     DCHECK(run_.empty());
     // INTRA_TICK_DRAIN_ORDER between what two chunks have next, as "a comes after b".
-    const auto after = [](const Chunk* a, const Chunk* b) {
-        return a->block_ticks->heap[0].order > b->block_ticks->heap[0].order;
+    const auto after = [slot = slot_](const Chunk* a, const Chunk* b) {
+        return (a->*slot)->heap[0].order > (b->*slot)->heap[0].order;
     };
 
     // sortContainersToTick: the chunks whose next tick is due, if they tick.
@@ -201,7 +203,7 @@ void LevelTicks::collect(i64 now, u32 max) {
     for (u32 i = 0; i < n; ++i) {
         if (LIKELY(next_[i] > now)) continue;
         Chunk* c = chunks_[i];
-        const i64 first = c->block_ticks->heap[0].trigger;
+        const i64 first = (c->*slot_)->heap[0].trigger;
         if (first > now) {
             next_[i] = first;
         } else if (c->block_ticking()) {
@@ -216,11 +218,11 @@ void LevelTicks::collect(i64 now, u32 max) {
         std::pop_heap(queue_.begin(), queue_.end(), after);
         Chunk* top = queue_.back();
         queue_.pop_back();
-        ChunkTicks& t = *top->block_ticks;
+        ChunkTicks& t = *(top->*slot_);
         run_.push_back(due_of(*top, pop(*top, t)));
         // drainFromCurrentContainer: on with this chunk for as long as its next tick is due and
         // not behind what the best of the other chunks has next.
-        const ScheduledTick* other = queue_.empty() ? nullptr : &queue_.front()->block_ticks->heap[0];
+        const ScheduledTick* other = queue_.empty() ? nullptr : &(queue_.front()->*slot_)->heap[0];
         while (run_.size() < max && t.n && t.heap[0].trigger <= now && !(other && t.heap[0].order > other->order))
             run_.push_back(due_of(*top, pop(*top, t)));
         if (!t.n) {
@@ -237,7 +239,7 @@ void LevelTicks::collect(i64 now, u32 max) {
 }
 
 void LevelTicks::unpack(Chunk& c, i64 now) {
-    ChunkTicks* t = c.block_ticks;
+    ChunkTicks* t = c.*slot_;
     if (!t || !t->saved_n) return;
     i64 sub = -static_cast<i64>(t->saved_n);
     heap_reserve(*t, t->n + t->saved_n);
@@ -257,12 +259,12 @@ void LevelTicks::unpack(Chunk& c, i64 now) {
 }
 
 void LevelTicks::release(Chunk& c) {
-    ChunkTicks* t = c.block_ticks;
+    ChunkTicks* t = c.*slot_;
     if (!t) return;
     unlist(*t);
     count_ -= t->n;
     destroy(t);
-    c.block_ticks = nullptr;
+    c.*slot_ = nullptr;
 }
 
 void LevelTicks::write(const ChunkTicks* t, i64 now, base::ByteBuf& out) {

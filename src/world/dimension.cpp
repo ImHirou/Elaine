@@ -83,13 +83,15 @@ Dimension::Dimension(u32 type_id, std::string name, ChunkGenerator& gen, i32 com
       light_(map_, layout_),
       workers_(workers ? *workers : own_workers_),
       store_(workers_, layout_, gen_, std::move(dir), sync),
-      ticks_(state::kBlockCount, min_y_, sections_ * 16) {}
+      ticks_(state::kBlockCount, min_y_, sections_ * 16),
+      fluid_ticks_(kFluidTickTypes, min_y_, sections_ * 16, &Chunk::fluid_ticks) {}
 
 Dimension::~Dimension() {
     store_.finish();  // what waits to be written is written; nothing of ours is out with a worker after this
     release_adopted();
     map_.for_each([this](Chunk& c) {
         ticks_.release(c);
+        fluid_ticks_.release(c);
         std::free(c.frame);
         free_block_entities(c);
         std::free(c.biomes);
@@ -133,8 +135,9 @@ Chunk& Dimension::adopt(LoadedChunk& lc) {
     c->sim_refs = c->block_refs = 0;  // whoever simulates says so again (Dimension::simulate)
     c->active_sections = 0;
     c->random_slot = Chunk::kUnlisted;
-    c->block_ticks = nullptr;
+    c->block_ticks = c->fluid_ticks = nullptr;
     ticks_.read(*c, lc.parts.ticks);
+    fluid_ticks_.read(*c, lc.parts.fluid_ticks);
     map_.set_loading(c->x, c->z, false);
     map_.insert(c);
     light_.init_chunk(*c);
@@ -169,8 +172,12 @@ void Dimension::refresh_active(Chunk& c) {
 // Something that decides what ticks in the chunk changed: whether it ticks at all, who simulates
 // it, which of its sections have random ticks to run.
 void Dimension::status_changed(Chunk& c) {
-    // ServerLevel.startTickingChunk: the ticks it was loaded with count from now.
-    if (c.block_ticking() && c.block_ticks && c.block_ticks->saved_n) ticks_.unpack(c, static_cast<i64>(time_));
+    // ServerLevel.startTickingChunk: the ticks it was loaded with count from now
+    // (LevelChunk.unpackTicks: the blocks', then the fluids').
+    if (c.block_ticking()) {
+        if (c.block_ticks && c.block_ticks->saved_n) ticks_.unpack(c, static_cast<i64>(time_));
+        if (c.fluid_ticks && c.fluid_ticks->saved_n) fluid_ticks_.unpack(c, static_cast<i64>(time_));
+    }
     const u32 sections = kCheckDormantSections ? c.ticking_sections : c.active_sections;
     const bool want = c.ticking && c.sim_refs != 0 && sections != 0;
     if (want == (c.random_slot != Chunk::kUnlisted)) return;
@@ -306,7 +313,14 @@ void Dimension::save(Chunk& c, const ChunkParts& parts) {
     scratch_.clear();
     tick_scratch_.clear();
     LevelTicks::write(c.block_ticks, static_cast<i64>(time_), tick_scratch_);
-    encode_chunk(c, {parts.block_entities, parts.entities, {tick_scratch_.data, tick_scratch_.len}}, scratch_);
+    const usize block_bytes = tick_scratch_.len;  // (the fluids' follow in the same buffer, which may move)
+    LevelTicks::write(c.fluid_ticks, static_cast<i64>(time_), tick_scratch_);
+    encode_chunk(c,
+                 {parts.block_entities,
+                  parts.entities,
+                  {tick_scratch_.data, block_bytes},
+                  {tick_scratch_.data + block_bytes, tick_scratch_.len - block_bytes}},
+                 scratch_);
     store_.save(c.x, c.z, {scratch_.data, scratch_.len});
     c.dirty = false;
     c.saved_tick = tick_;
@@ -327,6 +341,7 @@ void Dimension::unload(Chunk& c) {
     status_changed(c);  // (out of the list of chunks with random ticks, whether or not it ticked)
     DCHECK(c.random_slot == Chunk::kUnlisted);
     ticks_.release(c);
+    fluid_ticks_.release(c);
     std::erase(ready_, &c);
     std::erase(stopped_, &c);
     DCHECK(std::none_of(changes_.begin(), changes_.end(), [&](const BlockChange& b) { return b.chunk == &c; }));

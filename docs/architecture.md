@@ -956,10 +956,18 @@ parallel arrays - when each is next due, which chunk it is - so that the pass ov
 eight bytes a chunk and touches a chunk only when something in it is due. A chunk without
 ticks has none of this: its `ChunkTicks` is made with its first tick.
 
-Ticks belong to their chunk and are saved with it (`world/chunk_io.*`, version 2 of a chunk's
-bytes: a fourth part after block entities and entities; a chunk written before there were
-ticks is still read) - as vanilla saves them: the game ticks left until each is due, in the
-order they were scheduled in. A chunk that comes back counts them again from the moment it
+A level has two such lists, the blocks' and the fluids' (`ServerLevel.blockTicks`,
+`fluidTicks`: the same class, the fluids' run second), and so a chunk has two containers
+(`Chunk::block_ticks`, `fluid_ticks`); a `LevelTicks` is told which of them is its own. The
+type of a fluid's tick is the fluid's id - a flowing fluid and its source are two types, a tick
+is for the one it was asked for. Vanilla numbers the ticks of both lists from one counter; here
+each list counts for itself, which orders a list's ticks the same way, because the number of a
+tick is only ever held against another of its own list.
+
+Ticks belong to their chunk and are saved with it (`world/chunk_io.*`: the blocks' are a fourth
+part after block entities and entities - version 2 of a chunk's bytes - the fluids' a fifth,
+version 3; a chunk written before there were either is still read) - as vanilla saves them: the
+game ticks left until each is due, in the order they were scheduled in. A chunk that comes back counts them again from the moment it
 first ticks blocks (`LevelChunk.unpackTicks`), before everything scheduled since. So a lamp
 that was about to go out when its chunk was unloaded goes out when somebody returns, and sand
 that hung over a hole falls. The game time itself (`Game::time_`, `Level.getGameTime`) is not

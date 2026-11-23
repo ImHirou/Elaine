@@ -199,6 +199,7 @@ struct Chunk {
     u16 sim_refs = 0, block_refs = 0;
     bool block_ticking() const { return ticking && block_refs != 0; }
     ChunkTicks* block_ticks = nullptr;  // its scheduled ticks; null while it never had one
+    ChunkTicks* fluid_ticks = nullptr;  // ...and those of its fluids: a list of its own (LevelChunk.fluidTicks)
     // A bit per section: it holds cells that tick at random (Section::ticking); cells of them that
     // may always act; cells that are dying; soil that can be spread to - and, worked out from
     // those of this chunk and the eight around it, the sections whose random ticks can do

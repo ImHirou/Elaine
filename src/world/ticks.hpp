@@ -23,6 +23,12 @@
 // and the chunks that hold ticks are two parallel arrays - when each is next due, and which it
 // is - so that the pass over them reads eight bytes a chunk and touches a chunk only when it is due.
 //
+// A level has two of these lists - the blocks' and the fluids' (ServerLevel.blockTicks, fluidTicks)
+// - and a chunk a container for each (Chunk::block_ticks, fluid_ticks): a LevelTicks is told which
+// of the two is its own. Vanilla numbers the ticks of both lists from one counter
+// (Level.nextSubTickCount); here each list counts for itself, which orders the ticks of a list
+// the same way - the number is only ever compared with another of the same list.
+//
 // Tick thread only.
 #pragma once
 
@@ -33,6 +39,11 @@
 #include "world/chunk.hpp"
 
 namespace world {
+
+// The types of the fluids' list: a fluid's id in BuiltInRegistries.FLUID - empty, flowing_water,
+// water, flowing_lava, lava. A flowing fluid and its source are two types: a tick is for the
+// one it was scheduled for (ServerLevel.tickFluid: FluidState.is(type)).
+inline constexpr u32 kFluidTickTypes = 5;
 
 // TickPriority: EXTREMELY_HIGH (-3) .. EXTREMELY_LOW (3).
 inline constexpr i32 kTickPriorityMin = -3, kTickPriorityMax = 3, kTickPriorityNormal = 0;
@@ -70,8 +81,10 @@ class LevelTicks {
     };
     static constexpr u32 kMaxPerTick = 65536;
 
-    // `types`: one more than the largest type id (a block id); `min_y`, `height`: of the dimension.
-    LevelTicks(u32 types, i32 min_y, u32 height) : types_(types), min_y_(min_y), height_(height) {}
+    // `types`: one more than the largest type id (a block id, or a fluid id); `min_y`, `height`:
+    // of the dimension; `slot`: which of a chunk's containers holds this list's ticks.
+    LevelTicks(u32 types, i32 min_y, u32 height, ChunkTicks* Chunk::* slot = &Chunk::block_ticks)
+        : types_(types), min_y_(min_y), height_(height), slot_(slot) {}
     LevelTicks(const LevelTicks&) = delete;
     LevelTicks& operator=(const LevelTicks&) = delete;
 
@@ -137,7 +150,8 @@ class LevelTicks {
     u32 types_;
     i32 min_y_;
     u32 height_;
-    i64 sub_tick_ = 0;  // Level.subTickCount
+    ChunkTicks* Chunk::* slot_;
+    i64 sub_tick_ = 0;  // Level.subTickCount, of this list alone (see the top of the file)
     u64 count_ = 0;
     // LevelTicks.nextTickForContainer, as two columns: the chunks whose heap holds a tick, and for
     // each a game time not after its first one.

@@ -197,6 +197,19 @@ class Dimension {
         return c && ticks_.has(*c, x, y, z, block);
     }
     LevelTicks& block_ticks() { return ticks_; }
+    // LevelAccessor.scheduleTick(pos, fluid, delay): the fluids' list, which runs after the
+    // blocks' (ServerLevel.fluidTicks). `fluid`: its id in the fluid registry.
+    void schedule_fluid_tick(i32 x, i32 y, i32 z, u32 fluid, i32 delay) {
+        if (Chunk* c = map_.find(x >> 4, z >> 4)) {
+            fluid_ticks_.schedule(*c, x, y, z, fluid, static_cast<i64>(time_) + delay);
+            c->dirty = true;
+        }
+    }
+    bool has_scheduled_fluid_tick(i32 x, i32 y, i32 z, u32 fluid) const {
+        const Chunk* c = map_.find(x >> 4, z >> 4);
+        return c && fluid_ticks_.has(*c, x, y, z, fluid);
+    }
+    LevelTicks& fluid_ticks() { return fluid_ticks_; }
 
     // ---- random ticks
     // A random tick is three cells picked in each section of each simulated chunk, every game
@@ -286,7 +299,7 @@ class Dimension {
     base::Workers own_workers_{0};  // when none are given: everything on the calling thread
     base::Workers& workers_;
     ChunkStore store_;
-    LevelTicks ticks_;
+    LevelTicks ticks_, fluid_ticks_;
     u64 time_ = 0;
     std::vector<Chunk*> random_;
     base::ByteBuf tick_scratch_;

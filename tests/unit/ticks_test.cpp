@@ -165,6 +165,55 @@ TEST(ScheduledTicks, OnePerPositionAndType) {
     EXPECT_EQ(c->block_ticks, nullptr);
 }
 
+// The blocks' ticks and the fluids' are two lists (ServerLevel.blockTicks, fluidTicks) over the
+// same chunks: what one holds, runs and gives up is nothing to the other.
+TEST(ScheduledTicks, TwoListsOnOneChunk) {
+    LevelTicks blocks(kTypes, kMinY, kHeight), fluids(kFluidTickTypes, kMinY, kHeight, &Chunk::fluid_ticks);
+    auto c = chunk_at(0, 0), d = chunk_at(1, 0);
+    const u32 flowing = 1, source = 2;  // flowing_water, water: two types (FluidState.is(Fluid) is exact)
+    blocks.schedule(*c, 3, 70, 3, 5, 10);
+    fluids.schedule(*c, 3, 70, 3, source, 10);
+    fluids.schedule(*c, 3, 70, 3, source, 4);    // dropped, as a block's second tick is
+    fluids.schedule(*c, 3, 70, 3, flowing, 12);  // the same place, the other fluid
+    fluids.schedule(*d, 19, 70, 3, source, 10);
+    fluids.schedule(*c, 3, 70, 3, kFluidTickTypes, 10);  // no such fluid
+    EXPECT_EQ(blocks.count(), 1u);
+    EXPECT_EQ(fluids.count(), 3u);
+    EXPECT_TRUE(blocks.has(*c, 3, 70, 3, 5));
+    EXPECT_FALSE(blocks.has(*c, 3, 70, 3, source));
+    EXPECT_TRUE(fluids.has(*c, 3, 70, 3, source));
+    EXPECT_TRUE(fluids.has(*c, 3, 70, 3, flowing));
+    EXPECT_FALSE(fluids.has(*c, 3, 70, 3, 5));
+    ASSERT_NE(c->block_ticks, nullptr);
+    ASSERT_NE(c->fluid_ticks, nullptr);
+    EXPECT_NE(c->block_ticks, c->fluid_ticks);
+    EXPECT_EQ(d->block_ticks, nullptr);
+
+    LevelTicks::Due due;
+    blocks.collect(10);
+    ASSERT_TRUE(blocks.next(due));
+    EXPECT_EQ(due.type, 5u);
+    EXPECT_FALSE(blocks.next(due));
+    blocks.finish();
+    EXPECT_EQ(fluids.count(), 3u);  // the blocks' ticks ran: the fluids' wait for their own turn
+    std::vector<std::pair<i32, u32>> ran;
+    fluids.collect(10);
+    while (fluids.next(due)) ran.push_back({due.x, due.type});
+    fluids.finish();
+    EXPECT_EQ(ran, (std::vector<std::pair<i32, u32>>{{3, source}, {19, source}}));  // by the order of scheduling, across chunks
+    EXPECT_TRUE(fluids.has(*c, 3, 70, 3, flowing));
+    // A chunk leaves: each list gives up its own.
+    fluids.release(*c);
+    EXPECT_EQ(c->fluid_ticks, nullptr);
+    EXPECT_EQ(fluids.count(), 0u);
+    blocks.schedule(*c, 4, 70, 3, 5, 20);
+    EXPECT_EQ(blocks.count(), 1u);
+    blocks.release(*c);
+    blocks.release(*d);
+    fluids.release(*d);
+    EXPECT_EQ(c->block_ticks, nullptr);
+}
+
 TEST(ScheduledTicks, PriorityThenTheOrderOfScheduling) {
     LevelTicks ticks(kTypes, kMinY, kHeight);
     auto a = chunk_at(0, 0), b = chunk_at(1, 0);
@@ -365,6 +414,7 @@ TEST(ScheduledTicks, ComeBackWithTheirChunk) {
     TempDir dir;
     FlatGenerator gen(-64, 24, FlatGenerator::default_layers(), 39);
     const u32 sand = block_of(blk::kSand), lamp = block_of(blk::kRedstoneLamp);
+    const u32 water = 2;  // the fluid, in the fluids' own list
     {
         Dimension dim(proto::reg::dimension_type::kOverworld, "minecraft:overworld", gen, proto::kNoCompression, nullptr,
                       dir.path);
@@ -378,8 +428,12 @@ TEST(ScheduledTicks, ComeBackWithTheirChunk) {
         dim.schedule_tick(3, -60, 5, sand, 7);
         dim.schedule_tick(4, -60, 5, lamp, 2, -1);
         dim.schedule_tick(40000, -60, 5, sand, 7);  // where no chunk is: nothing
+        dim.schedule_fluid_tick(3, -60, 5, water, 5);
+        dim.schedule_fluid_tick(40000, -60, 5, water, 5);
         EXPECT_TRUE(dim.has_scheduled_tick(3, -60, 5, sand));
         EXPECT_FALSE(dim.has_scheduled_tick(3, -60, 5, lamp));
+        EXPECT_TRUE(dim.has_scheduled_fluid_tick(3, -60, 5, water));
+        EXPECT_FALSE(dim.has_scheduled_fluid_tick(4, -60, 5, water));
         EXPECT_TRUE(c.dirty);  // a chunk with a tick it was not saved with is to be saved again
         dim.set_time(103);
         std::vector<Chunk*> all;
@@ -387,27 +441,33 @@ TEST(ScheduledTicks, ComeBackWithTheirChunk) {
         for (Chunk* each : all) dim.save(*each, {});
         for (Chunk* each : all) dim.unload(*each);
         EXPECT_EQ(dim.block_ticks().count(), 0u);
+        EXPECT_EQ(dim.fluid_ticks().count(), 0u);
     }
     Dimension dim(proto::reg::dimension_type::kOverworld, "minecraft:overworld", gen, proto::kNoCompression, nullptr, dir.path);
     dim.set_time(5000);
     Chunk& c = dim.ticking(0, 0);
     EXPECT_TRUE(dim.has_scheduled_tick(3, -60, 5, sand));
     EXPECT_TRUE(dim.has_scheduled_tick(4, -60, 5, lamp));
+    EXPECT_TRUE(dim.has_scheduled_fluid_tick(3, -60, 5, water));
     LevelTicks::Due due;
     dim.block_ticks().collect(6000);
     EXPECT_FALSE(dim.block_ticks().next(due));  // nobody simulates the chunk: its ticks have not begun to count
     dim.block_ticks().finish();
     dim.set_time(7000);
     dim.simulate(c, 1, 1);
-    std::vector<std::pair<u64, u32>> ran;
+    std::vector<std::pair<u64, u32>> ran, flowed;
     for (u64 now = 7000; now <= 7010; ++now) {
         dim.set_time(now);
         dim.block_ticks().collect(now);
         while (dim.block_ticks().next(due)) ran.push_back({now, due.type});
         dim.block_ticks().finish();
+        dim.fluid_ticks().collect(now);
+        while (dim.fluid_ticks().next(due)) flowed.push_back({now, due.type});
+        dim.fluid_ticks().finish();
     }
-    // Saved at 103: the lamp's tick was overdue by one, the sand's had four to go.
+    // Saved at 103: the lamp's tick was overdue by one, the sand's had four to go - and the water's two.
     EXPECT_EQ(ran, (std::vector<std::pair<u64, u32>>{{7000, lamp}, {7004, sand}}));
+    EXPECT_EQ(flowed, (std::vector<std::pair<u64, u32>>{{7002, water}}));
 }
 
 TEST(ScheduledTicks, AChunkSavedBeforeThereWereTicksIsStillRead) {
@@ -418,16 +478,27 @@ TEST(ScheduledTicks, AChunkSavedBeforeThereWereTicksIsStillRead) {
     ASSERT_TRUE(load_chunk({}, 2, 3, layout, gen, made, err));
     base::ByteBuf now;
     encode_chunk(made.chunk, {}, now);
-    ASSERT_EQ(now.data[0], 2);
-    // Version 1 is version 2 without its last part.
-    std::vector<u8> old(now.data, now.data + now.len - 4);
+    ASSERT_EQ(now.data[0], 3);
+    // Version 2 is version 3 without its last part - the fluids' ticks - and version 1 without
+    // the last two.
+    std::vector<u8> old(now.data, now.data + now.len - 8), older(now.data, now.data + now.len - 4);
     old[0] = 1;
-    LoadedChunk from_old, from_new;
+    older[0] = 2;
+    LoadedChunk from_old, from_older, from_new;
     ASSERT_TRUE(load_chunk(old, 2, 3, layout, gen, from_old, err)) << err;
     EXPECT_TRUE(from_old.parts.ticks.empty());
     EXPECT_EQ(from_old.chunk.sections[0].ticking, 256u);  // counted when it is read: the grass on top
     EXPECT_EQ(from_old.chunk.ticking_sections, 1u);
+    ASSERT_TRUE(load_chunk(older, 2, 3, layout, gen, from_older, err)) << err;
+    EXPECT_TRUE(from_older.parts.fluid_ticks.empty());
     ASSERT_TRUE(load_chunk({now.data, now.len}, 2, 3, layout, gen, from_new, err)) << err;
+    // A version that says more than its bytes hold, or one from later, is no chunk.
+    older[0] = 3;
+    LoadedChunk short_one, later_one;
+    EXPECT_FALSE(load_chunk(older, 2, 3, layout, gen, short_one, err));
+    std::vector<u8> later(now.data, now.data + now.len);
+    later[0] = 4;
+    EXPECT_FALSE(load_chunk(later, 2, 3, layout, gen, later_one, err));
     // With ticks: they come back as bytes, for the world to take; ticks that are none refuse the chunk.
     const u8 one[] = {1, 1, 0, 0, 0, /* what */ 0x21, 0x43, 0x02, 0x00, /* delay */ 5, 0, 0, 0, /* priority */ 0xFF};
     base::ByteBuf with;
@@ -443,6 +514,28 @@ TEST(ScheduledTicks, AChunkSavedBeforeThereWereTicksIsStillRead) {
     encode_chunk(made.chunk, {{}, {}, bad}, broken);
     LoadedChunk refused;
     EXPECT_FALSE(load_chunk({broken.data, broken.len}, 2, 3, layout, gen, refused, err));
+    // The fluids' ticks are a part of their own, and a fluid that does not exist refuses the chunk
+    // as a block does: type 2 (water) is one, type 5 is not.
+    const u8 fluid[] = {1, 1, 0, 0, 0, /* what */ 0x21, 0x43, 0x04, 0x00, /* delay */ 5, 0, 0, 0, /* priority */ 0};
+    base::ByteBuf wet;
+    encode_chunk(made.chunk, {{}, {}, one, fluid}, wet);
+    LoadedChunk flowing;
+    ASSERT_TRUE(load_chunk({wet.data, wet.len}, 2, 3, layout, gen, flowing, err)) << err;
+    ASSERT_EQ(flowing.parts.fluid_ticks.size(), sizeof fluid);
+    EXPECT_EQ(0, std::memcmp(flowing.parts.fluid_ticks.data(), fluid, sizeof fluid));
+    EXPECT_EQ(0, std::memcmp(flowing.parts.ticks.data(), one, sizeof one));
+    u8 no_fluid[sizeof fluid];
+    std::memcpy(no_fluid, fluid, sizeof fluid);
+    no_fluid[7] = 0x0A;  // type 5
+    base::ByteBuf dry;
+    encode_chunk(made.chunk, {{}, {}, one, no_fluid}, dry);
+    LoadedChunk refused_fluid;
+    EXPECT_FALSE(load_chunk({dry.data, dry.len}, 2, 3, layout, gen, refused_fluid, err));
+    // (The same bytes as a block's ticks are fine: there are that many blocks.)
+    base::ByteBuf as_block;
+    encode_chunk(made.chunk, {{}, {}, no_fluid}, as_block);
+    LoadedChunk taken;
+    EXPECT_TRUE(load_chunk({as_block.data, as_block.len}, 2, 3, layout, gen, taken, err)) << err;
 }
 
 // ---------------------------------------------------------------------------- random ticks

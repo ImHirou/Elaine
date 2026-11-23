@@ -7,7 +7,7 @@ namespace world {
 
 namespace {
 
-constexpr u8 kVersion = 2, kVersionWithoutTicks = 1;
+constexpr u8 kVersion = 3, kVersionWithoutFluidTicks = 2, kVersionWithoutTicks = 1;
 constexpr u8 kLit = 1, kModified = 2, kTerrain = 4;
 enum : u8 { kAbsent = 0, kUniform = 1, kFolded = 2, kArray = 3 };
 
@@ -124,7 +124,8 @@ void encode_chunk(const Chunk& c, const ChunkParts& parts, base::ByteBuf& out) {
         put_layer(out, c.sky_layer(li));
         put_layer(out, c.block_layer(li));
     }
-    const std::span<const u8> tail[4] = {parts.block_entities, parts.entities, {c.keep.bytes, c.keep.len}, parts.ticks};
+    const std::span<const u8> tail[5] = {
+        parts.block_entities, parts.entities, {c.keep.bytes, c.keep.len}, parts.ticks, parts.fluid_ticks};
     for (const std::span<const u8> part : tail) {
         p = out.reserve(4 + part.size());
         store_le<u32>(p, static_cast<u32>(part.size()));
@@ -134,7 +135,7 @@ void encode_chunk(const Chunk& c, const ChunkParts& parts, base::ByteBuf& out) {
 }
 
 void encode_kept(const Chunk& c, base::ByteBuf& out) {
-    u8* p = out.reserve(10 + 16 + c.keep.len);
+    u8* p = out.reserve(12 + 20 + c.keep.len);  // the header, five lengths, what is kept
     *p++ = kVersion;
     *p++ = 0;
     store_le<i32>(p, c.x);
@@ -146,7 +147,8 @@ void encode_kept(const Chunk& c, base::ByteBuf& out) {
     store_le<u32>(p + 18, c.keep.len);
     if (c.keep.len) std::memcpy(p + 22, c.keep.bytes, c.keep.len);
     store_le<u32>(p + 22 + c.keep.len, 0);  // scheduled ticks
-    out.commit(p + 26 + c.keep.len);
+    store_le<u32>(p + 26 + c.keep.len, 0);  // ...of its fluids
+    out.commit(p + 30 + c.keep.len);
 }
 
 bool load_chunk(std::span<const u8> blob, i32 cx, i32 cz, const Layout& l, ChunkGenerator& gen, LoadedChunk& out,
@@ -160,15 +162,16 @@ bool load_chunk(std::span<const u8> blob, i32 cx, i32 cz, const Layout& l, Chunk
         err = what;
         return false;
     };
-    bool terrain = false, with_ticks = false;
+    bool terrain = false;
+    u8 version = kVersion;
     In in{blob.data(), blob.data() + blob.size()};
     if (!blob.empty()) {
-        const u8 version = in.num<u8>(), flags = in.num<u8>();
+        version = in.num<u8>();
+        const u8 flags = in.num<u8>();
         const i32 x = in.num<i32>(), z = in.num<i32>();
         const u8 sections = in.num<u8>(), light = in.num<u8>();
-        if (!in.ok || (version != kVersion && version != kVersionWithoutTicks))
+        if (!in.ok || version < kVersionWithoutTicks || version > kVersion)
             return fail("not a chunk of a version this server reads");
-        with_ticks = version == kVersion;
         if (x != cx || z != cz) return fail("the chunk of another place");
         if (sections != l.sections || light != l.sections + 2) return fail("a chunk of another height");
         terrain = (flags & kTerrain) != 0;
@@ -227,9 +230,12 @@ bool load_chunk(std::span<const u8> blob, i32 cx, i32 cz, const Layout& l, Chunk
         out.parts.entities = copy_into(out.arena, in.bytes());
         const std::span<const u8> keep = copy_into(out.arena, in.bytes());
         c.keep = {static_cast<u32>(keep.size()), const_cast<u8*>(keep.data())};
-        if (with_ticks) out.parts.ticks = copy_into(out.arena, in.bytes());
+        if (version > kVersionWithoutTicks) out.parts.ticks = copy_into(out.arena, in.bytes());
+        if (version > kVersionWithoutFluidTicks) out.parts.fluid_ticks = copy_into(out.arena, in.bytes());
         if (!in.ok) return fail("a chunk that ends too early");
-        if (!ticks_valid(out.parts.ticks, state::kBlockCount, l.sections * 16)) return fail("scheduled ticks that are none");
+        if (!ticks_valid(out.parts.ticks, state::kBlockCount, l.sections * 16) ||
+            !ticks_valid(out.parts.fluid_ticks, kFluidTickTypes, l.sections * 16))
+            return fail("scheduled ticks that are none");
     }
     out.traits = derive(c, l);
     return true;
