@@ -2084,11 +2084,9 @@ def a_lid_is_told_once(srv: Server):
     """A chest says how many have it open when that changes, and again with every recount - five
     ticks apart while it is open, and once more after. A block event that is asked for twice in a
     tick is sent once (vanilla keeps the tick's events in a set): closed in the very tick of the
-    recount, the lid is told to fall once, not twice."""
-    a = srv.client()
-    join(a, "Alice")
-    a.send("player_loaded")
-    settle(a)
+    recount, the lid is told to fall once, not twice. (The game stands still and is stepped: in
+    which tick the chest is closed is the scenario's to say, not the clock's.)"""
+    a = wet_start(srv)
     ground, pos = (8, -61, 10), (8, -60, 10)
     give(a, 36, I["kChest"], 1)
     click(a, ground, 1, seq=1)
@@ -2096,14 +2094,17 @@ def a_lid_is_told_once(srv: Server):
     told = []
     for wait in range(1, 9):                # every phase of the five ticks, and some of them again
         click(a, pos, 1, seq=1 + wait)
-        collect(a, ticks=wait)
+        collect(a)
         n = len(a.block_events)
+        step_game(a, wait)
         close_window(a)
-        collect(a, ticks=8)                 # (the recount that was due when it closed has come by now)
+        collect(a)
+        step_game(a, 8)                     # (the recount that was due when it closed has come by now)
         after = [e[:3] for e in a.block_events[n:]]
         assert set(after) <= {(pos, 1, 1), (pos, 1, 0)} and after[-1] == (pos, 1, 0), (wait, after)
-        told.append(after.count((pos, 1, 0)))   # (a short wait: the lid's going up is still on its way)
-    assert set(told) == {1, 2}, told        # by the close and by the recount - or by both at once
+        told.append(after.count((pos, 1, 0)))
+    # By the close and by the recount - or, closed four ticks after it was opened, by both at once.
+    assert told == [2, 2, 2, 1, 2, 2, 2, 2], told
 
 
 def furnace_setup(srv: Server, stone: int, planks: int):
