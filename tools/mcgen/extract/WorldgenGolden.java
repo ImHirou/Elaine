@@ -7,6 +7,9 @@
 //
 //   random.bin   the random sources: sequences of calls on each kind of source, the seeds
 //                positions and names hash to, how a seed is read and how it is hidden from clients
+//   density.bin  the density functions: every function vanilla asks a sampler of, at points and
+//                over volumes of the shapes a generator samples in - each by itself, and then in
+//                sequences on one context with caches, where an answer depends on the questions before
 //   noise.bin    every noise of the overworld for one seed: what the seed made of each layer
 //                (permutation, offsets), its value at points, and what it adds to a buffer over
 //                a volume - the two ways vanilla samples a noise, which are not the same bits
@@ -29,7 +32,9 @@ import net.minecraft.world.level.levelgen.WorldOptions;
 import net.minecraft.world.level.levelgen.WorldgenRandom;
 import net.minecraft.world.level.levelgen.XoroshiroRandomSource;
 import net.minecraft.world.level.levelgen.densityfunction.DensityBuffer;
+import net.minecraft.world.level.levelgen.densityfunction.DensitySampler;
 import net.minecraft.world.level.levelgen.densityfunction.DensityVolume;
+import net.minecraft.world.level.levelgen.densityfunction.SamplerContext;
 import net.minecraft.world.level.levelgen.synth.Noise;
 import net.minecraft.world.level.levelgen.synth.SmearedPerlinNoise;
 
@@ -378,6 +383,118 @@ final class WorldgenGolden {
         return o.save(file);
     }
 
+    // ------------------------------------------------------------------------------- density
+
+    /** One question of a density script, and vanilla's answer. */
+    static void ask(Out o, Random script, java.util.List<DensitySampler> roots, int root, SamplerContext context, DensityVolume volume) {
+        DensitySampler sampler = roots.get(root);
+        o.i32(root);
+        if (volume == null) {
+            // A point: anywhere, on a corner of the cells (where an interpolated function is its
+            // input), or far out.
+            int x = script.nextInt(100000) - 50000, y = script.nextInt(384) - 64, z = script.nextInt(100000) - 50000;
+            switch (script.nextInt(4)) {
+                case 0 -> {
+                    x &= ~3;
+                    y &= ~7;
+                    z &= ~3;
+                }
+                case 1 -> {
+                    x = (script.nextBoolean() ? 1 : -1) * (29_000_000 + script.nextInt(999_000));
+                    z += script.nextInt(20_000_000);
+                }
+                default -> { }
+            }
+            o.u8(0);
+            o.i32(x);
+            o.i32(y);
+            o.i32(z);
+            o.f32(sampler.sampleValue(context, x, y, z));
+            return;
+        }
+        o.u8(1);
+        for (int n : new int[] {volume.sizeX(), volume.sizeY(), volume.sizeZ(), volume.minBlockX(), volume.minBlockY(), volume.minBlockZ(),
+                                volume.stepBlockX(), volume.stepBlockY(), volume.stepBlockZ()}) o.i32(n);
+        DensityBuffer buffer = DensityBuffer.createUnpooled(volume.size());
+        sampler.sampleVolume(context, buffer, volume);
+        for (int i = 0; i < volume.size(); ++i) o.f32(buffer.get(i));
+    }
+
+    /** The shapes a generator samples in: corners of cells, blocks, the quarts of biomes, layers, single blocks. */
+    static DensityVolume shape(Random script, int kind, int chunkX, int chunkZ) {
+        int x = chunkX * 16, z = chunkZ * 16, y = (script.nextInt(40) - 8) * 8;
+        return switch (kind) {
+            case 0 -> new DensityVolume(5, 13, 5, x, y, z, 4, 8, 4);                 // the corners of a chunk's cells
+            case 1 -> new DensityVolume(4, 10, 4, x + script.nextInt(13), y + script.nextInt(8), z + script.nextInt(13), 1, 1, 1);
+            case 2 -> new DensityVolume(4, 12, 4, x, y & ~3, z, 4, 4, 4);            // quarts
+            case 3 -> new DensityVolume(16, 1, 16, x, 0, z, 1, 1, 1);                // a layer of blocks
+            case 4 -> new DensityVolume(5, 1, 5, x, 0, z, 4, 1, 4);                  // ...of cell corners
+            case 5 -> new DensityVolume(1, 1, 1, x + script.nextInt(16), y + script.nextInt(8), z + script.nextInt(16), 1, 1, 1);
+            case 6 -> new DensityVolume(2, 1, 2, x, 0, z, 16, 1, 16);                // the corners of a chunk
+            default -> new DensityVolume(1, 24, 1, x + script.nextInt(16), -64, z + script.nextInt(16), 1, 8, 1);  // a column
+        };
+    }
+
+    static int density(Path file, WorldgenRef.World world) throws Exception {
+        Out o = new Out();
+        o.magic("WGDENS01");
+        o.i64(world.seed());
+        Random script = new Random(20261125L);
+        java.util.List<DensitySampler> roots = new java.util.ArrayList<>(world.samplers().values());
+        o.i32(roots.size());
+        for (String name : world.samplers().keySet()) o.str(name);
+
+        // Every function by itself, nothing remembered between two questions: points, then one of each shape.
+        o.i32(1 + 1 + 8 + 1);
+        o.u8(0);
+        o.i32(roots.size() * 40);
+        for (int root = 0; root < roots.size(); ++root)
+            for (int i = 0; i < 40; ++i) ask(o, script, roots, root, SamplerContext.EMPTY_UNCACHED, null);
+        o.u8(0);
+        o.i32(roots.size() * 8);
+        for (int root = 0; root < roots.size(); ++root)
+            for (int kind = 0; kind < 8; ++kind)
+                ask(o, script, roots, root, SamplerContext.EMPTY_UNCACHED, shape(script, kind, script.nextInt(4000) - 2000, script.nextInt(4000) - 2000));
+        // A context with caches, as a chunk's has: questions of every kind about one neighbourhood,
+        // one after the other - what a cache answers depends on what it was asked before.
+        for (int session = 0; session < 8; ++session) {
+            SamplerContext context = SamplerContext.builder().enableCaches().build();
+            int chunkX = script.nextInt(2000) - 1000, chunkZ = script.nextInt(2000) - 1000;
+            final int questions = 48;
+            o.u8(1);
+            o.i32(questions);
+            for (int i = 0; i < questions; ++i) {
+                int root = script.nextInt(roots.size());
+                if (script.nextInt(3) == 0) {
+                    ask(o, script, roots, root, context, shape(script, script.nextInt(8), chunkX + script.nextInt(2), chunkZ + script.nextInt(2)));
+                } else {
+                    // A point of the neighbourhood: often one a volume asked before has.
+                    int x = chunkX * 16 + script.nextInt(32), y = (script.nextInt(40) - 8) * 8 + script.nextInt(8), z = chunkZ * 16 + script.nextInt(32);
+                    if (script.nextBoolean()) {
+                        x &= ~3;
+                        z &= ~3;
+                        if (script.nextBoolean()) y &= ~7;
+                    }
+                    if (script.nextInt(4) == 0) y = 0;
+                    o.i32(root);
+                    o.u8(0);
+                    o.i32(x);
+                    o.i32(y);
+                    o.i32(z);
+                    o.f32(roots.get(root).sampleValue(context, x, y, z));
+                }
+            }
+        }
+        // The terrain itself over two slabs of a chunk, as a chunk asks for it.
+        SamplerContext context = SamplerContext.builder().enableCaches().build();
+        int terrain = new java.util.ArrayList<>(world.samplers().keySet()).indexOf("router/finalDensity");
+        o.u8(1);
+        o.i32(2);
+        ask(o, script, roots, terrain, context, new DensityVolume(16, 48, 16, 1600, -64, -320, 1, 1, 1));
+        ask(o, script, roots, terrain, context, new DensityVolume(16, 48, 16, 1600, 40, -320, 1, 1, 1));
+        return o.save(file);
+    }
+
     interface Writer {
         int write(Path file, WorldgenRef.World world) throws Exception;
     }
@@ -387,5 +504,6 @@ final class WorldgenGolden {
     static {
         FILES.put("random", WorldgenGolden::random);
         FILES.put("noise", WorldgenGolden::noise);
+        FILES.put("density", WorldgenGolden::density);
     }
 }

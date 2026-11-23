@@ -12,8 +12,9 @@
 //   golden    what vanilla computes, as scripts the unit tests replay (WorldgenGolden.java): only
 //             when it is asked for - the tables are not made of it.
 //
-// A graph is a list of nodes; a node is {"c": class, field: value...}; a value is a number, a
-// string, a list, or {"#": index of another node}. A float is written as the double it widens
+// A graph is a list of nodes; a node is {"c": class, field: value...} - and "@name" where the
+// object has a name of its own (a noise's) -; a value is a number, a string, a list, or
+// {"#": index of another node}. A float is written as the double it widens
 // to, which names it exactly. "schemas" gives the declared type of every field of every class.
 //
 // It loads the game as GameData does: no world, no server, no network.
@@ -154,7 +155,7 @@ public final class WorldgenRef {
                 Class<?> k = v.getClass();
                 String name = lambda(k) ? "lambda:" + k.getName().replaceAll("\\$\\$Lambda.*", "").replaceAll("^.*\\.", "") : Dump.simple(k);
                 n.addProperty("c", name);
-                if (names.containsKey(v)) n.addProperty("name", names.get(v));
+                if (names.containsKey(v)) n.addProperty("@name", names.get(v));
                 JsonObject schema = schemas.has(name) ? null : new JsonObject();
                 for (Field f : fields(k)) {
                     Object fv;

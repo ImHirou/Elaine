@@ -14,6 +14,7 @@
 #include <variant>
 #include <vector>
 
+#include "worldgen/density.hpp"
 #include "worldgen/noise.hpp"
 #include "worldgen/random.hpp"
 
@@ -27,6 +28,9 @@ constexpr unsigned char kRandom[] = {
 };
 constexpr unsigned char kNoise[] = {
 #embed "data/worldgen_noise.bin"
+};
+constexpr unsigned char kDensity[] = {
+#embed "data/worldgen_density.bin"
 };
 
 // A script being read.
@@ -331,4 +335,59 @@ TEST(Worldgen, NoisesAreWhatTheSeedMakesThem) {
     EXPECT_GT(layers, 300u);
     EXPECT_EQ(points, count * 48);
     EXPECT_EQ(cells, count * (4 * 12 * 3 + 3 * 7 * 3 + 2 * 2));
+}
+
+// Sequences of questions to the density functions - a value at a block, a volume - each on a
+// context of its own: without caches, where every answer stands by itself, and with them, where
+// what a cache holds from the question before decides which of vanilla's two ways answers.
+TEST(Worldgen, DensityFunctionsAnswerAsVanillasSamplers) {
+    In in(kDensity);
+    in.magic("WGDENS01");
+    const Noises noises(in.i64_());
+    // The script's functions, by the names the generated program has them under.
+    std::vector<u32> nodes;
+    std::vector<std::string> names;
+    for (u32 n = in.num<u32>(), i = 0; i < n; ++i) {
+        names.push_back(in.str());
+        ASSERT_LT(i, std::size(wg::kRoots));
+        ASSERT_EQ(wg::kRoots[i].name, names.back());
+        nodes.push_back(wg::kRoots[i].node);
+    }
+    u32 values = 0, volumes = 0, cells = 0;
+    const u32 sessions = in.num<u32>();
+    for (u32 s = 0; s < sessions; ++s) {
+        Sampler sampler(noises, in.u8_() != 0);
+        for (u32 n = in.num<u32>(), q = 0; q < n; ++q) {
+            const u32 root = in.num<u32>();
+            ASSERT_LT(root, nodes.size());
+            if (in.u8_() == 0) {
+                const i32 x = in.i32_(), y = in.i32_(), z = in.i32_();
+                const u32 want = in.f32_bits();
+                const float got = sampler.value(nodes[root], x, y, z);
+                ASSERT_EQ(bits(got), want) << "session " << s << ", question " << q << ": " << names[root] << " at " << x << ", "
+                                           << y << ", " << z << " is " << got << ", vanilla's is " << std::bit_cast<float>(want);
+                ++values;
+            } else {
+                Volume v;
+                v.size_x = in.i32_(), v.size_y = in.i32_(), v.size_z = in.i32_();
+                v.min_x = in.i32_(), v.min_y = in.i32_(), v.min_z = in.i32_();
+                v.step_x = in.i32_(), v.step_y = in.i32_(), v.step_z = in.i32_();
+                std::vector<float> buffer(v.size());
+                sampler.volume(nodes[root], buffer.data(), v);
+                for (u32 j = 0; j < v.size(); ++j, ++cells) {
+                    const u32 want = in.f32_bits();
+                    ASSERT_EQ(bits(buffer[j]), want)
+                        << "session " << s << ", question " << q << ": " << names[root] << " over " << v.size_x << "x" << v.size_y
+                        << "x" << v.size_z << " from " << v.min_x << ", " << v.min_y << ", " << v.min_z << " in steps of "
+                        << v.step_x << ", " << v.step_y << ", " << v.step_z << ", cell " << j << " is " << buffer[j]
+                        << ", vanilla's is " << std::bit_cast<float>(want);
+                }
+                ++volumes;
+            }
+        }
+    }
+    EXPECT_EQ(in.p, in.end) << "the script was not read to its end";
+    EXPECT_GT(values, 1400u);
+    EXPECT_GT(volumes, 300u);
+    EXPECT_GT(cells, 60000u);
 }

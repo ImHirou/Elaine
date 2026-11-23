@@ -9,6 +9,9 @@ difference stops the run: the port relies on how the two fit together.
   noises     every noise of the overworld as the layers vanilla stacks it from: a frequency and an
              amplitude each, and the names its random sources are made from. The numbers a seed
              draws - permutations, offsets - are drawn at run time (worldgen/noise.cpp).
+  program    the overworld's density functions as vanilla compiled them: one node per sampler
+             object, a child before its parents, with the splines, the lists of an interval
+             select and the roots - the functions a generator asks for by name (worldgen/density.cpp).
 """
 from __future__ import annotations
 
@@ -72,7 +75,7 @@ class Program:
         """`node`, which must be of class `cls` and made of exactly `fields`."""
         if node["c"] != cls:
             die(f"gen_worldgen: expected a {cls}, the extractor found a {node['c']}: vanilla changed, read the class again")
-        have = set(node) - {"c", "name"}
+        have = set(node) - {"c", "@name"}
         if have != set(fields):
             die(f"gen_worldgen: {cls} has fields {sorted(have)}, the generator knows {sorted(fields)}")
         return node
@@ -120,13 +123,237 @@ def noise_tables(vanilla, program: Program) -> tuple[list, list, list, dict]:
     return noises, layers, blended, index
 
 
+# A compiled sampler class -> (the node's op, where each of its fields goes in the node). A field
+# that names another sampler goes into `a`, `b` or `c`; the rest into the slot of its type. A class
+# that is not here is one src/worldgen has no word for: the generator stops at it.
+SAMPLERS = {
+    "ConstantFunction$Sampler": ("kConstant", {"value": "f0"}),
+    "BinaryFunction$AddSampler": ("kAdd", {"left": "a", "right": "b"}),
+    "BinaryFunction$SubSampler": ("kSub", {"left": "a", "right": "b"}),
+    "BinaryFunction$MulSampler": ("kMul", {"left": "a", "right": "b"}),
+    "BinaryFunction$DivSampler": ("kDiv", {"left": "a", "right": "b"}),
+    "BinaryFunction$MinSampler": ("kMin", {"left": "a", "right": "b", "rightMinValue": "f0"}),
+    "BinaryFunction$MaxSampler": ("kMax", {"left": "a", "right": "b", "rightMaxValue": "f0"}),
+    "BinaryFunction$ConstAddSampler": ("kConstAdd", {"left": "a", "right": "f0"}),
+    "BinaryFunction$ConstMulSampler": ("kConstMul", {"left": "a", "right": "f0"}),
+    "BinaryFunction$ConstMinSampler": ("kConstMin", {"left": "a", "right": "f0"}),
+    "BinaryFunction$ConstMaxSampler": ("kConstMax", {"left": "a", "right": "f0"}),
+    "BinaryFunction$ConstSubSampler": ("kConstSub", {"left": "f0", "right": "a"}),
+    "BinaryFunction$ConstDivSampler": ("kConstDiv", {"left": "f0", "right": "a"}),
+    "UnaryFunction$AbsSampler": ("kAbs", {"input": "a"}),
+    "UnaryFunction$CubeSampler": ("kCube", {"input": "a"}),
+    "UnaryFunction$NegateSampler": ("kNegate", {"input": "a"}),
+    "UnaryFunction$SquareSampler": ("kSquare", {"input": "a"}),
+    "UnaryFunction$SqueezeSampler": ("kSqueeze", {"input": "a"}),
+    "UnaryFunction$LeakyReLUSampler": ("kLeakyRelu", {"input": "a", "negativeFactor": "f0"}),
+    "ClampFunction$Sampler": ("kClamp", {"input": "a", "min": "f0", "max": "f1"}),
+    "RangeChoiceFunction$Sampler": ("kRangeChoice", {"input": "a", "whenInRange": "b", "whenOutOfRange": "c",
+                                                     "minInclusive": "f0", "maxExclusive": "f1"}),
+    "RangeChoiceFunction$ConstSampler": ("kRangeChoiceConst", {"input": "a", "minInclusive": "f0", "maxExclusive": "f1",
+                                                               "whenInRange": "f2", "whenOutOfRange": "f3"}),
+    "LerpFunction$Sampler": ("kLerp", {"alpha": "a", "first": "b", "second": "c"}),
+    "LerpFunction$ConstFirstSampler": ("kLerpConstFirst", {"alpha": "a", "first": "f0", "second": "b"}),
+    "SliceFunction$YSampler": ("kSliceY", {"input": "a", "y": "i0"}),
+    "SliceFunction$XzSampler": ("kSliceXz", {"input": "a", "x": "i0", "z": "i1"}),
+    "GradientFunction$ClampedSampler": ("kGradient", {"axis": "axis", "fromCoordinate": "i0", "minCoordinate": "i1", "maxCoordinate": "i2",
+                                                      "fromValue": "f0", "coordinateFactor": "f1"}),
+    "NoiseFunction$Sampler": ("kNoise", {"noise": "noise", "xzScale": "d0", "yScale": "d1"}),
+    "NoiseFunction$ShiftedXzSampler": ("kShiftedXzNoise", {"shiftX": "a", "shiftZ": "b", "noise": "noise", "xzScale": "d0", "yScale": "d1"}),
+    "ShiftNoiseFunction$ShiftB$1": ("kShiftB", {"val$noise": "noise"}),
+    "InterpolatedFunction$Sampler": ("kInterpolated", {"input": "a", "cellSizeXz": "i0", "cellSizeY": "i1",
+                                                       "cellSizeXzInv": "f0", "cellSizeYInv": "f1"}),
+    "FindTopSurfaceFunction$Sampler": ("kFindTopSurface", {"density": "a", "upperBound": "b", "lowerBound": "i0", "cellHeight": "i1"}),
+    "BlendDensityFunction$Sampler": ("kBlendDensity", {"input": "a"}),
+    "CachingDensitySampler": ("kCache", {"input": "a", "id": "i0"}),
+    "ContextBoundSampler": ("kContextBound", {"fallbackSampler": "a", "key": "key"}),
+    "IntervalSelectFunction$Sampler": ("kIntervalSelect", {"input": "a", "thresholds": "thresholds", "samplers": "samplers"}),
+    "SplineFunction$Sampler": ("kSpline", {"sampler": "spline", "coordinateCount": "count"}),
+}
+OPS = sorted({op for op, _ in SAMPLERS.values()})
+CONTEXT_KEYS = {"minecraft:blender/alpha": 0, "minecraft:blender/offset": 1, "minecraft:beardifier": 2}
+AXES = {"X": 0, "Y": 1, "Z": 2}
+
+
+class ProgramTables:
+    """The compiled samplers as a flat table: a node per sampler object, children first."""
+
+    def __init__(self, program: Program, noise_index: dict):
+        self.p, self.noise_index = program, noise_index
+        self.nodes: list[dict] = []          # the emitted nodes, by index
+        self.index: dict[int, int] = {}      # dump node -> emitted node
+        self.thresholds: list[float] = []    # interval selects: their thresholds...
+        self.select: list[int] = []          # ...and the samplers they choose between
+        self.coordinates: list[int] = []     # splines: the samplers of their coordinates
+        self.splines: list[tuple] = []       # (coordinate, first point, points)
+        self.points: list[tuple] = []        # (location, derivative, value, child spline or -1)
+        self.cells = 0
+        self.roots = [(name, self.sampler(ref)) for name, ref in program.roots.items()]
+
+    def noise(self, ref) -> int:
+        """A noise by what the extractor called it: one of the registry, or one of the blended three."""
+        name = self.p.node(ref).get("@name")
+        blended = {"blended:min_limit": 0, "blended:max_limit": 1, "blended:main": 2}
+        if name in blended:
+            return len(self.noise_index) + blended[name]
+        if name not in self.noise_index:
+            die(f"gen_worldgen: a sampler holds a noise the extractor did not name ({self.p.node(ref)['c']})")
+        return self.noise_index[name]
+
+    def sampler(self, ref) -> int:
+        at = ref["#"]
+        if at in self.index:
+            return self.index[at]
+        node = self.p.node(ref)
+        cls = node["c"]
+        if cls not in SAMPLERS:
+            die(f"gen_worldgen: {cls}: a compiled sampler src/worldgen has no word for. Read the class "
+                f"(mcgen.py pseudo), port it (worldgen/density.cpp) and enter it in SAMPLERS")
+        op, fields = SAMPLERS[cls]
+        self.p.need(node, cls, *fields)
+        out = {"op": op}
+        for field, slot in fields.items():
+            v = node[field]
+            if slot in ("a", "b", "c"):
+                out[slot] = self.sampler(v)
+            elif slot == "noise":
+                out["noise"] = self.noise(v)
+            elif slot == "axis":
+                out["axis"] = AXES[v]
+            elif slot == "key":
+                key = self.p.need(self.p.node(v), "ContextKey", "name")["name"]
+                if key not in CONTEXT_KEYS:
+                    die(f"gen_worldgen: a sampler bound to the context key {key}, which src/worldgen does not know")
+                out["i0"] = CONTEXT_KEYS[key]
+            elif slot == "thresholds":
+                out["list"], out["count"] = len(self.select), len(node["samplers"])
+                if len(v) != len(node["samplers"]) - 1:
+                    die("gen_worldgen: an interval select with other than one threshold between two samplers")
+                chosen = [self.sampler(s) for s in node["samplers"]]
+                out["list"] = len(self.select)   # (its samplers may hold selects of their own)
+                self.select += chosen
+                self.thresholds += v + [0.0]     # one a sampler: the last has none
+            elif slot == "samplers":
+                pass
+            elif slot == "spline":
+                # CubicSpline.asSampler: an anonymous class around the spline's top.
+                top = self.p.need(self.p.node(v), "CubicSpline$1", "val$multipoint")
+                coordinates: dict[int, int] = {}
+                root = self.spline(top["val$multipoint"], coordinates)
+                if sorted(coordinates) != list(range(node["coordinateCount"])):
+                    die("gen_worldgen: a spline's coordinates are not numbered 0..n-1")
+                out["i0"], out["list"] = len(self.coordinates), root
+                self.coordinates += [coordinates[i] for i in range(len(coordinates))]
+            elif slot == "count":
+                out["count"] = v
+            else:
+                out[slot] = v
+        if op == "kCache":
+            self.cells = max(self.cells, out["i0"] + 1)
+        self.index[at] = len(self.nodes)
+        self.nodes.append(out)
+        return self.index[at]
+
+    def spline(self, ref, coordinates: dict[int, int]) -> int:
+        """A CubicSpline.Multipoint, its points' own splines first; `coordinates` gathers index -> sampler."""
+        node = self.p.need(self.p.node(ref), "CubicSpline$Multipoint", "coordinate", "locations", "values", "derivatives")
+        coordinate = self.p.need(self.p.node(node["coordinate"]), "SplineFunction$SamplerCoordinate", "sampler", "index", "range")
+        sampler = self.sampler(coordinate["sampler"])
+        if coordinates.setdefault(coordinate["index"], sampler) != sampler:
+            die("gen_worldgen: two samplers for one coordinate of a spline")
+        if not (len(node["locations"]) == len(node["values"]) == len(node["derivatives"])):
+            die("gen_worldgen: a spline whose points do not line up")
+        points = []
+        for location, value, derivative in zip(node["locations"], node["values"], node["derivatives"]):
+            v = self.p.node(value)
+            if v["c"] == "CubicSpline$Constant":
+                points.append((location, derivative, self.p.need(v, "CubicSpline$Constant", "value")["value"], -1))
+            else:
+                points.append((location, derivative, 0.0, self.spline(value, coordinates)))
+        first = len(self.points)
+        self.points += points
+        self.splines.append((coordinate["index"], first, len(points)))
+        return len(self.splines) - 1
+
+
+def emit_program(t: ProgramTables) -> str:
+    out = ["""
+// ---------------------------------------------------------------------------------------------
+// The density functions, as vanilla compiled them (RandomState.getSampler): a node is a sampler
+// object, and comes after the nodes it reads. What a field means is the op's to say
+// (worldgen/density.cpp, which names the vanilla class of each).
+enum class Op : u8 {
+"""]
+    out += [f"    {op},\n" for op in OPS]
+    out.append("""};
+struct Node {
+    Op op;
+    u8 axis;          // a gradient's: 0 x, 1 y, 2 z
+    u16 a, b, c;      // the samplers it reads
+    u16 noise;        // kNoises[noise], or - from noise::kCount on - old_blended_noise's min limit, max limit, main
+    u16 list, count;  // an interval select's samplers (kSelect) and thresholds; a spline's top (kSplines), its coordinates
+    i32 i0, i1, i2;
+    float f0, f1, f2, f3;
+    double d0, d1;
+};
+// A CubicSpline.Multipoint: `coordinate` is which of its function's coordinates it is a curve of.
+struct Spline {
+    u16 coordinate, first_point, points;
+};
+// ...and a point of one: where, how steep, and how high - a number, or what another spline says.
+struct SplinePoint {
+    float location, derivative, value;
+    i32 spline;  // -1: `value`
+};
+""")
+    out.append(f"\ninline constexpr u32 kCacheCells = {t.cells};  // CachingDensitySampler ids are 0..kCacheCells-1\n")
+    out.append(f"\ninline constexpr Node kNodes[{len(t.nodes)}] = {{\n")
+    for i, n in enumerate(t.nodes):
+        g = lambda k, d=0: n.get(k, d)
+        out.append(f"    {{Op::{n['op']}, {g('axis')}, {g('a')}, {g('b')}, {g('c')}, {g('noise')}, {g('list')}, {g('count')}, "
+                   f"{g('i0')}, {g('i1')}, {g('i2')}, {cfloat(g('f0', 0.0))}, {cfloat(g('f1', 0.0))}, {cfloat(g('f2', 0.0))}, "
+                   f"{cfloat(g('f3', 0.0))}, {cdouble(g('d0', 0.0))}, {cdouble(g('d1', 0.0))}}},  // {i}\n")
+    out.append("};\n")
+    out.append(f"\ninline constexpr u16 kSelect[{max(1, len(t.select))}] = {{{', '.join(map(str, t.select)) or '0'}}};\n")
+    out.append(f"inline constexpr float kSelectThresholds[{max(1, len(t.thresholds))}] = "
+               f"{{{', '.join(cfloat(x) for x in t.thresholds) or '0.0f'}}};\n")
+    out.append(f"inline constexpr u16 kSplineCoordinates[{max(1, len(t.coordinates))}] = "
+               f"{{{', '.join(map(str, t.coordinates)) or '0'}}};\n")
+    out.append(f"\ninline constexpr Spline kSplines[{len(t.splines)}] = {{\n")
+    out += [f"    {{{c}, {first}, {n}}},\n" for c, first, n in t.splines]
+    out.append("};\n")
+    out.append(f"\ninline constexpr SplinePoint kSplinePoints[{len(t.points)}] = {{\n")
+    out += [f"    {{{cfloat(l)}, {cfloat(d)}, {cfloat(v)}, {child}}},\n" for l, d, v, child in t.points]
+    out.append("};\n")
+    out.append("""
+// The functions a generator asks for (NoiseRouter, Aquifer.Config, the spawn target, the ore
+// veins of the material rules), by where vanilla names them.
+struct Root {
+    std::string_view name;
+    u16 node;
+};
+""")
+    out.append(f"inline constexpr Root kRoots[{len(t.roots)}] = {{\n")
+    out += [f'    {{"{name}", {node}}},\n' for name, node in t.roots]
+    out.append("};\nnamespace root {\n")
+    seen = set()
+    for name, node in t.roots:
+        const = ident(re.sub(r"([a-z])([A-Z])", r"\1_\2", name.replace("minecraft:", "")))
+        if const in seen:
+            die(f"gen_worldgen: two roots named {const}")
+        seen.add(const)
+        out.append(f"inline constexpr u32 {const} = {node};  // {name}\n")
+    out.append("}  // namespace root\n")
+    return "".join(out)
+
+
 def emit(hdr: str, version: str, vanilla) -> dict:
     """The generated files, by name - and "_stats"."""
     settings = json.loads(vanilla.zip.read("data/minecraft/worldgen/noise_settings/overworld.json"))
     if settings.get("legacy_random_source") is not False:
         die("gen_worldgen: the overworld draws from the legacy random source: src/worldgen takes it for Xoroshiro")
     program = Program(version)
-    noises, layers, blended, _ = noise_tables(vanilla, program)
+    noises, layers, blended, noise_index = noise_tables(vanilla, program)
+    tables = ProgramTables(program, noise_index)
 
     out = [hdr, """
 // The tables of src/worldgen: the overworld's generator. Made of data/minecraft/worldgen/ in the
@@ -194,5 +421,8 @@ inline constexpr BlendedLayer kBlendedLayers[{len(blended)}] = {{
 """)
     for frequency, amplitude, fudge in blended:
         out.append(f"    {{{cdouble(frequency)}, {cfloat(amplitude)}, {cdouble(fudge)}}},\n")
-    out.append("};\n\n}  // namespace proto::gen::worldgen\n")
-    return {"worldgen.hpp": "".join(out), "_stats": {"noises": len(noises), "noise_layers": len(layers) + len(blended)}}
+    out.append("};\n")
+    out.append(emit_program(tables))
+    out.append("\n}  // namespace proto::gen::worldgen\n")
+    return {"worldgen.hpp": "".join(out),
+            "_stats": {"noises": len(noises), "noise_layers": len(layers) + len(blended), "density_nodes": len(tables.nodes)}}
