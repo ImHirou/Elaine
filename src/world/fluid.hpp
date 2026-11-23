@@ -80,7 +80,8 @@ FluidState new_liquid(const Dimension& d, const FluidRules& r, i32 x, i32 y, i32
 // stands between the two.
 bool can_maybe_pass_through(const FluidRules& r, BlockState from, u32 dir, BlockState to);
 // FlowingFluid.canHoldSpecificFluid: a block that holds fluids by itself (a LiquidBlockContainer)
-// says which; every other takes whatever passed canMaybePassThrough. `type`: the fluid.
+// says which - a source of water, if it is one that can be waterlogged; every other block takes
+// whatever passed canMaybePassThrough. `type`: the fluid.
 bool can_hold_specific(BlockState state, u32 type);
 // FlowingFluid.isWaterHole: would the fluid of `top` fall into `bottom`, the block under it?
 bool water_hole(const FluidRules& r, BlockState top, BlockState bottom);

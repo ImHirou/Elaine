@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <random>
+#include <string>
 #include <tuple>
 #include <vector>
 
@@ -208,9 +209,35 @@ TEST(Fluids, AStateHoldsWhatTheJarSays) {
     EXPECT_EQ(facts("minecraft:lava"), st::kHoldsFluid);
     EXPECT_EQ(facts("minecraft:torch"), st::kHoldsFluid);
     EXPECT_EQ(facts("minecraft:dandelion"), st::kHoldsFluid);
-    EXPECT_EQ(facts("minecraft:oak_slab"), st::kHoldsFluid | st::kFluidContainer);
-    EXPECT_EQ(facts("minecraft:oak_slab[type=double]"), st::kHoldsFluid | st::kFluidContainer);  // (it says no when asked)
-    EXPECT_EQ(facts("minecraft:oak_fence"), st::kHoldsFluid | st::kFluidContainer);
+    // ...and of those that hold water by themselves, which take a source of it when asked
+    // (LiquidBlockContainer.canPlaceLiquid): a SimpleWaterloggedBlock, but a double slab, and a
+    // barrier only from a player in creative mode. One whose class is not ported is left alone.
+    const u32 holds = st::kHoldsFluid | st::kFluidContainer;
+    EXPECT_EQ(facts("minecraft:oak_slab"), holds | st::kTakesWater);
+    EXPECT_EQ(facts("minecraft:oak_slab[waterlogged=true]"), holds | st::kTakesWater);  // (canPlaceLiquid does not look)
+    EXPECT_EQ(facts("minecraft:oak_slab[type=double]"), holds);
+    EXPECT_EQ(facts("minecraft:oak_fence"), holds | st::kTakesWater);
+    EXPECT_EQ(facts("minecraft:oak_sign"), holds | st::kTakesWater);
+    EXPECT_EQ(facts("minecraft:barrier"), holds | st::kCreativeOnly);
+    EXPECT_EQ(facts("minecraft:oak_trapdoor"), holds);
+    EXPECT_TRUE(can_hold_specific(state_of("minecraft:oak_slab"), fluid::kWater));
+    EXPECT_FALSE(can_hold_specific(state_of("minecraft:oak_slab"), fluid::kFlowingWater));  // water that flows goes into no slab
+    EXPECT_FALSE(can_hold_specific(state_of("minecraft:oak_slab"), fluid::kLava));
+    EXPECT_FALSE(can_hold_specific(state_of("minecraft:oak_slab[type=double]"), fluid::kWater));
+    EXPECT_FALSE(can_hold_specific(state_of("minecraft:barrier"), fluid::kWater));
+    EXPECT_FALSE(can_hold_specific(state_of("minecraft:oak_trapdoor"), fluid::kWater));
+    EXPECT_TRUE(can_hold_specific(state_of("minecraft:torch"), fluid::kFlowingLava));  // (what holds none takes any)
+    // BlockInfo::wet_stride: a wet state plus it is the same block dry.
+    for (const char* name : {"minecraft:oak_slab", "minecraft:oak_fence", "minecraft:chest", "minecraft:oak_sign",
+                             "minecraft:barrier", "minecraft:copper_grate"}) {
+        const BlockState dry_one = state_of(name), wet_one = state_of(std::string(name) + "[waterlogged=true]");
+        const u32 stride = block_info_of(dry_one).wet_stride;
+        EXPECT_NE(stride, 0u) << name;
+        EXPECT_EQ(wet_one + stride, dry_one) << name;
+    }
+    EXPECT_EQ(block_info_of(state_of("minecraft:oak_trapdoor")).wet_stride, 0);  // (not ported: left as it is)
+    EXPECT_EQ(block_info_of(blk::kStone).wet_stride, 0);
+    EXPECT_EQ(block_info_of(blk::kWater).wet_stride, 0);
     EXPECT_EQ(facts("minecraft:stone"), 0);
     EXPECT_EQ(facts("minecraft:oak_door"), 0);
     EXPECT_EQ(facts("minecraft:glass"), 0);

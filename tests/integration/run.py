@@ -3535,6 +3535,70 @@ def water_washes_away(srv: Server):
     assert (8, -60, 13) not in got and got[(9, -60, 13)] == water + 2 and got[(7, -60, 13)] == water + 2, got
 
 
+@test()
+def waterlogged_water_flows(srv: Server):
+    """The water in a block that holds it (SimpleWaterloggedBlock) is a source where the block
+    stands: it is ticked when the block's shape is asked, flows out where the block's shape lets
+    it - a bottom slab to its sides, a top slab downwards too - and what a broken block leaves is
+    water that flows. Where a source would form, a dry block that can hold one is waterlogged."""
+    a = wet_start(srv)
+    water = mc.BLOCK["kWater"]
+    # A wet fence, broken at once: its water is left, and flows.
+    fence = (9, -60, 9)
+    assert run_command(a, "setblock 9 -60 9 oak_fence[waterlogged=true]")["blocks"] == {fence: cross("kOakFence", "", True)}
+    dig(a, fence, seq=1)
+    assert collect(a) == {fence: water}
+    assert step_game(a, 5) == {pos: water + 1 for pos in ring(fence, 1)}
+    # A wet bottom slab, set by a command: the water leaves it sideways, and the slab stays wet.
+    at = (-10, -60, 12)
+    assert run_command(a, "setblock -10 -60 12 oak_slab[waterlogged=true]")["blocks"] == {at: slab("kOakSlab", "bottom", True)}
+    got = step_game(a, 5)
+    assert at not in got and all(got[pos] == water + 1 for pos in ring(at, 1)), got
+    # A wet top slab a block up: its water falls out of it, and spreads where it lands.
+    run_command(a, "setblock 20 -59 0 oak_slab[type=top,waterlogged=true]")
+    got = step_game(a, 5)
+    assert got[(20, -60, 0)] == water + 8 and not any(pos in got for pos in ring((20, -59, 0), 1)), got
+    got = step_game(a, 5)
+    assert all(got[pos] == water + 1 for pos in ring((20, -60, 0), 1)), got
+    # Dry stairs between two sources: the source that would form there is in the stairs.
+    for line in ("setblock 21 -60 20 oak_stairs", "setblock 20 -60 20 water", "setblock 22 -60 20 water"):
+        run_command(a, line)
+    got = step_game(a, 5)
+    assert got[(21, -60, 20)] == stairs("kOakStairs", "north", "bottom", "straight", True), got
+    # ...and what /fill sets wet is wet.
+    got = run_command(a, "fill -20 -60 -20 -19 -60 -20 oak_slab[waterlogged=true]")
+    assert got["said"] == [tr("commands.fill.success", 2)], got
+    assert got["blocks"] == {(-20, -60, -20): slab("kOakSlab", "bottom", True), (-19, -60, -20): slab("kOakSlab", "bottom", True)}
+
+
+@test()
+def sponge_absorbs(srv: Server):
+    """A sponge takes up the water around it when it is placed and when water comes beside it
+    (SpongeBlock.tryAbsorbWater), and is a wet sponge then - with the sound of it. With no
+    water in reach it stays what it is."""
+    a = wet_start(srv)
+    water, sponge, wet = mc.BLOCK["kWater"], mc.BLOCK["kSponge"], mc.BLOCK["kWetSponge"]
+    absorb = mc.SOUND["kBlockSpongeAbsorb"]
+    assert run_command(a, "setblock 8 -60 12 sponge")["blocks"] == {(8, -60, 12): sponge}
+    assert not a.sounds
+    # Water set beside it: gone the moment it comes.
+    got = run_command(a, "setblock 9 -60 12 water")
+    assert got["said"] == [tr("commands.setblock.success", 9, -60, 12)], got
+    assert got["blocks"] == {(8, -60, 12): wet, (9, -60, 12): AIR}, got
+    assert a.sounds == [(absorb, 4, (8.5, -59.5, 12.5), 1.0, 1.0)], a.sounds
+    # A wet sponge takes nothing more.
+    assert run_command(a, "setblock 8 -60 13 water")["blocks"] == {(8, -60, 13): water}
+    run_command(a, "setblock 8 -60 13 air")
+    # A sponge set over a trench of three sources, with a wet slab at its end: all of it, and the slab is dry.
+    for line in ("fill 0 -61 14 2 -61 14 water", "setblock 3 -61 14 oak_slab[waterlogged=true]"):
+        run_command(a, line)
+    got = run_command(a, "setblock 1 -60 14 sponge")
+    assert got["blocks"] == {(1, -60, 14): wet, (0, -61, 14): AIR, (1, -61, 14): AIR, (2, -61, 14): AIR,
+                             (3, -61, 14): slab("kOakSlab", "bottom", False)}, got
+    assert [snd[:3] for snd in a.sounds[1:]] == [(absorb, 4, (1.5, -59.5, 14.5))], a.sounds
+    assert step_game(a, 12) == {}                   # nothing is left to flow
+
+
 LAVA_FIZZ = 1501    # LevelEvent.LAVA_FIZZ
 
 
@@ -3972,8 +4036,6 @@ def command_blocks(srv: Server):
     assert run_command(a, "setblock 100000 -60 11 stone")["said"] == [failure(tr("argument.pos.unloaded"))]
     got = run_command(a, "setblock 8 -60 11 lever")
     assert got["said"] == [failure("The block minecraft:lever is not supported by this server yet")] and not got["blocks"]
-    got = run_command(a, "setblock 8 -60 11 chest[waterlogged=true]")
-    assert got["said"] == [failure("The block minecraft:chest cannot hold a fluid on this server yet")]
 
     # /fill: a 5 x 3 x 3 box, east of Alice.
     lo, hi = (10, -60, 10), (14, -58, 12)

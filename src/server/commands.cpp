@@ -17,8 +17,7 @@
 //
 // What is NOT here, by command (docs/architecture.md lists it with the reasons):
 //   * /setblock, /fill: only blocks the server can simulate (rule 9: the placeable ones, air,
-//     and water by itself - a block that holds water is set dry), without block entity data;
-//     no particles or sound of a destroyed block;
+//     water and lava), without block entity data; no particles or sound of a destroyed block;
 //   * /tp: no `facing`; "^" coordinates use the processor's sine, not Mth's table;
 //   * /give: no components; /summon: no NBT, and what is summoned has no brain - a mob falls
 //     to the ground and stands where it was put;
@@ -741,8 +740,7 @@ struct Game::Commands {
         const bool known = world::is_air(block.state) ||
                            (info.flags & world::block_flag::kPlaceMask) != world::block_flag::kPlaceNone ||
                            (info.flags & world::block_flag::kSettable);
-        // A fluid by itself flows (kSettable: its own block); one in a block that holds it does not yet.
-        if (known && (world::state::fluid_legacy_of(block.state) == world::kAir || (info.flags & world::block_flag::kSettable))) {
+        if (known) {
             // The tag behind it: whatever of it this server cannot do is said before a block is touched.
             nbt::Doc doc;
             std::string what;
@@ -753,7 +751,7 @@ struct Game::Commands {
         }
         std::string why = "The block ";
         why += world::block_name(block.block);
-        why += known ? " cannot hold a fluid on this server yet" : " is not supported by this server yet";
+        why += " is not supported by this server yet";
         return in.fail(Text::literal(why));
     }
     // BlockPredicateArgument's predicates: the block, and - if a tag was given - a block entity

@@ -126,10 +126,11 @@ bool can_maybe_pass_through(const FluidRules& r, BlockState from, u32 dir, Block
 }
 
 bool can_hold_specific(BlockState state, u32 type) {
-    (void)type;
-    // LiquidBlockContainer.canPlaceLiquid. A block that holds water by itself takes none here
-    // yet, as it gives none: what is waterlogged stays as it was set.
-    return !(state::kFluidFacts[state] & state::kFluidContainer);
+    const u32 facts = state::kFluidFacts[state];
+    if (!(facts & state::kFluidContainer)) return true;
+    // LiquidBlockContainer.canPlaceLiquid(null, ...): SimpleWaterloggedBlock takes a source of
+    // water and nothing else - water that flows does not go into a slab.
+    return (facts & state::kTakesWater) && type == fluid::kWater;
 }
 
 bool water_hole(const FluidRules& r, BlockState top, BlockState bottom) {

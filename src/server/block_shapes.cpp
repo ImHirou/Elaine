@@ -21,9 +21,6 @@
 // wall state::kWallAbove (which of the wall's parts its underside covers).
 //
 // What is NOT here:
-//   * water: a block placed into a source of water is `waterlogged` and stays so. Its
-//     updateShape would ask for the water's tick (scheduleTick(pos, Fluids.WATER, ...)): there are
-//     no fluid ticks, the water in it does not flow, and nothing but its item fills or empties it;
 //   * a lead: FenceBlock.useWithoutItem ties the mobs a player leads to the fence. Nothing is on
 //     a lead, so the click passes to the item in hand, as it does in vanilla then;
 //   * a wall under a block whose collision shape depends on where it stands (bamboo, pointed

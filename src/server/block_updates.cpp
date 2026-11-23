@@ -15,7 +15,9 @@
 //   SnowyBlock, SpreadingSnowyBlock (grass, mycelium), NyliumBlock, ChangeOverTimeBlock /
 //   WeatheringCopper, BuddingAmethystBlock, AmethystClusterBlock, BaseTorchBlock, WallTorchBlock,
 //   RedstoneLampBlock, FallingBlock, ConcretePowderBlock, TntBlock, ChestBlock, CopperChestBlock,
-//   BarrelBlock, VegetationBlock and what is one, LiquidBlock (their hooks)
+//   BarrelBlock, VegetationBlock and what is one, LiquidBlock, SpongeBlock, WetSpongeBlock (their
+//   hooks; what the last three do is server/fluids.cpp), SimpleWaterloggedBlock's part of
+//   updateShape (the tick of the water in a block that holds it)
 // The blocks whose state is their shape - stairs, fences, panes, walls, lanterns, mushroom
 // blocks - answer updateShape in server/block_shapes.cpp.
 //
@@ -31,8 +33,6 @@
 // What is NOT here:
 //   * comparators (Level.updateNeighbourForOutputSignal, affectNeighborsAfterRemoval of the
 //     containers), redstone wire's updateIndirectNeighbourShapes: there are none;
-//   * the tick of the water in a waterlogged block: its updateShape does not ask for one, and
-//     that water stays where it is (water by itself flows: server/fluids.cpp);
 //   * tickPrecipitation and tickThunder (ice, snow layers, lightning): there is no weather - nor
 //     what rain takes from the sky's light (Level.skyDarken follows the time of day alone);
 //   * game rules: random-tick-speed is a setting, blocks and entities always drop.
@@ -329,6 +329,7 @@ void Game::neighbor_changed(BlockState state, BlockPos pos, u32 source_block) {
             break;
         }
         case block_kind::kLiquid: liquid_changed(state, pos); break;  // LiquidBlock: its fluid is ticked
+        case block_kind::kSponge: try_absorb_water(pos); break;       // SpongeBlock: water has come beside it, perhaps
         default: break;
     }
 }
@@ -340,6 +341,17 @@ BlockState Game::update_shape(BlockState state, BlockPos pos, u32 dir, BlockPos 
     (void)neighbour_pos;
     if (!(st::kHooks[state] & st::kHookShape)) return state;
     const world::BlockInfo& info = world::block_info_of(state);
+    const BlockState shaped = shape_beside(state, info, pos, dir, neighbour);
+    // SimpleWaterloggedBlock: a block that holds water asks for the water's tick whenever its shape
+    // is asked - every class of them, the first thing it does; but a sign, which looks first
+    // whether it can stay, and asks only if it does (SignBlock.updateShape, behind its subclasses').
+    if (info.wet_stride && world::fluid_of(state) && !(sign_kind(info.kind) && world::is_air(shaped)))
+        schedule_fluid_tick(pos, world::fluid::kWater, fluid_rules(world::fluid::kWaterFamily).tick_delay);
+    return shaped;
+}
+
+// ...the shape itself, class by class.
+BlockState Game::shape_beside(BlockState state, const world::BlockInfo& info, BlockPos pos, u32 dir, BlockState neighbour) {
     switch (info.kind) {
         case block_kind::kChest: return chest_update_shape(state, dir, neighbour);
         case block_kind::kSnowy:
@@ -355,7 +367,7 @@ BlockState Game::update_shape(BlockState state, BlockPos pos, u32 dir, BlockPos 
         case block_kind::kWallSign:
             return world::opposite(dir) == sign_facing(state) && !can_survive(state, pos) ? world::kAir : state;
         case block_kind::kHangingSign: return dir == world::kUp && !can_survive(state, pos) ? world::kAir : state;
-        case block_kind::kAmethystCluster:  // (waterlogged: a tick for the water - there are no fluid ticks)
+        case block_kind::kAmethystCluster:
             return dir == world::opposite(cluster_facing(state, info)) && !can_survive(state, pos) ? world::kAir : state;
         case block_kind::kPlant:
         case block_kind::kSegmented:  // VegetationBlock: whatever changes beside it, it looks at what it stands on
@@ -396,6 +408,10 @@ void Game::on_place(BlockState state, BlockPos pos, BlockState old) {
         case block_kind::kFalling:
         case block_kind::kConcretePowder: schedule_tick(pos, state, kFallDelay); break;  // FallingBlock
         case block_kind::kLiquid: liquid_changed(state, pos); break;                     // LiquidBlock: its fluid is ticked
+        case block_kind::kSponge:  // SpongeBlock: it takes up the water around it (not when it was a sponge already)
+            if (world::block_of(old) != world::block_of(state)) try_absorb_water(pos);
+            break;
+        case block_kind::kWetSponge: wet_sponge_placed(pos); break;  // WetSpongeBlock: dry at once where water does not stay
         default: break;
     }
 }

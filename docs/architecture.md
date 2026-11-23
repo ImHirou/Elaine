@@ -1118,18 +1118,19 @@ So a fence beside a block of an unported class - a gate, a shulker box of an imp
 still joins it as vanilla does: the tables are made for every state there is.
 
 A class whose `updateShape` does nothing but ask for the tick of the water in it (slabs,
-chains, grates) has no shape hook at all (`NO_SHAPE_HOOK`): the twelve updates of a change in
-a house of slabs stay a load and a branch each.
+chains, grates) has no shape hook for its dry states (`NO_SHAPE_HOOK`): the twelve updates of a
+change in a house of slabs stay a load and a branch each. Its wet states have one - for that
+tick.
 
 **Water.** A block that can hold water (`SimpleWaterloggedBlock`) is placed `waterlogged` into
 a source of it and dry anywhere else, flowing water included (`FluidState.is(Fluids.WATER)`);
 it keeps the water while it stands, leaves the water's block behind when it goes
 (`Level.removeBlock`), resists an explosion as water does while it holds some
 (`ExplosionDamageCalculator`: the more of the block's resistance and the fluid's), and the
-second half of a slab drives the water out. What vanilla does besides is a fluid tick on every
-update - the water flowing out of the block - and there are none: the water stays where it is.
-Only an imported world has any, and `/setblock` refuses a waterlogged state as it refuses
-water.
+second half of a slab drives the water out. Whenever its shape is asked, a block that holds
+water asks for the water's tick (`Game::update_shape`: every class of them does, the first
+thing - but the signs, which ask only if they stay), and its water flows as a source's does:
+see "Water and lava". `/setblock` and `/fill` set a block wet as they set any state.
 
 **Plants.** What stands on something and is nothing else: `VegetationBlock` - flowers, short
 grass and ferns, bushes, dead bushes and dry grass, azaleas, the nether's roots, sprouts and
@@ -1239,6 +1240,32 @@ cobblestone if it flowed - in the tick the water came, before any water has move
 soil and beside blue ice it is basalt. Lava that flows down onto water makes stone of the
 water (`LavaFluid.spreadTo`). Each with the hiss.
 
+A block that holds water by itself - a slab, a fence, a chest (`SimpleWaterloggedBlock`) - is
+a source of it where it stands. Its water is ticked when the block's shape is asked (above),
+and goes out through whatever the block's own shape leaves open: sideways out of a bottom
+slab, downwards as well out of a top slab, nowhere out of a block that fills its cell (the
+same table: the block's collision shape is one of the two that are asked). Into such a block a
+fluid goes only as a source of water (`canPlaceLiquid`): water that flows stops at a slab, but
+where a source would form - between two sources, over solid ground - a dry slab that stands
+there is waterlogged instead (`placeLiquid`: `Game::place_liquid`). Which blocks take water at
+all is a bit of `state::kFluidFacts` again: those of a ported class, but a double slab, and a
+barrier only from a player in creative mode (the three classes that say otherwise than the
+interface are known to mcgen by name, and a fourth would stop it); `BlockInfo::wet_stride` is
+what `waterlogged` adds to a state. A block of an imported world whose class is not ported
+takes no water and gives none.
+
+The sponge (`SpongeBlock.tryAbsorbWater`, `Game::remove_water_around`) is the one block that
+takes water away: placed, or with a block changed beside it, it looks through the cells that
+hold water around it - breadth first, six steps far, sixty-four cells at most
+(`BlockPos.breadthFirstTraversal`: here a queue of 385 and a bitmap of the 13 x 13 x 13 cells
+it can reach, on the stack) - empties each as it comes to it (a source and a waterlogged block
+by `pickupBlock`, flowing water by setting air), and is a wet sponge if it found any. The
+first cell it empties tells the sponge that a block beside it changed, and when the sponge was
+just placed nothing holds that back: it looks again before the first look is over, and where
+it still has water beside it takes that, turns wet and sounds - and the first look, which goes
+on with what is left, sounds once more. A sponge set into the middle of water is heard twice;
+vanilla's is.
+
 A fluid's tick waits with its chunk as a block's does, is saved with it, and counts again
 from the moment the chunk next ticks blocks. Where the chunks that tick end, water ends a
 block short of vanilla's: vanilla's water enters the chunk beyond and waits there, here a
@@ -1246,7 +1273,7 @@ block is set only in chunks that tick.
 
 ### Compared with vanilla
 
-`tools/vanilla/block_probe.py` runs both servers through the same 174 steps - two bots, one
+`tools/vanilla/block_probe.py` runs both servers through the same 192 steps - two bots, one
 building, one watching from three blocks off, and the console - and compares what each bot is
 told: every block change, level event, falling block, primed TNT and dropped item, in the
 order it came and by the tick it came in. It starts the servers itself; vanilla gets a new flat world every time.
@@ -1322,6 +1349,14 @@ In the last recordings nothing differs, in any step, for either bot. What that c
   it, obsidian in that tick; lava that has flowed, cobblestone; a pit of water under a source,
   stone thirty ticks on; lava on soul soil beside blue ice, basalt; each with its level event;
   a torch in its way gone with a hiss and no item;
+- **water in blocks**: a wet slab set by the console leaking to its four sides and the water
+  draining when a stone takes its place; a wet top slab leaking downwards; stairs between two
+  sources waterlogged in the tick a source would have formed there; a wet lantern whose floor
+  is taken - gone with its item, its water left and falling into the hole; two wet fences
+  filled side by side;
+- **the sponge**: set into a diamond of water - which sixty-four cells are gone in that tick,
+  the sound of it twice, and how the rest drains; set dry, with water set beside it; set
+  beside a wet slab, which is dry then; water set on a wet sponge, which stays and flows;
 - **TNT** on five sides of a block of redstone is primed west, east, up, north, south.
 
 What a recording cannot say is said by the unit tests: the tick queue's order against a model
@@ -1353,10 +1388,9 @@ tick queue under load and the random pass belong with the first claim that any o
 
 ### What is not there
 
-- **Of the fluids.** The water in a block that holds it: a waterlogged block does not ask for
-  the water's tick when its shape is asked, so the water in a slab, a fence or a wall stays in
-  it, and none flows in. Bubble columns: water over soul sand or magma is water. Ice does not
-  melt. Fire: lava's random tick sets fire to what burns around it, and there is no fire - a
+- **Of the fluids.** Bubble columns: water over soul sand or magma is water. Ice does not
+  melt. A block of an imported world that holds water and is of a class that is not ported (a
+  trapdoor, leaves, a candle) neither takes water nor gives any. Fire: lava's random tick sets fire to what burns around it, and there is no fire - a
   gap with a name (`RANDOM_TICK_GAPS`), so lava lights nothing. What water does to what is in it - an item, a mob, a player - is not
   there either: see "Physics". A block of an imported world that is not placeable here and
   gives way to water (a lever, a rail) goes without a drop: what a block drops is known for
@@ -2487,8 +2521,8 @@ Roughly in dependency order:
    missing system; slabs, stairs, fences, panes and walls are done ("A state that is a
    shape"). Next: plants and what else needs something to stand on, and the blocks that
    answer a click - doors, trapdoors, fence gates. Fluid ticks are there, water and lava flow
-   ("Water and lava"); next of the fluids: water that leaves and enters a waterlogged block,
-   buckets. Then redstone, the other block entities. And what the first four still lack:
+   ("Water and lava"), the water of a waterlogged block with them, and the sponge takes it up;
+   next of the fluids: buckets, and what a fluid does to what is in it. Then redstone, the other block entities. And what the first four still lack:
    experience orbs.
 8. **Commands**: tags into the world - block entity data, `/summon`'s tag
    (the SNBT reader is there) - `facing`, then the commands that wait for their subject. **Chat**: signed (see "Chat").

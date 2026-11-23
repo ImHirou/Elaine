@@ -107,8 +107,8 @@ PORTED_BLOCKS = {
                              "HangingSignItem"),
     # ---- shapes: a state from how the block is placed and what stands beside it (server/block_shapes.cpp).
     # `waterlogged` is in most of them: getFluidState answers water, and updateShape asks for the
-    # water's tick - of which there is none, so a class whose updateShape does nothing else has no
-    # shape hook here (NO_SHAPE_HOOK).
+    # water's tick. A class whose updateShape does nothing else has a shape hook for its wet states
+    # alone (NO_SHAPE_HOOK).
     "SlabBlock": ("kSlab", "kPlaceSlab", _SLAB),
     "StairBlock": ("kStairs", "kPlaceStairs", _STAIRS),
     "FenceBlock": ("kFence", "kPlaceCross", _CROSS | {"getOcclusionShape", "useWithoutItem"}),
@@ -164,6 +164,10 @@ PORTED_BLOCKS = {
         "getCollisionShape", "getDrops", "getFluidState", "getRenderShape", "getShape", "isPathfindable", "isRandomlyTicking",
         "neighborChanged", "onPlace", "randomTick", "tick", "updateShape", "propagatesSkylightDown", "skipRendering",
         "createBlockStateDefinition"}),
+    # ---- the sponge: it takes up the water around it when it is placed and when a block beside it
+    # changes (SpongeBlock.tryAbsorbWater: server/fluids.cpp). A wet one dries where water does not stay.
+    "SpongeBlock": ("kSponge", "kPlaceDefault", {"neighborChanged", "onPlace"}),
+    "WetSpongeBlock": ("kWetSponge", "kPlaceDefault", {"onPlace", "animateTick"}),
 }
 # Ported classes whose blocks have no item: they can be in the world, and nothing places them by
 # hand (block_flag::kSettable: what /setblock and /fill may set besides what is placeable).
@@ -193,7 +197,7 @@ PLANT_SUPPORT = {
 BLOCK_KINDS = ["kPlain", "kChest", "kFurnace", "kCraftingTable", "kTnt", "kPowered", "kSnowy", "kSpreading", "kNylium",
                "kBuddingAmethyst", "kAmethystCluster", "kTorch", "kWallTorch", "kLamp", "kFalling", "kConcretePowder",
                "kSlab", "kStairs", "kFence", "kBars", "kWall", "kLantern", "kMushroom", "kBarrel", "kPlant", "kSegmented",
-               "kSign", "kWallSign", "kHangingSign", "kWallHangingSign", "kLiquid"]
+               "kSign", "kWallSign", "kHangingSign", "kWallHangingSign", "kLiquid", "kSponge", "kWetSponge"]
 # The kinds whose randomTick is ported, and of those the ones whose tick may act whatever stands
 # around the block (the others are asked what is around them: state::kSmothers and its like).
 RANDOM_TICK_KINDS = {"kSpreading", "kNylium", "kBuddingAmethyst"}
@@ -205,9 +209,18 @@ WEATHERING_CLASSES = {"WeatheringCopperFullBlock", "WeatheringCopperSlabBlock", 
                       "WeatheringCopperBarsBlock", "WeatheringCopperChainBlock", "WeatheringLanternBlock",
                       "WeatheringCopperGrateBlock", "WeatheringCopperChestBlock"}
 # Classes whose updateShape only asks for the tick of the water in a waterlogged block
-# (ticks.scheduleTick(pos, Fluids.WATER, ...), then super): with no fluid ticks it does nothing,
-# and their states carry no kHookShape.
+# (ticks.scheduleTick(pos, Fluids.WATER, ...), then super): their dry states carry no kHookShape,
+# their wet ones do - Game::update_shape asks for that tick for every wet block, whatever its class.
 NO_SHAPE_HOOK = {"SlabBlock", "ChainBlock", "WaterloggedTransparentBlock", "BarrierBlock", "HeavyCoreBlock", "MangroveRootsBlock"}
+# What a block that holds water by itself (SimpleWaterloggedBlock) does when a fluid comes to it, or
+# is taken from it, is the interface's own - canPlaceLiquid: a source of water; placeLiquid: it is
+# waterlogged; pickupBlock: it is dry again - but for the classes that say otherwise, which the
+# port knows by name (gen.py finds who declares one of the three, and stops at a new one):
+#   SlabBlock     a double slab takes none
+#   BarrierBlock  takes and gives water only at the hands of a player in creative mode
+#   LiquidBlock   is no SimpleWaterloggedBlock: the fluid's own block, taken whole if it is a source
+LIQUID_OVERRIDES = {"SlabBlock", "BarrierBlock", "LiquidBlock"}
+
 # Blocks whose class overrides randomTick, and the tick is not ported - of a class that is placeable
 # by the general rule, or of a ported one: what they would do waits for something else. Named
 # here so that a new one stops the generator.
@@ -268,6 +281,7 @@ FAMILY_LAYOUTS = {
 # Sounds and particles the server sends by id (static registries: sound_event, particle_type).
 SOUNDS = ["block.chest.open", "block.chest.close", "entity.tnt.primed", "entity.generic.explode", "entity.item.pickup",
           "entity.armor_stand.break", "block.barrel.open", "block.barrel.close", "block.copper_chest.open",
+          "block.sponge.absorb", "block.wet_sponge.dries",
           "block.copper_chest.close", "block.copper_chest_weathered.open", "block.copper_chest_weathered.close",
           "block.copper_chest_oxidized.open", "block.copper_chest_oxidized.close", "block.chest.locked",
           "item.dye.use", "item.ink_sac.use", "item.glow_ink_sac.use", "item.honeycomb.wax_on",

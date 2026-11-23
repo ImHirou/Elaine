@@ -2,7 +2,7 @@
 
 Minecraft 26.3 has 1286 blocks in 268 block classes. The server holds a block only if it
 simulates everything vanilla would do with it - so the list of what can be **placed** is the list
-of what is **done**: 773 blocks today. This file is that list, block class by block class,
+of what is **done**: 775 blocks today. This file is that list, block class by block class,
 in the order the missing systems are meant to be built.
 
 **Generated** by `tools/mcgen/roadmap.py` from the jar's block classes (`mcgen.py gamedata`) and the
@@ -265,7 +265,7 @@ Needs: The tick queue (`world::LevelTicks`) and `FallingBlockEntity` are there: 
 - [ ] **ScaffoldingBlock** (1) - `canBeReplaced(BlockState,BlockPlaceContext)`, `canSurvive`, `getFluidState`, `getStateForPlacement`, `onPlace`, `tick`, `updateShape`  
   scaffolding
 
-## 5. Fluids (2 of 53 blocks)
+## 5. Fluids (4 of 53 blocks)
 
 Needs: Water and lava: flowing (`FlowingFluid.tick`), waterlogging (`getFluidState`, `SimpleWaterloggedBlock`), buckets.
 
@@ -309,11 +309,11 @@ Needs: Water and lava: flowing (`FlowingFluid.tick`), waterlogging (`getFluidSta
   sea_pickle
 - [ ] **SeagrassBlock** (1) - `canSurvive`, `getFluidState`, `getStateForPlacement`, `updateShape`  
   seagrass
-- [ ] **SpongeBlock** (1) - `neighborChanged`, `onPlace`  
+- [x] **SpongeBlock** (1) - `neighborChanged`, `onPlace`  
   sponge
 - [ ] **TallSeagrassBlock** (1) - `canSurvive`, `getCloneItemStack`, `getFluidState`, `getStateForPlacement`, `playerDestroy`, `playerWillDestroy`, `setPlacedBy`, `updateShape`  
   tall_seagrass
-- [ ] **WetSpongeBlock** (1) - `onPlace`  
+- [x] **WetSpongeBlock** (1) - `onPlace`  
   wet_sponge
 
 ## 6. Random ticks: growth, spread and decay (48 of 128 blocks)

@@ -734,10 +734,15 @@ TEST(Blocks, WhatAChangeAndATickAskOfAState) {
     EXPECT_EQ(block_info_of(blk::kWaxedCutCopperStairs).next_stage, 0);
     EXPECT_EQ(st::kRandom[blk::kCutCopperStairs] & (st::kRandomTick | st::kRandomAlways), st::kRandomTick | st::kRandomAlways);
     EXPECT_EQ(st::kRandom[blk::kOxidizedCutCopperStairs] & st::kRandomTick, 0);
-    // A block whose updateShape only asks for the tick of the water in it has no shape hook; one
-    // whose shape is its neighbours' doing has.
+    // A block whose updateShape only asks for the tick of the water in it has a shape hook while
+    // it holds water, and none dry; one whose shape is its neighbours' doing always has.
     EXPECT_EQ(st::kHooks[blk::kOakSlab] & st::kHookShape, 0);
     EXPECT_EQ(st::kHooks[blk::kIronChain] & st::kHookShape, 0);
+    EXPECT_NE(st::kHooks[blk::kOakSlab - block_info_of(blk::kOakSlab).wet_stride] & st::kHookShape, 0);
+    EXPECT_NE(st::kHooks[blk::kIronChain - block_info_of(blk::kIronChain).wet_stride] & st::kHookShape, 0);
+    // The sponge looks for water when it is placed and when a block beside it changes.
+    EXPECT_EQ(hooks(blk::kSponge), st::kHookNeighbor | st::kHookPlace);
+    EXPECT_EQ(hooks(blk::kWetSponge), st::kHookPlace);
     for (const u32 s :
          {blk::kOakStairs, blk::kOakFence, blk::kGlassPane, blk::kCobblestoneWall, blk::kLantern, blk::kRedMushroomBlock})
         EXPECT_TRUE(st::kHooks[s] & st::kHookShape) << s;

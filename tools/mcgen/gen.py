@@ -505,6 +505,9 @@ WALL_ABOVE_FLAGS = [
 FLUID_FACT_FLAGS = [
     ("kHoldsFluid", "FlowingFluid.canHoldAnyFluid: a LiquidBlockContainer, or in #washed_away_by_fluids - a fluid may flow here"),
     ("kFluidContainer", "a LiquidBlockContainer: a fluid that flows here is handed to the block (placeLiquid), which stays"),
+    ("kTakesWater", "...and canPlaceLiquid says yes to a source of water, whoever asks: a SimpleWaterloggedBlock of a ported "
+                    "class (a double slab says no; one of a class that is not ported is left as it is)"),
+    ("kCreativeOnly", "BarrierBlock: it takes water, and gives it up, only at the hands of a player in creative mode"),
 ]
 # proto::gen::fluid::kFlags, by fluid state.
 FLUID_STATE_FLAGS = [
@@ -778,8 +781,8 @@ def build_block_tables(v: dict, blocks: dict, data: dict, static_regs: dict, van
         h = 0
         if ported:
             for name, hook, _ in HOOK_FLAGS:
-                if hook == "updateShape" and gh.get(hook) in gen_game.NO_SHAPE_HOOK:
-                    continue   # (it asks for the water's tick and nothing else)
+                if hook == "updateShape" and gh.get(hook) in gen_game.NO_SHAPE_HOOK and cols["fluid_state"][i] == 0:
+                    continue   # (it asks for the water's tick and nothing else: nothing to do for a dry one)
                 h |= hbit[name] if hook and hook in gh else 0
         # FallingBlock.isFree
         h |= hbit["kFallThrough"] if (st["air"][i] or b["id"] in fire or cols["liquid"][i] or st["replaceable"][i]) else 0
@@ -1033,14 +1036,47 @@ def build_block_tables(v: dict, blocks: dict, data: dict, static_regs: dict, van
     ffbit = {name: 1 << i for i, (name, _) in enumerate(FLUID_FACT_FLAGS)}
     washed = tagged("washed_away_by_fluids")
     fluid_facts = bytearray(n)
+    wet_stride: dict[str, int] = {}     # a ported block that holds water by itself -> the stride of its `waterlogged`
     for b in ext_blocks:
-        container = "LiquidBlockContainer" in game["blocks"][b["name"]]["interfaces"]
+        gb = game["blocks"][b["name"]]
+        container = "LiquidBlockContainer" in gb["interfaces"]
         f = (ffbit["kHoldsFluid"] if container or b["id"] in washed else 0) | (ffbit["kFluidContainer"] if container else 0)
+        simple = "SimpleWaterloggedBlock" in gb["interfaces"] and ported_of[b["name"]] is not None
+        if simple:
+            wet = [q for q in gb["properties"] if q["name"] == "waterlogged"]
+            if len(wet) != 1 or wet[0]["values"] != ["true", "false"]:
+                die(f"{b['name']}: a SimpleWaterloggedBlock whose `waterlogged` is not (true, false)")
+            wet_stride[b["name"]] = wet[0]["stride"]
+            f |= ffbit["kCreativeOnly"] if "BarrierBlock" in gb["class"] else 0
         for s in blocks[b["name"]]["states"]:
-            fluid_facts[s["id"]] = f
+            g = f
+            if simple:
+                is_wet = s["properties"]["waterlogged"] == "true"
+                if is_wet != (fluid_states[fluid_col[s["id"]]]["fluid"] == "minecraft:water"):
+                    die(f"{b['name']}: `waterlogged` and holding a source of water are not the same states")
+                if "BarrierBlock" not in gb["class"] and not ("SlabBlock" in gb["class"] and s["properties"]["type"] == "double"):
+                    g |= ffbit["kTakesWater"]
+            fluid_facts[s["id"]] = g
+    # Who says otherwise than SimpleWaterloggedBlock: the classes of ported blocks that declare one
+    # of its three methods themselves (javap: nothing is run).
+    liquid_classes = {c for b in ext_blocks if ported_of[b["name"]] and "BucketPickup" in game["blocks"][b["name"]]["interfaces"]
+                      for c in game["blocks"][b["name"]]["class"]} - {"Block", "BlockBehaviour"}
+    with zipfile.ZipFile(jar_for(v["id"], client=False)) as z:
+        block_classes = {n[:-6].replace("/", ".") for n in z.namelist()
+                         if n.startswith("net/minecraft/world/level/block/") and n.endswith(".class")}
+    full_names = {n for n in block_classes if n.rsplit(".", 1)[1] in liquid_classes}
+    if {n.rsplit(".", 1)[1] for n in full_names} != liquid_classes:
+        die(f"block classes that are not in the jar under their names: {sorted(liquid_classes - {n.rsplit('.', 1)[1] for n in full_names})}")
+    says = {cls.rsplit(".", 1)[1] for method in ("canPlaceLiquid", "placeLiquid", "pickupBlock")
+            for cls in classes_declaring(v["id"], full_names, method)}
+    if says != gen_game.LIQUID_OVERRIDES & liquid_classes or not gen_game.LIQUID_OVERRIDES <= liquid_classes:
+        die(f"canPlaceLiquid / placeLiquid / pickupBlock are declared by {sorted(says)} among the ported classes, the port knows "
+            f"{sorted(gen_game.LIQUID_OVERRIDES)}: read the class, then gen_game.LIQUID_OVERRIDES")
     slab = next(b for b in ext_blocks if b["name"] == "minecraft:oak_slab")
-    if fluid_facts[slab["default_state"]] != ffbit["kHoldsFluid"] | ffbit["kFluidContainer"] or fluid_facts[stone] or not fluid_facts[0]:
-        die("kFluidFacts: a slab is no LiquidBlockContainer, stone holds a fluid, or air does not (#washed_away_by_fluids)")
+    if (fluid_facts[slab["default_state"]] != ffbit["kHoldsFluid"] | ffbit["kFluidContainer"] | ffbit["kTakesWater"] or
+            fluid_facts[stone] or fluid_facts[0] != ffbit["kHoldsFluid"]):
+        die("kFluidFacts: a slab is no LiquidBlockContainer that takes water, stone holds a fluid, or air does not "
+            "(#washed_away_by_fluids)")
 
     # ---- FlowingFluid.canPassThroughWall(direction, from, to) = !Shapes.mergedFaceOccludes(the
     # collision shape of `from`, that of `to`, direction): of each shape the layer of cells at the
@@ -1351,6 +1387,8 @@ struct BlockInfo {
     unsigned char kind;         // block_kind::*: the behaviour the server implements for its class
     unsigned char block_entity; // block_entity_type id of its block entity, kNoBlockEntity without one
     unsigned char weather;      // ChangeOverTimeBlock.getAge() of a WeatheringCopper block, ordinal + 1; 0: it is none
+    unsigned short wet_stride;  // of a ported SimpleWaterloggedBlock: what its `waterlogged` adds to a state - a wet
+                                // state plus this is the same block dry (the values are true, false); 0: it is none
 };
 struct ItemInfo {
     unsigned short block;       // block a BlockItem places, kNoBlock = not a block item
@@ -1569,7 +1607,8 @@ namespace proto::gen {
                  f"{cfloat(settings['speedFactor'])}f, {cfloat(settings['bounceRestitution'])}f, "
                  f"{{{{{drops[0][1]}, {drops[0][2]}, {drops[0][3]}}}, {{{drops[1][1]}, {drops[1][2]}, {drops[1][3]}}}}}, "
                  f"{cfloat(drops[0][0])}f, block_kind::{own_kind}, "
-                 f"{be_ids[be] if be is not None else 'kNoBlockEntity'}, {weather}}},  // {name.split(':', 1)[1]}\n")
+                 f"{be_ids[be] if be is not None else 'kNoBlockEntity'}, {weather}, {wet_stride.get(name, 0)}}},  "
+                 f"// {name.split(':', 1)[1]}\n")
     t.append("};\n\n")
 
     itf = {name: value for name, value, _ in ITEM_FLAGS}

@@ -23,9 +23,14 @@
 // answers the water's arrival, in the same tick) - and lava that comes down on water makes
 // stone of the water (LavaFluid.spreadTo). Each with a hiss: level event 1501.
 //
+// A block that holds water by itself (SimpleWaterloggedBlock: a slab, a fence, a chest) is a
+// source of it where it stands: its water is ticked when the block's shape is asked
+// (Game::update_shape), flows out through what the block's shape leaves open, and is put into it
+// where a source would form (place_liquid). The sponge takes water up (try_absorb_water).
+//
 // What is NOT here:
-//   * water in a block that holds it (a waterlogged slab): it does not flow out, and none flows
-//     in (world::can_hold_specific);
+//   * a block of an imported world that holds water and whose class is not ported (a trapdoor,
+//     leaves): it takes no water and gives none, as it does nothing else;
 //   * bubble columns (LiquidBlock.tick, tryScheduleBubbleBlockColumn): water over soul sand or
 //     magma is water;
 //   * lava's random tick (LavaFluid.randomTick: it sets fire to what burns around it): there is
@@ -34,6 +39,9 @@
 //     an imported world goes without a drop (BlockInfo::drop is there for placeable blocks).
 #include "server/game.hpp"
 #include "world/fluid.hpp"
+
+#include PROTO_GEN_ITEMS_HPP
+#include PROTO_GEN_STATIC_IDS_HPP
 
 namespace server {
 
@@ -152,7 +160,10 @@ void Game::spread_to(const world::FluidRules& r, BlockPos pos, BlockState state,
         level_event(kLevelEventLavaFizz, pos, 0);
         return;
     }
-    if (st::kFluidFacts[state] & st::kFluidContainer) return;  // (none gets here: world::can_hold_specific)
+    if (st::kFluidFacts[state] & st::kFluidContainer) {
+        place_liquid(pos, state, becomes);
+        return;
+    }
     if (!world::is_air(state)) {
         if (lava)
             level_event(kLevelEventLavaFizz, pos, 0);
@@ -186,6 +197,104 @@ bool Game::should_spread_liquid(BlockPos pos, BlockState state) {
         }
     }
     return true;
+}
+
+// SimpleWaterloggedBlock.placeLiquid (SlabBlock's: not into a double slab): a dry block that is
+// handed a source of water is waterlogged, and its water asks for its tick.
+bool Game::place_liquid(BlockPos pos, BlockState state, FluidState held) {
+    const world::BlockInfo& info = world::block_info_of(state);
+    if (!info.wet_stride || world::fluid_of(state) || world::fluid_type(held) != fluid::kWater) return false;
+    if (!(st::kFluidFacts[state] & (st::kTakesWater | st::kCreativeOnly))) return false;
+    set_block(pos, static_cast<BlockState>(state - info.wet_stride));
+    schedule_fluid_tick(pos, fluid::kWater, fluid_rules(fluid::kWaterFamily).tick_delay);
+    return true;
+}
+
+// BucketPickup.pickupBlock: the fluid is taken out of the block - the bucket it would fill, 0 if
+// there is nothing to take. LiquidBlock: a source goes whole, what flows is not taken.
+// SimpleWaterloggedBlock: the block is dry, and breaks if it cannot stay (BarrierBlock: at the
+// hands of a player in creative mode only).
+u32 Game::pickup_block(BlockPos pos, BlockState state, bool creative_player) {
+    const world::BlockInfo& info = world::block_info_of(state);
+    if (info.kind == block_kind::kLiquid) {
+        if (state != info.first_state) return 0;  // LEVEL 0: the source
+        set_block(pos, world::kAir);
+        return world::fluid_family(world::fluid_of(state)) == fluid::kLavaFamily ? proto::gen::item::kLavaBucket
+                                                                                 : proto::gen::item::kWaterBucket;
+    }
+    if (!info.wet_stride || !world::fluid_of(state)) return 0;
+    if ((st::kFluidFacts[state] & st::kCreativeOnly) && !creative_player) return 0;
+    set_block(pos, static_cast<BlockState>(state + info.wet_stride));
+    if (!can_survive(state, pos)) break_block(pos, true);
+    return proto::gen::item::kWaterBucket;
+}
+
+// SpongeBlock.tryAbsorbWater (its onPlace and neighborChanged): if there is water to take, it
+// is taken, and the sponge is wet.
+void Game::try_absorb_water(BlockPos pos) {
+    if (!remove_water_around(pos)) return;
+    set_block(pos, blk::kWetSponge, kUpdateClients);
+    play_sound(gen::sound::kBlockSpongeAbsorb, cb::Sound::kSourceBlocks, pos.x + 0.5, pos.y + 0.5, pos.z + 0.5, 1.0f, 1.0f);
+}
+
+// SpongeBlock.removeWaterBreadthFirstSearch, with BlockPos.breadthFirstTraversal written out:
+// from the sponge outwards, six steps far and sixty-five cells at most (the sponge is one),
+// through the cells that hold water and nothing else - each emptied as it is come to: a source
+// and what is waterlogged by pickupBlock, water that flows set to air, kelp and seagrass broken.
+// True if anything but the sponge's own cell was taken. A cell is looked at once, and marked
+// when it is come to, not when it is queued - so the queue holds a cell as often as it has
+// neighbours that were taken, and the order is the queue's: Direction.values() around each.
+// (A cell that is emptied tells its neighbours, the sponge among them, which looks again while
+// this search is still under way - as vanilla's does: each search has its own queue.)
+bool Game::remove_water_around(BlockPos start) {
+    constexpr i32 kDepth = 6, kSide = 2 * kDepth + 1;  // SpongeBlock.MAX_DEPTH
+    constexpr u32 kCount = 65;                         // MAX_COUNT + 1: the sponge's own cell is one
+    struct Node {
+        i8 dx, dy, dz;
+        u8 depth;
+    };
+    Node queue[(kCount - 1) * 6 + 1];  // every cell that is taken queues six, and fewer than kCount are taken before it ends
+    u64 seen[(kSide * kSide * kSide + 63) / 64] = {};
+    u32 head = 0, tail = 0, count = 0;
+    queue[tail++] = {0, 0, 0, 0};
+    while (head != tail) {
+        const Node n = queue[head++];
+        const u32 bit = static_cast<u32>(((n.dx + kDepth) * kSide + (n.dy + kDepth)) * kSide + (n.dz + kDepth));
+        if (seen[bit >> 6] >> (bit & 63) & 1) continue;
+        seen[bit >> 6] |= 1ull << (bit & 63);
+        const BlockPos pos{start.x + n.dx, start.y + n.dy, start.z + n.dz};
+        if (n.dx | n.dy | n.dz) {
+            const BlockState state = world_.block(pos.x, pos.y, pos.z);
+            if (!world::holds_water(state)) continue;
+            if (!pickup_block(pos, state, false)) {
+                const u32 block = world::block_of(state);
+                if (world::block_info_of(state).kind == block_kind::kLiquid) {
+                    set_block(pos, world::kAir);
+                } else if (block == world::block_of(blk::kKelp) || block == world::block_of(blk::kKelpPlant) ||
+                           block == world::block_of(blk::kSeagrass) || block == world::block_of(blk::kTallSeagrass)) {
+                    drop_resources(state, pos);  // (nothing: what they drop is not known - they are not placeable)
+                    set_block(pos, world::kAir);
+                } else {
+                    continue;
+                }
+            }
+        }
+        if (++count >= kCount) return true;
+        if (n.depth >= kDepth) continue;
+        for (u32 dir = 0; dir < 6; ++dir)
+            queue[tail++] = {static_cast<i8>(n.dx + world::kStepX[dir]), static_cast<i8>(n.dy + world::kStepY[dir]),
+                             static_cast<i8>(n.dz + world::kStepZ[dir]), static_cast<u8>(n.depth + 1)};
+    }
+    return count > 1;
+}
+
+// WetSpongeBlock.onPlace: where water does not stay (the nether), a wet sponge is dry at once.
+void Game::wet_sponge_placed(BlockPos pos) {
+    if (!world_.water_evaporates()) return;
+    set_block(pos, blk::kSponge);
+    level_event(kLevelEventWaterEvaporating, pos, 0);
+    play_sound(gen::sound::kBlockWetSpongeDries, cb::Sound::kSourceBlocks, pos.x + 0.5, pos.y + 0.5, pos.z + 0.5, 1.0f,
+               (1.0f + random_float() * 0.2f) * 0.7f);
 }
 
 // LiquidBlock.onPlace and neighborChanged: the fluid of the block asks for its tick.

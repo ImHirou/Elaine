@@ -91,9 +91,10 @@ class Game {
     static constexpr u32 kUpdateSkipContainer = 256;  // SKIP_BLOCK_ENTITY_SIDEEFFECTS: what a container held is not spilled
     static constexpr u32 kUpdateSkipOnPlace = 512;    // the new block is not told it was placed
     static constexpr u32 kUpdateAll = kUpdateNeighbors | kUpdateClients;
-    static constexpr i32 kUpdateLimit = 512;              // Block.UPDATE_LIMIT: how deep one change's shape updates may nest
-    static constexpr u32 kLevelEventDestroyBlock = 2001;  // LevelEvent.PARTICLES_AND_SOUND_DESTROY_BLOCK: `data` is the state
-    static constexpr u32 kLevelEventLavaFizz = 1501;      // LevelEvent.LAVA_FIZZ: a hiss and smoke where lava met something
+    static constexpr i32 kUpdateLimit = 512;                  // Block.UPDATE_LIMIT: how deep one change's shape updates may nest
+    static constexpr u32 kLevelEventDestroyBlock = 2001;      // LevelEvent.PARTICLES_AND_SOUND_DESTROY_BLOCK: `data` is the state
+    static constexpr u32 kLevelEventLavaFizz = 1501;          // LevelEvent.LAVA_FIZZ: a hiss and smoke where lava met something
+    static constexpr u32 kLevelEventWaterEvaporating = 2009;  // LevelEvent.PARTICLES_WATER_EVAPORATING: a cloud where water went
 
     struct Player {
         u32 reactor = 0, slot = 0, gen = 0;
@@ -503,6 +504,8 @@ class Game {
     void neighbor_changed(world::BlockState state, proto::BlockPos pos, u32 source_block);
     world::BlockState update_shape(world::BlockState state, proto::BlockPos pos, u32 direction, proto::BlockPos neighbour_pos,
                                    world::BlockState neighbour);
+    world::BlockState shape_beside(world::BlockState state, const world::BlockInfo& info, proto::BlockPos pos, u32 direction,
+                                   world::BlockState neighbour);
     world::BlockState update_from_neighbour_shapes(world::BlockState state, proto::BlockPos pos);
     void on_place(world::BlockState state, proto::BlockPos pos, world::BlockState old);
     bool can_survive(world::BlockState state, proto::BlockPos pos) const;
@@ -526,6 +529,11 @@ class Game {
     bool should_spread_liquid(proto::BlockPos pos, world::BlockState state);
     void liquid_changed(world::BlockState state, proto::BlockPos pos);
     void liquid_shape_changed(world::BlockState state, proto::BlockPos pos, world::BlockState neighbour);
+    bool place_liquid(proto::BlockPos pos, world::BlockState state, world::FluidState fluid);
+    u32 pickup_block(proto::BlockPos pos, world::BlockState state, bool creative_player);
+    void try_absorb_water(proto::BlockPos pos);
+    bool remove_water_around(proto::BlockPos start);
+    void wet_sponge_placed(proto::BlockPos pos);
     void run_random_ticks();
     void random_tick(world::BlockState state, proto::BlockPos pos);
     void tick_spreading(world::BlockState state, proto::BlockPos pos);

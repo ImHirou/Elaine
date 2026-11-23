@@ -35,7 +35,10 @@ hole filled in; a torch, an end rod, petals, a slab and a fence in its way; wate
 air. Then lava: a source that spreads a block every thirty ticks and three blocks far, and
 drains; water set beside a source and beside lava that flowed, lava over a pit of water, lava on
 soul soil beside blue ice - obsidian, cobblestone, stone and basalt, each with its hiss; a torch
-in its way. Last, TNT on five sides of a block of redstone.
+in its way. Then the water in blocks that hold it: a wet slab leaking to its sides, a wet top
+slab leaking downwards, stairs between two sources, a wet lantern whose floor goes. Then the
+sponge: set into spread water, set dry with water beside it, set beside a wet slab. Last, TNT on
+five sides of a block of redstone.
 
 `vanilla` starts the reference server under the rules in AGENTS.md (from .cache/vanilla-server/,
 the cached jar, Java 25; gamemode=creative, level-type=flat, spawn-protection=0,
@@ -101,7 +104,7 @@ from world_probe import PORT, SERVER_DIR, Vanilla  # noqa: E402
 from pace import Lockstep  # noqa: E402
 
 PROBE_WORLD = "block-probe"     # in .cache/vanilla-server/: this probe's, removed and made anew by `vanilla`
-SECTIONS = ("torches", "falling", "random", "stairs", "fences", "plants", "water", "lava", "tnt")
+SECTIONS = ("torches", "falling", "random", "stairs", "fences", "plants", "water", "lava", "waterlogged", "sponge", "tnt")
 RANDOM_TICK_SPEED = 4096        # every cell of a section, on average, once a tick
 
 WORLD = {"block_update", "section_blocks_update", "level_event", "add_transient_block", "sound", "explode"}
@@ -181,7 +184,7 @@ def record(port: int, out_path: str, name_a: str, name_b: str, random_ticks, con
         print(f"{name}: A {len(a.log) - mark_a}, B {len(b.log) - mark_b} packets")
 
     def walk(bot, x: float, z: float):
-        for _ in range(60):
+        for _ in range(400):    # (two blocks a move: as far as the last place is from the first, when the ones between are left out)
             dx, dz = x - bot.pos[0], z - bot.pos[2]
             if abs(dx) < 1e-9 and abs(dz) < 1e-9:
                 return
@@ -599,6 +602,46 @@ def record(port: int, out_path: str, name_a: str, name_b: str, random_ticks, con
                              setblock(at(-6, 1, 16), "minecraft:lava")))
         step("the console clears the place", lambda: fill(at(-8, 1, 4), at(8, 2, 20), "minecraft:air"), ticks=6)
         step("and then it is quiet", ticks=35)
+
+    # ---- the water in a block that holds it: ticked when the block's shape is asked, out through
+    # what the block's shape leaves open, and into a dry block where a source would form
+    section("waterlogged")
+    if console and wanted():
+        at = place(22)
+        floor(at)
+        step("the console sets a wet slab: its water leaves it to the sides", lambda: setblock(at(0, 1, 12), "minecraft:oak_slab[waterlogged=true]"),
+             ticks=22)
+        step("the console sets a stone where the slab is: what flowed dries up", lambda: setblock(at(0, 1, 12), "minecraft:stone"), ticks=70)
+        step("the console sets a wet top slab a block up: its water falls out of it", ticks=17,
+             action=lambda: setblock(at(-5, 2, 8), "minecraft:oak_slab[type=top,waterlogged=true]"))
+        step("...and a stone in its place", lambda: setblock(at(-5, 2, 8), "minecraft:stone"), ticks=60)
+        step("the console sets stairs, and a source of water to either side: the stairs are waterlogged", ticks=7,
+             action=lambda: (setblock(at(5, 1, 16), "minecraft:oak_stairs"), setblock(at(4, 1, 16), "minecraft:water"),
+                             setblock(at(6, 1, 16), "minecraft:water")))
+        step("the console clears the place", lambda: fill(at(-8, 1, 4), at(8, 2, 20), "minecraft:air"), ticks=8)
+        step("the console sets a wet lantern and takes the floor from under it: the lantern goes, its water falls into the hole", ticks=17,
+             action=lambda: (setblock(at(0, 1, 12), "minecraft:lantern[waterlogged=true]"), setblock(at(0, 0, 12), "minecraft:air")))
+        step("the console fills two wet fences side by side: each leaks where the other is not", ticks=12,
+             action=lambda: fill(at(-5, 1, 16), at(-4, 1, 16), "minecraft:oak_fence[waterlogged=true]"))
+        step("the console clears the place again, and fills the hole", ticks=8,
+             action=lambda: (fill(at(-8, 1, 4), at(8, 2, 20), "minecraft:air"), setblock(at(0, 0, 12), "minecraft:stone")))
+        step("and then it is quiet", ticks=10)
+
+    # ---- the sponge: what it takes when it is placed, and when water comes to it
+    section("sponge")
+    if console and wanted():
+        at = place(24)
+        floor(at)
+        step("the console sets water and lets it spread", lambda: setblock(at(0, 1, 12), "minecraft:water"), ticks=37)
+        step("the console sets a sponge two blocks from the source: sixty-four cells of water gone, and what is left drains",
+             lambda: setblock(at(2, 1, 12), "minecraft:sponge"), ticks=90)
+        step("the console sets a dry sponge and water beside it: the water is gone, the sponge wet", ticks=6,
+             action=lambda: (setblock(at(-6, 1, 6), "minecraft:sponge"), setblock(at(-5, 1, 6), "minecraft:water")))
+        step("the console sets a wet slab and a sponge beside it: the slab is dry", ticks=8,
+             action=lambda: (setblock(at(6, 1, 6), "minecraft:oak_slab[waterlogged=true]"), setblock(at(5, 1, 6), "minecraft:sponge")))
+        step("the console sets water on a wet sponge: it stays, and flows", lambda: setblock(at(-6, 2, 6), "minecraft:water"), ticks=12)
+        step("the console clears the place", lambda: fill(at(-8, 1, 4), at(8, 2, 20), "minecraft:air"), ticks=8)
+        step("and then it is quiet", ticks=10)
 
     # ---- TNT, last, for what it leaves: a signal reaches the six blocks around it in an order
     section("tnt")
