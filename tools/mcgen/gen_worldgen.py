@@ -14,6 +14,8 @@ difference stops the run: the port relies on how the two fit together.
              select and the roots - the functions a generator asks for by name (worldgen/density.cpp).
   climate    the tree the overworld's biomes are searched in by climate, as vanilla built it
              (worldgen/climate.cpp).
+  settings   the overworld's noise settings: its height, its sea, its stone and its water.
+  heightmaps which of vanilla's six heightmaps a block state counts for (worldgen_heightmaps.bin).
 """
 from __future__ import annotations
 
@@ -22,7 +24,7 @@ import json
 import re
 import struct
 
-from mcgen import die
+from mcgen import die, vdir
 
 import worldgen
 
@@ -427,6 +429,67 @@ struct ClimateNode {
     return "".join(out)
 
 
+class Blocks:
+    """Block states by how vanilla's data names them (reports/blocks.json)."""
+
+    def __init__(self, version: str):
+        path = vdir(version) / "reports" / "blocks.json"
+        if not path.exists():
+            die("gen_worldgen: reports/blocks.json is missing - run: mcgen.py reports")
+        self.blocks = json.loads(path.read_text())
+
+    def state(self, value) -> int:
+        """BlockState.CODEC: a name (the block's default state), or {id, properties}."""
+        name, properties = (value, {}) if isinstance(value, str) else (value.get("id") or value.get("Name"), value.get("properties") or value.get("Properties") or {})
+        block = self.blocks.get(name)
+        if block is None:
+            die(f"gen_worldgen: no block {name!r}")
+        default = next(s for s in block["states"] if s.get("default"))
+        want = {**default.get("properties", {}), **properties}
+        for s in block["states"]:
+            if s.get("properties", {}) == want:
+                return s["id"]
+        die(f"gen_worldgen: {name} has no state {properties}")
+
+
+def emit_settings(settings: dict, blocks: Blocks) -> str:
+    """noise_settings/overworld.json: what the whole generator goes by."""
+    noise = settings["noise"]
+    if set(noise) != {"min_y", "height"}:
+        die(f"gen_worldgen: noise settings of {sorted(noise)}: the generator knows min_y and height")
+    if "aquifers" not in settings:
+        die("gen_worldgen: the overworld has no aquifers: src/worldgen has only the noise-based kind")
+    return f"""
+// ---------------------------------------------------------------------------------------------
+// noise_settings/overworld.json
+inline constexpr i32 kMinY = {noise['min_y']}, kHeight = {noise['height']};
+inline constexpr i32 kSeaLevel = {settings['sea_level']};
+inline constexpr u16 kDefaultBlock = {blocks.state(settings['default_block'])};  // {settings['default_block']}
+inline constexpr u16 kDefaultFluid = {blocks.state(settings['default_fluid'])};  // {settings['default_fluid']}
+inline constexpr u16 kLava = {blocks.state('minecraft:lava')};  // (NoiseBasedChunkGenerator.createFluidPicker: below y -54)
+
+// Which of vanilla's heightmaps a block state counts for: a bit a heightmap, by Heightmap.Types' ordinal.
+inline constexpr u8 kWorldSurfaceWg = 1, kWorldSurface = 2, kOceanFloorWg = 4, kOceanFloor = 8, kMotionBlocking = 16,
+                    kMotionBlockingNoLeaves = 32;
+inline constexpr unsigned char kHeightmaps[] = {{
+#embed "worldgen_heightmaps.bin"
+}};
+"""
+
+
+def heightmap_bits(version: str) -> bytes:
+    """A byte a block state: which of vanilla's heightmaps it counts for (Heightmap.Types, by ordinal)."""
+    import gamedata
+    states = gamedata.load(version, "states")
+    want = ["WORLD_SURFACE_WG", "WORLD_SURFACE", "OCEAN_FLOOR_WG", "OCEAN_FLOOR", "MOTION_BLOCKING", "MOTION_BLOCKING_NO_LEAVES"]
+    if states["legend"].get("heightmap_opaque") != want:
+        die("gen_worldgen: gamedata/states.json: heightmap_opaque is not the six heightmaps in the order of Heightmap.Types")
+    column = states["columns"]["heightmap_opaque"]
+    if len(column) != states["state_count"] or max(column) > 63:
+        die("gen_worldgen: gamedata/states.json: heightmap_opaque is not six bits a state")
+    return bytes(column)
+
+
 def emit(hdr: str, version: str, vanilla) -> dict:
     """The generated files, by name - and "_stats"."""
     settings = json.loads(vanilla.zip.read("data/minecraft/worldgen/noise_settings/overworld.json"))
@@ -504,8 +567,10 @@ inline constexpr BlendedLayer kBlendedLayers[{len(blended)}] = {{
         out.append(f"    {{{cdouble(frequency)}, {cfloat(amplitude)}, {cdouble(fudge)}}},\n")
     out.append("};\n")
     out.append(emit_program(tables))
+    out.append(emit_settings(settings, Blocks(version)))
     out.append("\n}  // namespace proto::gen::worldgen\n")
     climate, biomes = climate_table(version, vanilla)
     return {"worldgen.hpp": "".join(out), "worldgen_climate.hpp": emit_climate(hdr, climate),
+            "worldgen_heightmaps.bin": heightmap_bits(version),
             "_stats": {"noises": len(noises), "noise_layers": len(layers) + len(blended), "density_nodes": len(tables.nodes),
                        "climate_nodes": len(climate), "climate_biomes": len(biomes)}}

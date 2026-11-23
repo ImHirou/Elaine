@@ -31,9 +31,11 @@ namespace server {
 struct WorldInfo {
     std::string dir;        // empty: nothing is kept
     std::string chunk_dir;  // the overworld's regions; empty with `dir`
-    // The generator. Flat: `layers` from the bottom of the world up, in `biome`. Not flat: nothing
-    // (world::EmptyGenerator) - the stand-in for a vanilla terrain generator this server has not got.
+    // The generator. Flat: `layers` from the bottom of the world up, in `biome`. Noise: the
+    // overworld's terrain, from the seed (worldgen::OverworldGenerator). Neither: nothing
+    // (world::EmptyGenerator) - what lies beyond the chunks of an imported vanilla world.
     bool flat = true;
+    bool noise = false;
     std::vector<world::FlatGenerator::Layer> layers = world::FlatGenerator::default_layers();
     u16 biome = 0;
     i32 sea_level = -63;  // ChunkGenerator.getSeaLevel(): -63 for a flat world, 63 for the overworld's noise

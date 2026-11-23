@@ -9,12 +9,19 @@
 
 namespace world {
 
+struct LoadedChunk;
+
 class ChunkGenerator {
   public:
     // Fill c.sections[0 .. c.sections_count) and c.biome[]. Called once per chunk; one virtual call
     // per chunk is noise next to the work behind it. With workers it is called on their threads,
     // for several chunks at once: a generator keeps nothing that two calls would share.
-    virtual void generate(Chunk& c, SectionAllocator& a) = 0;
+    virtual void generate(Chunk&, SectionAllocator&) {}
+    // For a generator that has more to say of a chunk than its blocks and one biome a section -
+    // a biome a cell, which lives in the chunk's arena: the whole of what a worker makes. True:
+    // it made the chunk, and the above is not asked. (Every virtual here is inline: the tests
+    // derive from this class with RTTI on, the server is built without.)
+    virtual bool generate_whole(LoadedChunk&) { return false; }
     virtual i32 sea_level() const = 0;     // ChunkGenerator.getSeaLevel(): sent in the login packet
     virtual i32 spawn_height() const = 0;  // ChunkGenerator.getSpawnHeight(): first free y at spawn
     virtual bool is_flat() const = 0;      // "isFlat" in the login packet (changes the client's horizon)

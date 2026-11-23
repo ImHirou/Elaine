@@ -14,6 +14,7 @@
 #include "server/world_info.hpp"
 #include "world/block.hpp"
 #include "worldgen/random.hpp"
+#include "worldgen/terrain.hpp"
 
 namespace server {
 
@@ -25,6 +26,27 @@ constexpr i64 kFormat = 1;  // of world.json and of the chunk bytes (world/chunk
 i64 random_seed() {
     std::random_device device;
     return static_cast<i64>(static_cast<u64>(device()) << 32 | device());
+}
+
+// What generates a world that is made new: `level-type`, a world preset by name
+// (DedicatedServerProperties.WorldDimensionData.create).
+bool new_generator(const Settings& s, WorldInfo& out, std::string& err) {
+    const std::string type = s.level_type.find(':') == std::string::npos ? "minecraft:" + s.level_type : s.level_type;
+    if (type == "minecraft:flat") return true;  // (as WorldInfo begins)
+    for (const char* missing : {"minecraft:large_biomes", "minecraft:amplified", "minecraft:single_biome_surface",
+                                "minecraft:debug_all_block_states"}) {
+        if (type != missing) continue;
+        err = "level-type " + s.level_type +
+              ": this server has no generator for it yet (it has minecraft:normal and minecraft:flat)";
+        return false;
+    }
+    // Vanilla takes a name it does not know for the default, and says so.
+    if (type != "minecraft:normal")
+        LOG_WARN("Failed to parse level-type %s, defaulting to minecraft:normal", s.level_type.c_str());
+    out.flat = false;
+    out.noise = true;
+    out.sea_level = worldgen::settings::kSeaLevel;
+    return true;
 }
 
 // `seeded`: whether the file names the world's seed (one written before worlds had seeds does not).
@@ -55,6 +77,7 @@ bool read_meta(const std::string& path, WorldInfo& out, bool& seeded, std::strin
         yyjson_val* gen = yyjson_obj_get(root, "generator");
         const char* type = yyjson_get_str(yyjson_obj_get(gen, "type"));
         out.flat = !type || std::string_view(type) == "flat";
+        out.noise = type && std::string_view(type) == "noise";
         out.sea_level = static_cast<i32>(yyjson_get_sint(yyjson_obj_get(gen, "sea_level")));
         if (const char* biome = yyjson_get_str(yyjson_obj_get(gen, "biome"))) {
             if (const u32 id = world::find_biome(biome); id != world::kNoId) out.biome = static_cast<u16>(id);
@@ -128,7 +151,7 @@ std::string world_json(const WorldInfo& info, const WorldTime& now) {
     yyjson_mut_obj_add_strcpy(doc, root, "version", std::string(proto::gen::kVersionName).c_str());
     yyjson_mut_obj_add_sint(doc, root, "seed", info.seed);
     yyjson_mut_val* gen = yyjson_mut_obj_add_obj(doc, root, "generator");
-    yyjson_mut_obj_add_str(doc, gen, "type", info.flat ? "flat" : "void");
+    yyjson_mut_obj_add_str(doc, gen, "type", info.flat ? "flat" : info.noise ? "noise" : "void");
     yyjson_mut_obj_add_strcpy(doc, gen, "biome", std::string(world::biome_name(info.biome)).c_str());
     yyjson_mut_obj_add_int(doc, gen, "sea_level", info.sea_level);
     if (info.flat) {
@@ -171,6 +194,7 @@ bool open_world(const Settings& s, base::Workers& workers, WorldInfo& out, std::
     out.biome = static_cast<u16>(proto::reg::worldgen_biome::kPlains);
     if (s.level_name.empty()) {
         if (!worldgen::parse_seed(s.level_seed, out.seed)) out.seed = random_seed();
+        if (!new_generator(s, out, err)) return false;
         LOG_INFO("level-name is empty: the world is not kept");
         return true;
     }
@@ -198,7 +222,10 @@ bool open_world(const Settings& s, base::Workers& workers, WorldInfo& out, std::
     if (std::filesystem::exists(meta, ec)) {
         bool seeded = false;
         if (!read_meta(meta, out, seeded, err)) return false;
-        LOG_INFO("world %s: %s generator%s", out.dir.c_str(), out.flat ? "flat" : "void",
+        LOG_INFO("world %s: %s generator%s", out.dir.c_str(),
+                 out.flat    ? "flat"
+                 : out.noise ? "noise"
+                             : "void",
                  out.imported ? ", imported from vanilla" : "");
         if (seeded) return true;
         out.seed = random_seed();  // a world from before worlds had seeds: it has this one from now on
@@ -209,7 +236,8 @@ bool open_world(const Settings& s, base::Workers& workers, WorldInfo& out, std::
     if (std::filesystem::exists(out.dir + "/level.dat", ec)) {
         if (!import_world(out.dir, workers, out, err)) return false;
     } else {
-        LOG_INFO("world %s: a new flat world", out.dir.c_str());
+        if (!new_generator(s, out, err)) return false;
+        LOG_INFO("world %s: a new %s world", out.dir.c_str(), out.flat ? "flat" : "noise");
     }
     return write_meta(meta, out, err);
 }

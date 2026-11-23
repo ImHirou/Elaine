@@ -10,15 +10,20 @@
 
 #include <bit>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <variant>
 #include <vector>
 
 #include "world/block.hpp"
+#include "world/chunk_io.hpp"
+#include "world/region.hpp"
 #include "worldgen/climate.hpp"
 #include "worldgen/density.hpp"
+#include "worldgen/generator.hpp"
 #include "worldgen/noise.hpp"
 #include "worldgen/random.hpp"
+#include "worldgen/terrain.hpp"
 
 using namespace worldgen;
 namespace wg = proto::gen::worldgen;
@@ -36,6 +41,9 @@ constexpr unsigned char kDensity[] = {
 };
 constexpr unsigned char kClimate[] = {
 #embed "data/worldgen_climate.bin"
+};
+constexpr unsigned char kTerrain[] = {
+#embed "data/worldgen_terrain.bin"
 };
 
 // A script being read.
@@ -459,4 +467,140 @@ TEST(Worldgen, BiomesOfAChunkAreVanillas) {
     }
     EXPECT_EQ(in.p, in.end) << "the script was not read to its end";
     EXPECT_EQ(chunks, 40u);
+}
+
+// The hash the extractor takes of a chunk's numbers: FNV-1a over each as four bytes.
+u64 fnv(u64 h, u32 v) {
+    for (u32 i = 0; i < 4; ++i) h = (h ^ ((v >> (8 * i)) & 0xFF)) * 0x100000001b3ull;
+    return h;
+}
+constexpr u64 kFnv = 0xcbf29ce484222325ull;
+
+// A stage of the script against the chunk as it stands. The script has a few chunks whole - there
+// a difference is told block by block - and of the rest a hash of each part.
+void expect_stage(In& in, const Terrain& t, bool whole, const std::string& what) {
+    u64 blocks = kFnv;
+    for (const u16 state : t.blocks) blocks = fnv(blocks, state);
+    const u64 want_blocks = in.num<u64>();
+    u64 heights = kFnv;
+    for (const i32* map : {t.world_surface_wg, t.ocean_floor_wg})
+        for (u32 i = 0; i < 256; ++i) {
+            heights = fnv(heights, static_cast<u32>(map[i]));
+            if (whole) {
+                const i32 want = in.i32_();
+                EXPECT_EQ(map[i], want) << what << ": " << (map == t.world_surface_wg ? "WORLD_SURFACE_WG" : "OCEAN_FLOOR_WG")
+                                        << " at " << (i & 15) << ", " << (i >> 4);
+            }
+        }
+    EXPECT_EQ(heights, in.num<u64>()) << what << ": the heightmaps";
+    // The marks, section by section and in each in the order they were made.
+    std::vector<u32> made;
+    for (u32 s = 0; s < Terrain::kSections; ++s)
+        for (const u16 mark : t.post_process[s]) made.push_back(s << 12 | mark);
+    const u32 count = in.num<u32>();
+    EXPECT_EQ(made.size(), count) << what << ": how many blocks are marked to be let flow";
+    u64 marks = kFnv;
+    for (const u32 mark : made) marks = fnv(marks, mark);
+    if (whole)
+        for (u32 i = 0; i < count; ++i) {
+            const u32 want = in.num<u32>();
+            if (i < made.size()) EXPECT_EQ(made[i], want) << what << ": mark " << i << " (section << 12 | x | y << 4 | z << 8)";
+        }
+    EXPECT_EQ(marks, in.num<u64>()) << what << ": what is marked to be let flow";
+    if (whole) {
+        const u32 packed = in.num<u32>();
+        std::vector<u8> raw;
+        ASSERT_TRUE(world::inflate_zlib({in.p, packed}, raw));
+        in.p += packed;
+        ASSERT_EQ(raw.size(), sizeof t.blocks);
+        u32 differ = 0;
+        for (u32 i = 0; i < std::size(t.blocks); ++i) {
+            const u16 want = load_le<u16>(raw.data() + 2 * i);
+            if (t.blocks[i] == want) continue;
+            if (++differ <= 8)
+                ADD_FAILURE() << what << ": block " << (i & 15) << ", " << static_cast<i32>(i >> 8) + settings::kMinY << ", "
+                              << (i >> 4 & 15) << " is " << world::block_name(world::block_of(t.blocks[i])) << " (state "
+                              << t.blocks[i] << "), vanilla's is " << world::block_name(world::block_of(want)) << " (state "
+                              << want << ")";
+        }
+        EXPECT_EQ(differ, 0u) << what << ": blocks that differ";
+    }
+    EXPECT_EQ(blocks, want_blocks) << what << ": the blocks";
+}
+
+// Whole chunks, step by step as vanilla's `terrain` status makes them: after the density and the
+// aquifers have said what every block is (doFill).
+TEST(Worldgen, TerrainOfAChunkIsVanillas) {
+    In in(kTerrain);
+    in.magic("WGTERR01");
+    const Overworld world(in.i64_());
+    const u32 chunks = in.num<u32>(), stages = in.num<u32>();
+    ASSERT_EQ(stages, 1u);
+    Sampler sampler(world.noises());
+    const auto terrain = std::make_unique<Terrain>();
+    u32 whole = 0;
+    for (u32 c = 0; c < chunks; ++c) {
+        const i32 cx = in.i32_(), cz = in.i32_();
+        const bool all = in.u8_() != 0;
+        whole += all;
+        const std::string where = "chunk " + std::to_string(cx) + ", " + std::to_string(cz);
+        terrain->begin(cx, cz);
+        NoiseChunk chunk(world, sampler, cx, cz);
+        fill_from_noise(chunk, *terrain);
+        expect_stage(in, *terrain, all, where + " after doFill");
+        if (::testing::Test::HasFailure()) return;  // (one chunk's differences say enough)
+    }
+    EXPECT_EQ(in.p, in.end) << "the script was not read to its end";
+    EXPECT_EQ(chunks, 48u);
+    EXPECT_EQ(whole, 6u);
+}
+
+// The generator a world is given: a worker's chunk - sections, a biome a cell - is the terrain and
+// the biomes above, as the world keeps them.
+TEST(Worldgen, GeneratorHandsAWorkerItsChunk) {
+    In in(kTerrain);
+    in.magic("WGTERR01");
+    const i64 seed = in.i64_();
+    in.num<u32>();
+    in.num<u32>();
+    const i32 cx = in.i32_(), cz = in.i32_();
+    in.u8_();
+    const u64 want_blocks = in.num<u64>();
+
+    OverworldGenerator generator(seed);
+    EXPECT_FALSE(generator.is_flat());
+    EXPECT_EQ(generator.sea_level(), 63);
+    const world::Layout layout{settings::kMinY, settings::kMinY >> 4, Terrain::kSections, true};
+    world::LoadedChunk made;
+    std::string err;
+    ASSERT_TRUE(world::load_chunk({}, cx, cz, layout, generator, made, err)) << err;
+    EXPECT_TRUE(made.fresh);
+    // Its blocks are vanilla's (the hash the script has of them).
+    u64 blocks = kFnv;
+    for (u32 si = 0; si < Terrain::kSections; ++si)
+        for (u32 i = 0; i < 4096; ++i) blocks = fnv(blocks, made.chunk.sections[si].get(i));
+    EXPECT_EQ(blocks, want_blocks);
+    // ...and its biomes those of the cells, a section's palette in the order vanilla comes to them.
+    Sampler sampler(generator.world().noises());
+    std::vector<u16> biome(Terrain::kSections * 64);
+    fill_biomes(sampler, cx, cz, settings::kMinY, Terrain::kSections, biome.data());
+    for (u32 si = 0; si < Terrain::kSections; ++si) {
+        const world::BiomeSection* b = made.chunk.biomes && made.chunk.biomes[si].count ? &made.chunk.biomes[si] : nullptr;
+        u16 first[64];
+        u32 kinds = 0;
+        for (u32 x = 0; x < 4; ++x)
+            for (u32 y = 0; y < 4; ++y)
+                for (u32 z = 0; z < 4; ++z) {
+                    const u16 want = biome[si * 64 + (y << 4 | z << 2 | x)];
+                    ASSERT_EQ(b ? b->palette[b->index[y << 4 | z << 2 | x]] : made.chunk.biome[si], want) << "section " << si;
+                    if (std::find(first, first + kinds, want) == first + kinds) first[kinds++] = want;
+                }
+        if (kinds == 1) {
+            EXPECT_EQ(b, nullptr) << "section " << si << " has one biome and a palette";
+        } else {
+            ASSERT_NE(b, nullptr) << "section " << si;
+            ASSERT_EQ(b->count, kinds);
+            for (u32 k = 0; k < kinds; ++k) EXPECT_EQ(b->palette[k], first[k]) << "section " << si << ", palette entry " << k;
+        }
+    }
 }

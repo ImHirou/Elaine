@@ -2050,7 +2050,8 @@ What does differ, and is a gap rather than a difference of the import:
 - **Players of an imported world.** `players/` of a vanilla world is left alone: whoever played
   there starts anew here. Of our own players, what is not kept is what does not exist yet -
   health, food, experience, effects, a game mode, an ender chest.
-- **A terrain generator.** Flat ground, or nothing.
+- **A whole terrain generator.** Flat ground, the overworld's bare rock ("World generation"), or
+  nothing.
 - **Export** back to Anvil; a converter for worlds saved by another data version.
 - **lz4** region files (`region-file-compression=lz4`): the import says so and stops.
 - **Other dimensions**: one dimension is all there is; the nether and the end of an imported world
@@ -2058,6 +2059,139 @@ What does differ, and is a gap rather than a difference of the import:
 - **`save-all`, `save-off`**: the server saves on its own schedule and at shutdown.
 - A chunk is lit on the tick thread, as before. For the flat generator that is nothing; a
   generator of real terrain will want the first lighting off the tick thread too.
+
+## World generation (src/worldgen/, tools/mcgen/gen_worldgen.py, tools/mcgen/extract/Worldgen*.java)
+
+`level-type=minecraft:normal` makes a world out of its seed the way vanilla's
+`NoiseBasedChunkGenerator` does. The aim is not terrain that looks like vanilla's: it is, for the
+same seed, vanilla's terrain - the same block at every place - made by code that is laid out for
+speed. Everything here is a port, held to what the jar's own classes compute; nothing is "near
+enough", because a float that is one unit in the last place off decides, somewhere, whether a
+block is stone.
+
+It is being built in the order vanilla makes a chunk: biomes, then the `terrain` status - the
+shape of the ground and what fills its hollows, then the surface, then the caves - then features,
+then structures. What is there is said at the end of this section.
+
+### 26.3 is not the generator of 1.18
+
+The terrain of 26.x was rewritten, and what is remembered of 1.18 - 1.21 is wrong for it:
+
+- Density is a `float`, and a function is not evaluated block by block: it is *compiled* into a
+  tree of samplers (`DensityFunction.compileSampler` -> `DensitySampler`) that fills a whole box of
+  blocks at once (`sampleVolume`).
+- Compiling changes the arithmetic. References are inlined, a `cache` becomes one cell shared by
+  everything that names the same input, a function that does not depend on y is sampled on one
+  layer (`DfRewriteRule.SLICE_UNIFORM_AXES`), a division by a constant is a multiplication by its
+  reciprocal, a `min` whose two sides cannot overlap is one of the sides.
+- Surface rules are "material rules" (`MaterialSystem`), ore veins are one kind of them, aquifers
+  have a block of their own in the noise settings, and noise, surface and carvers are one chunk
+  status, `terrain`.
+
+So the program that is run here is not derived from the JSON of the data pack. The extractor
+(`mcgen.py worldgen`, `WorldgenRef.java`) has vanilla compile the overworld's functions and dumps
+the sampler objects field by field: 359 of them for the 30 functions something asks for (the
+noise router, the aquifers', the spawn target's, the ore veins'). It compiles for two seeds and
+stops if anything differs but what a seed draws - a noise's permutation and offsets. From that
+dump `gen_worldgen.py` makes a flat table (`kNodes`: a node per sampler, a child before its
+parents) and stops at a sampler class it has no word for. The JSON is still read - a noise's
+octaves, the settings - and compared with the dump where both say the same thing.
+
+### Two ways to ask, and they do not agree
+
+A sampler answers one block (`sampleValue`) or a box (`sampleVolume`), and these are different
+code in vanilla with, in places, different results:
+
+- An interpolated function is its input at the corners of cells of 4 x 8 x 4 blocks. Over a
+  volume the blocks between are filled along z, along x, and then up each column by *adding a
+  step* (`value += valueStep`); at a point it is a three-way lerp with divisions. The last bits
+  differ.
+- A noise at a point is sampled at `(block * scale) * frequency`; over a volume the scale and the
+  frequency are multiplied first. A corner's dot product is added up in another order.
+- A product at a point is nothing when its left side is, and its right side is not asked; over a
+  volume both sides are computed everywhere.
+
+And a cache decides which of the two answers. `SamplerContext.CacheCell` holds the last volume a
+cached function was sampled over and the last single value; a point is answered from the volume
+when it lies on the volume's grid, else computed - by the value path. So what a caller is told
+depends on what the context was asked before, and a chunk has to ask its questions in vanilla's
+order: the aquifer's surface levels, then the chunk's density, then what the aquifer asks block
+by block as the chunk is filled, column by column from the top.
+
+`worldgen::Sampler` (density.cpp) is therefore a transliteration: every sampler class as vanilla
+runs it, both ways, lazy where vanilla is lazy, with the cells of a context. It is a
+volume-at-a-time evaluator because vanilla's is - loops over buffers of floats, a noise added to
+a whole box layer by layer - and it takes its buffers from a stack of blocks its thread keeps
+(`Scratch`), as vanilla takes them from a pool. A faster evaluator - one schedule for a chunk,
+the untaken branches of a `range_choice` skipped by a mask, the noise kernels in SIMD lanes - is
+work for when it can be measured, and will be held to this one bit for bit.
+
+### What a world has one of, and what a chunk has
+
+- `worldgen::Noises`: every noise of the registry and the three stacks of `old_blended_noise`,
+  made from the seed the way `RandomState` makes them - a source by the noise's name, two
+  factories forked from it, a `PerlinNoise` an octave from each. What does not depend on the seed
+  (which layers, their frequencies and amplitudes, the hashes of the names) is generated.
+- `worldgen::Overworld`: the noises, and the random sources the parts of a chunk draw from
+  (`RandomState.getOrCreateRandomFactory`).
+- `worldgen::NoiseChunk`: one chunk's context and its aquifer.
+- `worldgen::Terrain`: the chunk while it is made - blocks, the two heightmaps generation goes
+  by, the marks of what is to be let flow. A `ProtoChunk`.
+
+A chunk's terrain reads nothing of another chunk: it is a function of the seed and the chunk's
+position, so it is one task of one worker (`OverworldGenerator::generate_whole`), like a chunk
+read from disk. What a thread works with - two contexts, the terrain - is the thread's own and is
+kept between chunks.
+
+### Biomes (`climate.*`)
+
+A place has a climate - six of the density functions - and the overworld's biomes are 7594 boxes
+in that space; the biome is the nearest box, found in an R-tree. The tree is not data: the boxes
+come from `OverworldBiomeBuilder` and the tree is built when the game loads, so the extractor
+dumps it and the generator lays it out, a node's children in the order the search visits them.
+
+Where two boxes are equally near - they share their faces, so a climate exactly on one is in
+both - vanilla keeps whichever it found *last time*: the search begins with the leaf the search
+before ended at (a thread-local), and only a strictly nearer leaf replaces it. A chunk's cells
+are therefore asked in vanilla's order (sections from the bottom, then x, y, z). Before a chunk's
+first cell vanilla has whatever its thread asked last; here there is nothing, which is what a
+thread that has made no chunk has.
+
+### Aquifers (`aquifer.*`)
+
+The hollows of the terrain are filled by cells of 16 x 12 x 16 blocks, each with a point drawn
+from its position and a fluid level of its own - the sea's near the surface, a local one or none
+below, lava in places. An open block takes the fluid of the nearest point; between points whose
+levels differ there may be a wall of the terrain's block instead. Where water stands beside
+something it would run into, the block is marked (`ProtoChunk.markPosForPostProcessing`), to be
+let flow once when the chunk first ticks.
+
+### Held to the jar
+
+`mcgen.py worldgen golden --emit` runs vanilla's own classes - no world, no server - and writes
+scripts into `tests/unit/data/worldgen_*.bin`: what was asked, and what vanilla answered, floats
+as their bits. `tests/unit/worldgen_test.cpp` replays them:
+
+| File | What it holds |
+|---|---|
+| `random` | sequences of calls on every kind of random source; the seeds positions and names hash to |
+| `noise` | each noise's layers as the seed made them; its value at points and over volumes |
+| `density` | every function at points and over volumes, each alone, then in sequences on one context with caches |
+| `climate` | searches one after the other (some decided by the one before); the biomes of whole chunks |
+| `terrain` | whole chunks after each step of the `terrain` status: blocks, heightmaps, marks |
+
+For the last, the extractor builds a `ProtoChunk` and calls `NoiseBasedChunkGenerator`'s own
+(private) steps on it. A few chunks are in the file whole, so that a difference is told block by
+block; of the rest there is a hash.
+
+### What is there, and what is not
+
+There: biomes; the shape of the ground with its aquifers (`doFill`) - stone, water, lava and air.
+
+Not there yet: the surface and the ore veins (`MaterialSystem`), the carvers' caves, letting the
+marked water flow, the world's spawn point, features, structures. A world of terrain is bare
+rock under water. Beyond those: only the overworld, only the preset `normal`; an imported vanilla
+world does not go on with this generator yet.
 
 ## NBT and text components (src/nbt/, src/text/)
 
@@ -2663,7 +2797,8 @@ LuaJIT, one state, tick thread only. The intended shape:
 Roughly in dependency order:
 
 1. **World**: chunks are stored, lit, cached as frames, loaded, saved and unloaded (see "The world's
-   life cycle"). Next: a terrain generator - and with it the first lighting of a chunk on a worker -
+   life cycle"), and the overworld's terrain is being ported ("World generation"). Next: the rest of
+   it - and with it the first lighting of a chunk on a worker -
    the players of an imported world, the update tags of the block entities that are kept as tags,
    export to Anvil.
 2. **Entities**: the table, the tracker and physics exist (see "Entities", "Physics"). Next:

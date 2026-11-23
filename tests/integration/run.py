@@ -358,6 +358,34 @@ def join_offline_uncompressed(srv: Server):
     assert [t["name"] for t in j["tab"]] == ["Steve"]
 
 
+@test(alone=True, level_type="minecraft:normal", level_seed=20261123)
+def a_world_of_terrain(srv: Server):
+    """level-type=minecraft:normal: the overworld's terrain, made from the seed - not flat, the sea at
+    63, a biome a cell. (What it is block for block is the unit tests' to say, against the jar; this
+    is that a client is sent it, whole. By itself: making terrain takes every core the workers have,
+    and the scenarios beside it are counting ticks.)"""
+    c = srv.client()
+    j = join(c, "Steve")
+    login = j["login"]
+    assert login["is_flat"] is False and login["sea_level"] == 63, login
+    assert login["seed"] == hashed_seed(20261123), login["seed"]
+    cx, cz = j["center"]
+    assert set(j["chunks"]) == mc.view_chunks(cx, cz, 2)
+    stone, water, lava = mc.BLOCK["kStone"], mc.BLOCK["kWater"], mc.BLOCK["kLava"]
+    biomes = mc.load_registry("worldgen_biome")
+    seen, kinds = set(), set()
+    for ch in j["chunks"].values():
+        # Deep down there is rock, and at the top of the world nothing.
+        column = [mc.chunk_block(ch, 8, y, 8) for y in range(-64, 320)]
+        assert stone in column[:64] and set(column[-40:]) == {0}, column
+        kinds |= set(column)
+        for section in ch["sections"]:
+            for cell in range(64):
+                seen.add(biomes[mc.paletted_get(section["biomes"], cell)])
+    assert kinds <= {0, stone, water, lava}, kinds      # (no surface yet, and no caves of the carvers')
+    assert len(seen) > 1 and "minecraft:the_void" not in seen, seen
+
+
 @test()
 def join_offline_compressed(srv: Server):
     c = srv.client()

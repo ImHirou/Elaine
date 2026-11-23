@@ -39,6 +39,7 @@
 #include "world/dimension.hpp"
 #include "world/fluid.hpp"
 #include "world/generator.hpp"
+#include "worldgen/generator.hpp"
 
 namespace server {
 
@@ -678,6 +679,7 @@ class Game {
     const WorldInfo& info_;
     world::FlatGenerator flat_generator_;
     world::EmptyGenerator empty_generator_;
+    std::unique_ptr<worldgen::OverworldGenerator> noise_generator_;  // the overworld's terrain, of a world that has it
     world::ChunkGenerator& generator_;
     world::Dimension world_;
     double spawn_[3] = {8.5, 0, 8.5};  // where a player joins

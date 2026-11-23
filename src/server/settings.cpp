@@ -88,7 +88,12 @@ bool set_key(Settings& s, std::string_view k, std::string_view v, std::string& e
         s.level_name = std::string(v);
     else if (k == "level-seed")
         s.level_seed = std::string(v);
-    else if (k == "sync-chunk-writes")
+    else if (k == "level-type") {
+        // DedicatedServerProperties: lower case; and a server.properties has its colons escaped.
+        s.level_type.clear();
+        for (const char c : v)
+            if (c != '\\') s.level_type.push_back(static_cast<char>(c >= 'A' && c <= 'Z' ? c + 32 : c));
+    } else if (k == "sync-chunk-writes")
         ok = parse_bool(v, s.sync_chunk_writes);
     else if (k == "worker-threads")
         ok = parse_num(v, s.worker_threads, 0, 64);

@@ -39,6 +39,10 @@ struct Settings {
     // itself, any other text its String.hashCode(), nothing a random one). A world that is
     // there keeps the seed it was made with.
     std::string level_seed;
+    // level-type: what generates a world that is made new - a world preset, `minecraft:flat` or
+    // `minecraft:normal` (the overworld's terrain: src/worldgen). Vanilla's default is normal;
+    // this server's is flat until its terrain has what grows and stands on it.
+    std::string level_type = "minecraft:flat";
     bool sync_chunk_writes = true;  // sync-chunk-writes: fdatasync around every write of a region (world/region.hpp)
     u32 worker_threads = 0;         // worker-threads: threads that read, write and generate chunks; 0 = by the machine
     u32 chunk_unload_seconds = 10;  // chunk-unload-seconds: how long a chunk stays loaded once nobody is near

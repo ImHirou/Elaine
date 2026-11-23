@@ -12,6 +12,9 @@
 //                sequences on one context with caches, where an answer depends on the questions before
 //   climate.bin  which biome a climate is: searches one after the other - an answer depends on
 //                the one before where two biomes are equally near - and the biomes of whole chunks
+//   terrain.bin  whole chunks as vanilla's `terrain` status makes them, after each of its steps:
+//                the blocks (a few chunks whole, the rest as a hash), the heightmaps generation
+//                goes by, and what is marked to be let flow
 //   noise.bin    every noise of the overworld for one seed: what the seed made of each layer
 //                (permutation, offsets), its value at points, and what it adds to a buffer over
 //                a volume - the two ways vanilla samples a noise, which are not the same bits
@@ -34,7 +37,23 @@ import net.minecraft.world.level.biome.Climate;
 import net.minecraft.world.level.biome.MultiNoiseBiomeSource;
 import net.minecraft.world.level.biome.MultiNoiseBiomeSourceParameterList;
 import net.minecraft.world.level.biome.MultiNoiseBiomeSourceParameterLists;
+import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.LevelHeightAccessor;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.chunk.ChunkAccess;
+import net.minecraft.world.level.chunk.LevelChunkSection;
+import net.minecraft.world.level.chunk.PalettedContainerFactory;
+import net.minecraft.world.level.chunk.ProtoChunk;
+import net.minecraft.world.level.chunk.UpgradeData;
+import net.minecraft.world.level.levelgen.Aquifer;
+import net.minecraft.world.level.levelgen.Beardifier;
+import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.levelgen.LegacyRandomSource;
+import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
+import net.minecraft.world.level.levelgen.NoiseChunk;
+import net.minecraft.world.level.levelgen.NoiseGeneratorSettings;
+import net.minecraft.world.level.levelgen.NoiseSettings;
+import net.minecraft.world.level.levelgen.blending.Blender;
 import net.minecraft.world.level.levelgen.PositionalRandomFactory;
 import net.minecraft.world.level.levelgen.RandomSupport;
 import net.minecraft.world.level.levelgen.SingleThreadedRandomSource;
@@ -596,6 +615,124 @@ final class WorldgenGolden {
         return o.save(file);
     }
 
+    // ------------------------------------------------------------------------------- terrain
+
+    /** A chunk made the way ChunkStatus.TERRAIN makes it, step by step - with vanilla's own methods. */
+    static final class ChunkMaker {
+        final WorldgenRef.World world;
+        final NoiseBasedChunkGenerator generator;
+        final java.lang.reflect.Method doFill;
+        final Aquifer.FluidPicker fluidPicker;
+        final PalettedContainerFactory containers;
+
+        ChunkMaker(WorldgenRef.World world) throws Exception {
+            this.world = world;
+            var settings = world.registries().lookupOrThrow(Registries.NOISE_SETTINGS).getOrThrow(NoiseGeneratorSettings.OVERWORLD);
+            var preset = world.registries().lookupOrThrow(Registries.MULTI_NOISE_BIOME_SOURCE_PARAMETER_LIST).getOrThrow(MultiNoiseBiomeSourceParameterLists.OVERWORLD);
+            generator = new NoiseBasedChunkGenerator(MultiNoiseBiomeSource.createFromPreset(preset), settings);
+            doFill = NoiseBasedChunkGenerator.class.getDeclaredMethod("doFill", NoiseChunk.class, ChunkAccess.class);
+            doFill.setAccessible(true);
+            fluidPicker = (Aquifer.FluidPicker) ((java.util.function.Supplier<?>) WorldgenRef.field(generator, "globalFluidPicker")).get();
+            containers = PalettedContainerFactory.create(world.registries());
+        }
+
+        ProtoChunk chunk(int cx, int cz) {
+            NoiseSettings noise = world.settings().noiseSettings();
+            return new ProtoChunk(new ChunkPos(cx, cz), UpgradeData.EMPTY, LevelHeightAccessor.create(noise.minY(), noise.height()), containers, null);
+        }
+
+        /** NoiseBasedChunkGenerator.createNoiseChunk, where no structure is near and no old chunk to blend with. */
+        NoiseChunk noiseChunk(ProtoChunk chunk) {
+            NoiseSettings noise = world.settings().noiseSettings();
+            DensityVolume volume = new DensityVolume(16, noise.height(), 16, chunk.getPos().getMinBlockX(), noise.minY(), chunk.getPos().getMinBlockZ());
+            return new NoiseChunk(world.state(), Beardifier.EMPTY, world.settings(), fluidPicker, Blender.empty(), volume);
+        }
+    }
+
+    static long fnv(long h, int v) {
+        for (int i = 0; i < 4; ++i) h = (h ^ ((v >>> (8 * i)) & 0xFF)) * 0x100000001b3L;
+        return h;
+    }
+
+    /** A chunk as it stands: its blocks, the two heightmaps generation goes by, what is marked to be let flow. */
+    static void stage(Out o, ProtoChunk chunk, boolean whole) throws IOException {
+        int sections = chunk.getSectionsCount(), minY = chunk.getMinY();
+        byte[] blocks = new byte[sections * 4096 * 2];
+        long hash = 0xcbf29ce484222325L;
+        int at = 0;
+        for (int s = 0; s < sections; ++s) {
+            LevelChunkSection section = chunk.getSection(s);
+            for (int y = 0; y < 16; ++y)
+                for (int z = 0; z < 16; ++z)
+                    for (int x = 0; x < 16; ++x) {
+                        int id = Block.getId(section.getBlockState(x, y, z));
+                        blocks[at++] = (byte) id;
+                        blocks[at++] = (byte) (id >>> 8);
+                        hash = fnv(hash, id);
+                    }
+        }
+        o.i64(hash);
+        long heights = 0xcbf29ce484222325L;
+        for (Heightmap.Types type : new Heightmap.Types[] {Heightmap.Types.WORLD_SURFACE_WG, Heightmap.Types.OCEAN_FLOOR_WG}) {
+            Heightmap map = chunk.getOrCreateHeightmapUnprimed(type);
+            for (int z = 0; z < 16; ++z)
+                for (int x = 0; x < 16; ++x) {
+                    int first = map.getFirstAvailable(x, z);
+                    heights = fnv(heights, first);
+                    if (whole) o.i32(first);
+                }
+        }
+        o.i64(heights);
+        long marks = 0xcbf29ce484222325L;
+        int count = 0;
+        it.unimi.dsi.fastutil.shorts.ShortList[] lists = chunk.getPostProcessing();
+        for (int s = 0; s < lists.length; ++s)
+            if (lists[s] != null) count += lists[s].size();
+        o.i32(count);
+        for (int s = 0; s < lists.length; ++s) {
+            if (lists[s] == null) continue;
+            for (short packed : lists[s]) {
+                int mark = s << 12 | (packed & 0xFFF);
+                marks = fnv(marks, mark);
+                if (whole) o.i32(mark);
+            }
+        }
+        o.i64(marks);
+        if (whole) {
+            java.util.zip.Deflater deflater = new java.util.zip.Deflater(9);
+            deflater.setInput(blocks);
+            deflater.finish();
+            byte[] packed = new byte[blocks.length];
+            int n = deflater.deflate(packed);
+            deflater.end();
+            o.i32(n);
+            for (int i = 0; i < n; ++i) o.u8(packed[i]);
+        }
+    }
+
+    static int terrain(Path file, WorldgenRef.World world) throws Exception {
+        Out o = new Out();
+        o.magic("WGTERR01");
+        o.i64(world.seed());
+        Random script = new Random(20261127L);
+        ChunkMaker maker = new ChunkMaker(world);
+        final int whole = 6, chunks = 48;
+        o.i32(chunks);
+        o.i32(1);  // stages: after doFill
+        for (int n = 0; n < chunks; ++n) {
+            int cx = script.nextInt(4000) - 2000, cz = script.nextInt(4000) - 2000;
+            o.i32(cx);
+            o.i32(cz);
+            o.u8(n < whole ? 1 : 0);
+            ProtoChunk chunk = maker.chunk(cx, cz);
+            NoiseChunk noiseChunk = maker.noiseChunk(chunk);
+            maker.doFill.invoke(maker.generator, noiseChunk, chunk);
+            stage(o, chunk, n < whole);
+            noiseChunk.close();
+        }
+        return o.save(file);
+    }
+
     interface Writer {
         int write(Path file, WorldgenRef.World world) throws Exception;
     }
@@ -607,5 +744,6 @@ final class WorldgenGolden {
         FILES.put("noise", WorldgenGolden::noise);
         FILES.put("density", WorldgenGolden::density);
         FILES.put("climate", WorldgenGolden::climate);
+        FILES.put("terrain", WorldgenGolden::terrain);
     }
 }

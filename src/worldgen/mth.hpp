@@ -20,11 +20,11 @@ ALWAYS_INLINE i32 floor_int(float v) { return static_cast<i32>(std::floor(static
 // Mth.lfloor
 ALWAYS_INLINE i64 floor_long(double v) { return static_cast<i64>(std::floor(v)); }
 // Math.floorDiv, Math.floorMod of ints
-ALWAYS_INLINE i32 floor_div(i32 a, i32 b) {
+ALWAYS_INLINE constexpr i32 floor_div(i32 a, i32 b) {
     const i32 q = a / b;
     return (a % b != 0 && ((a ^ b) < 0)) ? q - 1 : q;
 }
-ALWAYS_INLINE i32 floor_mod(i32 a, i32 b) {
+ALWAYS_INLINE constexpr i32 floor_mod(i32 a, i32 b) {
     const i32 m = a % b;
     return (m != 0 && ((m ^ b) < 0)) ? m + b : m;
 }

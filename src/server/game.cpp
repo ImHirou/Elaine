@@ -44,7 +44,10 @@ Game::Game(const Settings& s, std::vector<std::unique_ptr<net::Reactor>>& reacto
       info_(world),
       flat_generator_(kOverworldType.min_y, static_cast<u32>(kOverworldType.height) / 16, world.layers, world.biome),
       empty_generator_(world.sea_level, world.biome),
-      generator_(world.flat ? static_cast<world::ChunkGenerator&>(flat_generator_) : empty_generator_),
+      noise_generator_(world.noise ? std::make_unique<worldgen::OverworldGenerator>(world.seed) : nullptr),
+      generator_(world.flat    ? static_cast<world::ChunkGenerator&>(flat_generator_)
+                 : world.noise ? static_cast<world::ChunkGenerator&>(*noise_generator_)
+                               : empty_generator_),
       world_(reg::dimension_type::kOverworld, std::string(kOverworld), generator_, s.compression_threshold, &workers,
              world.chunk_dir, s.sync_chunk_writes),
       tracker_(ents_, s.compression_threshold, s.entity_broadcast_range),

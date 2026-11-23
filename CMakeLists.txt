@@ -187,6 +187,9 @@ add_library(core STATIC
   src/worldgen/noise.cpp
   src/worldgen/density.cpp
   src/worldgen/climate.cpp
+  src/worldgen/aquifer.cpp
+  src/worldgen/terrain.cpp
+  src/worldgen/generator.cpp
   src/phys/physics.cpp
   src/item/components.cpp
   src/item/codec.cpp
@@ -210,6 +213,14 @@ target_link_libraries(core
   PUBLIC mc_flags PkgConfig::URING Threads::Threads
   PRIVATE mc_core_flags PkgConfig::DEFLATE PkgConfig::YYJSON OpenSSL::Crypto CURL::libcurl)
 mc_needs_generated(core)
+if(MC_SANITIZE)
+  # World generation is arithmetic by the million a chunk. Unoptimized and under ASan a scenario that
+  # joins a world of terrain held the cores for 26 s (the release build: 2 s), and five scenarios beside
+  # it timed out. Optimized, the sanitizers still see every load and store of it.
+  set_source_files_properties(
+    src/worldgen/noise.cpp src/worldgen/density.cpp src/worldgen/climate.cpp src/worldgen/aquifer.cpp src/worldgen/terrain.cpp
+    PROPERTIES COMPILE_OPTIONS "-O2")
+endif()
 if(MC_PCH)
   target_precompile_headers(core PRIVATE ${CMAKE_SOURCE_DIR}/src/server/game.hpp)
   get_target_property(mc_plain_sources core SOURCES)

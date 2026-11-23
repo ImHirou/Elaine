@@ -179,7 +179,7 @@ bool load_chunk(std::span<const u8> blob, i32 cx, i32 cz, const Layout& l, Chunk
         c.loaded_lit = terrain && (flags & kLit) != 0;
     }
     if (!terrain) {
-        gen.generate(c, out.alloc);
+        if (!gen.generate_whole(out)) gen.generate(c, out.alloc);
         out.fresh = blob.empty();
         c.dirty = true;  // nothing on disk holds these blocks
     } else {
