@@ -21,21 +21,6 @@ ALWAYS_INLINE i64 block_key(i32 x, i32 y, i32 z) {
                             (static_cast<u64>(static_cast<u32>(z) & 0x3FFFFFFu) << 12) | (static_cast<u32>(y) & 0xFFFu));
 }
 
-// DensityVolume.indexOfBlock: where in a volume's buffer a block is, or -1 when it is not one of
-// the volume's points.
-i32 index_of_block(const Volume& v, i32 x, i32 y, i32 z) {
-    const i32 rx = x - v.min_x, ry = y - v.min_y, rz = z - v.min_z;
-    if (v.step_x == 1 && v.step_y == 1 && v.step_z == 1) {
-        if (rx >= 0 && ry >= 0 && rz >= 0 && rx < v.size_x && ry < v.size_y && rz < v.size_z)
-            return static_cast<i32>(v.index(rx, ry, rz));
-        return -1;
-    }
-    if (rx < 0 || ry < 0 || rz < 0 || rx >= v.size_x * v.step_x || ry >= v.size_y * v.step_y || rz >= v.size_z * v.step_z)
-        return -1;
-    if (floor_mod(rx, v.step_x) != 0 || floor_mod(ry, v.step_y) != 0 || floor_mod(rz, v.step_z) != 0) return -1;
-    return static_cast<i32>(v.index(floor_div(rx, v.step_x), floor_div(ry, v.step_y), floor_div(rz, v.step_z)));
-}
-
 // GradientFunction.ClampedSampler.compute
 ALWAYS_INLINE float gradient(const Node& n, i32 coordinate) {
     const i32 relative = std::min(std::max(coordinate, n.i1), n.i2) - n.i0;
@@ -106,7 +91,7 @@ float Sampler::cached_value(u32 cell, u32 input, i32 x, i32 y, i32 z) {
     const i64 key = block_key(x, y, z);
     if (c.key == key && !std::isnan(c.value)) return c.value;
     if (c.filled) {
-        const i32 index = index_of_block(c.volume, x, y, z);
+        const i32 index = c.volume.index_of_block(x, y, z);
         if (index != -1) return c.buffer[index];
     }
     const float v = value(input, x, y, z);

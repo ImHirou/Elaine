@@ -26,14 +26,21 @@ class Overworld {
     explicit Overworld(i64 seed);
 
     i64 seed() const { return seed_; }
+    // The seed as clients are told it, and as the biome of a block is zoomed by (BiomeManager).
+    i64 zoom_seed() const { return zoom_seed_; }
     const Noises& noises() const { return noises_; }
-    // RandomState.getOrCreateRandomFactory("minecraft:aquifer"): where a cell's point lies.
-    const XoroshiroPositional& aquifer_random() const { return aquifer_random_; }
+    // RandomState.getOrCreateRandomFactory(name): proto::gen::worldgen::random_name::k* - an
+    // aquifer's points, an ore vein's blocks, the gradients of bedrock and deepslate.
+    const XoroshiroPositional& random(u32 name) const { return randoms_[name]; }
+    const XoroshiroPositional& aquifer_random() const { return randoms_[settings::random_name::kAquifer]; }
+    // MaterialSystem.clayBands: the bands of the badlands, 192 blocks of them one over the other.
+    const u16* clay_bands() const { return clay_bands_; }
 
   private:
-    i64 seed_;
+    i64 seed_, zoom_seed_;
     Noises noises_;
-    XoroshiroPositional aquifer_random_;
+    XoroshiroPositional randoms_[settings::random_name::kCount];
+    u16 clay_bands_[192];
 };
 
 struct Terrain {
@@ -51,6 +58,12 @@ struct Terrain {
 
     void begin(i32 cx, i32 cz);
     u16 block(i32 x, i32 y, i32 z) const { return blocks[index(x, y, z)]; }
+    // ProtoChunk.getBlockState: above and below the world there is air.
+    u16 block_or_air(i32 x, i32 y, i32 z) const {
+        return y < settings::kMinY || y >= settings::kMinY + settings::kHeight ? u16{0} : blocks[index(x, y, z)];
+    }
+    // ChunkAccess.getHighestFilledSectionIndex: the highest section that is not all air; -1: none.
+    i32 highest_filled_section() const;
     // LevelChunkSection.setBlockState and the heightmaps' update (x and z within the chunk).
     void set_block(i32 x, i32 y, i32 z, u16 state);
     void mark_post_process(i32 x, i32 y, i32 z);

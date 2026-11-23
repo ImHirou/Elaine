@@ -5,6 +5,7 @@
 
 #include "world/chunk_io.hpp"
 #include "worldgen/climate.hpp"
+#include "worldgen/material.hpp"
 
 namespace worldgen {
 
@@ -17,6 +18,7 @@ struct Work {
     const Overworld* world;
     Sampler biomes, terrain_sampler;
     Terrain terrain;
+    BiomeGrid grid;
     u16 biome[Terrain::kSections * 64];
 
     explicit Work(const Overworld& w) : world(&w), biomes(w.noises()), terrain_sampler(w.noises()) {}
@@ -38,7 +40,7 @@ bool OverworldGenerator::generate_whole(world::LoadedChunk& out) {
     // The biomes, a cell at a time; a section's palette in the order vanilla comes to its cells
     // (x, then y, then z).
     w.biomes.reset();
-    fill_biomes(w.biomes, c.x, c.z, settings::kMinY, Terrain::kSections, w.biome);
+    fill_biome_grid(w.biomes, c.x, c.z, settings::kMinY, Terrain::kSections, w.grid, w.biome);
     c.biomes = nullptr;
     for (u32 si = 0; si < Terrain::kSections; ++si) {
         world::BiomeSection made;
@@ -67,6 +69,7 @@ bool OverworldGenerator::generate_whole(world::LoadedChunk& out) {
     t.begin(c.x, c.z);
     NoiseChunk chunk(world_, w.terrain_sampler, c.x, c.z);
     fill_from_noise(chunk, t);
+    build_surface(world_, chunk, w.grid, t);
     for (u32 si = 0; si < Terrain::kSections; ++si) c.sections[si].assign(out.alloc, &t.blocks[si * 4096]);
     return true;
 }

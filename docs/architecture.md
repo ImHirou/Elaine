@@ -2166,6 +2166,44 @@ levels differ there may be a wall of the terrain's block instead. Where water st
 something it would run into, the block is marked (`ProtoChunk.markPosForPostProcessing`), to be
 let flow once when the chunk first ticks.
 
+### The surface (`material.*`)
+
+After `doFill` a chunk is stone, water, lava and air. `MaterialSystem.buildSurface` goes down
+every column and asks one rule about each block of stone; the rule answers with a block or with
+nothing. The overworld's rule is 42 files of the data pack (`worldgen/material_rule`,
+`material_condition`): bedrock at the bottom, two ore veins, the surface of each biome - grass
+over dirt, sand over sandstone, snow, the bands of the badlands - and deepslate below.
+`gen_worldgen.py` makes flat tables of it (`kMaterialRules`: 316 rules, `kMaterialConditions`:
+153), a named rule compiled anew wherever it is named, as vanilla compiles it; a rule or a
+condition of a type it has no word for stops it. `material.cpp` says what each means and runs
+the tables as vanilla runs its evaluators - the first rule of a sequence that answers, a
+condition asked once a column or once a block where vanilla's class remembers it.
+
+What the step reads besides the block:
+
+- **The biome of the block**, which is not its cell's: `BiomeManager.getBiome` takes the nearest
+  of the eight cell corners around, each moved by a hash of the seed and the corner. Near the
+  edge of a chunk that is a neighbour's cell, so a chunk's surface needs the biomes of a ring of
+  cells around it (`BiomeGrid`: quart columns -1 .. 4). They are the neighbour's cells as the
+  neighbour's own filling makes them: a cell where no second biome is exactly as near is found by
+  itself; where one is, the answer depends on the cell asked before it, and the neighbour is
+  filled whole (`fill_biome_grid`; the unit test holds the grid to nine chunks filled the long
+  way).
+- **The column as it stands**: how much stone is above and below, where the water over it
+  begins, and the slope - off the surface heightmap, which the columns before have changed.
+  Hence vanilla's order of columns, x before z, the other way round from `doFill`.
+- **The chunk's context**: an ore vein samples its density and its richness over the chunk
+  before the first column, and how far down the surface goes is the terrain's level before its
+  noise (`chunk_surface_level`), sampled when the first block asks. Both are questions to the
+  context `doFill` asked its own of, and are asked where vanilla asks them.
+- **Chance**, by position: a surface's depth, the gradients of bedrock and deepslate, the blocks
+  of a vein - each from the factory vanilla names for it (`kRandomNames`).
+
+Two biomes add to the terrain itself on the way: the pillars of the eroded badlands and the
+icebergs of the frozen oceans. Whether an iceberg is two blocks lower is the biome's
+temperature, which varies by a noise of its own, the same in every world (`Biome`'s static
+`SimplexNoise`s).
+
 ### Held to the jar
 
 `mcgen.py worldgen golden --emit` runs vanilla's own classes - no world, no server - and writes
@@ -2180,18 +2218,21 @@ as their bits. `tests/unit/worldgen_test.cpp` replays them:
 | `climate` | searches one after the other (some decided by the one before); the biomes of whole chunks |
 | `terrain` | whole chunks after each step of the `terrain` status: blocks, heightmaps, marks |
 
-For the last, the extractor builds a `ProtoChunk` and calls `NoiseBasedChunkGenerator`'s own
-(private) steps on it. A few chunks are in the file whole, so that a difference is told block by
-block; of the rest there is a hash.
+For the last, the extractor builds a `ProtoChunk` - and the eight around it, for their biomes -
+and calls `NoiseBasedChunkGenerator`'s own (private) steps on it. A few chunks are in the file
+whole, so that a difference is told block by block; of the rest there is a hash. The chunks are
+some anywhere, one for each of the overworld's 56 biomes, and more where the surface step builds
+icebergs and pillars.
 
 ### What is there, and what is not
 
-There: biomes; the shape of the ground with its aquifers (`doFill`) - stone, water, lava and air.
+There: biomes; the shape of the ground with its aquifers (`doFill`); the surface, bedrock,
+deepslate and the ore veins (`buildSurface`).
 
-Not there yet: the surface and the ore veins (`MaterialSystem`), the carvers' caves, letting the
-marked water flow, the world's spawn point, features, structures. A world of terrain is bare
-rock under water. Beyond those: only the overworld, only the preset `normal`; an imported vanilla
-world does not go on with this generator yet.
+Not there yet: the carvers' caves, letting the marked water flow, the world's spawn point,
+features, structures. A world of terrain has its ground and no tree on it. Beyond those: only
+the overworld, only the preset `normal`; an imported vanilla world does not go on with this
+generator yet.
 
 ## NBT and text components (src/nbt/, src/text/)
 

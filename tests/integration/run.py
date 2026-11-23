@@ -372,17 +372,19 @@ def a_world_of_terrain(srv: Server):
     cx, cz = j["center"]
     assert set(j["chunks"]) == mc.view_chunks(cx, cz, 2)
     stone, water, lava = mc.BLOCK["kStone"], mc.BLOCK["kWater"], mc.BLOCK["kLava"]
+    bedrock, deepslate = mc.BLOCK["kBedrock"], mc.BLOCK["kDeepslate"]
     biomes = mc.load_registry("worldgen_biome")
     seen, kinds = set(), set()
     for ch in j["chunks"].values():
-        # Deep down there is rock, and at the top of the world nothing.
+        # Bedrock under everything, and at the top of the world nothing.
         column = [mc.chunk_block(ch, 8, y, 8) for y in range(-64, 320)]
-        assert stone in column[:64] and set(column[-40:]) == {0}, column
+        assert column[0] == bedrock and set(column[-40:]) == {0}, column
         kinds |= set(column)
         for section in ch["sections"]:
             for cell in range(64):
                 seen.add(biomes[mc.paletted_get(section["biomes"], cell)])
-    assert kinds <= {0, stone, water, lava}, kinds      # (no surface yet, and no caves of the carvers')
+    # Rock, deepslate below it, and on it the surface of its biome: something that is none of these.
+    assert {stone, deepslate} <= kinds and kinds - {0, stone, deepslate, bedrock, water, lava}, kinds
     assert len(seen) > 1 and "minecraft:the_void" not in seen, seen
 
 

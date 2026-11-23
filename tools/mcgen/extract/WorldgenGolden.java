@@ -45,6 +45,7 @@ import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.PalettedContainerFactory;
 import net.minecraft.world.level.chunk.ProtoChunk;
 import net.minecraft.world.level.chunk.UpgradeData;
+import net.minecraft.world.level.chunk.status.ChunkStatus;
 import net.minecraft.world.level.levelgen.Aquifer;
 import net.minecraft.world.level.levelgen.Beardifier;
 import net.minecraft.world.level.levelgen.Heightmap;
@@ -53,6 +54,8 @@ import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
 import net.minecraft.world.level.levelgen.NoiseChunk;
 import net.minecraft.world.level.levelgen.NoiseGeneratorSettings;
 import net.minecraft.world.level.levelgen.NoiseSettings;
+import net.minecraft.world.level.levelgen.RandomState;
+import net.minecraft.world.level.levelgen.material.rule.MaterialRule;
 import net.minecraft.world.level.levelgen.blending.Blender;
 import net.minecraft.world.level.levelgen.PositionalRandomFactory;
 import net.minecraft.world.level.levelgen.RandomSupport;
@@ -621,17 +624,24 @@ final class WorldgenGolden {
     static final class ChunkMaker {
         final WorldgenRef.World world;
         final NoiseBasedChunkGenerator generator;
-        final java.lang.reflect.Method doFill;
+        final java.lang.reflect.Method doFill, doCreateBiomes, buildSurface;
         final Aquifer.FluidPicker fluidPicker;
         final PalettedContainerFactory containers;
+        final MultiNoiseBiomeSource biomeSource;
 
         ChunkMaker(WorldgenRef.World world) throws Exception {
             this.world = world;
             var settings = world.registries().lookupOrThrow(Registries.NOISE_SETTINGS).getOrThrow(NoiseGeneratorSettings.OVERWORLD);
             var preset = world.registries().lookupOrThrow(Registries.MULTI_NOISE_BIOME_SOURCE_PARAMETER_LIST).getOrThrow(MultiNoiseBiomeSourceParameterLists.OVERWORLD);
-            generator = new NoiseBasedChunkGenerator(MultiNoiseBiomeSource.createFromPreset(preset), settings);
+            biomeSource = MultiNoiseBiomeSource.createFromPreset(preset);
+            generator = new NoiseBasedChunkGenerator(biomeSource, settings);
             doFill = NoiseBasedChunkGenerator.class.getDeclaredMethod("doFill", NoiseChunk.class, ChunkAccess.class);
             doFill.setAccessible(true);
+            doCreateBiomes = net.minecraft.world.level.chunk.ChunkGenerator.class.getDeclaredMethod("doCreateBiomes", Blender.class, RandomState.class, ChunkAccess.class);
+            doCreateBiomes.setAccessible(true);
+            buildSurface = NoiseBasedChunkGenerator.class.getDeclaredMethod("buildSurface", ChunkAccess.class, NoiseChunk.class, RandomState.class,
+                BiomeManager.class, java.util.Set.class, MaterialRule.class);
+            buildSurface.setAccessible(true);
             fluidPicker = (Aquifer.FluidPicker) ((java.util.function.Supplier<?>) WorldgenRef.field(generator, "globalFluidPicker")).get();
             containers = PalettedContainerFactory.create(world.registries());
         }
@@ -639,6 +649,36 @@ final class WorldgenGolden {
         ProtoChunk chunk(int cx, int cz) {
             NoiseSettings noise = world.settings().noiseSettings();
             return new ProtoChunk(new ChunkPos(cx, cz), UpgradeData.EMPTY, LevelHeightAccessor.create(noise.minY(), noise.height()), containers, null);
+        }
+
+        /**
+         * The chunk at (cx, cz) and the eight around it, each with its biomes as the `biomes` status
+         * fills them - on a thread that has searched for no biome before. [dx + 1][dz + 1].
+         */
+        ProtoChunk[][] neighbourhood(int cx, int cz) throws Exception {
+            ProtoChunk[][] chunks = new ProtoChunk[3][3];
+            for (int dx = -1; dx <= 1; ++dx)
+                for (int dz = -1; dz <= 1; ++dz) {
+                    ProtoChunk chunk = chunk(cx + dx, cz + dz);
+                    fresh(unused -> doCreateBiomes.invoke(generator, Blender.empty(), world.state(), chunk));
+                    chunk.setPersistedStatus(ChunkStatus.BIOMES);  // (what a chunk is while its terrain is made)
+                    chunks[dx + 1][dz + 1] = chunk;
+                }
+            return chunks;
+        }
+
+        /** What a WorldGenRegion over those nine is to the biome of a block, and the biomes that are in them. */
+        BiomeManager biomeManager(ProtoChunk[][] chunks, int cx, int cz) {
+            return new BiomeManager((qx, qy, qz) -> chunks[(qx >> 2) - cx + 1][(qz >> 2) - cz + 1].getNoiseBiome(qx, qy, qz),
+                BiomeManager.obfuscateSeed(world.seed()));
+        }
+
+        java.util.Set<Holder<Biome>> possibleBiomes(ProtoChunk[][] chunks) {
+            java.util.Set<Holder<Biome>> biomes = new java.util.HashSet<>();
+            for (ProtoChunk[] row : chunks)
+                for (ProtoChunk chunk : row)
+                    for (LevelChunkSection section : chunk.getSections()) section.getBiomes().getAll(biomes::add);
+            return biomes;
         }
 
         /** NoiseBasedChunkGenerator.createNoiseChunk, where no structure is near and no old chunk to blend with. */
@@ -710,25 +750,88 @@ final class WorldgenGolden {
         }
     }
 
+    /** Chunks that have each of the overworld's biomes somewhere in them - on the ground or below it - as they are found on a grid, nearest first. */
+    static java.util.Map<String, java.util.List<int[]>> chunksOfEveryBiome(ChunkMaker maker) {
+        Climate.Sampler sampler = maker.world.state().createClimateSampler(SamplerContext.EMPTY_UNCACHED);
+        java.util.Map<String, java.util.List<int[]>> found = new java.util.TreeMap<>();
+        int wanted = maker.biomeSource.possibleBiomes().size();
+        for (int ring = 0; ring <= 96; ++ring)
+            for (int gx = -ring; gx <= ring; ++gx)
+                for (int gz = -ring; gz <= ring; ++gz) {
+                    if (Math.max(Math.abs(gx), Math.abs(gz)) != ring) continue;
+                    for (int qy : new int[] {16, 26, -8}) {  // y = 64, 104, -32
+                        String name = maker.biomeSource.getNoiseBiome(sampler.sample(gx * 48, qy, gz * 48)).getRegisteredName();
+                        java.util.List<int[]> chunks = found.computeIfAbsent(name, unused -> new java.util.ArrayList<>());
+                        int[] chunk = {(gx * 48) >> 2, (gz * 48) >> 2};
+                        if (chunks.size() < 40 && (chunks.isEmpty() || !java.util.Arrays.equals(chunks.getLast(), chunk))) chunks.add(chunk);
+                    }
+                }
+        if (found.size() != wanted) throw new IllegalStateException(found.size() + " of " + wanted + " biomes were found on the grid");
+        return found;
+    }
+
+    /** The first free block of every column (WORLD_SURFACE_WG). */
+    static int[] surface(ProtoChunk chunk) {
+        Heightmap map = chunk.getOrCreateHeightmapUnprimed(Heightmap.Types.WORLD_SURFACE_WG);
+        int[] heights = new int[256];
+        for (int i = 0; i < 256; ++i) heights[i] = map.getFirstAvailable(i & 15, i >> 4);
+        return heights;
+    }
+
+    /**
+     * A chunk through the steps of the `terrain` status, each written as it ends. Returns in how many
+     * columns the surface step put blocks on top of the terrain: icebergs, the pillars of the eroded badlands.
+     */
+    static int make(ChunkMaker maker, Out o, int cx, int cz, boolean whole) throws Exception {
+        MaterialRule rule = maker.world.settings().materialRule().value();
+        ProtoChunk[][] around = maker.neighbourhood(cx, cz);
+        ProtoChunk chunk = around[1][1];
+        NoiseChunk noiseChunk = maker.noiseChunk(chunk);
+        maker.doFill.invoke(maker.generator, noiseChunk, chunk);
+        if (o != null) stage(o, chunk, whole);
+        int[] before = surface(chunk);
+        maker.buildSurface.invoke(maker.generator, chunk, noiseChunk, maker.world.state(), maker.biomeManager(around, cx, cz), maker.possibleBiomes(around), rule);
+        if (o != null) stage(o, chunk, whole);
+        int[] after = surface(chunk);
+        noiseChunk.close();
+        int raised = 0;
+        for (int i = 0; i < 256; ++i) raised += after[i] > before[i] ? 1 : 0;
+        return raised;
+    }
+
     static int terrain(Path file, WorldgenRef.World world) throws Exception {
         Out o = new Out();
-        o.magic("WGTERR01");
+        o.magic("WGTERR02");
         o.i64(world.seed());
         Random script = new Random(20261127L);
         ChunkMaker maker = new ChunkMaker(world);
-        final int whole = 6, chunks = 48;
-        o.i32(chunks);
-        o.i32(1);  // stages: after doFill
-        for (int n = 0; n < chunks; ++n) {
-            int cx = script.nextInt(4000) - 2000, cz = script.nextInt(4000) - 2000;
+        // Some chunks anywhere, and one for every biome there is: each biome has a surface of its own.
+        java.util.List<int[]> chunks = new java.util.ArrayList<>();
+        final int whole = 4, anywhere = 24;
+        for (int n = 0; n < anywhere; ++n) chunks.add(new int[] {script.nextInt(4000) - 2000, script.nextInt(4000) - 2000});
+        java.util.Map<String, java.util.List<int[]>> every = chunksOfEveryBiome(maker);
+        for (java.util.List<int[]> of : every.values()) chunks.add(of.getFirst());
+        // And of the biomes whose surface adds to the terrain, chunks where it does.
+        StringBuilder added = new StringBuilder();
+        for (String name : new String[] {"minecraft:frozen_ocean", "minecraft:deep_frozen_ocean", "minecraft:eroded_badlands"}) {
+            int took = 0;
+            java.util.List<int[]> of = every.get(name);
+            for (int n = 1; n < of.size() && took < 4; ++n) {
+                if (make(maker, null, of.get(n)[0], of.get(n)[1], false) < 12) continue;
+                chunks.add(of.get(n));
+                ++took;
+            }
+            added.append(' ').append(name).append(' ').append(took);
+        }
+        System.err.println("worldgen: golden terrain: " + chunks.size() + " chunks, " + every.size() + " biomes; chunks whose surface is built up:" + added);
+        o.i32(chunks.size());
+        o.i32(2);  // stages: after doFill, after buildSurface
+        for (int n = 0; n < chunks.size(); ++n) {
+            int cx = chunks.get(n)[0], cz = chunks.get(n)[1];
             o.i32(cx);
             o.i32(cz);
             o.u8(n < whole ? 1 : 0);
-            ProtoChunk chunk = maker.chunk(cx, cz);
-            NoiseChunk noiseChunk = maker.noiseChunk(chunk);
-            maker.doFill.invoke(maker.generator, noiseChunk, chunk);
-            stage(o, chunk, n < whole);
-            noiseChunk.close();
+            make(maker, o, cx, cz, n < whole);
         }
         return o.save(file);
     }

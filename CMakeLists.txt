@@ -189,6 +189,7 @@ add_library(core STATIC
   src/worldgen/climate.cpp
   src/worldgen/aquifer.cpp
   src/worldgen/terrain.cpp
+  src/worldgen/material.cpp
   src/worldgen/generator.cpp
   src/phys/physics.cpp
   src/item/components.cpp

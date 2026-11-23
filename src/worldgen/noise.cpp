@@ -166,6 +166,33 @@ void Perlin::add_to_volume_smeared(float* buffer, const Volume& v, double xz_sca
     }
 }
 
+float Simplex::get(double xin, double yin) const {
+    // (No offsets: these noises are made with them thrown away.)
+    static const double kSqrt3 = std::sqrt(3.0);
+    static const double kF2 = 0.5 * (kSqrt3 - 1.0), kG2 = (3.0 - kSqrt3) / 6.0;
+    const double s = (xin + yin) * kF2;
+    const i32 i = floor_int(xin + s), j = floor_int(yin + s);
+    const double t = static_cast<double>(i + j) * kG2;
+    const double x0 = xin - (static_cast<double>(i) - t), y0 = yin - (static_cast<double>(j) - t);
+    const i32 i1 = x0 > y0 ? 1 : 0, j1 = x0 > y0 ? 0 : 1;
+    const double x1 = x0 - static_cast<double>(i1) + kG2, y1 = y0 - static_cast<double>(j1) + kG2;
+    const double x2 = x0 - 1.0 + 2.0 * kG2, y2 = y0 - 1.0 + 2.0 * kG2;
+    const i32 ii = i & 255, jj = j & 255;
+    // getCornerNoise3D(index, x, y, 0, 0.5): a corner's share, which falls off to nothing at 0.5.
+    const auto corner = [](i32 index, double x, double y) {
+        const double z = 0.0;
+        double share = 0.5 - x * x - y * y - z * z;
+        if (share < 0.0) return 0.0;
+        share = share * share;
+        const float* g = kGradient[index];
+        return share * share * (static_cast<double>(g[0]) * x + static_cast<double>(g[1]) * y + static_cast<double>(g[2]) * z);
+    };
+    const double n0 = corner(permute(perms, ii + permute(perms, jj)) % 12, x0, y0);
+    const double n1 = corner(permute(perms, ii + i1 + permute(perms, jj + j1)) % 12, x1, y1);
+    const double n2 = corner(permute(perms, ii + 1 + permute(perms, jj + 1)) % 12, x2, y2);
+    return static_cast<float>(70.0 * (n0 + n1 + n2));
+}
+
 float Noise::get(double x, double y, double z) const {
     float value = 0.0f;
     for (u32 i = 0; i < count; ++i) {

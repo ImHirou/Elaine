@@ -21,9 +21,12 @@
 #include "worldgen/climate.hpp"
 #include "worldgen/density.hpp"
 #include "worldgen/generator.hpp"
+#include "worldgen/material.hpp"
 #include "worldgen/noise.hpp"
 #include "worldgen/random.hpp"
 #include "worldgen/terrain.hpp"
+
+#include PROTO_GEN_WORLDGEN_CLIMATE_HPP
 
 using namespace worldgen;
 namespace wg = proto::gen::worldgen;
@@ -216,7 +219,9 @@ TEST(Worldgen, RandomSeedsOfPositionsNamesAndStrings) {
         const i64 want = in.i64_();
         i64 got = 0;
         ASSERT_EQ(parse_seed(text, got), present) << "parseSeed(\"" << text << "\")";
-        if (present) ASSERT_EQ(got, want) << "parseSeed(\"" << text << "\")";
+        if (present) {
+            ASSERT_EQ(got, want) << "parseSeed(\"" << text << "\")";
+        }
         ++seeds;
     }
     EXPECT_GT(seeds, 20u);
@@ -504,7 +509,9 @@ void expect_stage(In& in, const Terrain& t, bool whole, const std::string& what)
     if (whole)
         for (u32 i = 0; i < count; ++i) {
             const u32 want = in.num<u32>();
-            if (i < made.size()) EXPECT_EQ(made[i], want) << what << ": mark " << i << " (section << 12 | x | y << 4 | z << 8)";
+            if (i < made.size()) {
+                EXPECT_EQ(made[i], want) << what << ": mark " << i << " (section << 12 | x | y << 4 | z << 8)";
+            }
         }
     EXPECT_EQ(marks, in.num<u64>()) << what << ": what is marked to be let flow";
     if (whole) {
@@ -529,15 +536,19 @@ void expect_stage(In& in, const Terrain& t, bool whole, const std::string& what)
 }
 
 // Whole chunks, step by step as vanilla's `terrain` status makes them: after the density and the
-// aquifers have said what every block is (doFill).
+// aquifers have said what every block is (doFill), and after the material rule has made the
+// surface of it (buildSurface). The script has a chunk for every biome of the overworld.
 TEST(Worldgen, TerrainOfAChunkIsVanillas) {
     In in(kTerrain);
-    in.magic("WGTERR01");
+    in.magic("WGTERR02");
     const Overworld world(in.i64_());
     const u32 chunks = in.num<u32>(), stages = in.num<u32>();
-    ASSERT_EQ(stages, 1u);
-    Sampler sampler(world.noises());
+    ASSERT_EQ(stages, 2u);
+    Sampler sampler(world.noises()), climate(world.noises());
     const auto terrain = std::make_unique<Terrain>();
+    const auto grid = std::make_unique<BiomeGrid>();
+    std::vector<u16> own(Terrain::kSections * 64);
+    u64 seen[2] = {0, 0};
     u32 whole = 0;
     for (u32 c = 0; c < chunks; ++c) {
         const i32 cx = in.i32_(), cz = in.i32_();
@@ -545,27 +556,87 @@ TEST(Worldgen, TerrainOfAChunkIsVanillas) {
         whole += all;
         const std::string where = "chunk " + std::to_string(cx) + ", " + std::to_string(cz);
         terrain->begin(cx, cz);
+        climate.reset();
+        fill_biome_grid(climate, cx, cz, settings::kMinY, Terrain::kSections, *grid, own.data());
+        seen[0] |= grid->present[0];
+        seen[1] |= grid->present[1];
         NoiseChunk chunk(world, sampler, cx, cz);
         fill_from_noise(chunk, *terrain);
         expect_stage(in, *terrain, all, where + " after doFill");
+        build_surface(world, chunk, *grid, *terrain);
+        expect_stage(in, *terrain, all, where + " after buildSurface");
         if (::testing::Test::HasFailure()) return;  // (one chunk's differences say enough)
     }
     EXPECT_EQ(in.p, in.end) << "the script was not read to its end";
-    EXPECT_EQ(chunks, 48u);
-    EXPECT_EQ(whole, 6u);
+    EXPECT_GE(chunks, 60u);
+    EXPECT_EQ(whole, 4u);
+    // Every biome the overworld's climate can give stood in one of them.
+    u64 possible[2] = {0, 0};
+    for (const proto::gen::worldgen::ClimateNode& n : proto::gen::worldgen::kClimate)
+        if (n.children == 0) possible[n.first >> 6] |= 1ull << (n.first & 63);
+    EXPECT_EQ(seen[0] & possible[0], possible[0]);
+    EXPECT_EQ(seen[1] & possible[1], possible[1]);
+}
+
+// The biomes a chunk's surface is made by are its own and a ring of its neighbours' - each
+// neighbour's as the neighbour itself is filled, which the grid finds without filling it.
+TEST(Worldgen, BiomeGridIsWhatTheNeighboursAreFilledWith) {
+    In in(kTerrain);
+    in.magic("WGTERR02");
+    const Overworld world(in.i64_());
+    Sampler sampler(world.noises());
+    const auto grid = std::make_unique<BiomeGrid>();
+    const u32 sections = Terrain::kSections;
+    std::vector<u16> own(sections * 64), theirs(sections * 64);
+    LegacyRandom script(20261124);
+    for (u32 c = 0; c < 24; ++c) {
+        const i32 cx = script.next_int(4000) - 2000, cz = script.next_int(4000) - 2000;
+        sampler.reset();
+        fill_biome_grid(sampler, cx, cz, settings::kMinY, sections, *grid, own.data());
+        for (i32 nx = -1; nx <= 1; ++nx)
+            for (i32 nz = -1; nz <= 1; ++nz) {
+                sampler.reset();
+                fill_biomes(sampler, cx + nx, cz + nz, settings::kMinY, sections, theirs.data());
+                if (nx == 0 && nz == 0) {
+                    EXPECT_EQ(own, theirs) << "chunk " << cx << ", " << cz;
+                }
+                u32 differ = 0;
+                for (i32 qx = -1; qx <= 4; ++qx)
+                    for (i32 qz = -1; qz <= 4; ++qz) {
+                        if ((qx < 0 ? -1 : qx > 3 ? 1 : 0) != nx || (qz < 0 ? -1 : qz > 3 ? 1 : 0) != nz) continue;
+                        for (i32 qy = 0; qy < static_cast<i32>(sections) * 4; ++qy) {
+                            const u16 want = theirs[static_cast<u32>(qy >> 2) * 64 + (static_cast<u32>(qy & 3) << 4 |
+                                                                                      static_cast<u32>(qz & 3) << 2 |
+                                                                                      static_cast<u32>(qx & 3))];
+                            differ += grid->at(cx * 4 + qx, (settings::kMinY >> 2) + qy, cz * 4 + qz) != want;
+                        }
+                    }
+                EXPECT_EQ(differ, 0u) << "chunk " << cx << ", " << cz << ": cells of the neighbour " << nx << ", " << nz;
+            }
+    }
 }
 
 // The generator a world is given: a worker's chunk - sections, a biome a cell - is the terrain and
 // the biomes above, as the world keeps them.
 TEST(Worldgen, GeneratorHandsAWorkerItsChunk) {
     In in(kTerrain);
-    in.magic("WGTERR01");
+    in.magic("WGTERR02");
     const i64 seed = in.i64_();
     in.num<u32>();
-    in.num<u32>();
+    const u32 stages = in.num<u32>();
     const i32 cx = in.i32_(), cz = in.i32_();
-    in.u8_();
-    const u64 want_blocks = in.num<u64>();
+    ASSERT_EQ(in.u8_(), 1);
+    // The hash of the first chunk's blocks at its last stage: every stage of a whole chunk is a hash
+    // of blocks, 512 heights and a hash of them, the marks and a hash of them, the blocks deflated.
+    u64 want_blocks = 0;
+    for (u32 s = 0; s < stages; ++s) {
+        want_blocks = in.num<u64>();
+        in.p += 512 * 4 + 8;
+        const u32 marks = in.num<u32>();
+        in.p += marks * 4 + 8;
+        const u32 packed = in.num<u32>();
+        in.p += packed;
+    }
 
     OverworldGenerator generator(seed);
     EXPECT_FALSE(generator.is_flat());

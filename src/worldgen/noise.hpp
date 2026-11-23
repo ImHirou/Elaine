@@ -41,6 +41,19 @@ struct Volume {
     constexpr i32 block_y(i32 i) const { return min_y + i * step_y; }
     constexpr i32 block_z(i32 i) const { return min_z + i * step_z; }
     constexpr u32 index(i32 x, i32 y, i32 z) const { return static_cast<u32>(y + (x + z * size_x) * size_y); }
+    // DensityVolume.indexOfBlock: where in a buffer over this volume a block is, or -1 when the
+    // block is not one of the volume's points.
+    i32 index_of_block(i32 x, i32 y, i32 z) const {
+        const i32 rx = x - min_x, ry = y - min_y, rz = z - min_z;
+        if (step_x == 1 && step_y == 1 && step_z == 1) {
+            if (rx >= 0 && ry >= 0 && rz >= 0 && rx < size_x && ry < size_y && rz < size_z)
+                return static_cast<i32>(index(rx, ry, rz));
+            return -1;
+        }
+        if (rx < 0 || ry < 0 || rz < 0 || rx >= size_x * step_x || ry >= size_y * step_y || rz >= size_z * step_z) return -1;
+        if (floor_mod(rx, step_x) != 0 || floor_mod(ry, step_y) != 0 || floor_mod(rz, step_z) != 0) return -1;
+        return static_cast<i32>(index(floor_div(rx, step_x), floor_div(ry, step_y), floor_div(rz, step_z)));
+    }
     bool operator==(const Volume&) const = default;
 };
 
@@ -70,6 +83,27 @@ struct Perlin {
     // PerlinNoise.addToVolume, SmearedPerlinNoise.addToVolume
     void add_to_volume(float* buffer, const Volume& v, double xz_scale, double y_scale, float amplitude) const;
     void add_to_volume_smeared(float* buffer, const Volume& v, double xz_scale, double y_scale, float amplitude) const;
+};
+
+// SimplexNoise, in two dimensions: what a biome's temperature varies by. Its seeds are vanilla's
+// own (Biome's static noises), not a world's.
+struct Simplex {
+    u8 perms[256];
+
+    // GradientNoise's constructor with the offsets thrown away (SimplexNoise(random, true)):
+    // drawn, and nothing.
+    template <class Random>
+    void seed(Random& random) {
+        for (u32 i = 0; i < 3; ++i) random.next_double();
+        for (u32 i = 0; i < 256; ++i) perms[i] = static_cast<u8>(i);
+        for (u32 i = 0; i < 256; ++i) {
+            const u32 at = i + static_cast<u32>(random.next_int(static_cast<i32>(256 - i)));
+            const u8 tmp = perms[i];
+            perms[i] = perms[at];
+            perms[at] = tmp;
+        }
+    }
+    float get(double x, double y) const;  // SimplexNoise.get(double, double)
 };
 
 // NoiseStack.Layer

@@ -15,6 +15,9 @@ difference stops the run: the port relies on how the two fit together.
   climate    the tree the overworld's biomes are searched in by climate, as vanilla built it
              (worldgen/climate.cpp).
   settings   the overworld's noise settings: its height, its sea, its stone and its water.
+  material   the overworld's material rule - bedrock, ore veins, the surface of each biome,
+             deepslate - with every named rule and condition compiled where it is named
+             (worldgen/material.cpp).
   heightmaps which of vanilla's six heightmaps a block state counts for (worldgen_heightmaps.bin).
 """
 from __future__ import annotations
@@ -490,6 +493,228 @@ def heightmap_bits(version: str) -> bytes:
     return bytes(column)
 
 
+RULE_OPS = ["kSequence", "kCondition", "kBlock", "kBandlands", "kOreVein"]
+CONDITION_OPS = ["kBiome", "kNoiseThreshold", "kVerticalGradient", "kYAbove", "kWater", "kSteep", "kNot", "kHole",
+                 "kAbovePreliminarySurface", "kStoneDepth"]
+
+
+class MaterialTables:
+    """The overworld's material rule (noise_settings' `material_rule`) as flat tables.
+
+    A rule or a condition that is named - a file of its own - is compiled anew wherever it is
+    named, as vanilla compiles it (MaterialRule.HolderHolder): every use is a node of its own."""
+
+    def __init__(self, vanilla, blocks, noise_index: dict, roots: dict, settings: dict):
+        self.vanilla, self.blocks, self.noise_index, self.roots = vanilla, blocks, noise_index, roots
+        self.min_y, self.height = settings["noise"]["min_y"], settings["noise"]["height"]
+        self.biome_ids = {name: i for i, name in enumerate(vanilla.entries("worldgen/biome"))}
+        self.rules: list[tuple] = []        # (op, a, b)
+        self.children: list[int] = []       # a sequence's rules
+        self.conditions: list[dict] = []
+        self.biomes: list[int] = []         # the biomes of the biome conditions
+        self.veins: list[tuple] = []
+        self.randoms: list[str] = []        # the names vertical gradients draw by
+        self.root = self.rule(settings["material_rule"])
+
+    def load(self, kind: str, name: str):
+        path = f"data/minecraft/worldgen/{kind}/{name.split(':', 1)[1]}.json"
+        try:
+            return json.loads(self.vanilla.zip.read(path))
+        except KeyError:
+            die(f"gen_worldgen: {path} is named by a material rule and is not in the jar")
+
+    def need(self, value: dict, *fields: str) -> None:
+        if set(value) - {"type"} - set(fields):
+            die(f"gen_worldgen: {value['type']} has fields {sorted(set(value) - {'type'})}, the generator knows {sorted(fields)}")
+
+    def anchor(self, value: dict) -> int:
+        """VerticalAnchor.resolveY in a world of the noise settings' height."""
+        if list(value) == ["absolute"]:
+            return value["absolute"]
+        if list(value) == ["above_bottom"]:
+            return self.min_y + value["above_bottom"]
+        if list(value) == ["below_top"]:
+            return self.height - 1 + self.min_y - value["below_top"]
+        die(f"gen_worldgen: a vertical anchor of {value}")
+
+    def rule(self, value, name: str | None = None) -> int:
+        if isinstance(value, str):
+            return self.rule(self.load("material_rule", value), value)
+        kind = value["type"].split(":", 1)[1]
+        if kind == "sequence":
+            self.need(value, "sequence")
+            made = [self.rule(r) for r in value["sequence"]]
+            if not made:
+                die("gen_worldgen: a sequence of no rules")
+            if len(made) == 1:  # (SequenceRule.compile: a sequence of one is the one)
+                return made[0]
+            first = len(self.children)
+            self.children += made
+            self.rules.append(("kSequence", first, len(made)))
+        elif kind == "condition":
+            self.need(value, "if_true", "then_run")
+            condition = self.condition(value["if_true"])  # (compiled before what it guards, as in vanilla)
+            self.rules.append(("kCondition", condition, self.rule(value["then_run"])))
+        elif kind == "block":
+            self.need(value, "result_state")
+            self.rules.append(("kBlock", self.blocks.state(value["result_state"]), 0))
+        elif kind == "bandlands":
+            self.need(value)
+            self.rules.append(("kBandlands", 0, 0))
+        elif kind == "ore_vein":
+            self.need(value, "density", "richness", "filler_gap", "ore_block", "raw_ore_block", "filler_block", "raw_ore_chance")
+            # Its functions are roots of the program, under the name of the rule's file (WorldgenRef.find).
+            base = "material/" + name.split(":", 1)[1] if name else None
+            if base is None or any(base + f not in self.roots for f in (".density", ".richness", ".fillerGap")):
+                die(f"gen_worldgen: the ore vein {name}: its density functions are no roots of the compiled program")
+            self.veins.append((self.blocks.state(value["ore_block"]), self.blocks.state(value["raw_ore_block"]),
+                               self.blocks.state(value["filler_block"]), value["raw_ore_chance"],
+                               self.roots[base + ".density"], self.roots[base + ".richness"], self.roots[base + ".fillerGap"]))
+            self.rules.append(("kOreVein", len(self.veins) - 1, 0))
+        else:
+            die(f"gen_worldgen: a material rule of type {value['type']}: src/worldgen has no word for it")
+        return len(self.rules) - 1
+
+    def condition(self, value) -> int:
+        if isinstance(value, str):
+            return self.condition(self.load("material_condition", value))
+        kind = value["type"].split(":", 1)[1]
+        c = {"op": None}
+        if kind == "biome":
+            self.need(value, "biome_is")
+            names = [value["biome_is"]] if isinstance(value["biome_is"], str) else value["biome_is"]
+            if any(n.startswith("#") or n not in self.biome_ids for n in names):
+                die(f"gen_worldgen: a biome condition of {names}: a tag, or a biome that is not in the registry")
+            c.update(op="kBiome", i0=len(self.biomes), i1=len(names))
+            self.biomes += [self.biome_ids[n] for n in names]
+        elif kind == "noise_threshold":
+            self.need(value, "noise", "min_threshold", "max_threshold", "is_3d")
+            if value["noise"] not in self.noise_index:
+                die(f"gen_worldgen: a noise condition of {value['noise']}, which is no noise of the registry")
+            c.update(op="kNoiseThreshold", i0=self.noise_index[value["noise"]], flag=int(value.get("is_3d", False)),
+                     d0=value["min_threshold"], d1=value["max_threshold"])
+        elif kind == "vertical_gradient":
+            self.need(value, "random_name", "true_at_and_below", "false_at_and_above")
+            if value["random_name"] not in self.randoms:
+                self.randoms.append(value["random_name"])
+            c.update(op="kVerticalGradient", i0=self.anchor(value["true_at_and_below"]), i1=self.anchor(value["false_at_and_above"]),
+                     i2=self.randoms.index(value["random_name"]))
+        elif kind == "y_above":
+            self.need(value, "anchor", "surface_depth_multiplier", "add_stone_depth")
+            c.update(op="kYAbove", i0=self.anchor(value["anchor"]), i1=value["surface_depth_multiplier"], flag=int(value["add_stone_depth"]))
+        elif kind == "water":
+            self.need(value, "offset", "surface_depth_multiplier", "add_stone_depth")
+            c.update(op="kWater", i0=value["offset"], i1=value["surface_depth_multiplier"], flag=int(value["add_stone_depth"]))
+        elif kind == "stone_depth":
+            self.need(value, "offset", "add_surface_depth", "secondary_depth_range", "surface_type")
+            if value["surface_type"] not in ("floor", "ceiling"):
+                die(f"gen_worldgen: a stone depth of the surface {value['surface_type']}")
+            c.update(op="kStoneDepth", i0=value["offset"], i1=value["secondary_depth_range"],
+                     flag=int(value["add_surface_depth"]) | (2 if value["surface_type"] == "ceiling" else 0))
+        elif kind == "not":
+            self.need(value, "invert")
+            c.update(op="kNot", i0=self.condition(value["invert"]))
+        elif kind in ("steep", "hole", "above_preliminary_surface"):
+            self.need(value)
+            c.update(op={"steep": "kSteep", "hole": "kHole", "above_preliminary_surface": "kAbovePreliminarySurface"}[kind])
+        else:
+            die(f"gen_worldgen: a material condition of type {value['type']}: src/worldgen has no word for it")
+        self.conditions.append(c)
+        return len(self.conditions) - 1
+
+
+def emit_material(t: MaterialTables, blocks: Blocks) -> str:
+    out = ["""
+// ---------------------------------------------------------------------------------------------
+// The material rule of the overworld (data/minecraft/worldgen/material_rule, material_condition):
+// what a block of the terrain's stone becomes - bedrock, an ore vein, the surface of its biome,
+// deepslate. A rule gives a block state or nothing; a sequence is the first of its rules that
+// gives one. worldgen/material.cpp says what each op does (MaterialRule's and MaterialCondition's
+// classes in net.minecraft.world.level.levelgen.material).
+enum class RuleOp : u8 {
+"""]
+    out += [f"    {op},\n" for op in RULE_OPS]
+    out.append("""};
+struct MaterialRule {
+    RuleOp op;
+    u16 a, b;  // sequence: its first rule in kRuleChildren, how many; condition: the condition, the rule; block: the state; ore vein: which
+};
+enum class ConditionOp : u8 {
+""")
+    out += [f"    {op},\n" for op in CONDITION_OPS]
+    out.append("""};
+struct MaterialCondition {
+    ConditionOp op;
+    u8 flag;         // noise: it is sampled in three dimensions; y above, water: the stone above counts; stone depth: 1 the surface's depth counts, 2 of a ceiling
+    i32 i0, i1, i2;  // by op: a list of biomes (first, count), a noise, heights (resolved), an offset and a multiplier, the condition to invert
+    double d0, d1;   // noise: the least and the most it may be
+};
+// OreVeinRule: `density`, `richness` and `filler_gap` are nodes of the density program.
+struct OreVein {
+    u16 ore, raw_ore, filler;
+    float raw_ore_chance;
+    u16 density, richness, filler_gap;
+};
+""")
+    out.append(f"\ninline constexpr u32 kMaterialRoot = {t.root};\n")
+    out.append(f"inline constexpr MaterialRule kMaterialRules[{len(t.rules)}] = {{\n")
+    out += [f"    {{RuleOp::{op}, {a}, {b}}},\n" for op, a, b in t.rules]
+    out.append("};\n")
+    out.append(f"inline constexpr u16 kRuleChildren[{len(t.children)}] = {{{', '.join(map(str, t.children))}}};\n")
+    out.append(f"\ninline constexpr MaterialCondition kMaterialConditions[{len(t.conditions)}] = {{\n")
+    for c in t.conditions:
+        g = lambda k, d=0: c.get(k, d)
+        out.append(f"    {{ConditionOp::{c['op']}, {g('flag')}, {g('i0')}, {g('i1')}, {g('i2')}, {cdouble(g('d0', 0.0))}, {cdouble(g('d1', 0.0))}}},\n")
+    out.append("};\n")
+    out.append(f"inline constexpr u16 kConditionBiomes[{max(1, len(t.biomes))}] = {{{', '.join(map(str, t.biomes)) or '0'}}};\n")
+    out.append(f"\ninline constexpr OreVein kOreVeins[{max(1, len(t.veins))}] = {{\n")
+    out += [f"    {{{ore}, {raw}, {filler}, {cfloat(f32(chance))}, {d}, {r}, {gap}}},\n" for ore, raw, filler, chance, d, r, gap in t.veins]
+    out.append("};\n")
+    out.append("""
+// The names positional random factories are made by (RandomState.getOrCreateRandomFactory): a
+// vertical gradient's, by its place in this list; then what the generator itself names.
+""")
+    names = t.randoms + [n for n in ("minecraft:ore", "minecraft:aquifer", "minecraft:clay_bands") if n not in t.randoms]
+    out.append(f"inline constexpr Hash kRandomNames[{len(names)}] = {{\n")
+    for name in names:
+        a, b = md5_seed(name)
+        out.append(f"    {{{chex(a)}, {chex(b)}}},  // {name}\n")
+    out.append("};\nnamespace random_name {\n")
+    for i, name in enumerate(names):
+        out.append(f"inline constexpr u32 {ident(name)} = {i};\n")
+    out.append(f"inline constexpr u32 kCount = {len(names)};\n}}  // namespace random_name\n")
+    out.append("\n// Blocks and biomes the surface is made of by name in vanilla's code (MaterialSystem).\nnamespace surface {\n")
+    for const, name in (("kTerracotta", "minecraft:terracotta"), ("kWhiteTerracotta", "minecraft:white_terracotta"),
+                        ("kOrangeTerracotta", "minecraft:orange_terracotta"), ("kYellowTerracotta", "minecraft:yellow_terracotta"),
+                        ("kBrownTerracotta", "minecraft:brown_terracotta"), ("kRedTerracotta", "minecraft:red_terracotta"),
+                        ("kLightGrayTerracotta", "minecraft:light_gray_terracotta"), ("kPackedIce", "minecraft:packed_ice"),
+                        ("kSnowBlock", "minecraft:snow_block"), ("kGrassBlock", "minecraft:grass_block"), ("kMycelium", "minecraft:mycelium"),
+                        ("kDirt", "minecraft:dirt"), ("kBedrock", "minecraft:bedrock")):
+        out.append(f"inline constexpr u16 {const} = {blocks.state(name)};\n")
+    for const, name in (("kErodedBadlands", "minecraft:eroded_badlands"), ("kFrozenOcean", "minecraft:frozen_ocean"),
+                        ("kDeepFrozenOcean", "minecraft:deep_frozen_ocean")):
+        out.append(f"inline constexpr u16 {const} = {t.biome_ids[name]};  // (a biome)\n")
+    out.append(f"inline constexpr u32 kBiomeCount = {len(t.biome_ids)};\n")
+    out.append("}  // namespace surface\n")
+    out.append("""
+// A biome's temperature (Biome.ClimateSettings): what it is at the sea's level, and whether it is
+// of the kind that is colder in patches (TemperatureModifier.FROZEN: the frozen oceans).
+struct BiomeTemperature {
+    float temperature;
+    u8 frozen;
+};
+""")
+    out.append(f"inline constexpr BiomeTemperature kBiomeTemperature[{len(t.biome_ids)}] = {{\n")
+    for name in t.biome_ids:
+        biome = t.load("biome", name)
+        modifier = biome.get("temperature_modifier", "none")
+        if modifier not in ("none", "frozen"):
+            die(f"gen_worldgen: biome {name} has the temperature modifier {modifier}")
+        out.append(f"    {{{cfloat(f32(biome['temperature']))}, {int(modifier == 'frozen')}}},  // {name}\n")
+    out.append("};\n")
+    return "".join(out)
+
+
 def emit(hdr: str, version: str, vanilla) -> dict:
     """The generated files, by name - and "_stats"."""
     settings = json.loads(vanilla.zip.read("data/minecraft/worldgen/noise_settings/overworld.json"))
@@ -567,10 +792,14 @@ inline constexpr BlendedLayer kBlendedLayers[{len(blended)}] = {{
         out.append(f"    {{{cdouble(frequency)}, {cfloat(amplitude)}, {cdouble(fudge)}}},\n")
     out.append("};\n")
     out.append(emit_program(tables))
-    out.append(emit_settings(settings, Blocks(version)))
+    blocks = Blocks(version)
+    out.append(emit_settings(settings, blocks))
+    material = MaterialTables(vanilla, blocks, noise_index, dict(tables.roots), settings)
+    out.append(emit_material(material, blocks))
     out.append("\n}  // namespace proto::gen::worldgen\n")
     climate, biomes = climate_table(version, vanilla)
     return {"worldgen.hpp": "".join(out), "worldgen_climate.hpp": emit_climate(hdr, climate),
             "worldgen_heightmaps.bin": heightmap_bits(version),
             "_stats": {"noises": len(noises), "noise_layers": len(layers) + len(blended), "density_nodes": len(tables.nodes),
-                       "climate_nodes": len(climate), "climate_biomes": len(biomes)}}
+                       "climate_nodes": len(climate), "climate_biomes": len(biomes),
+                       "material_rules": len(material.rules), "material_conditions": len(material.conditions)}}

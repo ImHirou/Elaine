@@ -16,8 +16,43 @@ Sampler& reset(Sampler& s) {
 
 }  // namespace
 
-Overworld::Overworld(i64 seed)
-    : seed_(seed), noises_(seed), aquifer_random_(noises_.random().from_hash_of("minecraft:aquifer").fork_positional()) {}
+Overworld::Overworld(i64 seed) : seed_(seed), zoom_seed_(obfuscate_seed(seed)), noises_(seed) {
+    for (u32 i = 0; i < wg::random_name::kCount; ++i)
+        randoms_[i] = noises_.random().from_hash({wg::kRandomNames[i].lo, wg::kRandomNames[i].hi}).fork_positional();
+    // MaterialSystem.generateBands, drawn from the source of "minecraft:clay_bands" itself.
+    namespace sf = wg::surface;
+    const wg::Hash& name = wg::kRandomNames[wg::random_name::kClayBands];
+    XoroshiroRandom r = noises_.random().from_hash({name.lo, name.hi});
+    constexpr i32 kBands = 192;
+    std::fill(std::begin(clay_bands_), std::end(clay_bands_), sf::kTerracotta);
+    for (i32 i = 0; i < kBands; ++i) {
+        i += r.next_int(5) + 1;
+        if (i < kBands) clay_bands_[i] = sf::kOrangeTerracotta;
+    }
+    const auto make_bands = [&](i32 base_width, u16 state) {
+        const i32 count = r.next_int_between_inclusive(6, 15);
+        for (i32 i = 0; i < count; ++i) {
+            const i32 width = base_width + r.next_int(3), start = r.next_int(kBands);
+            for (i32 p = 0; start + p < kBands && p < width; ++p) clay_bands_[start + p] = state;
+        }
+    };
+    make_bands(1, sf::kYellowTerracotta);
+    make_bands(2, sf::kBrownTerracotta);
+    make_bands(1, sf::kRedTerracotta);
+    const i32 white = r.next_int_between_inclusive(9, 15);
+    for (i32 i = 0, start = 0; i < white && start < kBands; ++i, start += r.next_int(16) + 4) {
+        clay_bands_[start] = sf::kWhiteTerracotta;
+        if (start - 1 > 0 && r.next_boolean()) clay_bands_[start - 1] = sf::kLightGrayTerracotta;
+        if (start + 1 < kBands && r.next_boolean()) clay_bands_[start + 1] = sf::kLightGrayTerracotta;
+    }
+}
+
+i32 Terrain::highest_filled_section() const {
+    for (i32 s = static_cast<i32>(kSections) - 1; s >= 0; --s)
+        for (u32 i = 0; i < 4096; ++i)
+            if (!world::is_air(blocks[static_cast<u32>(s) * 4096 + i])) return s;
+    return -1;
+}
 
 void Terrain::begin(i32 cx, i32 cz) {
     chunk_x = cx;

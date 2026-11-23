@@ -56,4 +56,33 @@ u16 climate_biome(i32 leaf);
 // sets a section's cells x, then y, then z: the order its palette is in.)
 void fill_biomes(Sampler& sampler, i32 chunk_x, i32 chunk_z, i32 min_y, u32 sections, u16* out);
 
+// The biomes a chunk's terrain is made by: the chunk's own cells and one ring of the cells of the
+// chunks around it - what vanilla reads of its neighbours through a WorldGenRegion. The biome of
+// a *block* is not its cell's (BiomeManager.getBiome): it is the biome of the nearest of the
+// eight cell corners around, each moved a little by the seed, and for a block near the edge that
+// is a neighbour's cell.
+struct BiomeGrid {
+    static constexpr i32 kWidth = 6;  // quart columns -1 .. 4 of the chunk, in x and in z
+    i32 qx0 = 0, qy0 = 0, qz0 = 0;    // the quart coordinates of the first cell
+    i32 height = 0;                   // cells in y: four a section
+    u16 cells[kWidth * kWidth * 96];  // by (x * kWidth + z) * height + y
+    u64 present[2] = {0, 0};          // the biomes that are in it, a bit each
+
+    // ChunkAccess.getNoiseBiome: the biome of a quart cell, y clamped into the world.
+    u16 at(i32 qx, i32 qy, i32 qz) const {
+        const i32 y = qy < qy0 ? 0 : qy >= qy0 + height ? height - 1 : qy - qy0;
+        return cells[((qx - qx0) * kWidth + (qz - qz0)) * height + y];
+    }
+    bool has(u32 biome) const { return (present[biome >> 6] >> (biome & 63)) & 1; }
+};
+
+// The grid of a chunk, and - as fill_biomes - the chunk's own cells into `own`. A neighbour's
+// cell is what the neighbour's own filling makes of it: where two biomes are equally near there,
+// the neighbour is filled as it would be, for its answer depends on the cell before.
+void fill_biome_grid(Sampler& sampler, i32 chunk_x, i32 chunk_z, i32 min_y, u32 sections, BiomeGrid& grid, u16* own);
+
+// BiomeManager.getBiome: the biome of a block. `zoom_seed` is the world's seed as clients are
+// told it (obfuscate_seed) - a client zooms the same way.
+u16 zoomed_biome(const BiomeGrid& grid, i64 zoom_seed, i32 x, i32 y, i32 z);
+
 }  // namespace worldgen
