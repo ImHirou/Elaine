@@ -1271,6 +1271,43 @@ from the moment the chunk next ticks blocks. Where the chunks that tick end, wat
 block short of vanilla's: vanilla's water enters the chunk beyond and waits there, here a
 block is set only in chunks that tick.
 
+### Buckets, and the look that aims them (`server/buckets.cpp`, `world::clip`)
+
+A bucket is used on no block (`use_item`: the hand, the sequence the client predicted with,
+and the way it looks - which the server takes, as vanilla does). Where it goes is the server's
+to work out, by a look: `Item.getPlayerPOVHitResult` is `BlockGetter.clip` from the eyes along
+`Entity.calculateViewVector` (`Mth.sin`'s table again), as far as the hand reaches.
+`world::clip` is that method: the cells of `traverseBlocks`, in each the block's shape and the
+fluid's, the nearer of the two, the block of two as near. The shape is the *outline*
+(`ClipContext.Block.OUTLINE`: 866 of them, a table by state from the game as it runs) - a
+torch stops a look that no body is stopped by - moved where vanilla moves it by where the
+block stands (`BlockState.getOffset`: a flower's; the generator holds its copy of that
+function to the samples gamedata took of the real one), with the face of
+`getInteractionShape` where that is met sooner (the hollow of a cauldron). A fluid stops the
+look of an empty bucket if it is a source, and nothing else's.
+
+Then `BucketItem.use` and `emptyContents`, branch for branch: into the block that was met if
+that holds water by itself, else against the side that was met; into the place of what gives
+way to a fluid (`BlockState.canBeReplaced(Fluid)`: replaceable, or not solid), which breaks
+with its drops unless it is a liquid; against the side instead when the player sneaks at what
+would take it. An empty bucket takes what the block gives (`BucketPickup.pickupBlock`: a
+source whole, a block that holds water its water). Everyone is creative, so
+`ItemUtils.createFilledResult` leaves the hand as it was and puts a full bucket into the
+inventory only if there is none. The sounds are vanilla's two: emptying at the block, filling
+at the player, neither to the player itself.
+
+Compared with a vanilla 26.3 server by `tools/vanilla/swing_probe.py` - water and lava poured
+out beside the player, into a source, taken up again, into the air, with the off hand, a full
+bucket appearing in the inventory: the same swings, block changes, sounds and slots, for the
+one who does it and the one who watches.
+
+The same look, with collision shapes, is what concrete powder asks on a fast fall
+(`FallingBlockEntity.tick`: `ClipContext.Block.COLLIDER`, `Fluid.SOURCE_ONLY`).
+
+Not there: the buckets of other classes (a mob's, powder snow, milk); spawn protection
+(`Level.mayInteract`); the smoke where water is poured out in a dimension that has none; and,
+as everywhere, what a fluid state's shape was *first asked for with* (see "Physics").
+
 ### Compared with vanilla
 
 `tools/vanilla/block_probe.py` runs both servers through the same 192 steps - two bots, one
@@ -1416,8 +1453,7 @@ tick queue under load and the random pass belong with the first claim that any o
   water that was saved in the middle of its flow flows on.)
 - **The game time across a restart**: it starts at zero. Delays do not mind; the day will.
 - Falling: anvils and pointed dripstone, which hurt what they land on; a falling block's own
-  tag from `/summon` (it is sand); concrete powder that falls faster than a block a tick is
-  looked for water along its way only when it falls straight down.
+  tag from `/summon` (it is sand).
 - The sound of a block being placed.
 
 ## Physics (src/phys/, src/world/collide.*, src/server/physics.cpp)
@@ -2603,7 +2639,7 @@ Roughly in dependency order:
    shape"). Next: plants and what else needs something to stand on, and the blocks that
    answer a click - doors, trapdoors, fence gates. Fluid ticks are there, water and lava flow
    ("Water and lava"), the water of a waterlogged block with them, and the sponge takes it up;
-   what is in them floats, sinks, is carried and burns ("In water and lava"); next of the fluids: buckets. Then redstone, the other block entities. And what the first four still lack:
+   what is in them floats, sinks, is carried and burns ("In water and lava"); buckets pour them out and take them up ("Buckets"). Then redstone, the other block entities. And what the first four still lack:
    experience orbs.
 8. **Commands**: tags into the world - block entity data, `/summon`'s tag
    (the SNBT reader is there) - `facing`, then the commands that wait for their subject. **Chat**: signed (see "Chat").

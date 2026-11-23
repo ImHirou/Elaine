@@ -137,6 +137,7 @@ set(MC_GAME_SOURCES
   src/server/commands.cpp
   src/server/entity_tags.cpp
   src/server/explosion.cpp
+  src/server/buckets.cpp
   src/server/falling.cpp
   src/server/fluids.cpp
   src/server/game.cpp

@@ -798,14 +798,14 @@ void Game::tick_furnaces() {
 
 // ServerLevel.playSeededSound -> PlayerList.broadcast: everyone within the sound's range
 // (SoundEvent.getRange: 16 blocks, more for a volume above 1).
-void Game::play_sound(u32 sound, u32 source, double x, double y, double z, float volume, float pitch) {
+void Game::play_sound(u32 sound, u32 source, double x, double y, double z, float volume, float pitch, u32 but) {
     scratch_.clear();
     write_packet(scratch_, s_.compression_threshold, cb::Sound{sound, source, x, y, z, volume, pitch, random()});
     const double range = volume > 1.0f ? 16.0 * static_cast<double>(volume) : 16.0;
     const u32 n = static_cast<u32>(players_.size());
     for (u32 i = 0; i < n; ++i) {
         const double dx = x - ents_.x[i], dy = y - ents_.y[i], dz = z - ents_.z[i];
-        if (dx * dx + dy * dy + dz * dz < range * range) out(i).append(scratch_.data, scratch_.len);
+        if (i != but && dx * dx + dy * dy + dz * dz < range * range) out(i).append(scratch_.data, scratch_.len);
     }
 }
 

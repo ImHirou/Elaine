@@ -19,10 +19,7 @@
 //   * block entity data that falls with the block (FallingBlockEntity.blockData): no block
 //     that falls has a block entity;
 //   * a falling block's own NBT from /summon: one that is summoned is sand, as in vanilla
-//     without a tag;
-//   * concrete powder that falls faster than a block a tick is looked for water along its way
-//     (Level.clip) only when it falls straight down, and what stops that look is any block with
-//     a collision shape, not the shape itself.
+//     without a tag.
 #include <cmath>
 
 #include "server/game.hpp"
@@ -100,18 +97,14 @@ void Game::tick_falling(u32 slot, u32 row) {
     BlockPos pos{floor_int(m.pos[0]), floor_int(m.pos[1]), floor_int(m.pos[2])};  // blockPosition()
     const bool concrete = info.kind == block_kind::kConcretePowder;
     bool in_water = concrete && world::holds_water(state_for_client(pos));
-    if (concrete && m.vel[0] * m.vel[0] + m.vel[1] * m.vel[1] + m.vel[2] * m.vel[2] > 1.0 && from[0] == m.pos[0] &&
-        from[2] == m.pos[2]) {
-        // Level.clip(from, to, COLLIDER, SOURCE_ONLY): a source of water on its way catches it,
-        // though the tick carried it through (see the top of the file for what this leaves out).
-        for (i32 y = floor_int(from[1]); y >= pos.y; --y) {
-            const BlockState there = state_for_client({pos.x, y, pos.z});
-            if (world::holds_water_source(there)) {
-                pos.y = y;
-                in_water = true;
-                break;
-            }
-            if ((gp::kState[there] & gp::kShapeMask) != gp::kShapeNone) break;
+    if (concrete && m.vel[0] * m.vel[0] + m.vel[1] * m.vel[1] + m.vel[2] * m.vel[2] > 1.0) {
+        // Level.clip(from, to, COLLIDER, SOURCE_ONLY): faster than a block a tick it may have
+        // gone through water - a source on its way catches it, where the look along its way is
+        // stopped by one before anything it would collide with.
+        const world::ClipHit hit = world::clip(world_, from, m.pos, world::ClipBlock::kCollider, world::ClipFluid::kSourceOnly);
+        if (hit.hit && world::holds_water(state_for_client({hit.x, hit.y, hit.z}))) {
+            pos = {hit.x, hit.y, hit.z};
+            in_water = true;
         }
     }
     // discard(), then Entity.spawnAtLocation(level, block) if it drops: what it is, as an item, where it is.

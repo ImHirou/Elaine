@@ -9,7 +9,8 @@
 `record` joins two bots (tests/integration/mcproto.py, offline mode, creative): A watches, B does
 what a client's left and right mouse buttons do - punches the air, punches again before and after
 the first swing is half over, hits A, places blocks with either hand, clicks where nothing can be
-placed, breaks the blocks again, drops items around a punch, punches and stabs with a spear.
+placed, breaks the blocks again, drops items around a punch, punches and stabs with a spear,
+empties buckets of water and lava beside itself and fills them again.
 Every packet either of them receives about B's arm, about a block or as a sound is logged per
 step with its bytes. `diff` lines two recordings up step by step.
 
@@ -176,6 +177,25 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str) -> 
     step("a punch with the spear", b.punch, ticks=16)
     step("a stab with the spear", lambda: b.action(STAB), ticks=30)
     step("slot 0 again", lambda: b.select(0))
+
+    # Buckets (BucketItem.use): emptied where B looks, filled from what it looks at - the block
+    # east of its feet, so that B itself stays dry (a player that gets into water splashes, at a
+    # pitch that is chance). The game stands still: what is poured out stays where it is put.
+    beside = (-90.0, 58.3)      # from B's eyes down onto the ground one block east
+    step("buckets into slots 3, 4 and 5: water, empty, lava; B looks at the ground beside it",
+         lambda: (b.give(39, "kWaterBucket"), b.give(40, "kBucket"), b.give(41, "kLavaBucket"), b.select(3), b.look(*beside)))
+    step("the water bucket used: water on the ground beside B", b.use)
+    step("the same again, into the source", b.use)
+    step("the empty bucket: the water is taken", lambda: (b.select(4), b.use()))
+    step("the empty bucket at the ground it left: nothing", b.use)
+    step("the empty bucket into the air", lambda: (b.look(0.0, -90.0), b.use()))
+    step("the lava bucket", lambda: (b.look(*beside), b.select(5), b.use()))
+    step("the lava bucket out of the inventory; the empty one takes the lava, and a full one is put there",
+         {0: lambda: b.give(41, None), 2: lambda: (b.select(4), b.use())}, ticks=10)
+    step("a water bucket in the off hand, an empty main hand: used with the off hand",
+         {0: lambda: (b.give(45, "kWaterBucket"), b.select(8)), 2: lambda: b.use(hand=1)}, ticks=10)
+    step("...and taken up again; the off hand emptied, slot 0", {0: lambda: (b.select(4), b.use()), 3: lambda: (b.give(45, None), b.select(0))},
+         ticks=10)
     step("B disconnects", lambda: b.c.close(), ticks=10, b_alive=False)
 
     lock.close()

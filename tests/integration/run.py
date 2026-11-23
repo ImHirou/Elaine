@@ -3417,6 +3417,90 @@ def placed_in_water():
         shutil.rmtree(world, ignore_errors=True)
 
 
+def use(c: Client, seq: int, yaw: float, pitch: float, hand: int = 0) -> None:
+    """use_item: the right click on no block - with the way the client looks, which the server takes."""
+    c.send("use_item", varint(hand) + varint(seq) + struct.pack(">ff", yaw, pitch))
+
+
+@test()
+def buckets(srv: Server):
+    """A bucket is emptied where its holder looks, and filled from what it looks at (BucketItem.use
+    over Item.getPlayerPOVHitResult: a look as far as the hand reaches, stopped by a block's
+    outline - and, of an empty bucket's, by a source). The fluid goes against the side that was
+    met; into the block itself if that holds water; into the place of what gives way to it,
+    which breaks. Everyone is creative: a bucket stays what it is, and filling one puts a full
+    one into the inventory if none is there. The game stands still, so what is set stays."""
+    a, b = srv.client(), srv.client()
+    ja = join(a, "Alice")
+    join(b, "Bob")
+    a.expect("player_info_update")
+    for cl in (a, b):
+        cl.send("player_loaded")
+    settle(a, b)
+    make_op(srv, a, "Alice")
+    assert run_command(a, "tick freeze")["said"] == [tr("commands.tick.status.frozen")]
+    settle(b)
+    b.ignore = {"block_update", "section_blocks_update", "light_update", "system_chat"}
+    ida = ja["login"]["entity_id"]
+    water, lava = mc.BLOCK["kWater"], mc.BLOCK["kLava"]
+    feet, DOWN_AT_FEET = (8, -60, 8), (0.0, 90.0)
+    BLOCKS, PLAYERS = 4, 7              # SoundSource
+    for slot, item in enumerate(("kWaterBucket", "kBucket", "kLavaBucket")):
+        give(a, 36 + slot, I[item])
+        a.slots[36 + slot] = plain(item)        # (a client knows what it put there)
+    settle(a, b)
+
+    def used(slot: int, seq: int, looks: tuple, hand: int = 0, ticks: int = 3) -> tuple:
+        """Alice uses what is in that hotbar slot: the blocks that changed, what Bob heard, whether he saw her arm."""
+        mark = len(b.entity_log)
+        b.sounds.clear()
+        hold(a, slot)
+        use(a, seq, *looks, hand=hand)
+        changed = collect(a, ticks=ticks)
+        settle(b)
+        swung = [what for name, e, what in b.entity_log[mark:] if name == "swing_animation" and e == ida]
+        return changed, [(s[0], s[1], s[2]) for s in b.sounds], len(swung)
+
+    # Water, looking at her feet: it is met by the ground, and goes on top of it - where she stands.
+    assert used(0, 1, DOWN_AT_FEET) == ({feet: water}, [(mc.SOUND["kItemBucketEmpty"], BLOCKS, (8.5, -59.5, 8.5))], 1)
+    assert a.slots[36] == plain("kWaterBucket")                      # still full
+    # ...and once more into the source: nothing changes, and it sounds all the same.
+    assert used(0, 2, DOWN_AT_FEET) == ({}, [(mc.SOUND["kItemBucketEmpty"], BLOCKS, (8.5, -59.5, 8.5))], 1)
+    # The empty bucket: its look is stopped by the source. The water is gone; a full bucket is in the inventory already.
+    assert used(1, 3, DOWN_AT_FEET) == ({feet: AIR}, [(mc.SOUND["kItemBucketFill"], PLAYERS, (8.5, -60.0, 8.5))], 1)
+    assert a.slots[36:39] == [plain("kWaterBucket"), plain("kBucket"), plain("kLavaBucket")]
+    # ...into the air, or at the ground: nothing to take, no arm.
+    assert used(1, 4, (0.0, -90.0)) == ({}, [], 0)
+    assert used(1, 5, DOWN_AT_FEET) == ({}, [], 0)
+    # Lava. With no bucket of it left in the inventory, filling one puts one there.
+    assert used(2, 6, DOWN_AT_FEET) == ({feet: lava}, [(mc.SOUND["kItemBucketEmptyLava"], BLOCKS, (8.5, -59.5, 8.5))], 1)
+    a.send("set_creative_mode_slot", struct.pack(">h", 38) + mc.item_stack(0, 0))
+    a.slots[38] = None
+    assert used(1, 7, DOWN_AT_FEET) == ({feet: AIR}, [(mc.SOUND["kItemBucketFillLava"], PLAYERS, (8.5, -60.0, 8.5))], 1)
+    assert a.slots[38] == plain("kLavaBucket") and a.slots[37] == plain("kBucket"), a.slots[36:40]
+
+    # A slab east of her: water goes into it; an empty bucket takes it out again (its look meets the
+    # water that stands over the slab's top); one who sneaks pours it on top instead.
+    at_slab = (-90.0, 48.0)             # from her eyes down onto the slab's top
+    assert run_command(a, "setblock 9 -60 8 oak_slab")["said"] == [tr("commands.setblock.success", 9, -60, 8)]
+    assert used(0, 8, at_slab)[0] == {(9, -60, 8): slab("kOakSlab", "bottom", True)}
+    assert used(1, 9, at_slab) == ({(9, -60, 8): slab("kOakSlab")}, [(mc.SOUND["kItemBucketFill"], PLAYERS, (8.5, -60.0, 8.5))], 1)
+    a.send("player_input", bytes([0x20]))
+    assert used(0, 10, at_slab)[0] == {(9, -59, 8): water}
+    a.send("player_input", bytes([0x00]))
+    settle(a, b)                        # (she stands up with her next tick: the look is from where her eyes are)
+    assert used(1, 11, at_slab)[0] == {(9, -59, 8): AIR}
+
+    # A torch south of her. A look that meets it puts the water against the side it met - back at her feet -
+    # and leaves it be; a look past it at the ground under it puts the water in its place: it breaks, and drops.
+    run_command(a, "setblock 8 -60 9 torch")
+    assert used(0, 12, (0.0, 52.9))[0] == {feet: water}
+    assert used(1, 13, DOWN_AT_FEET)[0] == {feet: AIR}
+    assert not of_type(a, "kItem")
+    assert used(0, 14, (-14.5, 49.3))[0] == {(8, -60, 9): water}
+    assert [e.data[D_ITEM][1][0] for e in of_type(a, "kItem").values()] == [I["kTorch"]]
+
+
 @test()
 def imported_water_flows_on():
     """A vanilla world saved in the middle of a flow: the chunk's `fluid_ticks` are read with it

@@ -34,6 +34,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <vector>
 
 #include "phys/physics.hpp"
@@ -761,6 +762,93 @@ TEST(Physics, AtRestOrNotItIsTheSameTick) {
 
 TEST(Collide, TheShortcutsAnswerAsTheLongWayDoes) { against_the_long_way(false, 150000); }
 TEST(Collide, TheSameWithFencesAndWallsAbout) { against_the_long_way(true, 150000); }
+
+// BlockGetter.clip with ClipContext.Block.OUTLINE: what a look is stopped by - an outline where
+// nothing collides (a torch), not the air over half a block, a fluid if that is asked for.
+TEST(Collide, ALookIsStoppedByWhatItMeets) {
+    FlatGenerator gen(-64, 24, FlatGenerator::default_layers(), 39);
+    Dimension dim(proto::reg::dimension_type::kOverworld, "minecraft:overworld", gen, proto::kNoCompression);
+    dim.ticking(0, 0);
+    const auto put = [&](i32 x, i32 y, i32 z, std::string_view spec) {
+        ASSERT_TRUE(dim.set_block(x, y, z, state_of(spec))) << spec;
+    };
+    const auto look = [&](double x, double y, double z, double tx, double ty, double tz, ClipFluid fluid = ClipFluid::kNone) {
+        const double from[3] = {x, y, z}, to[3] = {tx, ty, tz};
+        return clip_outline(dim, from, to, fluid);
+    };
+    // Down at the ground (its top is -60): the side that is met is the top.
+    ClipHit h = look(3.5, -57.0, 3.5, 3.5, -62.0, 3.5);
+    EXPECT_TRUE(h.hit && !h.inside);
+    EXPECT_EQ(std::tie(h.x, h.y, h.z), std::tuple(3, -61, 3));
+    EXPECT_EQ(h.face, kUp);
+    EXPECT_EQ(h.at[1], -60.0);
+    // Along the ground, into nothing.
+    EXPECT_FALSE(look(3.5, -59.0, 3.5, 8.5, -59.0, 3.5).hit);
+    EXPECT_FALSE(look(3.5, -59.0, 3.5, 3.5, -59.0, 3.5).hit);  // (nowhere)
+    // A stone in the way: its west side. From inside it: at once, facing back.
+    put(6, -60, 3, "minecraft:stone");
+    h = look(3.5, -59.5, 3.5, 8.5, -59.5, 3.5);
+    EXPECT_TRUE(h.hit);
+    EXPECT_EQ(std::tie(h.x, h.y, h.z, h.face), std::tuple(6, -60, 3, static_cast<u8>(kWest)));
+    EXPECT_EQ(h.at[0], 6.0);
+    h = look(6.5, -59.5, 3.5, 8.5, -59.5, 3.5);
+    EXPECT_TRUE(h.hit && h.inside);
+    EXPECT_EQ(std::tie(h.x, h.face), std::tuple(6, static_cast<u8>(kWest)));  // (it looks east: the opposite)
+    // A torch stops no body and stops a look; over a slab's lower half the look goes on.
+    put(5, -60, 5, "minecraft:torch");
+    put(6, -60, 5, "minecraft:stone");
+    h = look(3.5, -59.8, 5.5, 8.5, -59.8, 5.5);
+    EXPECT_EQ(std::tie(h.hit, h.x), std::tuple(true, 5));
+    put(5, -60, 5, "minecraft:stone_slab[type=bottom]");
+    h = look(3.5, -59.3, 5.5, 8.5, -59.3, 5.5);
+    EXPECT_EQ(std::tie(h.hit, h.x), std::tuple(true, 6));
+    h = look(3.5, -59.8, 5.5, 8.5, -59.8, 5.5);
+    EXPECT_EQ(std::tie(h.hit, h.x, h.face), std::tuple(true, 5, static_cast<u8>(kWest)));
+    // Water: nothing to a look that asks for no fluid, the nearer thing to one that does - a
+    // source as high as it stands, what flows only if any fluid is asked for.
+    put(5, -60, 8, "minecraft:water");
+    put(6, -60, 8, "minecraft:water[level=3]");
+    EXPECT_EQ(look(5.5, -57.0, 8.5, 5.5, -62.0, 8.5).y, -61);  // through it, to the ground
+    h = look(5.5, -57.0, 8.5, 5.5, -62.0, 8.5, ClipFluid::kSourceOnly);
+    EXPECT_EQ(std::tie(h.hit, h.y, h.face), std::tuple(true, -60, static_cast<u8>(kUp)));
+    EXPECT_EQ(h.at[1], -60.0 + static_cast<double>(8.0f / 9.0f));
+    EXPECT_EQ(look(6.5, -57.0, 8.5, 6.5, -62.0, 8.5, ClipFluid::kSourceOnly).y, -61);
+    EXPECT_EQ(look(6.5, -57.0, 8.5, 6.5, -62.0, 8.5, ClipFluid::kAny).y, -60);
+    EXPECT_EQ(look(6.5, -57.0, 8.5, 6.5, -62.0, 8.5, ClipFluid::kWater).y, -60);
+    put(6, -60, 8, "minecraft:lava");
+    EXPECT_EQ(look(6.5, -57.0, 8.5, 6.5, -62.0, 8.5, ClipFluid::kWater).y, -61);
+    EXPECT_EQ(look(6.5, -57.0, 8.5, 6.5, -62.0, 8.5, ClipFluid::kSourceOnly).y, -60);
+    // A slab with water in it, from above: the water stands over the slab, so that is met -
+    // and under more water a cell is full of it.
+    put(8, -60, 8, "minecraft:stone_slab[type=bottom,waterlogged=true]");
+    h = look(8.5, -57.0, 8.5, 8.5, -62.0, 8.5, ClipFluid::kSourceOnly);
+    EXPECT_EQ(h.at[1], -60.0 + static_cast<double>(8.0f / 9.0f));
+    EXPECT_EQ(look(8.5, -57.0, 8.5, 8.5, -62.0, 8.5).at[1], -59.5);  // (no fluid asked for: the slab's top)
+    put(8, -59, 8, "minecraft:water");
+    h = look(7.5, -59.05, 8.5, 9.5, -59.05, 8.5, ClipFluid::kSourceOnly);  // level, through the top ninth of the lower cell
+    EXPECT_EQ(std::tie(h.hit, h.x, h.y, h.face), std::tuple(true, 8, -60, static_cast<u8>(kWest)));
+
+    // A flower's outline is not in the middle of its cell: BlockState.getOffset moves it, by
+    // where the block stands (these are what a 26.3 server answers: mcgen gamedata, `offset`).
+    double off[3];
+    ASSERT_TRUE(outline_offset(state_of("minecraft:poppy"), 1, 0, off));
+    EXPECT_EQ(std::tuple(off[0], off[1], off[2]), std::tuple(0.11666667461395264, 0.0, -0.01666666567325592));
+    ASSERT_TRUE(outline_offset(state_of("minecraft:poppy"), -30000000, 29999999, off));
+    EXPECT_EQ(std::tuple(off[0], off[1], off[2]), std::tuple(-0.25, 0.0, 0.15000000596046448));
+    ASSERT_TRUE(outline_offset(state_of("minecraft:pointed_dripstone"), 5, 11, off));
+    EXPECT_EQ(std::tuple(off[0], off[1], off[2]), std::tuple(0.0833333432674408, 0.0, -0.125));  // (an eighth at the most)
+    EXPECT_FALSE(outline_offset(state_of("minecraft:torch"), 5, 11, off));
+    EXPECT_FALSE(outline_offset(state_of("minecraft:short_grass"), 5, 11, off));  // (its picture moves, its outline does not)
+    // ...so a look along the west edge of the cell meets the poppy at (0, 0), which stands a
+    // quarter of a block west and north of the middle, and not the one at (1, 0).
+    put(0, -60, 0, "minecraft:poppy");
+    put(1, -60, 0, "minecraft:poppy");
+    ASSERT_TRUE(outline_offset(state_of("minecraft:poppy"), 0, 0, off));
+    EXPECT_EQ(std::tuple(off[0], off[2]), std::tuple(-0.25, -0.25));
+    EXPECT_TRUE(look(0.25, -57.0, 0.25, 0.25, -59.9, 0.25).y == -60);  // through where the moved outline is
+    EXPECT_TRUE(look(0.5, -57.0, 0.5, 0.5, -59.9, 0.5).hit == false);  // the middle of the cell is free
+    EXPECT_TRUE(look(1.5, -57.0, 0.5, 1.5, -59.9, 0.5).y == -60);      // (1, 0): a tenth east of the middle, still under the look
+}
 
 TEST(Collide, AFenceIsMetFromTheCellAbove) {
     // A fence post is 1.5 blocks tall: a box that stands in the cell above it, a quarter of a

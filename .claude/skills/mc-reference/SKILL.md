@@ -160,6 +160,19 @@ pseudo-code did not). Where a counter's first value matters, read the `dup_x1` i
   boxes and that grid (`collision_grids`); most joined shapes have exactly the lines their boxes' faces cut, 42 of
   330 have more (a piston's head, a straw bed). `getFaceShape(direction)` is the layer of cells at 1e-7 inside
   that face, stretched over the whole axis - what `WallBlock` holds its test shapes against.
+- **A look is `BlockGetter.clip`**, not a line against collision boxes: `ClipContext.Block` says which shape a block
+  has for it (`OUTLINE`: what the crosshair picks - a torch has one and no collision; `COLLIDER`; `FALLDAMAGE_RESETTING`)
+  and `ClipContext.Fluid` whether a fluid stops it. The outline of a flower, of bamboo and of a dripstone is moved by
+  where the block stands (`BlockState.getOffset`); `getInteractionShape` only changes which *face* was met. A use of
+  an item on no block (`use_item`) aims with it: `Item.getPlayerPOVHitResult`, from the eyes of the pose the player
+  has in that tick.
+- **What a fluid state's shape is depends on what was asked first**: `FlowingFluid.getShape` keeps one shape a state
+  in a map, built from the height at the first position it was asked about - "under more of the same" or not. A
+  recording that crosses the top ninth of a cell of water sideways shows whichever came first on that server.
+- **An entity in a fluid** is `EntityFluidInteraction` (26.x): trackers by fluid *type*, currents by fluid *tag*, the
+  cells walked x, then y, then z. A mob's `MoveControl.tick` runs every tick it has AI and may add to its velocity
+  with no goal asking (`SmoothSwimmingMoveControl` with gravity, `DrownedMoveControl`): read the control of a class
+  before taking its `travel` for all there is - and a mob with a `FloatGoal` cannot be recorded in deep water.
 
 ## What only exists once the game has loaded: `mcgen.py data`
 

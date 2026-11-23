@@ -1219,6 +1219,20 @@ struct UseItemOn {  // hand, BlockHitResult, sequence
     }
 };
 
+struct UseItem {  // ServerboundUseItemPacket: hand, sequence, the player's rotation as the client has it
+    u32 hand;     // 0 main, 1 off
+    i32 sequence;
+    float yaw, pitch;
+    static UseItem decode(Reader& r) {
+        UseItem u;
+        u.hand = r.varint() == 1 ? 1 : 0;  // InteractionHand.STREAM_CODEC: ByIdMap ... OutOfBoundsStrategy.ZERO
+        u.sequence = static_cast<i32>(r.varint());
+        u.yaw = r.f32();
+        u.pitch = r.f32();
+        return u;
+    }
+};
+
 struct SetCarriedItem {
     i16 slot;  // hotbar index 0..8
     static SetCarriedItem decode(Reader& r) { return {static_cast<i16>(r.be16())}; }

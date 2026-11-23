@@ -40,7 +40,8 @@ slab leaking downwards, stairs between two sources, a wet lantern whose floor go
 sponge: set into spread water, set dry with water beside it, set beside a wet slab. Then what is
 afloat: an item set into a pool, into a channel that carries it, dropped into the pool - a
 splash, and the hiss of one that burned - into lava, where it burns up or, being of netherite,
-floats: every move of it that the bots are told, and what they hear. Last, TNT on five sides
+floats: every move of it that the bots are told, and what they hear; and concrete powder that
+falls into the pool from far enough up to be faster than a block a tick. Last, TNT on five sides
 of a block of redstone.
 
 `vanilla` starts the reference server under the rules in AGENTS.md (from .cache/vanilla-server/,
@@ -68,7 +69,8 @@ Reading the diff:
     with the tick. Random ticks have no timing to compare - a step waits until what it is about
     has happened, and what is compared is that it did.
   * Items are compared as they were dropped; two that lie close enough become one stack,
-    which is chance.
+    which is chance - and so is where a dropped item lies and when water reaches it: the
+    splash of one is left out, but in the steps that follow their items.
   * Grass that dies under a block, and dirt that grass takes, is a random tick whenever it
     happens: in the steps that are timed, a block that becomes grass or dirt is left out. (On
     ours that is within a second, the random ticks being what they are for the whole run.)
@@ -672,6 +674,8 @@ def record(port: int, out_path: str, name_a: str, name_b: str, random_ticks, con
         step("an item falls into the pool: a splash", lambda: summon(at(-5, 1, 8), 4.0), ticks=13, follow=True)
         step("a burning item falls into the pool: its fire is out, with a hiss", ticks=13, follow=True,
              action=lambda: (console("kill @e[type=minecraft:item]"), summon(at(-5, 1, 8), 4.0, more=",Fire:200s")))
+        step("concrete powder forty blocks over the pool: where its fall meets the water it is concrete", ticks=60,
+             action=lambda: setblock(at(-5, 42, 8), "minecraft:white_concrete_powder"))
         step("an item over the lava: it falls in and burns", lambda: summon(at(-5, 1, 15), 2.5), ticks=12, follow=True)
         step("an ingot of netherite in the lava: it sinks, and floats up", ticks=60, follow=True,
              action=lambda: summon(at(-5, 1, 15), 1.2, "minecraft:netherite_ingot"))
@@ -790,7 +794,11 @@ def _normalise(rec: dict, who: str) -> dict[str, list]:
             elif name == "sound":
                 sound, source = r.varint() - 1, r.varint()
                 pos = tuple(v / 8 - o for v, o in zip((r.i32(), r.i32(), r.i32()), origin))
-                if sound in mc.SOUND.values():   # only the sounds this server makes at all
+                # Only the sounds this server makes at all - and of those an entity's (a splash,
+                # the hiss of its fire: every source but BLOCKS) only where the step follows its
+                # items: what a block drops is thrown as chance has it, so where and when it
+                # meets water is no rule.
+                if sound in mc.SOUND.values() and (source == 4 or follow):
                     row(name, f"{sound} source {source} at {pos}")
             elif name == "explode":
                 rows.append(("  (not compared)", "an explosion"))

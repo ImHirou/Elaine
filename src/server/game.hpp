@@ -584,6 +584,9 @@ class Game {
     // player is shown its own arm swing).
     enum class Used : u8 { kPass, kSuccess, kSuccessServer };
     Used use_block(u32 pi, proto::BlockPos pos, world::BlockState state, const ItemStack& held, u32 hand);
+    // ---- buckets (server/buckets.cpp)
+    Used use_bucket(u32 pi, const ItemStack& held);
+    bool empty_bucket(u32 pi, u32 content, proto::BlockPos pos, const world::ClipHit* hit);
     // ---- signs (server/signs.cpp)
     static bool sign_kind(u32 kind);
     static u32 sign_facing(world::BlockState s);    // of the two that hang on a wall: a Direction
@@ -612,7 +615,8 @@ class Game {
     void run_block_events();
     void tick_furnaces();
     void drop_contents(proto::BlockPos pos, ItemStack* items, u32 n);
-    void play_sound(u32 sound, u32 source, double x, double y, double z, float volume, float pitch);
+    // `but`: a player who is not sent it - the one whose client makes the sound itself (Level.playSound(player, ...)).
+    void play_sound(u32 sound, u32 source, double x, double y, double z, float volume, float pitch, u32 but = kNone);
     float random_float() { return static_cast<float>(random() >> 40) * (1.0f / 16777216.0f); }           // RandomSource.nextFloat
     double random_double() { return static_cast<double>(random() >> 11) * (1.0 / 9007199254740992.0); }  // nextDouble
     u32 random_int(u32 bound) { return static_cast<u32>((random() >> 32) * bound >> 32); }               // nextInt(bound)
@@ -627,6 +631,7 @@ class Game {
     // ---- blocks (server/block_actions.cpp)
     void on_player_action(u32 pi, const proto::sb::PlayerAction& a);
     void on_use_item_on(u32 pi, const proto::sb::UseItemOn& u);
+    void on_use_item(u32 pi, const proto::sb::UseItem& u);
     void on_pick_block(u32 pi, const proto::sb::PickItemFromBlock& pk);
     bool client_loaded(const Player& p) const { return tick_ >= p.loaded_at_tick; }
     bool crouching(const Player& p) const { return p.shift && !p.flying; }

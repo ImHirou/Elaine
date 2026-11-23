@@ -98,6 +98,37 @@ BlockProperty block_property(u32 block, u32 index) {
     return {p.name, {cmd::kPropertyValues + p.first_value, p.values}, use.stride};
 }
 
+std::span<const Box> outline_boxes(BlockState s) {
+    const u32 id = state::outline_of(s) & state::kOutlineMask;
+    return {gen::kOutlineBoxes + gen::kOutlineFirst[id], gen::kOutlineBoxes + gen::kOutlineFirst[id + 1]};
+}
+
+bool outline_offset(BlockState s, i32 x, i32 z, double out[3]) {
+    out[0] = out[1] = out[2] = 0.0;
+    if (LIKELY(!(state::outline_of(s) & state::kOutlineMoves))) return false;
+    const u32 block = block_of(s);
+    const gen::ShapeOffset* how = nullptr;
+    for (const gen::ShapeOffset& o : gen::kShapeOffsets)
+        if (o.block == block) how = &o;
+    if (!how) return false;
+    // Mth.getSeed(x, 0, z): the first product is an int's, the second a long's.
+    u64 seed = static_cast<u64>(static_cast<i64>(static_cast<i32>(static_cast<u32>(x) * 3129871u))) ^
+               (static_cast<u64>(static_cast<i64>(z)) * 116129781ull);
+    seed = seed * seed * 42317861ull + seed * 11ull;
+    const i64 bits = static_cast<i64>(seed) >> 16;
+    const auto part = [&](u32 shift) { return static_cast<double>(static_cast<float>(bits >> shift & 15) / 15.0f); };
+    const double limit = static_cast<double>(how->max_horizontal);
+    out[0] = std::clamp((part(0) - 0.5) * 0.5, -limit, limit);
+    out[2] = std::clamp((part(8) - 0.5) * 0.5, -limit, limit);
+    if (how->xyz) out[1] = (part(4) - 1.0) * static_cast<double>(how->max_vertical);
+    return true;
+}
+
+std::span<const Box> interaction_boxes(BlockState s) {
+    const u32 id = state::outline_of(s) >> state::kInteractionShift & state::kInteractionMask;
+    return {gen::kInteractionBoxes + gen::kInteractionFirst[id], gen::kInteractionBoxes + gen::kInteractionFirst[id + 1]};
+}
+
 std::span<const Box> collision_boxes(BlockState s, bool& dynamic) {
     const u32 id = state::collision_of(s);
     dynamic = id == state::kDynamicCollision;

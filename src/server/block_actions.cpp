@@ -239,6 +239,30 @@ void Game::on_use_item_on(u32 pi, const sb::UseItemOn& u) {
     send(pi, cb::BlockUpdate{next.x, next.y, next.z, state_for_client(next)});
 }
 
+// handleUseItem + ServerPlayerGameMode.useItem: the right click on no block. The client predicted
+// with a sequence like any other, and it turned the player the way it looks now.
+void Game::on_use_item(u32 pi, const sb::UseItem& u) {
+    Player& p = players_[pi];
+    if (!client_loaded(p) || u.sequence < 0) return;
+    ack(pi, u.sequence);
+    const Inventory& inv = p.menu.inv;
+    if ((u.hand == 0 ? inv.selected_item() : inv.items[inv::kOffhand]).empty()) return;
+    // absSnapRotationTo(wrapDegrees(yRot), wrapDegrees(xRot)); Entity.setYRot / setXRot pass over
+    // what is not finite.
+    if (std::isfinite(u.yaw)) ents_.yaw[pi] = wrap_degrees(u.yaw);
+    if (std::isfinite(u.pitch)) ents_.pitch[pi] = std::clamp(wrap_degrees(u.pitch), -90.0f, 90.0f);
+    // Item.use of what it holds: a bucket's. (The stack is copied: what it does may give the
+    // inventory another.) Nothing else implemented answers anything but PASS.
+    const ItemStack held = u.hand == 0 ? inv.selected_item() : inv.items[inv::kOffhand];
+    const Used used = held.info().kind == gen::item_kind::kBucket ? use_bucket(pi, held) : Used::kPass;
+    if (used == Used::kPass) return;
+    swing(pi, u.hand, {}, used == Used::kSuccessServer);
+    // Player.inventoryMenu.broadcastChanges comes with the player's tick; what the hand holds is
+    // what it held (a creative player keeps its bucket: ItemUtils.createFilledResult).
+    p.menu.send_changes(out(pi), p.threshold);
+    dirty_[pi] |= kEquipDirty;
+}
+
 // BlockItem.place
 bool Game::place_block(u32 pi, const sb::UseItemOn& u, const ItemStack& held) {
     const world::ItemInfo& item = held.info();

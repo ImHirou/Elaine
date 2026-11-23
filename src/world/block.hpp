@@ -140,5 +140,19 @@ BlockProperty block_property(u32 block, u32 index);
 // Collision boxes of a state in block-local coordinates; empty for states without collision.
 // `dynamic` is set when vanilla computes the shape from the position or the entity instead.
 std::span<const Box> collision_boxes(BlockState s, bool& dynamic);
+// What a look is stopped by: the state's outline (BlockState.getShape for nobody in particular),
+// and the shape that says which face was clicked where the outline is hollow
+// (getInteractionShape: a cauldron, a hopper; nothing for nearly every state).
+std::span<const Box> outline_boxes(BlockState s);
+std::span<const Box> interaction_boxes(BlockState s);
+// BlockState.getOffset: by how much the outline of a flower, of bamboo, of a dripstone is moved
+// from the middle of its cell - by where the block stands (x, z), the same every time. False,
+// and nothing, for every other state.
+bool outline_offset(BlockState s, i32 x, i32 z, double out[3]);
+// BlockState.canBeReplaced(Fluid): does it give way to the fluid a bucket is emptied into its
+// place - replaceable, or not solid (a torch), unless its class says never.
+ALWAYS_INLINE bool fluid_replaces(BlockState s) {
+    return !(state::kFluidFacts[s] & state::kNeverReplaced) && (is_replaceable(s) || !is_solid(s));
+}
 
 }  // namespace world

@@ -106,6 +106,25 @@ bool no_collision(const Dimension& w, const Aabb& box, u32 near = kAskSections);
 // Vec3i.compareTo puts last (y, then z, then x). False if there is none.
 bool supporting_block(const Dimension& w, const Aabb& box, double x, double y, double z, i32 out[3], u32 near = kAskSections);
 
+// BlockGetter.clip(new ClipContext(from, to, Block.OUTLINE, fluid, nobody in particular)): what a
+// look from `from` to `to` is stopped by - the outline of a block, or a fluid of the kind that
+// is asked for, whichever is nearer (the block, of two as near). Where vanilla's answer hangs on
+// the past - the shape of a fluid state is the one it was first asked for with,
+// FlowingFluid.getShape - the fluid is as high as it stands in that cell.
+enum class ClipFluid : u8 { kNone, kSourceOnly, kAny, kWater };  // ClipContext.Fluid
+enum class ClipBlock : u8 { kOutline, kCollider };               // ClipContext.Block: the shape a block has for the look
+struct ClipHit {
+    bool hit = false;     // HitResult.Type.BLOCK, not MISS
+    bool inside = false;  // the look began in the shape
+    u8 face = 0;          // BlockHitResult.getDirection: the side that was met
+    i32 x = 0, y = 0, z = 0;
+    double at[3] = {0, 0, 0};  // getLocation
+};
+ClipHit clip(const Dimension& w, const double from[3], const double to[3], ClipBlock block, ClipFluid fluid);
+inline ClipHit clip_outline(const Dimension& w, const double from[3], const double to[3], ClipFluid fluid) {
+    return clip(w, from, to, ClipBlock::kOutline, fluid);
+}
+
 // BlockGetter.clip(new ClipContext(from, to, COLLIDER, Fluid.NONE)).getType() != MISS: does the
 // line from `from` to `to` meet the collision shape of a block?
 bool clip_hits(const Dimension& w, const double from[3], const double to[3]);

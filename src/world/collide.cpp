@@ -628,7 +628,132 @@ ALWAYS_INLINE bool clip_impl(const Dimension& w, const double from[3], const dou
 
 constexpr Box kFullBlock[1] = {{{0.0, 0.0, 0.0}, {1.0, 1.0, 1.0}}};
 
+// Direction.getApproximateNearest: the direction a vector points along most - in floats, and of
+// two as good the first in Direction's order.
+u32 nearest_direction(double dx, double dy, double dz) {
+    const float v[3] = {static_cast<float>(dx), static_cast<float>(dy), static_cast<float>(dz)};
+    u32 best = kNorth;
+    float highest = 1.4e-45f;  // Float.MIN_VALUE
+    for (u32 dir = 0; dir < 6; ++dir) {
+        const float dot = v[0] * static_cast<float>(kStepX[dir]) + v[1] * static_cast<float>(kStepY[dir]) +
+                          v[2] * static_cast<float>(kStepZ[dir]);
+        if (dot > highest) highest = dot, best = dir;
+    }
+    return best;
+}
+
+// VoxelShape.clip(from, to, pos) for a shape that is these boxes in the cell (x, y, z): a look
+// that begins in it (a thousandth of its way along) is stopped there, facing back; else where
+// it first goes in through a side (AABB.clip over the boxes: getDirection, clipPoint). `moved`:
+// by how much the shape is moved in its cell (VoxelShape.move: BlockState.getOffset).
+bool clip_shape(std::span<const Box> boxes, i32 x, i32 y, i32 z, const double from[3], const double to[3], ClipHit& out,
+                const double* moved = nullptr) {
+    if (boxes.empty()) return false;
+    const double d[3] = {to[0] - from[0], to[1] - from[1], to[2] - from[2]};
+    if (d[0] * d[0] + d[1] * d[1] + d[2] * d[2] < 1.0e-7) return false;
+    const double origin[3] = {static_cast<double>(x), static_cast<double>(y), static_cast<double>(z)};
+    const double probe[3] = {from[0] + d[0] * 0.001, from[1] + d[1] * 0.001, from[2] + d[2] * 0.001};
+    static constexpr double kStill[3] = {0.0, 0.0, 0.0};
+    const double* off = moved ? moved : kStill;
+    for (const Box& b : boxes) {  // isFullWide(findIndex(...)): the cell of the shape's grid the point is in is one of a box
+        bool in = true;
+        for (u32 a = 0; a < 3; ++a)
+            in = in && probe[a] - origin[a] >= b.min[a] + off[a] && probe[a] - origin[a] < b.max[a] + off[a];
+        if (!in) continue;
+        out = {true, true, static_cast<u8>(nearest_direction(d[0], d[1], d[2]) ^ 1), x, y, z, {probe[0], probe[1], probe[2]}};
+        return true;
+    }
+    static constexpr u8 kLow[3] = {kWest, kDown, kNorth}, kHigh[3] = {kEast, kUp, kSouth};
+    double scale = 1.0;
+    i32 face = -1;
+    for (const Box& b : boxes) {
+        double lo[3], hi[3];
+        for (u32 a = 0; a < 3; ++a)
+            lo[a] = (b.min[a] + off[a]) + origin[a], hi[a] = (b.max[a] + off[a]) + origin[a];  // AABB.move(pos)
+        for (u32 a = 0; a < 3; ++a) {
+            const u32 u = (a + 1) % 3, v = (a + 2) % 3;
+            double point;
+            u8 side;
+            if (d[a] > 1.0e-7)
+                point = lo[a], side = kLow[a];
+            else if (d[a] < -1.0e-7)
+                point = hi[a], side = kHigh[a];
+            else
+                continue;
+            const double t = (point - from[a]) / d[a];
+            const double pu = from[u] + t * d[u], pv = from[v] + t * d[v];
+            if (0 < t && t < scale && lo[u] - 1.0e-7 < pu && pu < hi[u] + 1.0e-7 && lo[v] - 1.0e-7 < pv && pv < hi[v] + 1.0e-7)
+                scale = t, face = side;
+        }
+    }
+    if (face < 0) return false;
+    out = {true, false, static_cast<u8>(face), x, y, z, {from[0] + scale * d[0], from[1] + scale * d[1], from[2] + scale * d[2]}};
+    return true;
+}
+
 }  // namespace
+
+ClipHit clip(const Dimension& w, const double from[3], const double to[3], ClipBlock shape, ClipFluid fluid) {
+    ClipHit found;
+    if (from[0] == to[0] && from[1] == to[1] && from[2] == to[2]) return found;
+    const auto distance = [&](const ClipHit& h) {
+        const double dx = h.at[0] - from[0], dy = h.at[1] - from[1], dz = h.at[2] - from[2];
+        return dx * dx + dy * dy + dz * dz;
+    };
+    // BlockGetter.clip's function of a cell: the block's outline (clipWithInteractionOverride: the
+    // face is the interaction shape's where that is met sooner), the fluid's shape, the nearer.
+    const auto cell_hit = [&](i32 x, i32 y, i32 z) {
+        const BlockState s = w.block(x, y, z);
+        if (LIKELY(s == kAir)) return false;
+        ClipHit block, liquid, inner;
+        bool dynamic = false;
+        const std::span<const Box> boxes = shape == ClipBlock::kOutline ? outline_boxes(s) : collision_boxes(s, dynamic);
+        // (An outline that vanilla moves by where the block stands - a flower's - is moved. A
+        // collision shape that it moves - bamboo's, a dripstone's - is where it is in the
+        // middle of its cell, as everywhere here.)
+        double moved[3];
+        const bool moves = shape == ClipBlock::kOutline && outline_offset(s, x, z, moved);
+        if (clip_shape(boxes, x, y, z, from, to, block, moves ? moved : nullptr) &&
+            clip_shape(interaction_boxes(s), x, y, z, from, to, inner) && distance(inner) < distance(block))
+            block.face = inner.face;
+        if (const FluidState f = fluid_of(s); UNLIKELY(f) && fluid != ClipFluid::kNone) {
+            const bool picked = fluid == ClipFluid::kAny || (fluid == ClipFluid::kSourceOnly && fluid_source(f)) ||
+                                (fluid == ClipFluid::kWater && fluid_family(f) == fluid::kWaterFamily);
+            if (picked) {
+                const Box shape{{0.0, 0.0, 0.0}, {1.0, static_cast<double>(fluid_height(w, f, x, y, z)), 1.0}};
+                clip_shape({&shape, 1}, x, y, z, from, to, liquid);
+            }
+        }
+        if (!block.hit && !liquid.hit) return false;
+        const double far = 1.7976931348623157e308;
+        found = (block.hit ? distance(block) : far) <= (liquid.hit ? distance(liquid) : far) ? block : liquid;
+        return true;
+    };
+    // BlockGetter.traverseBlocks: both ends pulled a hair towards each other, then cell by cell.
+    double a[3], b[3];
+    for (u32 k = 0; k < 3; ++k) {
+        a[k] = from[k] + -kEps * (to[k] - from[k]);
+        b[k] = to[k] + -kEps * (from[k] - to[k]);
+    }
+    i32 cell[3] = {floor_i(a[0]), floor_i(a[1]), floor_i(a[2])};
+    if (cell_hit(cell[0], cell[1], cell[2])) return found;
+    i32 sign[3];
+    double t_delta[3], t[3];
+    for (u32 k = 0; k < 3; ++k) {
+        const double dk = b[k] - a[k];
+        sign[k] = dk > 0 ? 1 : dk < 0 ? -1 : 0;
+        t_delta[k] = sign[k] == 0 ? 1.7976931348623157e308 : static_cast<double>(sign[k]) / dk;
+        const double frac = a[k] - std::floor(a[k]);  // Mth.frac
+        t[k] = t_delta[k] * (sign[k] > 0 ? 1.0 - frac : frac);
+    }
+    while (t[0] <= 1.0 || t[1] <= 1.0 || t[2] <= 1.0) {
+        const u32 k = t[0] < t[1] ? (t[0] < t[2] ? 0u : 2u) : (t[1] < t[2] ? 1u : 2u);
+        cell[k] += sign[k];
+        t[k] += t_delta[k];
+        if (cell_hit(cell[0], cell[1], cell[2])) return found;
+    }
+    return found;
+}
 
 bool clip_hits(const Dimension& w, const double from[3], const double to[3]) {
     return clip_impl(w, from, to, [](BlockState s, i32, i32, i32) {

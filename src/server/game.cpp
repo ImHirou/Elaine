@@ -737,6 +737,11 @@ HOT void Game::on_packet(u32 pi, const u8* body, u32 n) {
             if (rd.ok) on_use_item_on(pi, u);
             break;
         }
+        case sbid::kUseItem: {
+            const auto u = sb::UseItem::decode(rd);
+            if (rd.ok) on_use_item(pi, u);
+            break;
+        }
         case sbid::kPickItemFromBlock: {
             const auto pk = sb::PickItemFromBlock::decode(rd);
             if (rd.ok) on_pick_block(pi, pk);

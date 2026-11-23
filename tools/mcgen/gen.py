@@ -41,6 +41,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import struct
 import sys
 import zipfile
 from pathlib import Path
@@ -510,6 +511,10 @@ FLUID_FACT_FLAGS = [
     ("kCreativeOnly", "BarrierBlock: it takes water, and gives it up, only at the hands of a player in creative mode"),
     ("kBlocksFlow", "#blocks_fluid_flow: a fluid beside it does not run off over its edge (FlowingFluid.getFlow)"),
     ("kIce", "an IceBlock: no side of it is a wall to a fluid that falls beside it (FlowingFluid.isSolidFace)"),
+    ("kNeverReplaced", "its class says no to canBeReplaced(BlockState, Fluid) whatever it is (the end's portal and gateway); every "
+                       "other state gives way to a bucket's fluid if it is replaceable or not solid"),
+    ("kIsLiquid", "BlockBehaviour.Properties.liquid: the block of a fluid, a bubble column - what a bucket's fluid takes the place "
+                "of without breaking it"),
 ]
 # proto::gen::fluid::kFlags, by fluid state.
 FLUID_STATE_FLAGS = [
@@ -1046,6 +1051,13 @@ def build_block_tables(v: dict, blocks: dict, data: dict, static_regs: dict, van
         container = "LiquidBlockContainer" in gb["interfaces"]
         f = (ffbit["kHoldsFluid"] if container or b["id"] in washed else 0) | (ffbit["kFluidContainer"] if container else 0)
         f |= (ffbit["kBlocksFlow"] if b["id"] in blocks_flow else 0) | (ffbit["kIce"] if "IceBlock" in gb["class"] else 0)
+        # BlockBehaviour.canBeReplaced(BlockState, Fluid) is "replaceable, or not solid" - but for who says otherwise.
+        if "canBeReplaced(BlockState,Fluid)" in gb["hooks"]:
+            if gb["hooks"]["canBeReplaced(BlockState,Fluid)"] not in ("EndPortalBlock", "EndGatewayBlock"):
+                die(f"{b['name']}: {gb['hooks']['canBeReplaced(BlockState,Fluid)']} has a canBeReplaced(BlockState, Fluid) of its own: "
+                    "read it (the two that are known say no)")
+            f |= ffbit["kNeverReplaced"]
+        f |= ffbit["kIsLiquid"] if gb["settings"]["liquid"] else 0
         simple = "SimpleWaterloggedBlock" in gb["interfaces"] and ported_of[b["name"]] is not None
         if simple:
             wet = [q for q in gb["properties"] if q["name"] == "waterlogged"]
@@ -1078,8 +1090,10 @@ def build_block_tables(v: dict, blocks: dict, data: dict, static_regs: dict, van
         die(f"canPlaceLiquid / placeLiquid / pickupBlock are declared by {sorted(says)} among the ported classes, the port knows "
             f"{sorted(gen_game.LIQUID_OVERRIDES)}: read the class, then gen_game.LIQUID_OVERRIDES")
     slab = next(b for b in ext_blocks if b["name"] == "minecraft:oak_slab")
+    water_block = next(b for b in ext_blocks if b["name"] == "minecraft:water")
     if (fluid_facts[slab["default_state"]] != ffbit["kHoldsFluid"] | ffbit["kFluidContainer"] | ffbit["kTakesWater"] | ffbit["kBlocksFlow"] or
-            fluid_facts[stone] != ffbit["kBlocksFlow"] or fluid_facts[0] != ffbit["kHoldsFluid"]):
+            fluid_facts[stone] != ffbit["kBlocksFlow"] or fluid_facts[0] != ffbit["kHoldsFluid"] or
+            fluid_facts[water_block["default_state"]] != ffbit["kHoldsFluid"] | ffbit["kIsLiquid"]):
         die("kFluidFacts: a slab is no LiquidBlockContainer that takes water, stone holds a fluid, or air does not "
             "(#washed_away_by_fluids)")
 
@@ -1150,6 +1164,65 @@ def build_block_tables(v: dict, blocks: dict, data: dict, static_regs: dict, van
     if len(shapes) >= 0xFFFF:
         die("too many collision shapes for 16-bit ids")
 
+    # ---- what a look is stopped by (BlockGetter.clip with ClipContext.Block.OUTLINE): a state's
+    # outline shape - BlockState.getShape for nobody in particular - and the shape that says
+    # which face was clicked where the outline is hollow (getInteractionShape: a cauldron, a
+    # hopper). gamedata has both for every state; here each is an id into the boxes of its own
+    # list, and the two share sixteen bits with one more: that vanilla moves the outline by
+    # where the block stands (BlockState.getOffset: a flower) - which this server does not.
+    outline_ids: dict[int, int] = {}
+    interaction_ids: dict[int, int] = {0: 0}
+    if game_shapes[0] != []:
+        die("gamedata/states.json: shape 0 is not the empty one")
+    outline_col = bytearray(2 * n)
+    offset_legend = game["states"]["legend"]["offset_shapes"]
+    if offset_legend[0] != "outline_shape":
+        die("gamedata/states.json: the first bit of offset_shapes is not the outline's")
+    for i in range(n):
+        o = outline_ids.setdefault(cols["outline_shape"][i], len(outline_ids))
+        k = interaction_ids.setdefault(cols["interaction_shape"][i], len(interaction_ids))
+        if o >= 1 << 12 or k >= 1 << 3:
+            die("state::kOutline has twelve bits for the outline and three for the interaction shape")
+        struct.pack_into("<H", outline_col, 2 * i, o | k << 12 | (0x8000 if cols["offset_shapes"][i] & 1 else 0))
+    # BlockState.getOffset (BlockBehaviour.Properties.offsetType's two functions): by how much such
+    # an outline is moved, from where the block stands. Written out here as the server has it, and
+    # held to the samples gamedata took of the real one - for every block that has an offset.
+    def shape_offset(kind: str, max_h: float, max_v: float, x: int, z: int) -> tuple:
+        def i32(v: int) -> int:
+            return (v + 2 ** 31) % 2 ** 32 - 2 ** 31
+        def i64(v: int) -> int:
+            return (v + 2 ** 63) % 2 ** 64 - 2 ** 63
+        def f32(v: float) -> float:
+            return struct.unpack("<f", struct.pack("<f", v))[0]
+        seed = i64(i32(x * 3129871) ^ i64(z * 116129781))                   # Mth.getSeed(x, 0, z)
+        seed = i64(i64(i64(seed * seed) * 42317861) + i64(seed * 11)) >> 16
+        def part(shift: int) -> float:
+            return f32(f32(float(seed >> shift & 15)) / f32(15.0))
+        clamp = lambda v: max(-f32(max_h), min(f32(max_h), v))      # (the two maxima are floats)
+        y = (part(4) - 1.0) * f32(max_v) if kind == "XYZ" else 0.0
+        return (clamp((part(0) - 0.5) * 0.5), y, clamp((part(8) - 0.5) * 0.5))
+    offset_rows = []
+    for b in ext_blocks:
+        off = game["blocks"][b["name"]].get("offset")
+        moves = any(cols["offset_shapes"][i] & 1 for i in range(first[b["name"]], first[b["name"]] + len(blocks[b["name"]]["states"])))
+        if off is None:
+            if moves:
+                die(f"{b['name']}: its outline moves, and gamedata has no offset for it")
+            continue
+        if off["type"] not in ("XZ", "XYZ"):
+            die(f"{b['name']}: an offset of type {off['type']}")
+        for x, _, z, ox, oy, oz in off["samples"]:
+            if shape_offset(off["type"], off["max_horizontal"], off["max_vertical"], x, z) != (ox, oy, oz):
+                die(f"{b['name']}: BlockState.getOffset at ({x}, {z}) is {(ox, oy, oz)}, the port gives "
+                    f"{shape_offset(off['type'], off['max_horizontal'], off['max_vertical'], x, z)}")
+        if moves:
+            offset_rows.append((b["id"], off["type"] == "XYZ", off["max_horizontal"], off["max_vertical"], b["name"]))
+    outline_shapes = [game_shapes[sid] for sid in sorted(outline_ids, key=outline_ids.get)]
+    interaction_shapes = [game_shapes[sid] for sid in sorted(interaction_ids, key=interaction_ids.get)]
+    if struct.unpack_from("<H", outline_col, 2 * stone)[0] != outline_ids[cols["outline_shape"][stone]] or \
+            game_shapes[cols["outline_shape"][stone]] != [[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]] or game_shapes[cols["outline_shape"][0]] != []:
+        die("gamedata/states.json: stone's outline is not the block, or air has one")
+
     files: dict = {
         "state_flags.bin": bytes(flags),
         "state_light.bin": bytes(light),
@@ -1160,6 +1233,7 @@ def build_block_tables(v: dict, blocks: dict, data: dict, static_regs: dict, van
         "state_fluid_facts.bin": bytes(fluid_facts),
         "state_flow.bin": bytes(flow_faces),
         "state_hooks.bin": bytes(hooks),
+        "state_outline.bin": bytes(outline_col),
         "state_random.bin": bytes(random_ticks),
         "state_sturdy_full.bin": bytes(cols["sturdy_full"]),
         "state_sturdy_center.bin": bytes(cols["sturdy_center"][i] | (0x40 if st["solid"][i] else 0) |
@@ -1182,6 +1256,14 @@ namespace proto::gen::fluid {
     fl.append(f"inline constexpr unsigned kCount = {len(fluid_ids)};        // the fluids: the type of a scheduled fluid tick\n")
     for name in sorted(fluid_ids, key=fluid_ids.get):
         fl.append(f"inline constexpr unsigned char {ident(name)} = {fluid_ids[name]};\n")
+    for f in game["fluids"]["fluids"]:
+        if f["name"] != "minecraft:empty" and f.get("pickup_sound") != \
+                ("minecraft:item.bucket.fill_lava" if "lava" in f["name"] else "minecraft:item.bucket.fill"):
+            die(f"{f['name']}: its pickup sound is {f.get('pickup_sound')} - server/buckets.cpp takes item.bucket.fill(_lava)")
+    fl.append("// Fluid.getBucket(): the item that holds it, 0 for the fluid that is none\n"
+              "inline constexpr unsigned short kBucket[kCount] = {" +
+              ", ".join(str(item_ids.get(f["bucket"], 0) if f["bucket"] != "minecraft:air" else 0)
+                        for f in sorted(game["fluids"]["fluids"], key=lambda f: f["id"])) + "};\n")
     fl.append("// ...by name, as a saved tick names its fluid\ninline constexpr const char* kNames[kCount] = {" +
               ", ".join(f'"{name}"' for name in sorted(fluid_ids, key=fluid_ids.get)) + "};\n")
     fl.append(f"inline constexpr unsigned kStateCount = {len(fluid_states)};\n\n// kFlags[fluid state]\n")
@@ -1305,10 +1387,20 @@ static_assert(sizeof kHooks == kCount && sizeof kRandom == kCount && sizeof kStu
 static_assert(sizeof kConnect == kCount && sizeof kWallAbove == kCount && sizeof kSupport == kCount);
 static_assert(sizeof kBlockBytes == 2 * kCount && sizeof kCollisionBytes == 2 * kCount);
 static_assert(sizeof kFluid == kCount && sizeof kFluidFacts == kCount && sizeof kFlowFaces == kCount);
+// What a look is stopped by: the state's outline shape (kOutlineBoxes: BlockState.getShape for
+// nobody in particular), and the shape that says which face of it was clicked where it is
+// hollow (kInteractionBoxes: getInteractionShape). kOutlineMoves: vanilla moves the outline by
+// where the block stands (BlockState.getOffset) - here it is as in the middle of its cell.
+inline constexpr unsigned char kOutlineBytes[] = {
+#embed "state_outline.bin"
+};
+static_assert(sizeof kOutlineBytes == 2 * kCount);
+inline constexpr unsigned kOutlineMask = 0x0FFF, kInteractionShift = 12, kInteractionMask = 0x7, kOutlineMoves = 0x8000;
 
 constexpr unsigned u16_at(const unsigned char* t, unsigned i) { return t[2 * i] | static_cast<unsigned>(t[2 * i + 1]) << 8; }
 constexpr unsigned block_of(unsigned state) { return u16_at(kBlockBytes, state); }
 constexpr unsigned collision_of(unsigned state) { return u16_at(kCollisionBytes, state); }
+constexpr unsigned outline_of(unsigned state) { return u16_at(kOutlineBytes, state); }
 // What Level.removeBlock() leaves: air, or the block of the fluid the state held (a waterlogged one's water).
 constexpr unsigned fluid_legacy_of(unsigned state) { return fluid::kLegacy[kFluid[state]]; }
 
@@ -1407,6 +1499,7 @@ struct ItemInfo {
     unsigned short fuel_ticks;  // default COOKING_FUEL burn time in a furnace, 0 = not a fuel
     unsigned short fuel_ticks_fast;  // ...and in a smoker or a blast furnace, where it also cooks kFastCookingSpeed times as fast
     unsigned short remainder;   // Item.getCraftingRemainder(): what crafting or burning it leaves, 0 = nothing
+    unsigned char kind;         // item_kind::*: the class whose use the server implements
 };
 inline constexpr unsigned short kNoBlock = 0xFFFF;
 inline constexpr unsigned char kNoBlockEntity = 0xFF;
@@ -1425,7 +1518,11 @@ namespace block_flag {
     info.append("}  // namespace block_flag\nnamespace item_flag {\n")
     for name, value, why in ITEM_FLAGS:
         info.append(f"inline constexpr unsigned char {name} = 0x{value:X};  // {why}\n")
-    info.append("}  // namespace item_flag\n\n// BlockInfo::kind: block classes the server has a port of.\nnamespace block_kind {\n")
+    info.append("}  // namespace item_flag\n\n// ItemInfo::kind: item classes whose use the server implements (gen_game.PORTED_ITEMS).\n"
+                "namespace item_kind {\n")
+    for i, kind in enumerate(gen_game.ITEM_KINDS):
+        info.append(f"inline constexpr unsigned char {kind} = {i};\n")
+    info.append("}  // namespace item_kind\n\n// BlockInfo::kind: block classes the server has a port of.\nnamespace block_kind {\n")
     for i, kind in enumerate(gen_game.BLOCK_KINDS):
         info.append(f"inline constexpr unsigned char {kind} = {i};\n")
     info.append("}  // namespace block_kind\n\n"
@@ -1626,6 +1723,17 @@ namespace proto::gen {
         it = ext_items[name]
         comps = item_default_components(name)
         tool = comps.get("minecraft:tool")
+        kind = gen_game.ported_item(game["items"][name])
+        # BucketItem.content: the fluid whose bucket the item is (Fluid.getBucket) - nothing, of the
+        # empty one. The server reads it off fluid::kBucket, so the two have to say the same.
+        if kind == "kBucket":
+            content = game["items"][name]["fields"].get("content")
+            holds = {f["name"] for f in game["fluids"]["fluids"] if f.get("bucket") == name}
+            if content == "minecraft:empty":
+                if name != "minecraft:bucket" or holds:
+                    die(f"{name}: a bucket of nothing that is not minecraft:bucket, or some fluid's")
+            elif content not in holds or game["fluids"]["fluids"][fluid_ids[content]].get("source") != content:
+                die(f"{name}: it holds {content}, which is not a source whose bucket it is")
         f = itf["kPlainBlockItem"] if it["class"] == "BlockItem" else 0
         f |= itf["kStandingAndWall"] if it["class"] in ("StandingAndWallBlockItem", "HangingSignItem") else 0
         f |= itf["kDestroysInCreative"] if (tool is None or tool.get("can_destroy_blocks_in_creative", True)) else 0
@@ -1686,7 +1794,7 @@ namespace proto::gen {
             die(f"{name}: a crafting remainder with a count or components: {remainder}")
         t.append(f"    {{{blk}, {equip_sound}, {stack}, 0x{f:X}, {equip_slot}, "
                  f"0x{swing_types[swing_type] << 6 | swing_ticks:02X}, {', '.join(map(str, gen_game.fuel_ticks(vanilla, comps, name)))}, "
-                 f"{item_ids[remainder['id']] if remainder else 0}}},  // {name.split(':', 1)[1]}\n")
+                 f"{item_ids[remainder['id']] if remainder else 0}, item_kind::{kind}}},  // {name.split(':', 1)[1]}\n")
     t.append("};\n\n")
 
     # Collision boxes: kCollisionBoxes[kCollisionFirst[id] .. kCollisionFirst[id + 1])
@@ -1700,6 +1808,24 @@ namespace proto::gen {
         for b in sh:
             t.append("    {{" + ", ".join(cfloat(x) for x in b[:3]) + "}, {" + ", ".join(cfloat(x) for x in b[3:]) + "}},\n")
     t.append("};\n\n")
+    t.append("// The blocks whose outline is moved by where they stand (state::kOutlineMoves), by block id:\n"
+             "// BlockBehaviour.OffsetType - XZ, or XYZ - and Block.getMaxHorizontalOffset / getMaxVerticalOffset.\n"
+             "struct ShapeOffset {\n    unsigned short block;\n    bool xyz;\n    float max_horizontal, max_vertical;\n};\n"
+             f"inline constexpr ShapeOffset kShapeOffsets[{len(offset_rows)}] = {{\n")
+    for block, xyz, max_h, max_v, name in sorted(offset_rows):
+        t.append(f"    {{{block}, {'true' if xyz else 'false'}, {cfloat32(max_h)}, {cfloat32(max_v)}}},  // {name.split(':', 1)[1]}\n")
+    t.append("};\n\n")
+    for what, some in (("Outline", outline_shapes), ("Interaction", interaction_shapes)):
+        firsts = [0]
+        for sh in some:
+            firsts.append(firsts[-1] + len(sh))
+        t.append(f"inline constexpr unsigned short k{what}First[{len(firsts)}] = {{\n    ")
+        t.append(", ".join(str(x) for x in firsts))
+        t.append(f"\n}};\ninline constexpr Box k{what}Boxes[{max(firsts[-1], 1)}] = {{\n")
+        for sh in some:
+            for b in sh:
+                t.append("    {{" + ", ".join(cfloat(x) for x in b[:3]) + "}, {" + ", ".join(cfloat(x) for x in b[3:]) + "}},\n")
+        t.append("};\n\n")
     t.append(f"inline constexpr std::string_view kBlockNames[{len(ext_blocks)}] = {{\n")
     t.extend(f'    "{b["name"]}",\n' for b in ext_blocks)
     t.append("};\n\n}  // namespace proto::gen\n")
