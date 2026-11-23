@@ -94,11 +94,13 @@ def load_item_table() -> dict[str, dict]:
     text = (_gen_dir() / "block_tables.hpp").read_text()
     body = re.search(r"ItemInfo kItems\[\d+\] = \{\n(.*?)\n\};", text, re.S).group(1)
     out = {}
-    for m in re.finditer(r"\{(\d+), (\d+), (\d+), 0x([0-9A-F]+), (\d+), 0x([0-9A-F]+), (\d+), (\d+), (\d+)\},  // (\w+)", body):
-        block, sound, stack, flags, slot, swing, fuel, fuel_fast, remainder, name = m.groups()
+    for m in re.finditer(r"\{(\d+), (\d+), (\d+), 0x([0-9A-F]+), (\d+), 0x([0-9A-F]+), (\d+), (\d+), (\d+), item_kind::(\w+)\},  // (\w+)",
+                         body):
+        block, sound, stack, flags, slot, swing, fuel, fuel_fast, remainder, kind, name = m.groups()
         out[name] = {"block": int(block), "equip_sound": int(sound), "max_stack": int(stack), "flags": int(flags, 16), "equip_slot": int(slot),
                      "attack_swing": (int(swing, 16) >> 6, int(swing, 16) & 0x3F),   # (SwingAnimationType, ticks)
-                     "fuel_ticks": int(fuel), "fuel_ticks_fast": int(fuel_fast), "remainder": int(remainder)}
+                     "fuel_ticks": int(fuel), "fuel_ticks_fast": int(fuel_fast), "remainder": int(remainder),
+                     "kind": kind}   # the class whose use the server implements: "kSpawnEgg", or "kPlain"
     assert len(out) == ITEM["kCount"], (len(out), ITEM["kCount"])
     return out
 

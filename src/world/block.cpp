@@ -87,6 +87,7 @@ std::string_view item_text_key(u32 item) { return item < std::size(cmd::kItems) 
 u32 item_rarity(u32 item) { return item < std::size(cmd::kItems) ? cmd::kItems[item].rarity : 0; }
 std::string_view entity_type_name(u32 type) { return type < gen::entity_type::kCount ? gen::entity_type::kNames[type] : "?"; }
 bool summonable(u32 type) { return type < gen::entity_type::kCount && cmd::kSummonable[type]; }
+u32 spawn_egg_of(u32 type) { return type < std::size(gen::kSpawnEggOf) ? gen::kSpawnEggOf[type] : 0; }
 
 u32 block_property_count(u32 block) {
     DCHECK(block < state::kBlockCount);

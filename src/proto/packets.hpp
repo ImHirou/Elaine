@@ -1219,6 +1219,31 @@ struct UseItemOn {  // hand, BlockHitResult, sequence
     }
 };
 
+struct UseItem {  // ServerboundUseItemPacket: hand, sequence, the player's rotation as the client has it
+    u32 hand;     // 0 main, 1 off
+    i32 sequence;
+    float yaw, pitch;
+    static UseItem decode(Reader& r) {
+        UseItem u;
+        u.hand = r.varint() == 1 ? 1 : 0;  // InteractionHand.STREAM_CODEC: ByIdMap ... OutOfBoundsStrategy.ZERO
+        u.sequence = static_cast<i32>(r.varint());
+        u.yaw = r.f32();
+        u.pitch = r.f32();
+        return u;
+    }
+};
+
+struct PickItemFromEntity {  // the middle click on an entity: its network id, and whether ctrl was held
+    i32 id;
+    bool include_data;
+    static PickItemFromEntity decode(Reader& r) {
+        PickItemFromEntity p;
+        p.id = static_cast<i32>(r.varint());
+        p.include_data = r.boolean();
+        return p;
+    }
+};
+
 struct SetCarriedItem {
     i16 slot;  // hotbar index 0..8
     static SetCarriedItem decode(Reader& r) { return {static_cast<i16>(r.be16())}; }

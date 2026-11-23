@@ -598,14 +598,15 @@ bool Game::teleport(u32 row, double x, double y, double z, u32 relatives, float 
 // primed TNT ticks as any other; a living thing falls, slides and is pushed as one that wants
 // nothing does (no brain: server/physics.cpp says which types). What nothing here moves stays
 // where it is put, and if a client would let it fall by itself, it is told that it does not.
-u32 Game::summon(u32 type, double x, double y, double z) {
+// `yaw`: where it looks - a living thing's head too (/summon: 0; a spawn egg draws one).
+u32 Game::summon(u32 type, double x, double y, double z, float yaw) {
     namespace gp = proto::gen::physics;
     const Uuid uuid{(random() & ~0xF000ull) | 0x4000ull, (random() & 0x3FFFFFFFFFFFFFFFull) | 0x8000000000000000ull};
     // FallingBlockEntity.DEFAULT_BLOCK_STATE: without a tag to say otherwise it is sand.
     if (type == entity_type::kFallingBlock)
         return add_falling(uuid, static_cast<BlockState>(gen::block::kSand), x, y, z, 0, false);
     entity::Store::Moves moved;
-    const u32 row = tracker_.spawn(type, false, uuid, x, y, z, 0, 0, moved);
+    const u32 row = tracker_.spawn(type, false, uuid, x, y, z, yaw, 0, moved);
     const u32 slot = ents_.slot[row];
     const u8 mover = gp::kEntity[type].mover;
     if (type == entity_type::kTnt) {

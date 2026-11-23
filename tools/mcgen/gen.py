@@ -1135,6 +1135,7 @@ struct ItemInfo {
     unsigned short fuel_ticks;  // default COOKING_FUEL burn time in a furnace, 0 = not a fuel
     unsigned short fuel_ticks_fast;  // ...and in a smoker or a blast furnace, where it also cooks kFastCookingSpeed times as fast
     unsigned short remainder;   // Item.getCraftingRemainder(): what crafting or burning it leaves, 0 = nothing
+    unsigned char kind;         // item_kind::*: the class whose use the server implements
 };
 inline constexpr unsigned short kNoBlock = 0xFFFF;
 inline constexpr unsigned char kNoBlockEntity = 0xFF;
@@ -1153,7 +1154,11 @@ namespace block_flag {
     info.append("}  // namespace block_flag\nnamespace item_flag {\n")
     for name, value, why in ITEM_FLAGS:
         info.append(f"inline constexpr unsigned char {name} = 0x{value:X};  // {why}\n")
-    info.append("}  // namespace item_flag\n\n// BlockInfo::kind: block classes the server has a port of.\nnamespace block_kind {\n")
+    info.append("}  // namespace item_flag\n\n// ItemInfo::kind: item classes whose use the server implements (gen_game.PORTED_ITEMS).\n"
+                "namespace item_kind {\n")
+    for i, kind in enumerate(gen_game.ITEM_KINDS):
+        info.append(f"inline constexpr unsigned char {kind} = {i};\n")
+    info.append("}  // namespace item_kind\n\n// BlockInfo::kind: block classes the server has a port of.\nnamespace block_kind {\n")
     for i, kind in enumerate(gen_game.BLOCK_KINDS):
         info.append(f"inline constexpr unsigned char {kind} = {i};\n")
     info.append("}  // namespace block_kind\n\n"
@@ -1343,11 +1348,27 @@ namespace proto::gen {
     itf = {name: value for name, value, _ in ITEM_FLAGS}
     damage_tags = vanilla.tags("damage_type")
     swing_types, swing_default_type, swing_default_ticks = swing_animations(v["id"])
+    type_ids = {name: e["protocol_id"] for name, e in static_regs["minecraft:entity_type"]["entries"].items()}
+    egg_of: dict[int, int] = {}  # entity type -> the spawn egg that names it
     t.append(f"inline constexpr ItemInfo kItems[{len(item_ids)}] = {{\n")
     for name in sorted(item_ids, key=item_ids.get):
         it = ext_items[name]
         comps = item_default_components(name)
         tool = comps.get("minecraft:tool")
+        kind = gen_game.ported_item(game["items"][name])
+        # SpawnEggItem.getType: the type its ENTITY_DATA names - which the server reads from the
+        # item's default components, a patch's where it has one. SpawnEggItem.byId is the other
+        # way round: every egg whose default names a type, so one egg a type at most.
+        spawns = comps.get("minecraft:entity_data")
+        if (kind == "kSpawnEgg") != (spawns is not None):
+            die(f"{name}: a {it['class']} {'without' if spawns is None else 'with'} a default entity_data - "
+                "server/spawn_eggs.cpp takes an egg's type from there, and only an egg's")
+        if spawns is not None:
+            if set(spawns) != {"id"} or spawns["id"] not in type_ids:
+                die(f"{name}: its default entity_data is {spawns}, not the id of an entity type alone")
+            if type_ids[spawns["id"]] in egg_of:
+                die(f"{name}: a second egg of {spawns['id']} - SpawnEggItem.byId would find either")
+            egg_of[type_ids[spawns["id"]]] = item_ids[name]
         f = itf["kPlainBlockItem"] if it["class"] == "BlockItem" else 0
         f |= itf["kStandingAndWall"] if it["class"] in ("StandingAndWallBlockItem", "HangingSignItem") else 0
         f |= itf["kDestroysInCreative"] if (tool is None or tool.get("can_destroy_blocks_in_creative", True)) else 0
@@ -1402,8 +1423,14 @@ namespace proto::gen {
             die(f"{name}: a crafting remainder with a count or components: {remainder}")
         t.append(f"    {{{blk}, {equip_sound}, {stack}, 0x{f:X}, {equip_slot}, "
                  f"0x{swing_types[swing_type] << 6 | swing_ticks:02X}, {', '.join(map(str, gen_game.fuel_ticks(vanilla, comps, name)))}, "
-                 f"{item_ids[remainder['id']] if remainder else 0}}},  // {name.split(':', 1)[1]}\n")
+                 f"{item_ids[remainder['id']] if remainder else 0}, item_kind::{kind}}},  // {name.split(':', 1)[1]}\n")
     t.append("};\n\n")
+    if sorted(type_ids.values()) != list(range(len(type_ids))):
+        die("entity_type ids are not dense")
+    t.append("// SpawnEggItem.byId: the egg whose default ENTITY_DATA names each entity type, 0 = it has none\n"
+             f"inline constexpr unsigned short kSpawnEggOf[{len(type_ids)}] = {{\n    ")
+    t.append(", ".join(str(egg_of.get(i, 0)) for i in range(len(type_ids))))
+    t.append("\n};\n\n")
 
     # Collision boxes: kCollisionBoxes[kCollisionFirst[id] .. kCollisionFirst[id + 1])
     offsets = [0]
@@ -1765,6 +1792,13 @@ def emit_entities(v: dict, version: str, static_regs: dict, d: Path) -> tuple[st
                            decl[field])
     if sorted(rows) != list(range(len(ids))):
         die(f"EntityTypes: parsed {len(rows)} of {len(ids)} entity types - the static initializer changed shape")
+    # EntityType.onlyOpCanSetNbt: the types whose tag only an operator's spawn egg puts on them.
+    m = re.search(r"^\s+OP_ONLY_CUSTOM_DATA = Set\.of\(([\w, ]+)\);$", text, re.M)
+    if not m:
+        die("EntityTypes.OP_ONLY_CUSTOM_DATA: not a Set.of(...) of fields - read it again")
+    op_only = {ids[keys[f.strip()]] for f in m.group(1).split(",") if keys.get(f.strip()) in ids}
+    if len(op_only) != len(m.group(1).split(",")):
+        die(f"EntityTypes.OP_ONLY_CUSTOM_DATA: {m.group(1)} - not every one is an entity type")
 
     # What a living entity saves beyond its own state (Entity.saveWithoutId and below): which of
     # Mob's and AgeableMob's entries it has, and the attributes a fresh one has touched.
@@ -1818,6 +1852,7 @@ struct Info {
     bool living;                      // extends LivingEntity: movement is sent as stepped paths
     bool mob;                         // extends Mob
     bool ageable;                     // extends AgeableMob and can be a baby (AgeableMob.canBeABaby): it saves an age
+    bool op_only_data;                // EntityType.onlyOpCanSetNbt: a spawn egg's tag is put on it for an operator only
     float max_health;                 // the default of its max_health attribute: what a fresh one's Health is
     double movement_speed;            // ...of movement_speed
     double follow_range;              // ...of follow_range (a Mob's)
@@ -1829,7 +1864,8 @@ inline constexpr Info kInfo[kCount] = {
         name, width, height, eye, tracking, interval, deltas, living, _ = rows[i]
         mob, ageable, health, speed, follow = saved[i]
         out.append(f"    {{{cfloat32(width)}, {cfloat32(height)}, {cfloat32(eye)}, {tracking}, {interval}, {str(deltas).lower()}, "
-                   f"{str(living).lower()}, {str(mob).lower()}, {str(ageable).lower()}, {cfloat32(health)}, {speed!r}, {follow!r}}},  // {name}\n")
+                   f"{str(living).lower()}, {str(mob).lower()}, {str(ageable).lower()}, {str(i in op_only).lower()}, "
+                   f"{cfloat32(health)}, {speed!r}, {follow!r}}},  // {name}\n")
     out.append("};\n\ninline constexpr std::string_view kNames[kCount] = {\n")
     out.extend(f'    "minecraft:{rows[i][0]}",\n' for i in range(len(rows)))
     out.append("};\n\n}  // namespace proto::gen::entity_type\n")

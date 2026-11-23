@@ -636,6 +636,36 @@ TEST(Packets, SignLayoutsAreTheJars) {
     EXPECT_FALSE(r2.ok);
 }
 
+TEST(Packets, UseItemAndPickItemFromEntityLayouts) {
+    // ServerboundUseItemPacket: InteractionHand (VarInt), sequence (VarInt), yRot, xRot (floats).
+    const u8 use[] = {0x01, 0xAC, 0x02, 0x42, 0xB4, 0x00, 0x00, 0xC1, 0xA0, 0x00, 0x00};  // off hand, 300, 90f, -20f
+    Reader r(use, sizeof use);
+    const auto u = sb::UseItem::decode(r);
+    EXPECT_TRUE(r.done());
+    EXPECT_EQ(u.hand, 1u);
+    EXPECT_EQ(u.sequence, 300);
+    EXPECT_EQ(u.yaw, 90.0f);
+    EXPECT_EQ(u.pitch, -20.0f);
+    const u8 other_hand[] = {0x07, 0x00, 0, 0, 0, 0, 0, 0, 0, 0};  // a hand there is none of: the main one (ByIdMap ZERO)
+    Reader rh(other_hand, sizeof other_hand);
+    EXPECT_EQ(sb::UseItem::decode(rh).hand, 0u);
+    EXPECT_TRUE(rh.done());
+    Reader cut(use, sizeof use - 1);
+    sb::UseItem::decode(cut);
+    EXPECT_FALSE(cut.ok);
+
+    // ServerboundPickItemFromEntityPacket: the entity's id (VarInt), includeData (bool).
+    const u8 pick[] = {0x96, 0x01, 0x01};  // 150, with ctrl
+    Reader rp(pick, sizeof pick);
+    const auto p = sb::PickItemFromEntity::decode(rp);
+    EXPECT_TRUE(rp.done());
+    EXPECT_EQ(p.id, 150);
+    EXPECT_TRUE(p.include_data);
+    Reader rc(pick, 2);
+    sb::PickItemFromEntity::decode(rc);
+    EXPECT_FALSE(rc.ok);
+}
+
 TEST(Packets, ChunkBatchReceivedLayout) {
     const u8 body[] = {0x41, 0x48, 0x00, 0x00};  // 12.5f
     Reader r(body, sizeof body);

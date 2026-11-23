@@ -306,6 +306,30 @@ def ported_block(game_block: dict):
     return kind, place, item[0] if item else "BlockItem"
 
 
+# Item classes whose use the server implements, as PORTED_BLOCKS is for blocks: the class -> its
+# ItemInfo::kind and every hook of Item it overrides. A hook another version adds stops the
+# generator until somebody has read it. (BlockItem and its kin place blocks: ItemInfo::block.)
+ITEM_KINDS = ["kPlain", "kSpawnEgg"]
+PORTED_ITEMS = {
+    # useOn: the egg on a block (server/spawn_eggs.cpp). use: thrown into the air or at water far
+    # away - not yet: it needs getPlayerPOVHitResult, which buckets bring. shouldPrintOpWarning: the
+    # client's tooltip.
+    "SpawnEggItem": ("kSpawnEgg", {"useOn", "use", "shouldPrintOpWarning"}),
+}
+
+
+def ported_item(game_item: dict) -> str:
+    """ItemInfo::kind of an item: its own class's in PORTED_ITEMS, the hook set checked; else kPlain."""
+    cls = game_item["class"][0]
+    if cls not in PORTED_ITEMS:
+        return "kPlain"
+    kind, hooks = PORTED_ITEMS[cls]
+    if set(game_item["hooks"]) != hooks:
+        die(f"{game_item['name']}: {cls} overrides {sorted(set(game_item['hooks']) ^ hooks)} differently from the version "
+            "the server's port was written against - read the class again, then update PORTED_ITEMS")
+    return kind
+
+
 # ----------------------------------------------------------------------------- explosion drops
 
 class Loot:

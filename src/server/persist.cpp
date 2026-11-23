@@ -416,11 +416,15 @@ void Game::read_entities(world::Chunk& c, std::span<const u8> bytes) {
             } else if (mover == gp::kMoverLiving || mover == gp::kMoverArmorStand) {
                 start_ticking(slot, mover);
                 enter_push_grid(slot, x, z, entity_type::kInfo[type].width);
-            } else if (flags & kNoGravity) {
-                ents_.set_no_gravity(row, true);
             }
         }
         if (slot == kNone) continue;
+        // What nothing here moves has the flag (Game::summon); what moves has it from a tag, and
+        // its body then falls no more (Entity.getGravity).
+        if (flags & kNoGravity) {
+            ents_.set_no_gravity(ents_.by_slot(slot), true);
+            if (slot < movers_.size() && movers_[slot].kind != gp::kMoverNone) movers_[slot].body.no_gravity = true;
+        }
         if (!told.empty()) {  // what a tag once said of it: read as a command's tag is
             nbt::Doc doc;
             EntityTag tag;

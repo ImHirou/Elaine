@@ -9,6 +9,7 @@
 //   Entity.collide, collectCandidateStepUpHeights (stepping up)        ->  collide()
 //   CollisionGetter.noCollision                                        ->  no_collision()
 //   CollisionGetter.findSupportingBlock                                ->  supporting_block()
+//   EntityType.getYOffset (where a spawn egg's mob stands)             ->  spawn_offset()
 //   BlockGetter.clip with ClipContext.Block.COLLIDER / FALLDAMAGE_RESETTING  ->  clip_hits*()
 //   ServerExplosion.calculateExplodedPositions                         ->  blast_positions()
 //
@@ -106,6 +107,14 @@ bool no_collision(const Dimension& w, const Aabb& box, u32 near = kAskSections);
 // Vec3i.compareTo puts last (y, then z, then x). False if there is none.
 bool supporting_block(const Dimension& w, const Aabb& box, double x, double y, double z, i32 out[3], u32 near = kAskSections);
 
+// EntityType.getYOffset: how far above the bottom of block (x, y, z) something whose box is `box`
+// (set at the block's middle, one block up: x + 0.5, y + 1, z + 0.5) comes to rest - on what
+// stands in that block or, `moved_up` (it was put on top of the block that was clicked), in the
+// one below; it falls one block at most, two when moved up. Only the shapes of that column
+// count (Level.getCollisions(null, its cells)), however wide the box. What a spawn egg's mob
+// stands on when it appears.
+double spawn_offset(const Dimension& w, i32 x, i32 y, i32 z, bool moved_up, const Aabb& box, CollideScratch& scratch);
+
 // BlockGetter.clip(new ClipContext(from, to, COLLIDER, Fluid.NONE)).getType() != MISS: does the
 // line from `from` to `to` meet the collision shape of a block?
 bool clip_hits(const Dimension& w, const double from[3], const double to[3]);
@@ -118,6 +127,7 @@ namespace slow {
 void collide(const Dimension& w, const Aabb& box, const double move[3], float max_up_step, bool on_ground, double out[3]);
 bool no_collision(const Dimension& w, const Aabb& box);
 bool supporting_block(const Dimension& w, const Aabb& box, double x, double y, double z, i32 out[3]);
+double spawn_offset(const Dimension& w, i32 x, i32 y, i32 z, bool moved_up, const Aabb& box);
 }  // namespace slow
 
 // ServerExplosion.calculateExplodedPositions: the blocks an explosion of `radius` at (x, y, z)

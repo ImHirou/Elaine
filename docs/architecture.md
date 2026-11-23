@@ -208,7 +208,57 @@ whole before an entity is made of it; what this server cannot make is refused in
 own: a baby (`Age` below 0), a small armor stand, a marker - each another body to the physics,
 which has no recording of them - and a name with a part of a text that is not read. Not read
 at all: what a class below those saves (a pig's variant, a villager's trades), `UUID`,
-attributes, effects, passengers.
+attributes, effects, passengers. `NoGravity` reaches the body of what moves here (a mob, a primed
+TNT, a falling block: `Entity.getGravity` is 0 for it), and stays with its chunk.
+
+### Spawn eggs (`server/spawn_eggs.cpp`)
+
+An egg is a `SpawnEggItem` (`ItemInfo::kind`, entered in `PORTED_ITEMS`), and what it makes is not
+in the item but in its `entity_data`: every egg has one of its own (`{id:"minecraft:pig"}`, the
+item's default component - no table of eggs is kept), and a stack may carry another type, more of
+a tag, or none (`!entity_data`: it makes nothing). Used on a block (`use_item_on`, once the block
+itself had its say - a chest opens, and nothing hatches in it), it makes that type where
+`SpawnEggItem.useOn` puts it: in the clicked block if that has no collision shape (a plant, a
+torch), else against the face that was clicked. `EntityType.getYOffset` lets it down from a block
+up onto what that block holds - and, put on top of the clicked block, onto that one: a slab's top,
+a fence's 1.5. Only the shapes of that column count (`Level.getCollisions` of its cells), however
+wide the body: an iron golem beside a pillar it overlaps stands on the ground
+(`world::spawn_offset`, held to `slow::spawn_offset` by the collision tests). It looks a way drawn
+at random, its head the same way.
+
+What it is told is vanilla's `TypedEntityData.loadInto`: what the new entity would save - of a
+fresh one, nothing but what the stack gave it (`CUSTOM_NAME`, `CUSTOM_DATA`:
+`applyComponentsFromItemStack`) - with the egg's own tag merged over it (`nbt::merge`: two `data`
+compounds become one), read as `/summon` reads a tag, `Pos` included. A tag this server cannot
+make an entity of (a baby, a small armor stand) makes nothing, as it makes `/summon` fail; on the
+three types `EntityType.onlyOpCanSetNbt` names - a falling block, the command block and spawner
+minecarts - the tag counts for an operator only: whoever else gets a falling block of sand.
+
+The middle click on a mob (`pick_item_from_entity`, `Mob.getPickResult`) gives its egg -
+`SpawnEggItem.byId`, which the generator turns round into `kSpawnEggOf` - and on an armor stand
+its item, into the hand as a picked block goes (`tryPickItem`). `use_item`, the right click on no
+block, is acknowledged and turns the player the way the packet says (`handleUseItem`); no item's
+`use` is implemented yet.
+
+Compared with a vanilla 26.3 server (`tools/vanilla/command_probe.py`, section eggs): where each
+mob appears and how it looks, a name, the merge, `Pos`, another type, none, a monster's egg, the
+middle click - the same bytes. What differs, and why:
+
+- What an egg makes is what `/summon` makes: `Mob.finalizeSpawn` does not run - a sheep is white,
+  a skeleton holds no bow, a slime is the smallest, no mob is left-handed - and the components that
+  set a variant (`pig/variant`, `sheep/color`...) or the keys of a mob's own class in the tag are
+  not read. What vanilla draws there needs the variants, the equipment and the sizes of every
+  class first.
+- A mob makes no sound as it appears (`Mob.playAmbientSound`): which sound it is depends on the
+  class, its variant and chance, and mobs here make no sound at all.
+- There is no difficulty: a monster's egg makes the monster, as vanilla's does on any difficulty but
+  peaceful.
+- Not there: an egg used at water, or into the air (`use_item` -> `SpawnEggItem.use`: it takes
+  `getPlayerPOVHitResult`, a ray against the blocks' outline shapes and the sources of fluids, which
+  buckets need as well); an egg on a spawner (an imported world's is a kept tag: nothing happens);
+  an egg on a mob of its own kind (a baby: `interact` is not handled); the pick of what this server
+  does not simulate (boats, minecarts, item frames, paintings, an end crystal, a leash knot) and,
+  with ctrl, the profile of a player.
 
 ### What a tick of this costs
 

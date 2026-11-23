@@ -222,7 +222,10 @@ void Game::apply_entity_tag(u32 slot, EntityTag&& t) {
     }
     if (t.has_rotation) ents_.yaw[row] = t.yaw, ents_.pitch[row] = t.pitch, ents_.head_yaw[row] = t.yaw;  // setYHeadRot
     if (t.on_ground) ents_.flags[row] |= entity::flag::kOnGround;
-    if (t.no_gravity) ents_.set_no_gravity(row, true);
+    if (t.no_gravity) {  // ...and for what moves here, its body: Entity.getGravity is 0 for it
+        ents_.set_no_gravity(row, true);
+        if (slot < movers_.size() && movers_[slot].kind != proto::gen::physics::kMoverNone) movers_[slot].body.no_gravity = true;
+    }
     if (t.glowing) ents_.set_shared_flag(row, 6, true);    // Entity.FLAG_GLOWING
     if (t.invisible) ents_.set_shared_flag(row, 5, true);  // FLAG_INVISIBLE
     if (slot < movers_.size() && movers_[slot].kind != proto::gen::physics::kMoverNone)
@@ -237,9 +240,10 @@ void Game::apply_entity_tag(u32 slot, EntityTag&& t) {
     wake(slot);
 }
 
-// SummonCommand.createEntity with a tag: the entity `tag` describes, at this place. kNone, and
-// `why`, where the tag asks for what this server cannot do; nothing was made then.
-u32 Game::summon(u32 type, double x, double y, double z, nbt::Tag tag, std::string& why) {
+// SummonCommand.createEntity with a tag: the entity `tag` describes, at this place, looking along
+// `yaw` unless the tag says otherwise. kNone, and `why`, where the tag asks for what this server
+// cannot do; nothing was made then.
+u32 Game::summon(u32 type, double x, double y, double z, nbt::Tag tag, std::string& why, float yaw) {
     namespace gp = proto::gen::physics;
     EntityTag read;
     if (!read_entity_tag(type, tag, read, why)) return kNone;
@@ -247,7 +251,7 @@ u32 Game::summon(u32 type, double x, double y, double z, nbt::Tag tag, std::stri
     if (type == entity_type::kItem && !read.item.empty()) {
         const Uuid uuid{(random() & ~0xF000ull) | 0x4000ull, (random() & 0x3FFFFFFFFFFFFFFFull) | 0x8000000000000000ull};
         const u64 delay = read.pickup_delay == 32767 ? kNever : static_cast<u64>(std::max(read.pickup_delay, 0));
-        slot = add_item(uuid, 0.0f, std::move(read.item), x, y, z, 0, 0, 0, delay, static_cast<u64>(std::max(read.item_age, 0)),
+        slot = add_item(uuid, yaw, std::move(read.item), x, y, z, 0, 0, 0, delay, static_cast<u64>(std::max(read.item_age, 0)),
                         static_cast<i8>(read.item_health));
     } else if (type == entity_type::kFallingBlock && read.has_falling) {
         const Uuid uuid{(random() & ~0xF000ull) | 0x4000ull, (random() & 0x3FFFFFFFFFFFFFFFull) | 0x8000000000000000ull};
@@ -255,7 +259,7 @@ u32 Game::summon(u32 type, double x, double y, double z, nbt::Tag tag, std::stri
         falling_[slot].drop_item = read.drop_item;
         falling_[slot].cancel_drop = read.cancel_drop;
     } else {
-        slot = summon(type, x, y, z);
+        slot = summon(type, x, y, z, yaw);
         if (type == entity_type::kTnt) ents_.set_fuse(ents_.by_slot(slot), read.fuse);
     }
     apply_entity_tag(slot, std::move(read));

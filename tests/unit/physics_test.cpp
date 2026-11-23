@@ -536,7 +536,7 @@ struct Arena {
 void against_the_long_way(bool with_large, u32 rounds) {
     Arena a(with_large);
     CollideScratch scratch;
-    u32 collided = 0, stepped = 0, blocked = 0, supported = 0;
+    u32 collided = 0, stepped = 0, blocked = 0, supported = 0, landed = 0;
     for (u32 i = 0; i < rounds; ++i) {
         const Aabb box = a.box();
         const double move[3] = {a.component(), a.component(), a.component()};
@@ -570,12 +570,27 @@ void against_the_long_way(bool with_large, u32 rounds) {
             ASSERT_TRUE(p[0] == q[0] && p[1] == q[1] && p[2] == q[2]) << "round " << i;
         }
         supported += found;
+
+        // EntityType.getYOffset at a cell of the arena: where a spawn egg's mob of one of these
+        // sizes stands, put into that cell or on top of the one under it.
+        static constexpr float kBodies[][2] = {{0.9f, 0.9f}, {1.4f, 2.7f}, {0.6f, 1.95f}, {1.95f, 2.2f}, {0.25f, 0.25f}};
+        const auto& body = kBodies[a.rng() % std::size(kBodies)];
+        const i32 cx = Arena::kX0 + static_cast<i32>(a.rng() % Arena::kSide);
+        const i32 cy = Arena::kY0 - 1 + static_cast<i32>(a.rng() % (Arena::kHeight + 2));
+        const i32 cz = Arena::kZ0 + static_cast<i32>(a.rng() % Arena::kSide);
+        const bool up = a.rng() % 2;
+        const Aabb spawned = entity_box(cx + 0.5, static_cast<double>(cy + 1), cz + 0.5, body[0], body[1]);
+        const double offset = spawn_offset(a.dim, cx, cy, cz, up, spawned, scratch);
+        ASSERT_EQ(bits(offset), bits(slow::spawn_offset(a.dim, cx, cy, cz, up, spawned)))
+            << "round " << i << " cell (" << cx << ", " << cy << ", " << cz << ") moved up " << up;
+        landed += offset != (up ? -1.0 : 0.0);
     }
     // The rounds have to have met something, or the comparison says nothing.
     EXPECT_GT(collided, rounds / 4);
     EXPECT_GT(stepped, rounds / 400);
     EXPECT_GT(blocked, rounds / 4);
     EXPECT_GT(supported, rounds / 20);
+    EXPECT_GT(landed, rounds / 10);
 }
 
 }  // namespace
@@ -724,6 +739,35 @@ TEST(Collide, AFenceIsMetFromTheCellAbove) {
     feet.min[1] -= 1.0e-6;
     ASSERT_TRUE(supporting_block(dim, feet, 8.5, -58.5, 8.5, pos));
     EXPECT_EQ(pos[1], -60);
+}
+
+TEST(Collide, AnEggsMobComesToRestOnWhatIsUnderIt) {
+    // EntityType.getYOffset: put at the middle of a cell one block up, it comes down on what that
+    // cell holds - and, when it was put on top of the block that was clicked, on that block -
+    // falling one block at most, two when moved up. On grass, whose top is at -60.
+    FlatGenerator gen(-64, 24, FlatGenerator::default_layers(), 39);
+    Dimension dim(proto::reg::dimension_type::kOverworld, "minecraft:overworld", gen, proto::kNoCompression);
+    dim.ticking(0, 0);
+    ASSERT_TRUE(dim.set_block(8, -60, 9, state_of("minecraft:stone_slab[type=bottom]")));
+    ASSERT_TRUE(dim.set_block(8, -60, 10, state_of("minecraft:white_carpet")));
+    ASSERT_TRUE(dim.set_block(8, -60, 11, state_of("minecraft:oak_fence")));
+    ASSERT_TRUE(dim.set_block(8, -60, 13, state_of("minecraft:short_grass")));
+    ASSERT_TRUE(dim.set_block(9, -60, 14, state_of("minecraft:stone")));  // beside the cell, as tall as a golem's knees
+    ASSERT_TRUE(dim.set_block(9, -59, 14, state_of("minecraft:stone")));
+    CollideScratch scratch;
+    const auto offset = [&](i32 x, i32 y, i32 z, bool moved_up, float width, float height) {
+        const Aabb box = entity_box(x + 0.5, static_cast<double>(y + 1), z + 0.5, width, height);
+        const double fast = spawn_offset(dim, x, y, z, moved_up, box, scratch);
+        EXPECT_EQ(bits(fast), bits(slow::spawn_offset(dim, x, y, z, moved_up, box)));
+        return fast;
+    };
+    EXPECT_EQ(offset(8, -60, 8, true, 0.9f, 0.9f), 0.0);       // on top of the grass that was clicked
+    EXPECT_EQ(offset(8, -59, 9, true, 0.9f, 0.9f), -0.5);      // ...of a bottom slab
+    EXPECT_EQ(offset(8, -59, 10, true, 0.9f, 0.9f), -0.9375);  // ...of a carpet
+    EXPECT_EQ(offset(8, -59, 11, true, 0.9f, 0.9f), 0.5);      // ...of a fence, which is 1.5 tall
+    EXPECT_EQ(offset(8, -58, 12, false, 0.9f, 0.9f), 0.0);     // beside a block, air under it: it stays (and falls later)
+    EXPECT_EQ(offset(8, -60, 13, false, 0.9f, 0.9f), 0.0);     // into a plant, which stops nothing
+    EXPECT_EQ(offset(8, -60, 14, true, 1.4f, 2.7f), 0.0);      // wide: only its own column counts, not the stone beside it
 }
 
 TEST(Collide, TwoBlocksAsNearTheLaterOneIsStoodOn) {
