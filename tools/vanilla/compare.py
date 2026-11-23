@@ -25,8 +25,8 @@ servers have): a recording is the same script at the same ticks on either, and t
     An operator a recording that broke off left in its ops.json is taken out again.
   * Ours runs on a free port, in a world of its own that is removed afterwards.
   * The bots get names made of the time, because vanilla keeps what a player it has seen held.
-  * `-k word` is handed to the probes that know it (command_probe's sections, component_probe's
-    cases): they record only the parts whose names hold one of the words.
+  * `-k word` is handed to the probes that know it (command_probe's and block_probe's sections,
+    component_probe's cases): they record only the parts whose names hold one of the words.
   * `--keep dir` leaves the recordings and the servers' logs there.
   * `--noise`: all of it twice - servers and worlds as new the second time as the first, the
     bots of the same names - and the two recordings of each server are diffed as well. What
@@ -203,13 +203,14 @@ def record_all(args, work: Path, port: int, env: dict, stamp: str) -> dict:
     for stale in work.glob("*.console"):
         stale.unlink()
     out = {}
+    only = [f"--only={','.join(args.k)}"] if args.k else []
     for n, probe in enumerate(p for p in args.probes if p in SELF_STARTING):
         names = [f"Q{n}a{stamp}", f"Q{n}b{stamp}"]
         recordings = {"vanilla": work / f"{probe}.vanilla.json", "ours": work / f"{probe}.ours.json"}
         mode = {"vanilla": ["vanilla"], "ours": ["ours", args.exe]}
         t1 = time.time()
         runs = both_at_once(lambda what: subprocess.run(
-            [sys.executable, str(HERE / f"{probe}.py"), *mode[what], str(recordings[what]), *names],
+            [sys.executable, str(HERE / f"{probe}.py"), *mode[what], str(recordings[what]), *names, *only],
             stdout=open(work / f"{probe}.{what}.out", "w"), stderr=subprocess.STDOUT, env=env))
         out[probe] = (recordings if recorded(probe, runs, work) else None, time.time() - t1)
     session = [p for p in args.probes if p not in SELF_STARTING]

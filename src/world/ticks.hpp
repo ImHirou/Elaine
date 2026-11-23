@@ -43,7 +43,7 @@ namespace world {
 // The types of the fluids' list: a fluid's id in BuiltInRegistries.FLUID - empty, flowing_water,
 // water, flowing_lava, lava. A flowing fluid and its source are two types: a tick is for the
 // one it was scheduled for (ServerLevel.tickFluid: FluidState.is(type)).
-inline constexpr u32 kFluidTickTypes = 5;
+inline constexpr u32 kFluidTickTypes = fluid::kCount;
 
 // TickPriority: EXTREMELY_HIGH (-3) .. EXTREMELY_LOW (3).
 inline constexpr i32 kTickPriorityMin = -3, kTickPriorityMax = 3, kTickPriorityNormal = 0;

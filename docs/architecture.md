@@ -1054,8 +1054,7 @@ which is a row of the entity table like an item or a primed TNT (`entity::Store:
 own (16 scenarios of `physics_probe.py`, `Physics.ReplaysTheFallingBlocksAVanillaServerRecorded`).
 Where it comes down it is a block again if the block there gives way and it could stand; on a
 torch or a slab it breaks and lies there as an item. Concrete powder that lands in water, or
-beside it, is concrete, and so is powder that water is poured beside - or would be: nothing
-here places water yet, an imported world has it.
+beside it, is concrete, and so is powder that water comes to lie beside.
 
 A client moves a falling block by itself and takes it away when told; the block it becomes is
 sent twice, as in vanilla - at once to those who see the entity (`block_update`, and
@@ -1163,9 +1162,71 @@ layout a family, that is the next block's first state plus this state's offset
 (`BlockInfo::next_stage`). Weathering stopped being a kind of block for that - it is whatever
 has a next stage.
 
+### Water (`world/fluid.*`, `server/fluids.cpp`)
+
+A fluid is nothing of its own in the world. A cell of water is the block `water` at one of
+sixteen levels, a waterlogged slab is a slab - and what either *holds*, which fluid and how
+much of it and whether it is falling, is a `FluidState`, which vanilla works out from the block
+state (`BlockState.getFluidState`) and this server reads from a table of that name
+(`state::kFluid`: the id of the fluid state, of which there are 37; `fluid::kType`, `kAmount`,
+`kFlags` and `kLegacy` say what each is, `kFlowingOf` and `kSourceOf` lead back - all mcgen's,
+from the game as it runs). So a flow is block changes and nothing else: a tick works out what a
+cell should hold and puts the block that is exactly that (`FluidState.createLegacyBlock`) with
+`Game::set_block` - its neighbours hear of it, light follows, the section's fluid count and the
+clients are told, as of any block.
+
+What makes it move is the fluids' own tick list (above). A cell of fluid asks for its tick when
+it is placed, when a block beside it changes, and when a neighbour takes another shape while
+one of the two is a source (`LiquidBlock.onPlace`, `neighborChanged`, `updateShape`: hooks like
+any block's, kind `kLiquid`). The tick is `FlowingFluid.tick` (`Game::tick_fluid`). A cell that
+flows first becomes what stands around it - one level less than the most beside it; a falling
+column, under the fluid; a source, between two sources and over solid ground or a third, if
+`water-source-conversion` (a game rule in vanilla, a setting here) allows; or nothing - and if
+that changed it, it is ticked again five game ticks on. Then the fluid goes on from the cell:
+down, if the block below takes it; else to its sides - all four on flat ground, and only towards
+the nearest way down when there is one within four blocks of the cell beside it
+(`getSpread`, `getSlopeDistance`). That is all of it: five ticks a block, one level a block,
+seven blocks from a source; and with the source gone each cell finds in its turn that nothing
+feeds it - the middle last, into which the water beside it flows back until that is gone too.
+
+Where a fluid may go is three questions, and each is a table load:
+
+- *Does the block there give way to a fluid at all* (`FlowingFluid.canHoldAnyFluid`)? In 26.3
+  that is a tag, `#washed_away_by_fluids`, and an interface, `LiquidBlockContainer` - here a bit
+  a state (`state::kFluidFacts`).
+- *Does anything stand between the two cells* (`canPassThroughWall`: of the two collision
+  shapes, `Shapes.mergedFaceOccludes`)? Vanilla joins the two faces as voxel shapes when it is
+  asked, and keeps the answers for the last two hundred pairs of states. mcgen joins them once:
+  the 330 collision shapes have 224 different layers of cells at their six faces, which fall
+  into 42 classes that answer alike against every other, and a state names the classes of its
+  six faces with one byte (`state::kFlowFaces` into `kFlowFace`; `kFlowCovers` says which two
+  classes shut a face between them - built as light's `kOccludes` is). A block whose shape
+  depends on where it stands or on its block entity is asked as mcgen asked it: at no offset,
+  shut. The unit test holds the table to the method written out over the shapes' grids - every
+  pair of shapes, every direction.
+- *Does the fluid that is there give way* (`canBeReplacedWith`)? Water does only to what comes
+  from above and is not water.
+
+The search for a way down remembers the cells it has looked at. Vanilla does so in two hash
+maps keyed by a short, made for every spread (`FlowingFluid.SpreadContext`); here it is two
+flat arrays on the stack - the search reaches five cells from where it starts, so a square of
+eleven holds it. Everything that only reads is in `world/fluid.*`, as functions of the blocks
+named after `FlowingFluid`'s methods, so that the test can hold the search to the same search
+without its memory, on worlds thrown together at random; what a tick then does to the world is
+`server/fluids.cpp`.
+
+What gives way is washed away: it drops what its loot table gives an empty hand, with no sound
+and no particles of a block breaking (`WaterFluid.beforeDestroyingBlock`), and the water's
+block takes its place - a torch, a flower, three petals as a stack of three.
+
+A fluid's tick waits with its chunk as a block's does, is saved with it, and counts again
+from the moment the chunk next ticks blocks. Where the chunks that tick end, water ends a
+block short of vanilla's: vanilla's water enters the chunk beyond and waits there, here a
+block is set only in chunks that tick.
+
 ### Compared with vanilla
 
-`tools/vanilla/block_probe.py` runs both servers through the same 136 steps - two bots, one
+`tools/vanilla/block_probe.py` runs both servers through the same 157 steps - two bots, one
 building, one watching from three blocks off, and the console - and compares what each bot is
 told: every block change, level event, falling block, primed TNT and dropped item, in the
 order it came and by the tick it came in. It starts the servers itself; vanilla gets a new flat world every time.
@@ -1226,6 +1287,15 @@ In the last recordings nothing differs, in any step, for either bot. What that c
   and a cactus flower; `/setblock` of a poppy in the air and of full wildflowers, destroyed;
 - **barrels** by where their player looks - level, up, down - and a smoker and a blast furnace
   facing theirs; `/setblock` of an open barrel and a lit smoker, which stay as they were set;
+- **water**, set by the console on a floor of stone: the diamond a source makes, ring by ring
+  every fifth tick and a level less each ring; the same water once the source is taken away -
+  which cell sinks to which level in which tick, the middle filling again and going last; two
+  sources at the ends of a trench making the cell between them a source, and that source
+  filling an end that is emptied with water that flows; a hole three blocks off taking all of
+  it, the water falling in as a column that does not spread, and spreading from where it
+  stands when the hole is filled in; a torch, an end rod and petals washed away, with what
+  they drop, while a slab and a fence stand dry; water set five blocks up falling a block
+  every five ticks, a pool round where it lands, and the column going from the top;
 - **TNT** on five sides of a block of redstone is primed west, east, up, north, south.
 
 What a recording cannot say is said by the unit tests: the tick queue's order against a model
@@ -1257,11 +1327,15 @@ tick queue under load and the random pass belong with the first claim that any o
 
 ### What is not there
 
-- **Fluids.** No fluid ticks (vanilla's second `LevelTicks`, run after the blocks'): a
-  waterlogged block that would ask for one on an update does not, and the water in a slab, a
-  fence or a wall stays in it. Ice does not melt - it would leave water - and lava sets
-  nothing alight (a fluid's random tick). Concrete powder hardens beside water, which only an
-  imported world has, and that water does not flow.
+- **Of the fluids.** Lava: its block has no hooks yet, so the lava of an imported world lies
+  as it was saved, and water does not flow into it. The water in a block that holds it: a
+  waterlogged block does not ask for the water's tick when its shape is asked, so the water in
+  a slab, a fence or a wall stays in it, and none flows in. Bubble columns: water over soul
+  sand or magma is water. Ice does not melt, and nothing a fluid does at random happens (lava
+  sets nothing alight). What water does to what is in it - an item, a mob, a player - is not
+  there either: see "Physics". A block of an imported world that is not placeable here and
+  gives way to water (a lever, a rail) goes without a drop: what a block drops is known for
+  the blocks that can be placed.
 - **Of the plants**: everything that grows or spreads (saplings, crops, stems, mushrooms,
   bamboo, vines, bone meal on anything), the ones that are two blocks tall, the ones that act
   on who walks into them (the wither rose, sweet berries), eyeblossoms, flower pots; and
@@ -2387,9 +2461,10 @@ Roughly in dependency order:
    are there (see "Block updates"), so a block class is its own hooks now and no longer a
    missing system; slabs, stairs, fences, panes and walls are done ("A state that is a
    shape"). Next: plants and what else needs something to stand on, and the blocks that
-   answer a click - doors, trapdoors, fence gates. Then fluids - with them fluid ticks, ice,
-   water that leaves a waterlogged block - redstone, the other block entities. And what the
-   first four still lack: experience orbs.
+   answer a click - doors, trapdoors, fence gates. Fluid ticks are there and water flows
+   ("Water"); next of the fluids: lava, water that leaves and enters a waterlogged block,
+   buckets. Then redstone, the other block entities. And what the first four still lack:
+   experience orbs.
 8. **Commands**: tags into the world - block entity data, `/summon`'s tag
    (the SNBT reader is there) - `facing`, then the commands that wait for their subject. **Chat**: signed (see "Chat").
    **Time**: the weather, game rules.

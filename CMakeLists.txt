@@ -138,6 +138,7 @@ set(MC_GAME_SOURCES
   src/server/entity_tags.cpp
   src/server/explosion.cpp
   src/server/falling.cpp
+  src/server/fluids.cpp
   src/server/game.cpp
   src/server/inventory_actions.cpp
   src/server/item_entities.cpp
@@ -176,6 +177,7 @@ add_library(core STATIC
   src/world/region.cpp
   src/world/store.cpp
   src/world/ticks.cpp
+  src/world/fluid.cpp
   src/world/generator.cpp
   src/world/dimension.cpp
   src/world/collide.cpp
@@ -232,6 +234,7 @@ if(MC_TESTS)
       tests/unit/store_test.cpp
       tests/unit/player_data_test.cpp
       tests/unit/ticks_test.cpp
+      tests/unit/fluid_test.cpp
       tests/unit/physics_test.cpp
       tests/unit/light_test.cpp
       tests/unit/entity_test.cpp

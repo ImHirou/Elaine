@@ -2,7 +2,7 @@
 
 Minecraft 26.3 has 1286 blocks in 268 block classes. The server holds a block only if it
 simulates everything vanilla would do with it - so the list of what can be **placed** is the list
-of what is **done**: 771 blocks today. This file is that list, block class by block class,
+of what is **done**: 772 blocks today. This file is that list, block class by block class,
 in the order the missing systems are meant to be built.
 
 **Generated** by `tools/mcgen/roadmap.py` from the jar's block classes (`mcgen.py gamedata`) and the
@@ -265,7 +265,7 @@ Needs: The tick queue (`world::LevelTicks`) and `FallingBlockEntity` are there: 
 - [ ] **ScaffoldingBlock** (1) - `canBeReplaced(BlockState,BlockPlaceContext)`, `canSurvive`, `getFluidState`, `getStateForPlacement`, `onPlace`, `tick`, `updateShape`  
   scaffolding
 
-## 5. Fluids (0 of 53 blocks)
+## 5. Fluids (1 of 53 blocks)
 
 Needs: Water and lava: flowing (`FlowingFluid.tick`), waterlogging (`getFluidState`, `SimpleWaterloggedBlock`), buckets.
 
@@ -285,7 +285,7 @@ Needs: Water and lava: flowing (`FlowingFluid.tick`), waterlogging (`getFluidSta
   tube_coral_wall_fan, brain_coral_wall_fan, bubble_coral_wall_fan, fire_coral_wall_fan, horn_coral_wall_fan
 - [ ] **LayeredCauldronBlock** (2) - `entityInside`, `getAnalogOutputSignal`, `handlePrecipitation`, `hasAnalogOutputSignal`, `tick`, `useItemOn`  
   water_cauldron, powder_snow_cauldron
-- [ ] **LiquidBlock** (2) - `getDrops`, `getFluidState`, `isRandomlyTicking`, `neighborChanged`, `onPlace`, `randomTick`, `tick`, `updateShape`  
+- [ ] **LiquidBlock** (2, 1 of 2 done) - `getDrops`, `getFluidState`, `isRandomlyTicking`, `neighborChanged`, `onPlace`, `randomTick`, `tick`, `updateShape`  
   water, lava
 - [ ] **BubbleColumnBlock** (1) - `canSurvive`, `entityInside`, `getFluidState`, `tick`, `updateShape`  
   bubble_column

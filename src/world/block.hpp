@@ -18,6 +18,7 @@ namespace world {
 
 using BlockState = u16;
 namespace state = proto::gen::state;
+namespace fluid = proto::gen::fluid;
 namespace block_flag = proto::gen::block_flag;
 namespace item_flag = proto::gen::item_flag;
 using proto::gen::BlockInfo;
@@ -74,14 +75,30 @@ ALWAYS_INLINE bool is_solid(BlockState s) { return (state::kSturdyCenter[s] & 0x
 // Block.isFaceFull(the state's collision shape, DOWN): what a hanging sign hangs from by both chains.
 ALWAYS_INLINE bool collision_full_below(BlockState s) { return (state::kSturdyCenter[s] & 0x80) != 0; }
 
+// ---- fluids. A FluidState is its id in Fluid.FLUID_STATE_REGISTRY - which fluid, how much of
+// it, falling or not - and 0 is the empty one: what most blocks hold.
+using FluidState = u8;
+// BlockState.getFluidState(): the fluid a state is (water, lava) or holds (a waterlogged block).
+ALWAYS_INLINE FluidState fluid_of(BlockState s) { return state::kFluid[s]; }
+ALWAYS_INLINE u32 fluid_type(FluidState f) { return fluid::kType[f]; }                    // getType(): the fluid's id
+ALWAYS_INLINE u32 fluid_family(FluidState f) { return fluid::kFamily[fluid::kType[f]]; }  // Fluid.isSame; kNoFamily
+ALWAYS_INLINE u32 fluid_amount(FluidState f) { return fluid::kAmount[f]; }                // getAmount()
+ALWAYS_INLINE bool fluid_source(FluidState f) { return fluid::kFlags[f] & fluid::kIsSource; }
+ALWAYS_INLINE bool fluid_falling(FluidState f) { return fluid::kFlags[f] & fluid::kIsFalling; }
+// FlowingFluid.getOwnHeight: how much of its cell a fluid fills when nothing of it is above.
+ALWAYS_INLINE float fluid_own_height(FluidState f) { return static_cast<float>(fluid::kAmount[f]) / 9.0f; }
+// FluidState.createLegacyBlock(): the block state that is this fluid and nothing else (air for none).
+ALWAYS_INLINE BlockState fluid_block(FluidState f) { return fluid::kLegacy[f]; }
 // FluidState.is(FluidTags.WATER): water, still or flowing, as the block or with it (waterlogged) -
 // and FluidState.is(Fluids.WATER): a source of it.
-ALWAYS_INLINE bool holds_water(BlockState s) {
-    return (state::kFlags[s] & state::kHasFluid) &&
-           state::block_of(state::fluid_legacy_of(s)) == state::block_of(proto::gen::block::kWater);
-}
-ALWAYS_INLINE bool holds_water_source(BlockState s) {
-    return (state::kFlags[s] & state::kHasFluid) && state::fluid_legacy_of(s) == proto::gen::block::kWater;
+ALWAYS_INLINE bool holds_water(BlockState s) { return fluid::kFlags[state::kFluid[s]] & fluid::kInWater; }
+ALWAYS_INLINE bool holds_water_source(BlockState s) { return fluid::kType[state::kFluid[s]] == fluid::kWater; }
+// FlowingFluid.canPassThroughWall(dir, from, to): the collision shapes of two blocks that touch
+// do not, between them, cover the face they share - a fluid gets from one to the other.
+ALWAYS_INLINE bool fluid_passes(BlockState from, BlockState to, u32 dir) {
+    return !(
+        (state::kFlowCovers[state::kFlowFace[state::kFlowFaces[from]][dir]] >> state::kFlowFace[state::kFlowFaces[to]][dir ^ 1]) &
+        1);
 }
 
 // What a state means to the queries that ask a chunk about its sections first (Chunk::large_sections

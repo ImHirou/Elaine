@@ -37,6 +37,7 @@
 #include "server/world_info.hpp"
 #include "world/collide.hpp"
 #include "world/dimension.hpp"
+#include "world/fluid.hpp"
 #include "world/generator.hpp"
 
 namespace server {
@@ -510,6 +511,19 @@ class Game {
     }
     void run_block_ticks();
     void tick_block(world::BlockState state, proto::BlockPos pos);
+    // ---- fluids flow (server/fluids.cpp; what a fluid asks of the world is world/fluid.hpp)
+    world::FluidRules fluid_rules(u32 family) const;
+    void schedule_fluid_tick(proto::BlockPos pos, u32 fluid, i32 delay) {
+        world_.schedule_fluid_tick(pos.x, pos.y, pos.z, fluid, delay);
+    }
+    void run_fluid_ticks();
+    void tick_fluid(proto::BlockPos pos, u32 type);
+    void spread_fluid(const world::FluidRules& r, proto::BlockPos pos, world::BlockState state, world::FluidState held);
+    void spread_to_sides(const world::FluidRules& r, proto::BlockPos pos, world::BlockState state, world::FluidState held);
+    void spread_to(const world::FluidRules& r, proto::BlockPos pos, world::BlockState state, u32 dir, world::FluidState becomes);
+    bool should_spread_liquid(proto::BlockPos pos, world::BlockState state);
+    void liquid_changed(world::BlockState state, proto::BlockPos pos);
+    void liquid_shape_changed(world::BlockState state, proto::BlockPos pos, world::BlockState neighbour);
     void run_random_ticks();
     void random_tick(world::BlockState state, proto::BlockPos pos);
     void tick_spreading(world::BlockState state, proto::BlockPos pos);

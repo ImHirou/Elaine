@@ -156,7 +156,21 @@ PORTED_BLOCKS = {
     # SegmentableBlock: up to four of it in one block, each placed onto the ones that are there.
     "FlowerBedBlock": ("kSegmented", "kPlaceSegment", _SEGMENTS),
     "LeafLitterBlock": ("kSegmented", "kPlaceSegment", _SEGMENTS),
+    # ---- fluids: the block a fluid is by itself (server/fluids.cpp; the flow is world/fluid.*). No
+    # item places it - a bucket empties the fluid, /setblock sets the block (ITEMLESS_PORTED).
+    # Its block tick is the bubble column's, of which there is none; its random tick is lava's
+    # (RANDOM_TICK_GAPS); its collision shape is empty for whatever cannot stand on a fluid.
+    "LiquidBlock": ("kLiquid", None, {
+        "getCollisionShape", "getDrops", "getFluidState", "getRenderShape", "getShape", "isPathfindable", "isRandomlyTicking",
+        "neighborChanged", "onPlace", "randomTick", "tick", "updateShape", "propagatesSkylightDown", "skipRendering",
+        "createBlockStateDefinition"}),
 }
+# Ported classes whose blocks have no item: they can be in the world, and nothing places them by
+# hand (block_flag::kSettable: what /setblock and /fill may set besides what is placeable).
+ITEMLESS_PORTED = {"LiquidBlock"}
+# The blocks of LiquidBlock whose fluid flows. Lava's rules - its own pace, what it does to water -
+# are not written yet: its block has no hooks, as if the class were not ported.
+LIQUIDS_PORTED = {"minecraft:water"}
 # What a plant stands on: VegetationBlock.mayPlaceOn of its class, asked of the state below it
 # (canSurvive) - a block tag, the tag a field of the block names ("field:<name>"), or one of the
 # two rules that ask for more than a tag. gen.py makes each rule a bit a state (state::kSupport)
@@ -182,7 +196,7 @@ PLANT_SUPPORT = {
 BLOCK_KINDS = ["kPlain", "kChest", "kFurnace", "kCraftingTable", "kTnt", "kPowered", "kSnowy", "kSpreading", "kNylium",
                "kBuddingAmethyst", "kAmethystCluster", "kTorch", "kWallTorch", "kLamp", "kFalling", "kConcretePowder",
                "kSlab", "kStairs", "kFence", "kBars", "kWall", "kLantern", "kMushroom", "kBarrel", "kPlant", "kSegmented",
-               "kSign", "kWallSign", "kHangingSign", "kWallHangingSign"]
+               "kSign", "kWallSign", "kHangingSign", "kWallHangingSign", "kLiquid"]
 # The kinds whose randomTick is ported, and of those the ones whose tick may act whatever stands
 # around the block (the others are asked what is around them: state::kSmothers and its like).
 RANDOM_TICK_KINDS = {"kSpreading", "kNylium", "kBuddingAmethyst"}
@@ -197,9 +211,11 @@ WEATHERING_CLASSES = {"WeatheringCopperFullBlock", "WeatheringCopperSlabBlock", 
 # (ticks.scheduleTick(pos, Fluids.WATER, ...), then super): with no fluid ticks it does nothing,
 # and their states carry no kHookShape.
 NO_SHAPE_HOOK = {"SlabBlock", "ChainBlock", "WaterloggedTransparentBlock", "BarrierBlock", "HeavyCoreBlock", "MangroveRootsBlock"}
-# Placeable blocks whose class overrides randomTick and is not ported: what they would do waits
-# for something else. Named here so that a new one stops the generator.
-RANDOM_TICK_GAPS = {"IceBlock": "melts into water: it waits for fluids"}
+# Blocks whose class overrides randomTick, and the tick is not ported - of a class that is placeable
+# by the general rule, or of a ported one: what they would do waits for something else. Named
+# here so that a new one stops the generator.
+RANDOM_TICK_GAPS = {"IceBlock": "melts into water where a light is near: not ported, ice stays ice",
+                    "LiquidBlock": "lava sets fire to what burns around it: it waits for fire"}
 
 # Property layouts the C++ side computes states from: block -> [(property, values in order)].
 # state = first_state + sum(value index * stride); gen.py emits the strides and checks the orders.
@@ -303,6 +319,8 @@ def ported_block(game_block: dict):
     if set(game_block["hooks"]) != hooks:
         die(f"{game_block['name']}: {cls} overrides {sorted(set(game_block['hooks']) ^ hooks)} differently from the version "
             "the server's port was written against - read the class again, then update PORTED_BLOCKS")
+    if cls == "LiquidBlock" and game_block["name"] not in LIQUIDS_PORTED:
+        return None
     return kind, place, item[0] if item else "BlockItem"
 
 

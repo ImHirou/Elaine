@@ -451,6 +451,7 @@ BLOCK_FLAGS = [
     ("kGameMaster", 0x100, "GameMasterBlock: only operators may break it"),
     ("kCustomReplace", 0x200, "overrides canBeReplaced(state, context): kReplaceable alone does not decide"),
     ("kCustomClone", 0x400, "overrides getCloneItemStack: \"pick block\" gives something other than a plain stack of its item"),
+    ("kSettable", 0x800, "its class is ported and no item places it (a fluid's block): /setblock and /fill may set it"),
 ]
 
 # proto::gen::state::kHooks: which of the hooks a block change runs the state's block has - of a
@@ -500,6 +501,22 @@ WALL_ABOVE_FLAGS = [
     ("kPostOverride", "#wall_post_override: the same, whatever its shape (a torch, a sign)"),
     ("kWallPost", "a wall with a post of its own (`up`): the wall under it has one too"),
 ]
+# proto::gen::state::kFluidFacts: what a state is to a fluid that would flow into it (FlowingFluid).
+FLUID_FACT_FLAGS = [
+    ("kHoldsFluid", "FlowingFluid.canHoldAnyFluid: a LiquidBlockContainer, or in #washed_away_by_fluids - a fluid may flow here"),
+    ("kFluidContainer", "a LiquidBlockContainer: a fluid that flows here is handed to the block (placeLiquid), which stays"),
+]
+# proto::gen::fluid::kFlags, by fluid state.
+FLUID_STATE_FLAGS = [
+    ("kIsSource", "FluidState.isSource()"),
+    ("kIsFalling", "its FALLING property: the fluid came from above"),
+    ("kInWater", "FluidState.is(FluidTags.WATER)"),
+    ("kInLava", "FluidState.is(FluidTags.LAVA)"),
+]
+# Fluid.isSame: a fluid and its flowing kind are one family. proto::gen::fluid::kFamily, kFlowingOf, kSourceOf.
+FLUID_FAMILIES = [("kWaterFamily", "minecraft:water", "minecraft:flowing_water"),
+                  ("kLavaFamily", "minecraft:lava", "minecraft:flowing_lava")]
+
 EXCEPTIONS_FOR_CONNECTION = ("minecraft:barrier", "minecraft:carved_pumpkin", "minecraft:jack_o_lantern", "minecraft:melon",
                              "minecraft:pumpkin")  # Block.isExceptionForConnection; and LeavesBlock, #shulker_boxes
 
@@ -771,6 +788,9 @@ def build_block_tables(v: dict, blocks: dict, data: dict, static_regs: dict, van
         weathers = bool(ported) and game["blocks"][b["name"]]["class"][0] in gen_game.WEATHERING_CLASSES
         if st["randomly_ticking"][i] and (kind in gen_game.RANDOM_TICK_KINDS or weathers):
             r |= rbit["kRandomTick"] | (rbit["kRandomAlways"] if kind in gen_game.RANDOM_TICK_ALWAYS or weathers else 0)
+        elif st["randomly_ticking"][i] and ported and gh.get("randomTick") not in gen_game.RANDOM_TICK_GAPS:
+            die(f"{b['name']}: its class is ported, {gh.get('randomTick')}.randomTick is not, and it is no known gap "
+                "(gen_game.RANDOM_TICK_KINDS, RANDOM_TICK_GAPS)")
         if kind in ("kSpreading", "kNylium"):
             # LightEngine.getLightDampeningInto(this, above, UP, ...) is read below with an empty shape for `this`.
             if st["occlusion_tuple"][i] != 0 or not st["randomly_ticking"][i]:
@@ -946,6 +966,146 @@ def build_block_tables(v: dict, blocks: dict, data: dict, static_regs: dict, van
     stone = next((b["default_state"] for b in ext_blocks if b["name"] == "minecraft:stone"), None)
     if stone is None or wall_above[stone] != 0x1F or wall_above[0] != 0:
         die("kWallAbove: a full block does not cover a wall's every test shape, or air covers one")
+
+    # ---- fluids: the FluidState a block state holds, by its id (Fluid.FLUID_STATE_REGISTRY), and
+    # what each of those is. A flowing fluid and its source are one family (Fluid.isSame) of two fluids.
+    fluid_col = cols["fluid_state"]
+    if {f["name"]: f["id"] for f in game["fluids"]["fluids"]} != fluid_ids:
+        die("gamedata/fluids.json and registries.json disagree on the fluid registry")
+    if len(fluid_states) > 255 or len(FLUID_STATE_FLAGS) > 8 or len(FLUID_FACT_FLAGS) > 8:
+        die("state::kFluid, fluid::kFlags and state::kFluidFacts are one byte each")
+    fsbit = {name: 1 << i for i, (name, _) in enumerate(FLUID_STATE_FLAGS)}
+    family_of: dict[str, int] = {}
+    for k, (_, source, flowing) in enumerate(FLUID_FAMILIES):
+        family_of[source] = family_of[flowing] = k
+        # FluidTags.WATER / LAVA are asked where Fluid.isSame is: they must name the same fluids.
+        if set(fluid_tags.get(source, ())) != {fluid_ids[source], fluid_ids[flowing]}:
+            die(f"fluid tag #{source.split(':', 1)[1]} is not {source} and {flowing}: the port takes the tag for the family")
+        for f in game["fluids"]["fluids"]:
+            if f["name"] in (source, flowing) and (f.get("source"), f.get("flowing")) != (source, flowing):
+                die(f"{f['name']}: its source and its flowing fluid are not {source} and {flowing}")
+    in_tag = {"kInWater": water, "kInLava": set(fluid_tags["minecraft:lava"])}
+    fluid_type, fluid_amount, fluid_flags, fluid_legacy = [], [], [], []
+    flowing_of = [[[0] * 9 for _ in range(2)] for _ in FLUID_FAMILIES]   # [family][falling][amount]
+    source_of = [[0, 0] for _ in FLUID_FAMILIES]                          # [family][falling]
+    for fs in fluid_states:
+        fid, fam, falling = fluid_ids[fs["fluid"]], family_of.get(fs["fluid"]), int(bool(fs.get("falling", False)))
+        if fs["empty"] != (fid == 0) or fs["empty"] != (fam is None):
+            die(f"fluid state {fs['id']}: a fluid of no family that is not the empty one")
+        if abs(fs["own_height"] - fs["amount"] / 9.0) > 1e-6:
+            die(f"fluid state {fs['id']}: FlowingFluid.getOwnHeight is not amount / 9 any more")
+        if fam is not None:
+            _, source, flowing = FLUID_FAMILIES[fam]
+            if fs["source"] and (fs["fluid"] != source or fs["amount"] != 8):
+                die(f"fluid state {fs['id']}: a source that is not {source} with amount 8")
+            if not fs["source"] and (fs["fluid"] != flowing or not 1 <= fs["amount"] <= 8):
+                die(f"fluid state {fs['id']}: a flowing fluid that is not {flowing} with an amount of 1..8")
+            if fs["source"]:
+                source_of[fam][falling] = fs["id"]
+            else:
+                flowing_of[fam][falling][fs["amount"]] = fs["id"]
+        fluid_type.append(fid)
+        fluid_amount.append(fs["amount"])
+        fluid_flags.append((fsbit["kIsSource"] if fs["source"] else 0) | (fsbit["kIsFalling"] if falling else 0) |
+                           sum(fsbit[flag] for flag, members in in_tag.items() if fid in members))
+        fluid_legacy.append(fs["legacy_block"])
+    if any(0 in fam[f][1:] for fam in flowing_of for f in (0, 1)) or any(0 in fam for fam in source_of):
+        die("gamedata/fluids.json: a family without a fluid state for some amount, falling or not")
+    for i in range(n):
+        if fluid_legacy[fluid_col[i]] != st["fluid_legacy_block"][i]:
+            die(f"state {i}: its fluid state's legacy block is not what blockdata.json says removeBlock leaves")
+    for k, (_, source, _) in enumerate(FLUID_FAMILIES):
+        # LiquidBlock.getFluidState: level 0 the source, 1..7 flowing with 8 - level, 8 and more falling.
+        liquid = game["blocks"].get(source)
+        if not liquid or liquid["class"][0] != "LiquidBlock" or [(q["name"], q["stride"], len(q["values"])) for q in liquid[
+                "properties"]] != [("level", 1, 16)]:
+            die(f"{source}: the block of the fluid is no LiquidBlock with one property, level 0..15")
+        for level in range(16):
+            want = source_of[k][0] if level == 0 else flowing_of[k][0][8 - level] if level < 8 else flowing_of[k][1][8]
+            if fluid_col[liquid["first_state"] + level] != want:
+                die(f"{source}[level={level}]: LiquidBlock.getFluidState is not what the flow's port takes it for")
+        # What the flow makes - a source, 1..7 of it flowing, a falling column - is a block state
+        # that holds exactly that again (FlowingFluid.getLegacyLevel).
+        for made in [source_of[k][0], flowing_of[k][1][8]] + flowing_of[k][0][1:8]:
+            if fluid_col[fluid_legacy[made]] != made:
+                die(f"fluid state {made}: its legacy block holds another fluid state")
+
+    ffbit = {name: 1 << i for i, (name, _) in enumerate(FLUID_FACT_FLAGS)}
+    washed = tagged("washed_away_by_fluids")
+    fluid_facts = bytearray(n)
+    for b in ext_blocks:
+        container = "LiquidBlockContainer" in game["blocks"][b["name"]]["interfaces"]
+        f = (ffbit["kHoldsFluid"] if container or b["id"] in washed else 0) | (ffbit["kFluidContainer"] if container else 0)
+        for s in blocks[b["name"]]["states"]:
+            fluid_facts[s["id"]] = f
+    slab = next(b for b in ext_blocks if b["name"] == "minecraft:oak_slab")
+    if fluid_facts[slab["default_state"]] != ffbit["kHoldsFluid"] | ffbit["kFluidContainer"] or fluid_facts[stone] or not fluid_facts[0]:
+        die("kFluidFacts: a slab is no LiquidBlockContainer, stone holds a fluid, or air does not (#washed_away_by_fluids)")
+
+    # ---- FlowingFluid.canPassThroughWall(direction, from, to) = !Shapes.mergedFaceOccludes(the
+    # collision shape of `from`, that of `to`, direction): of each shape the layer of cells at the
+    # face between the two - if the shape reaches that face at all - and the two layers together
+    # must not cover the face. A layer is the footprints of the shape's boxes that reach the face;
+    # layers that answer alike against every other are one class, the six classes of a state one
+    # tuple (as light's kOccludes is made). The shape of a block whose shape depends on where it is
+    # or on its block entity is taken as gamedata asked for it: at no offset, shut.
+    axis_of = (1, 1, 2, 2, 0, 0)                      # Direction: down, up, north, south, west, east
+    others = {0: (1, 2), 1: (0, 2), 2: (0, 1)}
+    layer_ids: dict[tuple, int] = {(): 0}
+
+    def face_layers(boxes) -> tuple:
+        out = []
+        for d in range(6):
+            a = axis_of[d]
+            u, w = others[a]
+            rects: list = []
+            if boxes and d & 1:                       # up, south, east: where the shape ends at 1
+                edge = max(q[a + 3] for q in boxes)
+                if abs(edge - 1.0) <= 1e-7:
+                    rects = sorted((q[u], q[w], q[u + 3], q[w + 3]) for q in boxes if q[a + 3] >= edge - 1e-7)
+            elif boxes:                               # down, north, west: where it begins at 0
+                edge = min(q[a] for q in boxes)
+                if abs(edge) <= 1e-7:
+                    rects = sorted((q[u], q[w], q[u + 3], q[w + 3]) for q in boxes if q[a] <= edge + 1e-7)
+            out.append(layer_ids.setdefault(tuple(rects), len(layer_ids)))
+        return tuple(out)
+
+    layers_cache: dict[tuple, tuple] = {}
+    state_layers = []
+    for i in range(n):
+        boxes = shapes[st["collision_shape"][i]] if st["collision_shape"][i] >= 0 else game_shapes[game_coll[i]]
+        key = tuple(tuple(q) for q in boxes)
+        if key not in layers_cache:
+            layers_cache[key] = face_layers(boxes)
+        state_layers.append(layers_cache[key])
+    layer_rects = sorted(layer_ids, key=layer_ids.get)
+    unit = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]
+    together = [[bool(ra or rb) and covers(list(ra) + list(rb), unit) for rb in layer_rects] for ra in layer_rects]
+    class_ids: dict[tuple, int] = {}
+    class_of = [class_ids.setdefault(tuple(row), len(class_ids)) for row in together]
+    if len(class_ids) > 64:
+        die(f"{len(class_ids)} classes of face layers: kFlowCovers packs one row per u64, widen it")
+    flow_covers = [0] * len(class_ids)
+    for a, row in enumerate(together):
+        for b, hit in enumerate(row):
+            flow_covers[class_of[a]] |= 1 << class_of[b] if hit else 0
+    for a, row in enumerate(together):   # (two layers of one class answer alike to every class: the relation is symmetric)
+        if any(hit != bool(flow_covers[class_of[a]] >> class_of[b] & 1) for b, hit in enumerate(row)):
+            die("kFlowCovers: layers of one class that do not cover the same")
+    tuple_ids: dict[tuple, int] = {}
+    flow_faces = bytearray(n)
+    for i in range(n):
+        key = tuple(class_of[layer] for layer in state_layers[i])
+        if key not in tuple_ids and len(tuple_ids) == 256:
+            die("more than 256 tuples of face layer classes: state::kFlowFaces is one byte a state")
+        flow_faces[i] = tuple_ids.setdefault(key, len(tuple_ids))
+    flow_tuples = sorted(tuple_ids, key=tuple_ids.get)
+
+    def fluid_passes(a: int, b: int, d: int) -> bool:
+        return not flow_covers[flow_tuples[flow_faces[a]][d]] >> flow_tuples[flow_faces[b]][d ^ 1] & 1
+    if (flow_tuples[0] != (0,) * 6 or not all(fluid_passes(0, 0, d) for d in range(6)) or
+            any(fluid_passes(stone, 0, d) or fluid_passes(0, stone, d) for d in range(6))):
+        die("kFlowCovers: a fluid does not pass from air to air, or passes a full block")
     if len(shapes) >= 0xFFFF:
         die("too many collision shapes for 16-bit ids")
 
@@ -955,7 +1115,9 @@ def build_block_tables(v: dict, blocks: dict, data: dict, static_regs: dict, van
         "state_occlusion.bin": bytes(st["occlusion_tuple"]),
         "state_block.bin": u16s(st["block"]),
         "state_collision.bin": u16s(coll),
-        "state_fluid_legacy.bin": u16s(st["fluid_legacy_block"]),
+        "state_fluid.bin": bytes(fluid_col),
+        "state_fluid_facts.bin": bytes(fluid_facts),
+        "state_flow.bin": bytes(flow_faces),
         "state_hooks.bin": bytes(hooks),
         "state_random.bin": bytes(random_ticks),
         "state_sturdy_full.bin": bytes(cols["sturdy_full"]),
@@ -967,7 +1129,44 @@ def build_block_tables(v: dict, blocks: dict, data: dict, static_regs: dict, van
     }
 
     hdr = HEADER.format(id=v["id"], proto=v["protocol_version"])
-    o = [hdr, """
+    def carray(values, per_line: int = 24) -> str:
+        return "".join("    " + ", ".join(str(x) for x in values[k:k + per_line]) + ",\n" for k in range(0, len(values), per_line))
+
+    fl = ["""
+// Fluids: BuiltInRegistries.FLUID, and the states of them (Fluid.FLUID_STATE_REGISTRY: what
+// BlockState.getFluidState() answers, by id - 0 is the empty one). Source: mcgen gamedata.
+namespace proto::gen::fluid {
+
+"""]
+    fl.append(f"inline constexpr unsigned kCount = {len(fluid_ids)};        // the fluids: the type of a scheduled fluid tick\n")
+    for name in sorted(fluid_ids, key=fluid_ids.get):
+        fl.append(f"inline constexpr unsigned char {ident(name)} = {fluid_ids[name]};\n")
+    fl.append(f"inline constexpr unsigned kStateCount = {len(fluid_states)};\n\n// kFlags[fluid state]\n")
+    for name, why in FLUID_STATE_FLAGS:
+        fl.append(f"inline constexpr unsigned char {name} = 0x{fsbit[name]:02X};  // {why}\n")
+    fl.append("\n// Fluid.isSame: the family of a fluid, kNoFamily for the empty one.\n")
+    for k, (name, source, flowing) in enumerate(FLUID_FAMILIES):
+        fl.append(f"inline constexpr unsigned char {name} = {k};  // {source}, {flowing}\n")
+    fl.append(f"inline constexpr unsigned char kNoFamily = 0xFF;\ninline constexpr unsigned kFamilies = {len(FLUID_FAMILIES)};\n")
+    fl.append("inline constexpr unsigned char kFamily[kCount] = {" + ", ".join(
+        str(family_of.get(name, "kNoFamily")) for name in sorted(fluid_ids, key=fluid_ids.get)) + "};\n\n")
+    fl.append("// FluidState.getType(): the fluid, by fluid state.\ninline constexpr unsigned char kType[kStateCount] = {\n" +
+              carray(fluid_type) + "};\n")
+    fl.append("// FluidState.getAmount(): 1..8 of a flowing fluid, 8 of a source. Its own height is amount / 9.0f\n"
+              "// (FlowingFluid.getOwnHeight).\ninline constexpr unsigned char kAmount[kStateCount] = {\n" + carray(fluid_amount) + "};\n")
+    fl.append("inline constexpr unsigned char kFlags[kStateCount] = {\n" + carray(fluid_flags) + "};\n")
+    fl.append("// FluidState.createLegacyBlock(): the block state that is this fluid and nothing else - what is\n"
+              "// left of a block that held it (Level.removeBlock), what a flow puts where it arrives.\n"
+              "inline constexpr unsigned short kLegacy[kStateCount] = {\n" + carray(fluid_legacy, 16) + "};\n")
+    fl.append("// FlowingFluid.getFlowing(amount, falling) and getSource(falling), as fluid states:\n"
+              "// kFlowingOf[family][falling][amount] (amount 1..8), kSourceOf[family][falling].\n"
+              "inline constexpr unsigned char kFlowingOf[kFamilies][2][9] = {\n")
+    for fam in flowing_of:
+        fl.append("    {" + ", ".join("{" + ", ".join(str(x) for x in row) + "}" for row in fam) + "},\n")
+    fl.append("};\ninline constexpr unsigned char kSourceOf[kFamilies][2] = {" + ", ".join(
+        "{" + ", ".join(str(x) for x in fam) + "}" for fam in source_of) + "};\n\n}  // namespace proto::gen::fluid\n")
+
+    o = [hdr, "".join(fl), """
 // Per block state tables, indexed by state id. One byte (or two) per state and one table per
 // question, so a scan over a section touches only the column it needs. Sources: Mojang's
 // blocks.json for the ids, tools/mcgen/extract/Extract.java for the properties, the vanilla
@@ -979,7 +1178,9 @@ namespace proto::gen::state {
     o.append(f"inline constexpr unsigned kBlockCount = {len(ext_blocks)};\n")
     o.append(f"inline constexpr unsigned kOcclusionTuples = {len(tuples)};\n")
     o.append(f"inline constexpr unsigned kCollisionShapes = {len(shapes)};\n")
-    o.append("inline constexpr unsigned short kDynamicCollision = 0xFFFF;  // shape depends on position or entity\n\n")
+    o.append("inline constexpr unsigned short kDynamicCollision = 0xFFFF;  // shape depends on position or entity\n")
+    o.append(f"inline constexpr unsigned kFlowTuples = {len(flow_tuples)};\n")
+    o.append(f"inline constexpr unsigned kFlowClasses = {len(class_ids)};\n\n")
     o.append("// kFlags[state]\n")
     for name, why in STATE_FLAGS:
         o.append(f"inline constexpr unsigned char {name} = 0x{bit[name]:02X};  // {why}\n")
@@ -995,6 +1196,9 @@ namespace proto::gen::state {
     o.append("\n// kWallAbove[state]\n")
     for name, why in WALL_ABOVE_FLAGS:
         o.append(f"inline constexpr unsigned char {name} = 0x{wbit[name]:02X};{'  // ' + why if why else ''}\n")
+    o.append("\n// kFluidFacts[state]\n")
+    for name, why in FLUID_FACT_FLAGS:
+        o.append(f"inline constexpr unsigned char {name} = 0x{ffbit[name]:02X};  // {why}\n")
     o.append("""
 inline constexpr unsigned char kFlags[] = {
 #embed "state_flags.bin"
@@ -1042,19 +1246,28 @@ inline constexpr unsigned char kBlockBytes[] = {
 inline constexpr unsigned char kCollisionBytes[] = {
 #embed "state_collision.bin"
 };
-inline constexpr unsigned char kFluidLegacyBytes[] = {
-#embed "state_fluid_legacy.bin"
+// The fluid state a block state holds (BlockState.getFluidState()): an index into fluid::k*.
+inline constexpr unsigned char kFluid[] = {
+#embed "state_fluid.bin"
+};
+inline constexpr unsigned char kFluidFacts[] = {
+#embed "state_fluid_facts.bin"
+};
+// Which tuple of face layers the state's collision shape has: kFlowFace[kFlowFaces[state]].
+inline constexpr unsigned char kFlowFaces[] = {
+#embed "state_flow.bin"
 };
 static_assert(sizeof kFlags == kCount && sizeof kLight == kCount && sizeof kOcclusion == kCount);
 static_assert(sizeof kHooks == kCount && sizeof kRandom == kCount && sizeof kSturdyFull == kCount && sizeof kSturdyCenter == kCount);
 static_assert(sizeof kConnect == kCount && sizeof kWallAbove == kCount && sizeof kSupport == kCount);
-static_assert(sizeof kBlockBytes == 2 * kCount && sizeof kCollisionBytes == 2 * kCount && sizeof kFluidLegacyBytes == 2 * kCount);
+static_assert(sizeof kBlockBytes == 2 * kCount && sizeof kCollisionBytes == 2 * kCount);
+static_assert(sizeof kFluid == kCount && sizeof kFluidFacts == kCount && sizeof kFlowFaces == kCount);
 
 constexpr unsigned u16_at(const unsigned char* t, unsigned i) { return t[2 * i] | static_cast<unsigned>(t[2 * i + 1]) << 8; }
 constexpr unsigned block_of(unsigned state) { return u16_at(kBlockBytes, state); }
 constexpr unsigned collision_of(unsigned state) { return u16_at(kCollisionBytes, state); }
-// What Level.removeBlock() leaves: air, or the fluid block of a waterlogged state.
-constexpr unsigned fluid_legacy_of(unsigned state) { return u16_at(kFluidLegacyBytes, state); }
+// What Level.removeBlock() leaves: air, or the block of the fluid the state held (a waterlogged one's water).
+constexpr unsigned fluid_legacy_of(unsigned state) { return fluid::kLegacy[kFluid[state]]; }
 
 // Direction order of everything indexed by direction (net.minecraft.core.Direction ordinals).
 enum Direction : unsigned char { kDown, kUp, kNorth, kSouth, kWest, kEast };
@@ -1066,6 +1279,20 @@ inline constexpr unsigned long long kOccludes[kOcclusionTuples][6] = {
 """)
     for row in matrix:
         o.append("    {" + ", ".join(f"0x{m:X}ull" for m in row) + "},\n")
+    o.append("""};
+
+// FlowingFluid.canPassThroughWall(direction, from, to) ==
+//   !(kFlowCovers[kFlowFace[kFlowFaces[from]][direction]] >> kFlowFace[kFlowFaces[to]][direction ^ 1] & 1)
+// precomputed with Shapes.mergedFaceOccludes() over every pair of collision shapes: the class of
+// the layer of cells a shape has at each of its six faces, and which two classes cover a face
+// between them.
+inline constexpr unsigned char kFlowFace[kFlowTuples][6] = {
+""")
+    for row in flow_tuples:
+        o.append("    {" + ", ".join(str(c) for c in row) + "},\n")
+    o.append("};\ninline constexpr unsigned long long kFlowCovers[kFlowClasses] = {\n")
+    for k in range(0, len(flow_covers), 4):
+        o.append("    " + ", ".join(f"0x{m:X}ull" for m in flow_covers[k:k + 4]) + ",\n")
     o.append("};\n\n}  // namespace proto::gen::state\n")
     files["block_data.hpp"] = "".join(o)
 
@@ -1330,6 +1557,11 @@ namespace proto::gen {
         f |= bf["kGameMaster"] if b["game_master"] else 0
         f |= bf["kCustomReplace"] if not hook_default(b, "canBeReplaced") else 0
         f |= bf["kCustomClone"] if b["class"] in custom_clone else 0
+        # A ported class without an item: nothing places it, a command may set it.
+        if ported and b["item"] == "minecraft:air":
+            if gb["class"][0] not in gen_game.ITEMLESS_PORTED or b["game_master"]:
+                die(f"{name}: its class is ported and it has no item - is it to be set by commands? (gen_game.ITEMLESS_PORTED)")
+            f |= bf["kSettable"]
         snd = b["sound"]
         t.append(f"    {{{first[name]}, {len(blocks[name]['states'])}, {b['default_state']}, {item_ids[b['item']]}, 0x{f:X}, "
                  f"{{{alt[0]}, {alt[1]}, {alt[2]}}}, {next_stage}, {sound(snd['place'])}, {sound(snd['break'])}, "

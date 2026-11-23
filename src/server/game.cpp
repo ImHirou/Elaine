@@ -127,7 +127,7 @@ void Game::run(const std::atomic<bool>& stop) {
         const u64 t0 = base::now_ns();
         // Same order as MinecraftServer.processPacketsAndTick, tickServer and tickChildren:
         // packets, then - if the game is not frozen - the clocks; the level - its time, the
-        // scheduled block ticks, the chunks' random ticks, block and light changes go out to
+        // scheduled ticks of blocks and of fluids, the chunks' random ticks, block and light changes go out to
         // whoever sees them (ServerChunkCache.broadcastChangedChunks), the entities are shown (ChunkMap.tick),
         // block events are sent, the entities tick (items, primed TNT; ServerPlayer.tick, which
         // is the menu), then the block entities (furnaces) - then the per-connection tick (block
@@ -147,9 +147,11 @@ void Game::run(const std::atomic<bool>& stop) {
         const u64 t_blocks = base::now_ns();
         if (LIKELY(runs)) {
             // ServerLevel.tick: tickTime - what packets scheduled was scheduled by the tick before -
-            // then the block ticks that are due, then (ServerChunkCache.tickChunks) the random ticks.
+            // then the block ticks that are due, the fluids' after them, then
+            // (ServerChunkCache.tickChunks) the random ticks.
             world_.set_time(++time_);
             run_block_ticks();
+            run_fluid_ticks();
             run_random_ticks();
         }
         block_ns += base::now_ns() - t_blocks;

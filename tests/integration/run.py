@@ -3364,7 +3364,8 @@ def copper_keeps_its_shape(srv: Server):
 @test()
 def placed_in_water():
     """A block that can hold water holds the source it is placed into, and leaves it behind when it
-    goes; flowing water is displaced. (The water is an imported world's: nothing here makes any.)"""
+    goes; flowing water is displaced. (The water is an imported world's, and the game stands still
+    while it is built into: water that is touched flows - water_spreads and the scenarios after it.)"""
     world = tempfile.mkdtemp(prefix="world-water-")
     srv = None
     try:
@@ -3375,6 +3376,8 @@ def placed_in_water():
         join(c, "Alice", view=2)
         c.send("player_loaded")
         settle(c)
+        make_op(srv, c, "Alice")
+        assert run_command(c, "tick freeze")["said"] == [tr("commands.tick.status.frozen")]
         water = mc.BLOCK["kWater"]
         for slot, item in enumerate(("kOakSlab", "kOakStairs", "kOakFence", "kCobblestoneWall", "kLantern", "kIronChain", "kBarrier")):
             give(c, 36 + slot, I[item], 16)
@@ -3406,6 +3409,160 @@ def placed_in_water():
         dig(c, (2, -60, 8), seq=11)
         dig(c, (8, -60, 8), seq=12)
         assert collect(c) == {(3, -60, 8): water, (4, -60, 8): water, (2, -60, 8): AIR, (8, -60, 8): AIR}
+        assert srv.stop() == 0, srv.read_log()
+        os.unlink(srv.log.name)
+    finally:
+        if srv:
+            srv.stop()
+        shutil.rmtree(world, ignore_errors=True)
+
+
+# ----------------------------------------------------------------------------- fluids
+
+def step_game(c: Client, ticks: int) -> dict:
+    """`/tick step` of a game that stands still: so many game ticks and no more - and the block
+    changes they brought. (What a fluid does is counted in game ticks: a scenario that asks when
+    freezes the game and steps it.)"""
+    got = run_command(c, f"tick step {ticks}", ticks=ticks + 4)
+    assert got["said"] == [tr("commands.tick.step.success", ticks)], got["said"]
+    return got["blocks"]
+
+
+def ring(centre: tuple, d: int) -> list:
+    """The cells `d` steps from `centre` on its level: where a fluid is after d of its steps."""
+    x, y, z = centre
+    return sorted({(x + dx, y, z + dz) for dx in range(-d, d + 1) for dz in (d - abs(dx), abs(dx) - d)})
+
+
+def wet_start(srv: Server) -> Client:
+    """An operator in a game that stands still: what is set is ticked when the scenario says."""
+    a = srv.client()
+    join(a, "Alice")
+    a.send("player_loaded")
+    settle(a)
+    make_op(srv, a, "Alice")
+    assert run_command(a, "tick freeze")["said"] == [tr("commands.tick.status.frozen")]
+    return a
+
+
+@test()
+def water_spreads(srv: Server):
+    """Water flows (FlowingFluid.tick): from a source a block every five game ticks, a level less
+    each block, seven blocks far on flat ground - a diamond of 113 cells. With the source gone it
+    drains, every cell finding in its turn that nothing feeds it."""
+    a = wet_start(srv)
+    water, source = mc.BLOCK["kWater"], (8, -60, 12)
+    got = run_command(a, "setblock 8 -60 12 water")
+    assert got["said"] == [tr("commands.setblock.success", 8, -60, 12)] and got["blocks"] == {source: water}, got
+    assert step_game(a, 4) == {}                    # WaterFluid.getTickDelay: five ticks a step
+    assert step_game(a, 1) == {pos: water + 1 for pos in ring(source, 1)}
+    for d in range(2, 8):
+        assert step_game(a, 5) == {pos: water + d for pos in ring(source, d)}, d
+    assert step_game(a, 20) == {}                   # one level left gives none away: it ends there
+    # /fill sets water as /setblock does, and water set beside water is water: nothing to flow.
+    assert run_command(a, "fill 8 -60 12 8 -60 12 water")["said"] == [failure(tr("commands.fill.failed"))]
+    # The source goes: what it fed sinks and dries up, from the middle outwards - the middle
+    # last, into which the water beside it flows back until that is gone too.
+    assert run_command(a, "setblock 8 -60 12 air")["blocks"] == {source: AIR}
+    wet = {pos for d in range(0, 8) for pos in ring(source, d)}
+    drained = step_game(a, 150)
+    assert drained == {pos: AIR for pos in wet}, {p: s for p, s in drained.items() if s != AIR}
+    assert step_game(a, 20) == {}
+
+
+@test()
+def water_finds_the_hole(srv: Server):
+    """Water goes to the nearest way down within its reach, and nowhere else (FlowingFluid.getSpread);
+    over the hole it falls - a falling column, which is not a source - and does not spread from there."""
+    a = wet_start(srv)
+    water = mc.BLOCK["kWater"]
+    run_command(a, "setblock 11 -61 12 air")        # a hole in the ground, three blocks east
+    run_command(a, "setblock 8 -60 12 water")
+    assert step_game(a, 5) == {(9, -60, 12): water + 1}
+    assert step_game(a, 5) == {(10, -60, 12): water + 2}
+    assert step_game(a, 5) == {(11, -60, 12): water + 3}
+    assert step_game(a, 5) == {(11, -61, 12): water + 8}    # down: level 8 is "falling"
+    assert step_game(a, 30) == {}
+    # The hole is filled in under it: now the water spreads as on flat ground, from where it stands.
+    assert run_command(a, "setblock 11 -61 12 stone")["blocks"] == {(11, -61, 12): mc.BLOCK["kStone"]}
+    got = step_game(a, 5)
+    assert got == {(12, -60, 12): water + 4, (11, -60, 11): water + 4, (11, -60, 13): water + 4}, got
+
+
+def water_between_two_sources(srv: Server, converts: bool) -> None:
+    a = wet_start(srv)
+    water = mc.BLOCK["kWater"]
+    run_command(a, "setblock 8 -60 12 water")
+    run_command(a, "setblock 10 -60 12 water")
+    between = water if converts else water + 1
+    assert step_game(a, 5) == {(9, -60, 12): between} | {
+        pos: water + 1 for pos in ((8, -60, 11), (8, -60, 13), (7, -60, 12), (10, -60, 11), (10, -60, 13), (11, -60, 12))}
+    # What lies beside the cell between them is fed by a source - or is two blocks from one.
+    got = step_game(a, 5)
+    assert (got[(9, -60, 11)], got[(9, -60, 13)]) == ((water + 1,) * 2 if converts else (water + 2,) * 2), got
+
+
+@test()
+def water_makes_a_source(srv: Server):
+    """Between two sources, over solid ground, water becomes a source itself (FlowingFluid.getNewLiquid)."""
+    water_between_two_sources(srv, True)
+
+
+@test(water_source_conversion="false")
+def water_source_conversion_off(srv: Server):
+    """water-source-conversion=false (the game rule of that name): it flows, and is no source."""
+    water_between_two_sources(srv, False)
+
+
+@test()
+def water_washes_away(srv: Server):
+    """What gives way to a fluid is washed away by it: it drops what it would to an empty hand, with
+    no sound and no particles of a block breaking (WaterFluid.beforeDestroyingBlock) - a torch, a
+    flower, petals. A slab holds its ground, and stays dry."""
+    a = wet_start(srv)
+    water = mc.BLOCK["kWater"]
+    for line in ("setblock 9 -60 12 torch", "setblock 7 -60 12 dandelion", "setblock 8 -60 11 pink_petals[flower_amount=3]",
+                 "setblock 8 -60 13 oak_slab"):
+        run_command(a, line)
+    run_command(a, "setblock 8 -60 12 water")
+    assert step_game(a, 5) == {(9, -60, 12): water + 1, (7, -60, 12): water + 1, (8, -60, 11): water + 1}
+    a.ticks(3)
+    dropped = sorted((e.data[D_ITEM][1][0], e.data[D_ITEM][1][1]) for e in of_type(a, "kItem").values())
+    assert dropped == sorted([(I["kTorch"], 1), (I["kDandelion"], 1), (I["kPinkPetals"], 3)]), dropped
+    assert not a.level_events
+    # On: round the slab, not into it.
+    got = step_game(a, 5)
+    assert (8, -60, 13) not in got and got[(9, -60, 13)] == water + 2 and got[(7, -60, 13)] == water + 2, got
+
+
+@test()
+def water_flows_on_after_a_restart():
+    """A fluid's tick waits with its chunk as a block's does, a restart long if need be: water set
+    four chunks off - outside what a player simulates - stands until somebody comes nearer, and
+    then flows as if it had just been set."""
+    world = tempfile.mkdtemp(prefix="world-water-ticks-")
+    srv = None
+    water, far = mc.BLOCK["kWater"], (72, -60, 8)       # in chunk 4; the players stand in chunk 0 and simulate two around it
+    try:
+        srv = Server(EXE, world=world, simulation_distance=2)
+        a = srv.client()
+        join(a, "Alice", view=6)
+        a.send("player_loaded")
+        settle(a)
+        make_op(srv, a, "Alice")
+        got = run_command(a, "setblock 72 -60 8 water", ticks=20)
+        assert got["said"] == [tr("commands.setblock.success", 72, -60, 8)] and got["blocks"] == {far: water}, got
+        assert srv.stop() == 0, srv.read_log()
+        os.unlink(srv.log.name)
+
+        srv = Server(EXE, world=world, simulation_distance=2)
+        c = srv.client()
+        join(c, "Carol", view=6)
+        c.send("player_loaded")
+        settle(c, ticks=20)                     # (a block that changed would have been said)
+        make_op(srv, c, "Carol")
+        got = run_command(c, "tp 40 -60 12", ticks=80)      # into chunk 2: the tick the water was saved with is due
+        assert got["blocks"] == {pos: water + d for d in range(1, 8) for pos in ring(far, d)}, got["blocks"]
         assert srv.stop() == 0, srv.read_log()
         os.unlink(srv.log.name)
     finally:

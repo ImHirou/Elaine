@@ -9,12 +9,13 @@
 //   BlockStateBase.updateNeighbourShapes, Block.updateOrDestroy / updateFromNeighbourShapes
 //   Level.destroyBlock / removeBlock, Block.dropResources / popResource, ServerLevel.levelEvent
 //   ServerLevel.tick (tickTime, then blockTicks.tick), tickBlock; LevelTicks is world/ticks.hpp
+//   (the fluids' ticks, which run next, and what a fluid does are server/fluids.cpp)
 //   ServerChunkCache.tickChunks, ServerLevel.tickChunk, Level.getBlockRandomPos (random ticks)
 // and, for the blocks that have a part in any of it:
 //   SnowyBlock, SpreadingSnowyBlock (grass, mycelium), NyliumBlock, ChangeOverTimeBlock /
 //   WeatheringCopper, BuddingAmethystBlock, AmethystClusterBlock, BaseTorchBlock, WallTorchBlock,
 //   RedstoneLampBlock, FallingBlock, ConcretePowderBlock, TntBlock, ChestBlock, CopperChestBlock,
-//   BarrelBlock, VegetationBlock and what is one (their hooks)
+//   BarrelBlock, VegetationBlock and what is one, LiquidBlock (their hooks)
 // The blocks whose state is their shape - stairs, fences, panes, walls, lanterns, mushroom
 // blocks - answer updateShape in server/block_shapes.cpp.
 //
@@ -25,13 +26,13 @@
 // objects, and nothing else changed.
 //
 // A block of a class that is not ported has no hook here (state::kHooks is empty for it): an
-// imported world's lever or water is told of a change and does nothing, as it does nothing else.
+// imported world's lever or lava is told of a change and does nothing, as it does nothing else.
 //
 // What is NOT here:
 //   * comparators (Level.updateNeighbourForOutputSignal, affectNeighborsAfterRemoval of the
 //     containers), redstone wire's updateIndirectNeighbourShapes: there are none;
-//   * fluid ticks (a second LevelTicks, which runs after the blocks'): a waterlogged block
-//     does not ask for one;
+//   * the tick of the water in a waterlogged block: its updateShape does not ask for one, and
+//     that water stays where it is (water by itself flows: server/fluids.cpp);
 //   * tickPrecipitation and tickThunder (ice, snow layers, lightning): there is no weather - nor
 //     what rain takes from the sky's light (Level.skyDarken follows the time of day alone);
 //   * game rules: random-tick-speed is a setting, blocks and entities always drop.
@@ -327,6 +328,7 @@ void Game::neighbor_changed(BlockState state, BlockPos pos, u32 source_block) {
                 set_block(pos, lamp_state(true), kUpdateClients);
             break;
         }
+        case block_kind::kLiquid: liquid_changed(state, pos); break;  // LiquidBlock: its fluid is ticked
         default: break;
     }
 }
@@ -364,6 +366,9 @@ BlockState Game::update_shape(BlockState state, BlockPos pos, u32 dir, BlockPos 
         case block_kind::kFalling:  // FallingBlock: it looks whether it still lies on something
             schedule_tick(pos, state, kFallDelay);
             return state;
+        case block_kind::kLiquid:  // LiquidBlock: a source, or what has one beside it, flows on (server/fluids.cpp)
+            liquid_shape_changed(state, pos, neighbour);
+            return state;
         default: return shaped_update(state, info, pos, dir, neighbour);  // server/block_shapes.cpp
     }
 }
@@ -390,6 +395,7 @@ void Game::on_place(BlockState state, BlockPos pos, BlockState old) {
             break;
         case block_kind::kFalling:
         case block_kind::kConcretePowder: schedule_tick(pos, state, kFallDelay); break;  // FallingBlock
+        case block_kind::kLiquid: liquid_changed(state, pos); break;                     // LiquidBlock: its fluid is ticked
         default: break;
     }
 }

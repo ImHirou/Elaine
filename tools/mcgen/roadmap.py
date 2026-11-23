@@ -146,8 +146,11 @@ def build() -> str:
     for b in sorted(data["blocks"], key=lambda b: b["id"]):
         gb = game["blocks"][b["name"]]
         item = items.get(b["item"]) if b["item"] != "minecraft:air" else None
-        # Air is what is there when no block is: nothing to place, nothing to port.
-        done = gen.placement_kind(b, item, gen_game.ported_block(gb)) != 0 or gb["class"][0] == "AirBlock"
+        # Air is what is there when no block is: nothing to place, nothing to port. A ported class
+        # without an item (a fluid's block) is done though nothing places it: a command sets it.
+        ported = gen_game.ported_block(gb)
+        done = (gen.placement_kind(b, item, ported) != 0 or gb["class"][0] == "AirBlock" or
+                (ported is not None and item is None and gb["class"][0] in gen_game.ITEMLESS_PORTED))
         classes.setdefault(gb["class"][0], []).append((b["name"].split(":", 1)[1], done, gb))
 
     claimed: dict[str, int] = {}

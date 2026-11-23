@@ -3,9 +3,12 @@
 """What does a server do when a block changes beside another, when a scheduled tick comes due,
 when a random tick falls? Record it, on vanilla and on ours, and diff.
 
-    block_probe.py vanilla <out.json> [nameA nameB]         # runs the vanilla server itself
-    block_probe.py ours <elaine> <out.json> [nameA nameB]   # runs ours
+    block_probe.py vanilla <out.json> [nameA nameB] [--only=section,...]         # runs the vanilla server itself
+    block_probe.py ours <elaine> <out.json> [nameA nameB] [--only=section,...]   # runs ours
     block_probe.py diff <vanilla.json> <ours.json> [-v]
+
+`--only`: the sections to play (SECTIONS; a part of a name will do) - what compare.py's `-k` hands
+on. A recording of some sections is compared with another of the same ones.
 
 A recording is of two bots (tests/integration/mcproto.py, offline mode, creative): B builds, A
 stands three blocks away and watches. Torches on a stone and on its sides, and the stone taken
@@ -24,8 +27,12 @@ go of it, a wall under a block, a torch and a wall, lanterns that hang and stand
 end rods, glazed terracotta, mushroom blocks - by hand, and by `/setblock` and `/fill`. Then
 plants: a poppy, a dead bush, an azalea and a cactus flower on what holds them and on what does
 not, leaf litter and petals up to four to a block, what gives way to a stone that is set into it,
-the ground dug from under them; barrels by where their player looks. Last, TNT on five sides of a
-block of redstone.
+the ground dug from under them; barrels by where their player looks. Then water, set by the
+console on a floor of stone, sixteen blocks from the bots (what water does to a player is
+another matter): a source that spreads a block every five ticks and seven blocks far, and drains
+when it is taken away; two sources and the cell between them; a hole within its reach, and the
+hole filled in; a torch, an end rod, petals, a slab and a fence in its way; water set in the
+air. Last, TNT on five sides of a block of redstone.
 
 `vanilla` starts the reference server under the rules in AGENTS.md (from .cache/vanilla-server/,
 the cached jar, Java 25; gamemode=creative, level-type=flat, spawn-protection=0,
@@ -91,6 +98,7 @@ from world_probe import PORT, SERVER_DIR, Vanilla  # noqa: E402
 from pace import Lockstep  # noqa: E402
 
 PROBE_WORLD = "block-probe"     # in .cache/vanilla-server/: this probe's, removed and made anew by `vanilla`
+SECTIONS = ("torches", "falling", "random", "stairs", "fences", "plants", "water", "tnt")
 RANDOM_TICK_SPEED = 4096        # every cell of a section, on average, once a tick
 
 WORLD = {"block_update", "section_blocks_update", "level_event", "add_transient_block", "sound", "explode"}
@@ -112,13 +120,22 @@ class Watcher(Prober):
         self.stamps += [self.tick] * (len(self.log) - len(self.stamps))
 
 
-def record(port: int, out_path: str, name_a: str, name_b: str, random_ticks, console) -> None:
+def record(port: int, out_path: str, name_a: str, name_b: str, random_ticks, console, only: set | None = None) -> None:
     """`random_ticks`: a function that is called with True before the steps about random ticks and
     with False after (the game rule, where there is one). `console`: types a line on the server's
     console - which is also what keeps the server in step (pace.py): the game stands still but
     for the ticks a step lets it take, one at a time, and a packet is stamped with the tick that
-    brought it."""
+    brought it. `only`: the sections to play; the beginning is always played."""
     steps: list[dict] = []
+    current = ["setup"]
+
+    def section(name: str) -> None:
+        assert name in SECTIONS
+        current[0] = name
+
+    def wanted() -> bool:
+        return not only or current[0] == "setup" or any(word in current[0] for word in only)
+
     lock = Lockstep(console)
     a, b = Watcher(port, name_a), Watcher(port, name_b)
     for bot in (a, b):
@@ -130,6 +147,8 @@ def record(port: int, out_path: str, name_a: str, name_b: str, random_ticks, con
         step satisfy it. `about`: the places a step about random ticks is about - what becomes
         of them is what is compared, not when: its ticks pass twenty at a time. `loose`: a step
         of explosions - they are counted."""
+        if not wanted():
+            return
         mark_a, mark_b = len(a.log), len(b.log)
         for bot in (a, b):
             bot.tick = 0
@@ -168,7 +187,8 @@ def record(port: int, out_path: str, name_a: str, name_b: str, random_ticks, con
             lock.mark()     # (one move a loop of the server)
 
     def idle(ticks: int) -> None:
-        lock.step(ticks)
+        if wanted():
+            lock.step(ticks)
 
     # A spot of its own for every pair of names, in the chunk the bots spawned in or the next.
     spot = zlib.crc32((name_a + name_b).encode()) % 16
@@ -179,15 +199,20 @@ def record(port: int, out_path: str, name_a: str, name_b: str, random_ticks, con
 
     def place(n: int):
         """Both walk to the n-th place - each eight blocks east of the last, B on its corner and A
-        three blocks off - and what is built there is counted from that corner."""
-        walk(b, ox + 8 * n + 0.5, oz + 0.5)
-        walk(a, ox + 8 * n + 3.5, oz - 1.5)
-        for bot in (a, b):
-            bot.look(0.0, 0.0)      # south: +z
-        idle(4)
+        three blocks off - and what is built there is counted from that corner. (Of a section that
+        is not played only the corner is said.)"""
+        if wanted():
+            walk(b, ox + 8 * n + 0.5, oz + 0.5)
+            walk(a, ox + 8 * n + 3.5, oz - 1.5)
+            for bot in (a, b):
+                bot.look(0.0, 0.0)      # south: +z
+                lock.chunks(bot)        # (a place far off: what is built there is built in chunks that have come)
+            idle(4)
         return lambda dx, dy, dz: (ox + 8 * n + dx, oy + dy, oz + dz)
 
     def hotbar(*items: str) -> None:
+        if not wanted():
+            return
         for slot, item in enumerate(items):
             b.give(36 + slot, item, 64)
         idle(3)
@@ -199,8 +224,9 @@ def record(port: int, out_path: str, name_a: str, name_b: str, random_ticks, con
         b.use(pos, face=face, cursor=side[face])
 
     # ---- torches: what holds them, and the order they break in
-    at = place(0)
     step("settled", ticks=10)
+    section("torches")
+    at = place(0)
     hotbar("kStone", "kTorch", "kSoulTorch", "kCopperTorch", "kRedstoneLamp", "kRedstoneBlock", "kAmethystCluster",
            "kLargeAmethystBud", "kTnt")
     step("B builds a pillar of two stones", lambda: (b.select(0), b.use(at(0, 0, 2)), b.use(at(0, 1, 2))))
@@ -263,6 +289,7 @@ def record(port: int, out_path: str, name_a: str, name_b: str, random_ticks, con
              action=lambda: console("fill {} {} {} {} {} {} minecraft:air destroy".format(*at(-3, 1, 6), *at(-1, 1, 6))))
 
     # ---- falling blocks: the tick two after, the fall, the landing
+    section("falling")
     at = place(1)
     hotbar("kStone", "kTorch", "kSand", "kGravel", "kWhiteConcretePowder")
     step("B places sand on the ground", lambda: (b.select(2), b.use(at(-1, 0, 2))), ticks=10)
@@ -276,7 +303,8 @@ def record(port: int, out_path: str, name_a: str, name_b: str, random_ticks, con
          lambda: (b.select(2), b.use(at(-1, 1, 2)), b.use(at(-1, 2, 2)), b.dig(at(-1, 1, 2))), ticks=30)
 
     # ---- random ticks
-    if random_ticks:
+    section("random")
+    if random_ticks and wanted():
         at = place(2)
         hotbar("kStone", "kDirt", "kCopperBlock", "kBuddingAmethyst", "kCrimsonNylium", "kCutCopperStairs", "kCopperChest")
         grass, dirt = mc.BLOCK["kGrassBlock"], mc.BLOCK["kDirt"]
@@ -337,6 +365,7 @@ def record(port: int, out_path: str, name_a: str, name_b: str, random_ticks, con
         idle(4)
 
     # ---- stairs and slabs: the half that is clicked, the corner the neighbours make, two halves that are one block
+    section("stairs")
     at = place(3)
     hotbar("kStone", "kOakStairs", "kOakSlab", "kStoneSlab")
     DOWN_FACE = 0
@@ -378,6 +407,7 @@ def record(port: int, out_path: str, name_a: str, name_b: str, random_ticks, con
                       setblock(at(2, 1, 1), "minecraft:oak_stairs[facing=south]")), ticks=10)
 
     # ---- fences, panes and walls: what they reach for; lanterns, chains, rods, glazed terracotta, mushroom blocks
+    section("fences")
     at = place(4)
     hotbar("kStone", "kOakFence", "kNetherBrickFence", "kGlassPane", "kCobblestoneWall", "kTorch", "kIronBars", "kLantern", "kIronChain")
     step("B places a stone and a fence beside it", lambda: (b.select(0), b.use(at(0, 0, 3)), b.select(1), b.use(at(1, 0, 3))))
@@ -428,6 +458,7 @@ def record(port: int, out_path: str, name_a: str, name_b: str, random_ticks, con
              action=lambda: console("fill {} {} {} {} {} {} minecraft:air destroy".format(*at(-3, 1, -4), *at(-1, 1, -4))))
 
     # ---- plants: what they stand on, how many lie in one block, what gives way to a block and what breaks
+    section("plants")
     at = place(5)
     hotbar("kStone", "kPoppy", "kPinkPetals", "kLeafLitter", "kShortGrass", "kDeadBush", "kSand", "kCactusFlower", "kAzalea")
 
@@ -474,7 +505,62 @@ def record(port: int, out_path: str, name_a: str, name_b: str, random_ticks, con
     step("B, looking east, places a smoker and a blast furnace", ticks=10,
          action=lambda: (b.look(-90.0, 0.0), b.select(1), b.use(at(1, 0, 5)), b.select(2), b.use(at(2, 0, 5)), b.look(0.0, 0.0)))
 
+    # ---- water: a fluid's ticks. Every step is the console's - twelve blocks south of where the
+    # bots stand, out of the water's reach - on a floor of stone (grass under water dies, a random
+    # tick). What is compared is which cells change in which tick, and into what: a fluid is five
+    # ticks a step, and every step is a `block_update` or a section's worth of them.
+    section("water")
+    if console and wanted():
+        def fill(lo: tuple, hi: tuple, what: str) -> None:
+            console("fill {} {} {} {} {} {} {}".format(*lo, *hi, what))
+
+        def floor(at) -> None:
+            step("the console lays a floor of stone", lambda: fill(at(-8, 0, 4), at(8, 0, 20), "minecraft:stone"), ticks=4)
+
+        at = place(8)
+        floor(at)
+        step("the console sets water on it: a block every five ticks, seven blocks far",
+             lambda: setblock(at(0, 1, 12), "minecraft:water"), ticks=42)
+        step("...and there it lies", ticks=10)
+        step("the console takes the source away: the water sinks and dries up", lambda: setblock(at(0, 1, 12), "minecraft:air"), ticks=100)
+        step("...and is gone", ticks=10)
+        # Two sources and the cell between them, in a trench that keeps them in.
+        at = place(10)
+        floor(at)
+        step("the console digs a trench of three and sets water at its ends: the middle becomes a source", ticks=12,
+             action=lambda: (fill(at(-1, 0, 12), at(1, 0, 12), "minecraft:air"), setblock(at(-1, 0, 12), "minecraft:water"),
+                             setblock(at(1, 0, 12), "minecraft:water")))
+        step("the console takes one end away: it fills again, with water that flows", lambda: setblock(at(-1, 0, 12), "minecraft:air"),
+             ticks=12)
+        step("...and the other end", lambda: setblock(at(1, 0, 12), "minecraft:air"), ticks=12)
+        # A way down within reach: there, and nowhere else.
+        at = place(12)
+        floor(at)
+        step("the console digs a hole and sets water three blocks from it: it goes there, and falls in", ticks=30,
+             action=lambda: (setblock(at(3, 0, 12), "minecraft:air"), setblock(at(0, 1, 12), "minecraft:water")))
+        step("the console fills the hole in: the water spreads from where it stands", lambda: setblock(at(3, 0, 12), "minecraft:stone"),
+             ticks=22)
+        step("the console sets a stone where the source is: what flowed dries up", lambda: setblock(at(0, 1, 12), "minecraft:stone"),
+             ticks=90)
+        # What gives way to water is washed away and drops; what holds its ground stays dry.
+        at = place(14)
+        floor(at)
+        step("the console sets a torch, an end rod, petals, a slab and a fence", ticks=6,
+             action=lambda: (setblock(at(1, 1, 12), "minecraft:torch"), setblock(at(-1, 1, 12), "minecraft:end_rod"),
+                             setblock(at(0, 1, 11), "minecraft:pink_petals[flower_amount=3]"), setblock(at(0, 1, 13), "minecraft:oak_slab"),
+                             setblock(at(1, 1, 11), "minecraft:oak_fence")))
+        step("...and water between them", lambda: setblock(at(0, 1, 12), "minecraft:water"), ticks=22)
+        step("the console sets a stone where the source is", lambda: setblock(at(0, 1, 12), "minecraft:stone"), ticks=80)
+        # From above: a falling column, a block every five ticks, and a pool round where it lands.
+        at = place(16)
+        floor(at)
+        step("the console sets water five blocks up: it falls, and spreads where it lands", lambda: setblock(at(0, 6, 12), "minecraft:water"),
+             ticks=50)
+        step("the console takes it away: the column goes from the top", lambda: setblock(at(0, 6, 12), "minecraft:air"), ticks=120)
+        step("and then it is quiet", ticks=10)
+
     # ---- TNT, last, for what it leaves: a signal reaches the six blocks around it in an order
+    section("tnt")
     at = place(6)
     hotbar("kStone", "kTnt", "kRedstoneBlock")
     step("B places TNT west, east, south and north of an empty place",
@@ -708,7 +794,7 @@ def diff(path_ref: str, path_ours: str) -> int:
 
 # ----------------------------------------------------------------------------- the servers
 
-def record_vanilla(out: str, name_a: str, name_b: str) -> None:
+def record_vanilla(out: str, name_a: str, name_b: str, only: set | None = None) -> None:
     world = SERVER_DIR / PROBE_WORLD
     if world.exists():
         if not (world / "level.dat").exists():
@@ -724,12 +810,12 @@ def record_vanilla(out: str, name_a: str, name_b: str) -> None:
         v.until(r"Done \(")
         v.cmd("gamerule minecraft:spawn_mobs false")     # (kept in this probe's world, which is made anew)
         v.until(r"Game rule \S*spawn_mobs is now set to", timeout=20)
-        record(PORT, out, name_a, name_b, rule, v.cmd)
+        record(PORT, out, name_a, name_b, rule, v.cmd, only)
     finally:
         v.stop()
 
 
-def record_ours(exe: str, out: str, name_a: str, name_b: str) -> None:
+def record_ours(exe: str, out: str, name_a: str, name_b: str, only: set | None = None) -> None:
     with socket.socket() as probe:      # a port nothing listens on: reactors bind with SO_REUSEPORT
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
@@ -748,7 +834,7 @@ def record_ours(exe: str, out: str, name_a: str, name_b: str) -> None:
             proc.stdin.write(line.encode() + b"\n")
             proc.stdin.flush()
 
-        record(port, out, name_a, name_b, lambda fast: None, console)
+        record(port, out, name_a, name_b, lambda fast: None, console, only)
     finally:
         proc.terminate()
         code = proc.wait(timeout=30)
@@ -759,15 +845,19 @@ def record_ours(exe: str, out: str, name_a: str, name_b: str) -> None:
 
 
 def main() -> int:
-    argv = [arg for arg in sys.argv[1:] if arg != "-v"]
+    only = {word for arg in sys.argv if arg.startswith("--only=") for word in arg[len("--only="):].split(",") if word}
+    argv = [arg for arg in sys.argv[1:] if arg != "-v" and not arg.startswith("--only=")]
     what, args = (argv[0], argv[1:]) if argv else ("", [])
     fixed = {"vanilla": 1, "ours": 2}.get(what)
     if fixed is not None and len(args) >= fixed:
+        if only and not any(word in name for name in SECTIONS for word in only):    # (a word may be another probe's)
+            print(f"--only names no section; there are: {', '.join(SECTIONS)}")
+            return 2
         names = tuple(args[fixed:fixed + 2]) if len(args) >= fixed + 2 else ("ProbeG", "ProbeH")
         if what == "vanilla":
-            record_vanilla(args[0], *names)
+            record_vanilla(args[0], *names, only=only)
         else:
-            record_ours(args[0], args[1], *names)
+            record_ours(args[0], args[1], *names, only=only)
         return 0
     if what == "diff" and len(args) == 2:   # -v: print every step's rows, and what is not compared
         return 1 if diff(args[0], args[1]) else 0

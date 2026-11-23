@@ -669,8 +669,12 @@ TEST(Blocks, WhatAChangeAndATickAskOfAState) {
     EXPECT_EQ(hooks(blk::kGrassBlock), st::kHookShape);
     EXPECT_EQ(hooks(blk::kPodzol), st::kHookShape);
     EXPECT_EQ(hooks(blk::kAmethystCluster), st::kHookShape);
-    // A class that is not ported has none, whatever vanilla's does (water, a lever).
-    EXPECT_EQ(hooks(blk::kWater), 0);
+    // LiquidBlock: its fluid asks for a tick when it is placed, when a block beside it changes
+    // and when a neighbour's shape does (its block tick is the bubble column's: there is none).
+    EXPECT_EQ(hooks(blk::kWater), st::kHookShape | st::kHookNeighbor | st::kHookPlace | st::kHookTick);
+    // A class that is not ported has none, whatever vanilla's does (a lever) - nor has a block
+    // of one that is ported and held back (lava: gen_game.LIQUIDS_PORTED).
+    EXPECT_EQ(hooks(blk::kLava), 0);
     EXPECT_EQ(hooks(blk::kLever), 0);
     // FallingBlock.isFree: air, a liquid, fire, what can be replaced.
     EXPECT_TRUE(st::kHooks[kAir] & st::kFallThrough);
