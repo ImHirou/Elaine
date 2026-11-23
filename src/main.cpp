@@ -91,7 +91,15 @@ int main(int argc, char** argv) {
         game.run(g_stop);
     }
     LOG_INFO("stopping");
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));  // let "Server closed" reach the clients
+    // Let "Server closed" reach the clients: a connection is closed once that has been sent and
+    // its client has hung up in turn. Not for longer than a fifth of a second - for one that
+    // does not.
+    for (u32 waited = 0; waited < 200; ++waited) {
+        u32 open = 0;
+        for (auto& r : reactors) open += r->sockets();
+        if (open == 0) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
     for (auto& r : reactors) r->stop();
     for (auto& t : threads) t.join();
     return 0;

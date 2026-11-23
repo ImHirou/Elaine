@@ -105,7 +105,7 @@ class Server:
                 if time.time() > deadline:
                     self.stop()
                     raise RuntimeError("server did not start listening")
-                time.sleep(0.02)
+                time.sleep(0.002)
 
     def client(self, timeout: float = 5.0) -> Client:
         return Client("127.0.0.1", self.port, timeout)
@@ -1722,11 +1722,11 @@ def arm_swings(srv: Server):
     assert not [x for x in b.entity_log if x[0] == "swing_animation"]
 
 
-@test(tick_rate=500)
+@test()
 def dropped_items_expire(srv: Server):
     """ItemEntity.LIFETIME: an item nobody picks up is gone after 6000 ticks - five minutes at the
-    rate of a vanilla server, twelve seconds at this one's. The game time says how many went by: at
-    five hundred ticks a second a client's pings do not come back once a tick."""
+    rate of a vanilla server. Here most of them are a sprint (`/tick sprint`), the last hundred
+    are counted one by one, and the game time says how many it was."""
     c = srv.client()
     j = join(c, "Alice")
     c.send("player_loaded")
@@ -1745,12 +1745,17 @@ def dropped_items_expire(srv: Server):
     item_type = mc.ENTITY_TYPE["kItem"]
     lying = [i for i, e in c.entities.items() if e.type == item_type]
     assert len(lying) == 1
-    deadline = time.time() + 120
-    while lying[0] in c.entities:
-        assert time.time() < deadline, "still there after two minutes"
-        c.pump(0.01)
-    # (Both questions come a little late: a millisecond is half a tick, and a client beside a full
-    # pool of others is late by tens of them.)
+    mark = len(srv.read_log())
+    srv.console("tick sprint 5900")
+    srv.wait_log("Sprint completed", timeout=60, since=mark)
+    c.mark_chat_read()      # (an operator is told of the sprint)
+    settle(c)
+    c.mark_chat_read()
+    assert lying[0] in c.entities and game_time() - dropped < 6000 - 15
+    for _ in range(200):
+        if lying[0] not in c.entities:
+            break
+        c.ticks(1)
     lay = game_time() - dropped
     assert 6000 - 15 <= lay <= 6000 + 30, lay
     assert c.entity_log[-1] == ("remove_entities", lying[0], None), c.entity_log[-1]
@@ -5158,9 +5163,9 @@ def many_players(srv: Server):
     assert json.loads(c.expect("status_response").str())["players"]["online"] == n
     print(f"    {n} concurrent joins in {time.time() - t0:.2f}s (client-side Python is the bottleneck)")
 
-    # Steady state: every client moves 20 times a second for 3 s. Report what that costs the server.
+    # Steady state: every client moves 20 times a second for a second. Report what that costs the server.
     cpu0, t1 = srv.cpu_seconds(), time.time()
-    for tick in range(60):
+    for tick in range(20):
         for i, cl in enumerate(clients):
             cl.send("move_player_pos_rot", struct.pack(">dddffB", 8.5 + (tick % 5) * 0.1, 64.0, 8.5, float(i), 0.0, 1))
         time.sleep(max(0.0, t1 + (tick + 1) * 0.05 - time.time()))

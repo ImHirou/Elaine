@@ -131,6 +131,9 @@ class Reactor {
     base::SpscRing<base::ByteBuf*>& recycled() { return recycled_; }
     bool post(const OutMsg& m) { return outbox_.push(m); }
     void wake();  // any thread; coalesces with other pending wakes
+    // Any thread: the connections whose socket is still open (a count kept by the loop; whoever
+    // reads it sees what it was a moment ago).
+    u32 sockets() const { return sockets_.load(std::memory_order_relaxed); }
 
     // ---- any thread: run fn on the reactor thread (cold path: auth results, admin actions) --
     void run_on_loop(std::function<void()> fn);
@@ -200,6 +203,7 @@ class Reactor {
     u64 wake_val_ = 0;
     std::atomic<bool> stop_{false};
     std::atomic<bool> wake_pending_{false};
+    std::atomic<u32> sockets_{0};
 
     io_uring ring_{};
     bool ring_ok_ = false;

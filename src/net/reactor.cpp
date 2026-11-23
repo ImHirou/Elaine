@@ -343,6 +343,7 @@ void Reactor::on_accept(int res, u32 flags) {
     free_slots_.pop_back();
     c.fd = fd;
     c.open = true;
+    sockets_.fetch_add(1, std::memory_order_relaxed);
     c.deadline_ns = base::now_ns() + cfg_.prelogin_timeout_ns;
     set_phase(c, Phase::Handshake);
 
@@ -592,6 +593,7 @@ void Reactor::finish_close(Conn& c) {
     if (!c.closing || c.fd < 0 || c.recv_armed || c.send_busy) return;
     ::close(c.fd);
     c.fd = -1;
+    sockets_.fetch_sub(1, std::memory_order_relaxed);
     while (base::ByteBuf* b = c.send_head) {
         c.send_head = b->next;
         recycle(b);
