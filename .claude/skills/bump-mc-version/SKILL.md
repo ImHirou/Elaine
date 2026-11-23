@@ -32,6 +32,10 @@ Its files keep one record per line, so what the version changed outside the prot
 `diff .cache/mc/{OLD,NEW}/gamedata/blocks.json` (new blocks, changed hooks and properties), likewise `entities.json`
 (synchronized data ids move when a class gains a field), `enums.json`, `registries.json`.
 
+And `mcgen.py --version NEW worldgen` (the jar again): the density functions as the new version compiles them
+and its biome parameters. `diff .cache/mc/{OLD,NEW}/worldgen/program.json` is by sampler class and field - a
+class that is new there is one `src/worldgen` has no word for yet.
+
 ## 3. Generate and switch
 
 ```sh

@@ -85,9 +85,9 @@ all of it.
 
 ## Mojang's jar and the vanilla server
 
-- `tools/mcgen` downloads the official server jar from Mojang (sha1-checked) into `.cache/`. Three
-  of its steps - `reports`, `blockdata`, `gamedata` - and `setup`, which runs them, execute code
-  from that jar. No server is started by them.
+- `tools/mcgen` downloads the official server jar from Mojang (sha1-checked) into `.cache/`. Four
+  of its steps - `reports`, `blockdata`, `gamedata`, `worldgen` - and `setup`, which runs them, execute
+  code from that jar. No server is started by them.
 - The probes in `tools/vanilla/` do start a vanilla server, from `.cache/vanilla-server/`, bound to
   localhost. That needs Mojang's EULA accepted in `eula.txt` there. **Accepting it is yours to do**,
   by hand; no script of this repository and no agent working in it writes that file.

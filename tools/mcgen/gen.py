@@ -47,6 +47,7 @@ import zipfile
 from pathlib import Path
 
 import gamedata
+import worldgen
 import gen_commands
 import gen_game
 import gen_physics
@@ -2539,7 +2540,8 @@ def cmd_setup(args) -> None:
     """From nothing to the generated tables: every step that is not already done, then the lock."""
     args.client, args.sections = False, []
     mcgen.cmd_fetch(args)
-    for step, run in (("reports", mcgen.cmd_reports), ("blockdata", mcgen.cmd_blockdata), ("gamedata", gamedata.cmd_gamedata)):
+    for step, run in (("reports", mcgen.cmd_reports), ("blockdata", mcgen.cmd_blockdata), ("gamedata", gamedata.cmd_gamedata),
+                      ("worldgen", worldgen.cmd_worldgen)):
         if mcgen.stamp_is_current(args.version, step):
             print(f"mcgen: {step}: already there")
         else:

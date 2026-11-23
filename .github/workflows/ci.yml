@@ -37,7 +37,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .cache/mc
-          key: mc-${{ hashFiles('tools/mcgen/mcgen.py', 'tools/mcgen/gamedata.py', 'tools/mcgen/extract/**') }}
+          key: mc-${{ hashFiles('tools/mcgen/mcgen.py', 'tools/mcgen/gamedata.py', 'tools/mcgen/worldgen.py', 'tools/mcgen/extract/**') }}
           restore-keys: mc-
       - run: ./install.sh --yes --no-build
       - run: tools/ci/checks.sh
@@ -55,7 +55,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .cache/mc
-          key: mc-${{ hashFiles('tools/mcgen/mcgen.py', 'tools/mcgen/gamedata.py', 'tools/mcgen/extract/**') }}
+          key: mc-${{ hashFiles('tools/mcgen/mcgen.py', 'tools/mcgen/gamedata.py', 'tools/mcgen/worldgen.py', 'tools/mcgen/extract/**') }}
           restore-keys: mc-
       - run: ./install.sh --yes
       - run: ctest --preset release
@@ -73,7 +73,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .cache/mc
-          key: mc-${{ hashFiles('tools/mcgen/mcgen.py', 'tools/mcgen/gamedata.py', 'tools/mcgen/extract/**') }}
+          key: mc-${{ hashFiles('tools/mcgen/mcgen.py', 'tools/mcgen/gamedata.py', 'tools/mcgen/worldgen.py', 'tools/mcgen/extract/**') }}
           restore-keys: mc-
       - run: ./install.sh --yes --no-build
       - run: cmake --preset dev && cmake --build --preset dev --target server_exe
@@ -96,7 +96,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .cache/mc
-          key: mc-${{ hashFiles('tools/mcgen/mcgen.py', 'tools/mcgen/gamedata.py', 'tools/mcgen/extract/**') }}
+          key: mc-${{ hashFiles('tools/mcgen/mcgen.py', 'tools/mcgen/gamedata.py', 'tools/mcgen/worldgen.py', 'tools/mcgen/extract/**') }}
           restore-keys: mc-
       - run: ./install.sh --yes --no-build
       - run: cmake --preset release && cmake --build --preset release --target server_exe unit_tests

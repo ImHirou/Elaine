@@ -67,8 +67,8 @@ build/release/elaine --online-mode=false --server-port=25565   # run; any server
 ./install.sh                                               # a fresh clone, once: packages, the jar, the generated tables, a release
                                                            # build (it runs Mojang's code - see "Protocol data")
 python3 tools/mcgen/mcgen.py --help                        # protocol data pipeline
-python3 tools/mcgen/mcgen.py setup                         # only the tables: whatever of fetch / reports / blockdata / gamedata is
-                                                           # not done yet, then generate, then compare with the lock
+python3 tools/mcgen/mcgen.py setup                         # only the tables: whatever of fetch / reports / blockdata / gamedata /
+                                                           # worldgen is not done yet, then generate, then compare with the lock
 python3 tools/mcgen/mcgen.py data blocks '^minecraft:oak_stairs$'   # a fact that only exists at runtime (shapes, hooks,
                                                            # fields, attributes, enums, menus): see the mc-reference skill
 python3 tools/mcgen/roadmap.py                             # rewrite docs/blocks-roadmap.md after porting a block class (--check: is it stale?)
@@ -265,7 +265,7 @@ what the lock says stop it (after a pull: `mcgen.py setup`). Never commit anythi
 the jars, or anything else from `.cache/`.
 
 **`mcgen.py reports` executes Mojang's data generator (the downloaded server jar, needs Java 25).
-Ask the user before running it**, and likewise `blockdata` and `gamedata` — these three are the mcgen
+Ask the user before running it**, and likewise `blockdata`, `gamedata` and `worldgen` — these four are the mcgen
 steps that run downloaded code — and `setup` and `./install.sh`, which run them (each only when its
 output is missing or older than the jar and the extractor: `.cache/mc/<version>/stamps/`). `reports` produces `registries.json` and `blocks.json`, without which
 there are no static-registry ids: no tags, no block ids. Never substitute ids from memory, guesses or
@@ -285,6 +285,15 @@ synchronized entity data, all static registries, enums, static tables, menu slot
 C++ takes from it what `gen.py` / `gen_game.py` have been taught to, table by table - so far: block classes
 and the hooks they override, block entity types, loot table names, speed and bounce factors, crafting
 remainders, which states conduct redstone - and `generate` stops without it.
+
+`mcgen.py worldgen` (`tools/mcgen/extract/WorldgenRef.java`) loads the game the same way and writes what
+world generation is once vanilla has built it, into `.cache/mc/<version>/worldgen/`: `program.json`, the
+overworld's density functions as vanilla *compiled* them (`RandomState.getSampler`: a graph of sampler
+objects, field by field - a division by a constant is a multiplication there, a `min` whose ranges do not
+overlap is gone, and that is what decides the bits), and `climate.json`, the biome parameters with the
+R-tree they are searched by. It compiles for two seeds and stops if anything but a noise's permutation and
+offsets differs. The JSON under `data/minecraft/worldgen/` in the jar says what a world is made of; these
+files say what vanilla made of it, and the tables of `src/worldgen` are generated from both.
 
 ### The vanilla server as a reference
 

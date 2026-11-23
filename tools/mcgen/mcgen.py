@@ -18,18 +18,20 @@ Commands:
   gamedata  RUN tools/mcgen/extract/GameData.java against the jar -> everything else that exists only at
             runtime: shapes, hooks, block/item/entity fields, attributes, registries, enums, menus
   data      look up a record in what `gamedata` extracted (reads the cache, runs nothing)
+  worldgen  RUN tools/mcgen/extract/WorldgenRef.java against the jar -> the overworld's density functions as
+            vanilla compiled them, its biome parameters and their search tree
   pseudo    methods as compact pseudo-code with real local names (static, for reading logic)
   generate  emit src/proto/gen/v<protocol>/ from the cache, and write its lock
   check     verify that the generated code is what the committed lock says (the build runs this)
-  setup     RUN everything a fresh clone needs, in order: fetch, reports, blockdata, gamedata -
+  setup     RUN everything a fresh clone needs, in order: fetch, reports, blockdata, gamedata, worldgen -
             each only if it is not already done - then generate, then check
 
 `packets` exists so packet ids can be obtained without executing the jar; when
 `reports` has been run its packets.json wins and the two must agree.
 
-`reports`, `blockdata` and `gamedata` - and `setup`, which runs them - are the only steps that
-execute downloaded code (the sha1-verified official jar). The first two only build vanilla's static registries; `gamedata` also
-loads the vanilla data pack, as a server does before it creates a world. None starts a server.
+`reports`, `blockdata`, `gamedata` and `worldgen` - and `setup`, which runs them - are the only steps that
+execute downloaded code (the sha1-verified official jar). The first two only build vanilla's static registries; `gamedata` and
+`worldgen` also load the vanilla data pack, as a server does before it creates a world. None starts a server.
 """
 from __future__ import annotations
 
@@ -171,16 +173,21 @@ def find_tool(name: str, need_major: int) -> str:
 
 # ----------------------------------------------------------------------------- stamps
 #
-# The three steps that run the jar take minutes and give the same files every time. Each leaves a
+# The steps that run the jar take minutes and give the same files every time. Each leaves a
 # stamp - the jar it ran and the sources it ran it with - so that `setup` runs a step again only
 # when one of those changed, or its files are gone.
 
 EXTRACT = Path(__file__).resolve().parent / "extract"
-STEPS = {  # step -> (sources whose change makes its output stale, what it must have left under the version's directory)
+# step -> (sources whose change makes its output stale - a pattern that begins with `!` takes files out
+# of what the patterns before it named - and what it must have left under the version's directory)
+STEPS = {
     "reports": ((), ("reports/packets.json", "reports/registries.json", "reports/blocks.json", "reports/commands.json",
                      "reports/item_components", "datagen/libraries")),
     "blockdata": (("extract/Extract.java",), ("extract/blockdata.json",)),
-    "gamedata": (("extract/*.java", "gamedata.py"), ("gamedata/states.json", "gamedata/blocks.json", "gamedata/entities.json")),
+    "gamedata": (("extract/*.java", "!extract/Worldgen*.java", "gamedata.py"),
+                 ("gamedata/states.json", "gamedata/blocks.json", "gamedata/entities.json")),
+    "worldgen": (("extract/Worldgen*.java", "extract/GameData.java", "extract/Dump.java", "worldgen.py"),
+                 ("worldgen/program.json", "worldgen/climate.json")),
 }
 
 
@@ -188,9 +195,14 @@ def stamp_key(version: str, step: str) -> str:
     h = hashlib.sha256()
     h.update(json.loads((vdir(version) / "version_meta.json").read_text())["downloads"]["server"]["sha1"].encode())
     here = Path(__file__).resolve().parent
+    sources: list[Path] = []
     for pattern in STEPS[step][0]:
-        for src in sorted(here.glob(pattern)):
-            h.update(src.name.encode() + b"\0" + src.read_bytes())
+        if pattern.startswith("!"):
+            sources = [src for src in sources if not src.match(pattern[1:])]
+        else:
+            sources += sorted(here.glob(pattern))
+    for src in sources:
+        h.update(src.name.encode() + b"\0" + src.read_bytes())
     return h.hexdigest()
 
 
@@ -517,12 +529,14 @@ def main() -> None:
 
     import gamedata  # noqa: E402
     gamedata.register(sub)
+    import worldgen  # noqa: E402
+    worldgen.register(sub)
 
     from gen import cmd_generate, cmd_check, cmd_setup  # noqa: E402  (kept separate: it is the part that changes per version)
     p = sub.add_parser("generate", help="emit the tables from the cache, and their lock"); p.set_defaults(fn=cmd_generate)
     p = sub.add_parser("check", help="are the generated tables what their lock says? (reads nothing else)")
     p.add_argument("--quiet", action="store_true", help="say nothing when they are"); p.set_defaults(fn=cmd_check)
-    p = sub.add_parser("setup", help="RUN every step a fresh clone needs: fetch, reports, blockdata, gamedata, generate")
+    p = sub.add_parser("setup", help="RUN every step a fresh clone needs: fetch, reports, blockdata, gamedata, worldgen, generate")
     p.set_defaults(fn=cmd_setup)
 
     args = ap.parse_args()
