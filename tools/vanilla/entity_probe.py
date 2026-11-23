@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """What does a server tell one player about another? Record it, on vanilla and on ours, and diff.
 
-    entity_probe.py record <port> <out.json> [nameA nameB]
+    tools/vanilla/compare.py entity_probe            # both servers, both recordings, the diff
+    entity_probe.py record <port> <out.json> <nameA> <nameB> <console>
     entity_probe.py diff <vanilla.json> <ours.json>
 
 `record` joins two bots (tests/integration/mcproto.py, offline mode): A watches, B acts - joins,
@@ -10,15 +11,11 @@ walks, turns, sneaks, sprints, jumps, stands, walks out of sight and back, chang
 leaves. Every play packet either of them receives is logged per step, entity packets with their
 bytes. `diff` lines two recordings up step by step, entity ids and the two bots' packets only.
 
-The reference is the vanilla server, run under the rules in AGENTS.md:
-
-    cd .cache/vanilla-server && /usr/lib/jvm/java-25-openjdk/bin/java -jar ../mc/26.3/server.jar --nogui
+The reference is the vanilla server, run under the rules in AGENTS.md - compare.py starts it and
+ours, and gives `record` the console of each: the probe keeps both in step by it (pace.py), so a
+recording is the same script at the same ticks on either.
     # server.properties: server-ip=127.0.0.1, online-mode=false, white-list=false, gamemode=creative,
     #                    level-type=minecraft\\:flat, view-distance=2, a port of its own
-    tools/vanilla/entity_probe.py record 25577 /tmp/vanilla.json Ann Ben      # then stop the server
-    build/release/elaine --server-ip=127.0.0.1 --server-port=25580 --online-mode=false --view-distance=2 &
-    tools/vanilla/entity_probe.py record 25580 /tmp/ours.json Ann Ben
-    tools/vanilla/entity_probe.py diff /tmp/vanilla.json /tmp/ours.json
 
 Reading the diff:
   * Use names vanilla has not seen: it saves players, and one that returns starts on the ground,
@@ -40,8 +37,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests" / "integration"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mcproto as mc  # noqa: E402
-import pace  # noqa: E402
-from pace import TICK, ticks  # noqa: E402
+from pace import Lockstep, console_of  # noqa: E402
 from mcproto import varint  # noqa: E402
 
 ENTITY = {"bundle_delimiter", "add_entity", "set_entity_data", "update_attributes", "set_equipment", "move_entity_pos",
@@ -57,6 +53,16 @@ class Bot:
         self.pos = None
         self.rot = (0.0, 0.0)
         self.entity_id = None
+        self.seen: list[tuple[str, str]] = []   # what pump() has read so far
+        self.lock = None                        # the Lockstep it keeps step by, once it has joined
+
+    def begin(self, lock: Lockstep) -> None:
+        """Join, and be there: in step with the server, the view's chunks taken, the client loaded."""
+        self.join()
+        lock.join(self)
+        lock.chunks(self)
+        self.c.send("player_loaded")
+        lock.sync()
 
     def join(self) -> None:
         c = self.c
@@ -118,6 +124,7 @@ class Bot:
                 raise RuntimeError(f"{self.name} was disconnected: {data.hex()}")
             out.append((got, data.hex() if got in ENTITY else ""))
         c.sock.settimeout(10)
+        self.seen += out
         return out
 
     def tick_end(self) -> None:
@@ -140,38 +147,33 @@ class Bot:
         self.c.send("move_player_rot", struct.pack(">ffB", yaw, pitch, 1 if ground else 0))
 
 
-def record(port: int, out_path: str, name_a: str, name_b: str) -> None:
+def record(port: int, out_path: str, name_a: str, name_b: str, console: str) -> None:
+    """The game stands still all the while (pace.py): what is recorded is players, who tick in a
+    frozen game as in any - once a loop of the server, which is what a "tick" is here."""
     steps: list[dict] = []
+    lock = Lockstep(console_of(console))
     a = Bot(port, name_a)
-    a.join()
-    a.pump(ticks(30))
-    a.c.send("player_loaded")
-    a.tick_end()
-    a.pump(ticks(10))
+    a.begin(lock)
+    lock.place((a,), "entity " + name_a + name_b)
     b = Bot(port, name_b)
 
-    def step(name: str, actions, ticks: int = 1, settle: float = 5, bots=()):
+    def step(name: str, actions, ticks: int = 1, settle: int = 5, bots=()):
         """Run actions(i) once a tick, then log what A (and `bots`) received meanwhile and in
         `settle` ticks more."""
-        t0 = time.time()
-        got_a, got_other = [], {"B": []}
+        mark_a, mark_b = len(a.seen), len(b.seen)
         for i in range(ticks):
             actions(i)
-            got_a += a.pump(0.001)
-            for bot in bots:
-                got_other["B"] += bot.pump(0.001)
-            time.sleep(max(0.0, t0 + (i + 1) * TICK - time.time()))
-        got_a += a.pump(pace.ticks(settle))
-        for bot in bots:
-            got_other["B"] += bot.pump(pace.ticks(1))
-        steps.append({"step": name, "A": got_a, **got_other})
+            lock.mark()
+        lock.sync()
+        for _ in range(settle):
+            lock.mark()
+        got_a = a.seen[mark_a:]
+        steps.append({"step": name, "A": got_a, "B": b.seen[mark_b:] if bots else []})
         print(f"{name}: A got {len(got_a)} packets, {sum(1 for n, _ in got_a if n in ENTITY)} about entities")
 
     def join_b(_):
-        b.join()
-        b.pump(ticks(30))
-        b.c.send("player_loaded")
-        b.tick_end()
+        b.begin(lock)
+        lock.place((b,), "entity " + name_a + name_b)
 
     def tick(fn):  # one client tick of B: what it does, then client_tick_end
         def run(i):
@@ -201,8 +203,9 @@ def record(port: int, out_path: str, name_a: str, name_b: str) -> None:
     step("B walks back, 4 a tick, 15 ticks", tick(lambda i: b.move(dx=-4.0)), ticks=15, bots=[b])
     step("A turns", lambda i: (a.look(45.0, 0.0), a.tick_end()), ticks=2, bots=[b])
     step("B changes options: cape off, left-handed", tick(options), ticks=4, bots=[b])
-    step("B disconnects", lambda i: b.c.close(), ticks=1, settle=20)
+    step("B disconnects", lambda i: (lock.leave(b), b.c.close()), ticks=1, settle=20)
 
+    lock.close()
     with open(out_path, "w") as f:
         json.dump({"ids": {"A": a.entity_id, "B": b.entity_id}, "steps": steps}, f, indent=1)
     a.c.close()
@@ -262,8 +265,9 @@ def diff(path_ref: str, path_ours: str) -> int:
 
 def main() -> int:
     if len(sys.argv) >= 4 and sys.argv[1] == "record":
-        names = (sys.argv[4], sys.argv[5]) if len(sys.argv) >= 6 else ("ProbeA", "ProbeB")
-        record(int(sys.argv[2]), sys.argv[3], *names)
+        if len(sys.argv) < 7:
+            raise SystemExit("record <port> <out.json> <name A> <name B> <console>: the console keeps the servers in step - compare.py has one")
+        record(int(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6])
         return 0
     if len(sys.argv) == 4 and sys.argv[1] == "diff":
         diff(sys.argv[2], sys.argv[3])

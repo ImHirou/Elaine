@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """What does a server do with a player's inventory? Record it, on vanilla and on ours, and diff.
 
-    inventory_probe.py record <port> <out.json> [nameA nameB]
+    tools/vanilla/compare.py inventory_probe            # both servers, both recordings, the diff
+    inventory_probe.py record <port> <out.json> <nameA> <nameB> <console>
     inventory_probe.py diff <vanilla.json> <ours.json>
 
 `record` joins two bots (tests/integration/mcproto.py, offline mode, creative): A watches, B acts -
@@ -12,14 +13,11 @@ it with items in the crafting grid, leaves. Every packet either of them receives
 B's menu or about an item on the ground is logged per step with its bytes. `diff` lines two
 recordings up step by step.
 
-The reference is the vanilla server, run under the rules in AGENTS.md (see entity_probe.py for
-the properties it needs; gamemode=creative matters here):
-
-    cd .cache/vanilla-server && /usr/lib/jvm/java-25-openjdk/bin/java -jar ../mc/26.3/server.jar --nogui
-    tools/vanilla/inventory_probe.py record 25577 /tmp/vanilla.json Ann Ben     # then stop the server
-    build/release/elaine --server-ip=127.0.0.1 --server-port=25580 --online-mode=false --view-distance=2 &
-    tools/vanilla/inventory_probe.py record 25580 /tmp/ours.json Ann Ben
-    tools/vanilla/inventory_probe.py diff /tmp/vanilla.json /tmp/ours.json
+The reference is the vanilla server, run under the rules in AGENTS.md. tools/vanilla/compare.py
+starts it and ours and hands `record` the console of each: the probe keeps a server in step by
+it (pace.py) - the game stands still but for the ticks a step asks for - so a recording is the
+same script at the same ticks on either server, and waits for no clock.
+(See entity_probe.py for the properties vanilla needs; gamemode=creative matters here.)
 
 How the clicks are sent: a real client predicts each click and reports what it expects every
 touched slot to hold; a server then only corrects what it disagrees with. B reports nothing
@@ -49,8 +47,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests" / "integrat
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mcproto as mc  # noqa: E402
 from entity_probe import Bot  # noqa: E402
-from pace import TICK, ticks  # noqa: E402
-from pace import ticks as pace_ticks  # noqa: E402  (where a parameter is called ticks)
+from pace import Lockstep, console_of  # noqa: E402
 from mcproto import ITEM, varint  # noqa: E402
 
 MENU = {"container_set_content", "container_set_slot", "set_cursor_item", "set_player_inventory", "set_held_slot",
@@ -130,14 +127,13 @@ class Actor(Bot):
         self.c.send("set_carried_item", struct.pack(">h", slot))
 
     def click(self, slot: int, button: int, kind: int, changed: dict | None = None, carried=None, state: int | None = None) -> None:
-        """container_click on the player's own menu, then a moment for the answer: the next click
-        has to echo the state id it brings. `changed` / `carried`: the prediction to report."""
+        """container_click on the player's own menu, and its answer: the next click has to echo
+        the state id it brings. `changed` / `carried`: the prediction to report."""
         changed = changed or {}
         body = varint(0) + varint(self.state_id if state is None else state) + struct.pack(">hb", slot, button) + varint(kind)
         body += varint(len(changed)) + b"".join(struct.pack(">h", s) + mc.hashed_stack(v) for s, v in changed.items())
         self.c.send("container_click", body + mc.hashed_stack(carried))
-        self.tick_end()
-        self.pump(ticks(2.4))
+        self.lock.sync()
 
     def drag(self, kind: int, slots: list[int]) -> None:
         self.click(OUTSIDE, 0 | kind << 2, QUICK_CRAFT)
@@ -146,38 +142,28 @@ class Actor(Bot):
         self.click(OUTSIDE, 2 | kind << 2, QUICK_CRAFT)
 
 
-def record(port: int, out_path: str, name_a: str, name_b: str) -> None:
+def record(port: int, out_path: str, name_a: str, name_b: str, console: str) -> None:
     steps: list[dict] = []
+    lock = Lockstep(console_of(console))    # the game stands still but for the ticks of a step (pace.py)
     a = Actor(port, name_a)
-    a.join()
-    a.pump(ticks(30))
-    a.c.send("player_loaded")
-    a.tick_end()
-    a.pump(ticks(10))
+    a.begin(lock)
+    lock.place((a,), "inventory " + name_a + name_b)
     b = Actor(port, name_b)
 
     def step(name: str, action=None, ticks: int = 6, b_alive: bool = True):
-        """Run `action` in the first of `ticks` client ticks, then log what arrived."""
-        t0 = time.time()
+        """Run `action`, let the game take `ticks` ticks, then log what arrived."""
         mark_a, mark_b = len(a.log), len(b.log)
-        for i in range(ticks):
-            if i == 0 and action:
-                action()
-            if b_alive:
-                b.tick_end()
-                b.pump(0.001)
-            a.pump(0.001)
-            time.sleep(max(0.0, t0 + (i + 1) * TICK - time.time()))
-        a.pump(pace_ticks(3))
-        if b_alive:
-            b.pump(pace_ticks(1))
+        if action:
+            action()
+        if not b_alive:
+            lock.leave(b)
+        lock.step(ticks)
         steps.append({"step": name, "A": a.log[mark_a:], "B": b.log[mark_b:]})
         print(f"{name}: A {len(a.log) - mark_a}, B {len(b.log) - mark_b} packets")
 
     def join_b():
-        b.join()
-        b.pump(ticks(30))
-        b.c.send("player_loaded")
+        b.begin(lock)
+        lock.place((b,), "inventory " + name_a + name_b)
 
     def stand_apart():
         # Six blocks from A: in sight, out of reach of what B drops. (Vanilla spreads players
@@ -189,8 +175,7 @@ def record(port: int, out_path: str, name_a: str, name_b: str) -> None:
                 break
             b.move(dx=max(-2.0, min(2.0, dx)), dz=max(-2.0, min(2.0, dz)))
             b.tick_end()
-            b.pump(ticks(1))
-            a.pump(0.001)
+            lock.mark()     # (one move a loop of the server: more of them at once are too fast for vanilla)
 
     step("B joins", join_b, ticks=20)
     step("B walks to six blocks from A", stand_apart)
@@ -296,6 +281,7 @@ def record(port: int, out_path: str, name_a: str, name_b: str) -> None:
     step("wait: it comes back (nothing is left lying for the next run)", ticks=60)
     step("B disconnects", lambda: b.c.close(), ticks=10, b_alive=False)
 
+    lock.close()
     with open(out_path, "w") as f:
         json.dump({"ids": {"A": a.entity_id, "B": b.entity_id}, "steps": steps}, f, indent=1)
     a.c.close()
@@ -386,8 +372,9 @@ def diff(path_ref: str, path_ours: str) -> int:
 
 def main() -> int:
     if len(sys.argv) >= 4 and sys.argv[1] == "record":
-        names = (sys.argv[4], sys.argv[5]) if len(sys.argv) >= 6 else ("ProbeA", "ProbeB")
-        record(int(sys.argv[2]), sys.argv[3], *names)
+        if len(sys.argv) < 7:
+            raise SystemExit("record <port> <out.json> <name A> <name B> <console>: the console keeps the servers in step - compare.py has one")
+        record(int(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6])
         return 0
     if len(sys.argv) == 4 and sys.argv[1] == "diff":
         return 1 if diff(sys.argv[2], sys.argv[3]) else 0

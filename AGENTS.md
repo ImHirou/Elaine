@@ -288,14 +288,20 @@ upgrade old worlds before importing them. Rules:
 - Run it only from `.cache/vanilla-server/`, with the cached official jar and Java 25:
   `cd .cache/vanilla-server && /usr/lib/jvm/java-25-openjdk/bin/java -jar ../mc/<version>/server.jar --nogui`.
   The probes in `tools/vanilla/` (`entity_probe.py`, `inventory_probe.py`, `swing_probe.py`,
-  `component_probe.py`, `container_probe.py`, `command_probe.py`) record one scripted session on any server; record vanilla and
-  ours, then `diff` - or let `tools/vanilla/compare.py command_probe component_probe` do it: it starts both servers, records
-  each probe on the two side by side, diffs and stops them (`-k give -k nbt`: only those parts of a probe, which is what to
-  run while a change is worked on; the whole probe once before "done"). `world_probe.py` starts the servers itself: `build <name>` has vanilla make a world of that name
+  `component_probe.py`, `container_probe.py`, `command_probe.py`) record one scripted session on a server and its console;
+  `tools/vanilla/compare.py command_probe component_probe` starts both servers, records
+  each probe on the two side by side, diffs and stops them (`-k give -k nbt`: only those parts of a probe; `--noise`:
+  all of it twice, and each server against itself - what differs there is the probe's noise, not a difference). A probe
+  waits for no clock: it freezes the game (`/tick freeze`) and lets it take the ticks its script asks for
+  (`tools/vanilla/pace.py`: `Lockstep.sync()`, `run(k)`, `tick()`, `chunks(bot)`), so a recording is the same script at the
+  same ticks on either server - all seven probes on both servers in about two minutes, where they took ten. A new step
+  says how many ticks it wants, never how many seconds; what no tick brings (chunks, a file) is waited for by its event.
+  The session's vanilla runs in a world of compare.py's own (`--world compare-probe`), new every time. `world_probe.py` starts the servers itself: `build <name>` has vanilla make a world of that name
   (`--world <name>`: beside the other probes' world, `server.properties` untouched) and build a fixture in it, `vanilla` and
   `ours` record how each server sends that world once it is read from disk - ours from a copy, which it imports.
-  `block_probe.py` starts them too (`vanilla <out>`, `ours <elaine> <out>`, then `diff`): vanilla in a world of the probe's
-  own (`--world block-probe`), which it removes and makes anew every time. `physics_probe.py` starts the vanilla server itself: `record` steps it tick by tick and writes down
+  `block_probe.py` starts them too (`vanilla <out>`, `ours <elaine> <out>`, then `diff`; `compare.py block_probe` runs
+  both at once): vanilla in a world of the probe's own (`--world block-probe`), which it removes and makes anew every
+  time. It steps the game a tick at a time and stamps every packet with the tick that brought it. `physics_probe.py` starts the vanilla server itself: `record` steps it tick by tick and writes down
   what every entity of its scenarios is (the unit test's vectors), `perf` times its ticks with and without entities. Use player names vanilla has not seen: it saves players, what they dropped and what
   they blew up. Start ours on a port nothing else listens on, and stop it by pid: reactors bind with
   `SO_REUSEPORT`, so a second server on the same port quietly takes half the connections.

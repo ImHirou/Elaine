@@ -3,7 +3,7 @@
 """What does a server make of the text and NBT in an item's components? Record it, on vanilla
 and on ours, and diff.
 
-    component_probe.py record <port> <out.json> [nameA nameB [console]] [--only=word,...]
+    component_probe.py record <port> <out.json> <nameA> <nameB> <console> [--only=word,...]
     component_probe.py diff <vanilla.json> <ours.json>
     tools/vanilla/compare.py component_probe [-k word ...]      # both servers at once, and the diff
 
@@ -12,19 +12,16 @@ client sent and encodes it again. `record` joins two bots (creative): B puts one
 another into its hand, each with one component spelled one way - sensible, odd or wrong; A
 writes down the stack it is then shown in B's hand (set_equipment), which is the server's own
 encoding. A stack B is thrown out for is written down as that, and B comes back under another
-name. With `console` - a FIFO that is the server's stdin - A is made an operator and also asks
+name. Through `console` - a FIFO that is the server's stdin, which is also what keeps the server
+in step (pace.py: the game stands still throughout) - A is made an operator, and it asks
 `/data get entity B SelectedItem.components` of every stack: the component as its Codec writes
 it into a tag, which is the form a command takes and a world keeps. There the cases go on past
 text, with a value or two of every component the server reads. `diff` compares two recordings case by case and exits 0 if nothing is wrong.
 
-The reference is the vanilla server, run under the rules in AGENTS.md (see entity_probe.py for
-the properties it needs; gamemode=creative matters here):
-
-    cd .cache/vanilla-server && /usr/lib/jvm/java-25-openjdk/bin/java -jar ../mc/26.3/server.jar --nogui
-    tools/vanilla/component_probe.py record 25577 /tmp/vanilla.json      # then stop the server
-    build/release/elaine --server-ip=127.0.0.1 --server-port=25580 --online-mode=false --view-distance=2 &
-    tools/vanilla/component_probe.py record 25580 /tmp/ours.json
-    tools/vanilla/component_probe.py diff /tmp/vanilla.json /tmp/ours.json
+The reference is the vanilla server, run under the rules in AGENTS.md (see entity_probe.py for the properties it needs; gamemode=creative matters here).
+tools/vanilla/compare.py starts it and ours and hands `record` the console of each: the probe
+keeps a server in step by it (pace.py), so a recording is the same script at the same ticks on
+either server, and waits for no clock.
 
 Reading the diff - per case one of:
   same              the two servers sent the same bytes
@@ -56,7 +53,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests" / "integrat
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mcproto as mc  # noqa: E402
 from inventory_probe import Actor  # noqa: E402
-from pace import ticks  # noqa: E402
+from pace import Lockstep, console_of  # noqa: E402
 from mcproto import Byte, Double, Float, IntArray, Long, LongArray, Short, nbt, varint  # noqa: E402
 
 PIG, CHEST = mc.ENTITY_TYPE["kPig"], 1   # an entity type; a block entity type (any that exists)
@@ -513,35 +510,25 @@ def more_cases() -> list[tuple]:
     return out
 
 
-def record(port: int, out_path: str, name_a: str, name_b: str, console: str | None = None, only: set | None = None) -> None:
-    """`only`: the cases to play - those whose name or component holds one of the words."""
+def record(port: int, out_path: str, name_a: str, name_b: str, console: str, only: set | None = None) -> None:
+    """`only`: the cases to play - those whose name or component holds one of the words.
+
+    The game stands still throughout (pace.py): a stack in a hand is a player's business, and a
+    player ticks in a frozen game. What a case waits for is the loop of the server that read it."""
+    type_on_console = console_of(console)
+    lock = Lockstep(type_on_console)
     a = Actor(port, name_a)
     a.logged = Actor.logged | {"system_chat"}
-    a.join()
-    a.pump(ticks(30))
-    a.c.send("player_loaded")
-    a.tick_end()
-    a.pump(ticks(10))
+    a.begin(lock)
 
     joined = 0
 
     def join_b() -> Actor:
+        # (It comes back some eighty times, once for every stack it is thrown out for.)
         nonlocal joined
         b = Actor(port, name_b if joined == 0 else f"{name_b[:12]}{joined}")
         joined += 1
-        mark = len(a.log)
-        b.join()
-        # B is there when A is shown it - and it comes back some eighty times, once for every
-        # stack it is thrown out for: waiting a fixed while each time was most of a recording.
-        end = time.time() + ticks(60)
-        while time.time() < end and not any(kind == "add_entity" for kind, _ in a.log[mark:]):
-            b.pump(ticks(0.6))
-            a.pump(ticks(0.6))
-        b.c.send("player_loaded")
-        b.tick_end()
-        for _ in range(3):
-            b.pump(ticks(1))
-            a.pump(ticks(1))
+        b.begin(lock)
         return b
 
     def shown(since: int, eid: int) -> str | None:
@@ -553,68 +540,57 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str | No
         return None
 
     def on_console(line: str) -> None:
-        with open(console, "w") as f:
-            f.write(line + "\n")
-        a.pump(ticks(10))
+        type_on_console(line)
+        lock.sync()
 
     def asked(holder: str) -> str:
         """What `/data get` shows of the components of the stack in `holder`'s hand - or the
         key of the answer, if that is none (the item's own components are no patch)."""
         mark = len(a.log)
         a.c.send("chat_command", mc.mc_str(f"data get entity {holder} SelectedItem.components"))
-        for _ in range(8):
-            a.tick_end()
-            a.pump(ticks(1))
-            for kind, data in a.log[mark:]:
-                if kind == "system_chat":
-                    said = mc.Reader(bytes.fromhex(data)).nbt()
-                    if isinstance(said, dict) and said.get("translate") == "commands.data.entity.query":
-                        return _plain(said["with"][-1])
-                    return mc.snbt(said)
+        lock.sync()
+        for kind, data in a.log[mark:]:
+            if kind == "system_chat":
+                said = mc.Reader(bytes.fromhex(data)).nbt()
+                if isinstance(said, dict) and said.get("translate") == "commands.data.entity.query":
+                    return _plain(said["with"][-1])
+                return mc.snbt(said)
         return "(no answer)"
 
-    if console:
-        on_console(f"op {name_a}")
+    on_console(f"op {name_a}")
     b = join_b()
     results = []
     items = ("kStone", "kDirt")   # in turn, so that every stack differs from the one before it
-    every = [(*c, None) for c in cases()] + (more_cases() if console else [])
+    every = [(*c, None) for c in cases()] + more_cases()
     if only:
         every = [c for c in every if any(word.lower() in (c[0] + " " + c[1]).lower() for word in only)]
     for i, (label, component, value, item) in enumerate(every):
         mark_a, mark_b = len(a.log), len(b.log)
-        b.give(36, item or items[i % 2], 1, {component: value})
-        kicked = False
         try:
-            # Five ticks at most: an answer - the stack in B's hand as A is shown it, the slot
-            # sent back, a kick - ends the wait, and only a stack that changes nothing takes all.
-            for _ in range(5):
-                b.tick_end()
-                b.pump(ticks(0.8))
-                a.pump(ticks(0.4))
-                if shown(mark_a, b.entity_id) is not None or any(kind in ("container_set_slot", "disconnect") for kind, _ in b.log[mark_b:]):
-                    break
-        except (OSError, EOFError, AssertionError, struct.error):
-            kicked = True
-        kicked = kicked or any(kind == "disconnect" for kind, _ in b.log[mark_b:])
-        a.pump(ticks(1))
+            b.give(36, item or items[i % 2], 1, {component: value})
+        except (ConnectionError, OSError):
+            pass
+        # The loop that reads it answers: the stack in B's hand as A is shown it, the slot sent
+        # back, or a kick - after which B keeps step no more.
+        lock.sync()
+        kicked = b not in lock.bots or any(kind == "disconnect" for kind, _ in b.log[mark_b:])
         result = {"case": label, "component": component, "sent": value.hex()}
         if kicked:
             result["kicked"] = True
+            lock.leave(b)
             b.c.close()
-            a.pump(ticks(2))
+            lock.sync()
             b = join_b()
         else:
             result["stack"] = shown(mark_a, b.entity_id)
             result["sent_back"] = any(kind == "container_set_slot" for kind, _ in b.log[mark_b:])
-            if console:
-                result["tag"] = asked(b.name)
+            result["tag"] = asked(b.name)
         results.append(result)
         print(f"{label}: {'kicked' if kicked else result['stack'] or ('sent back' if result['sent_back'] else 'nothing')}")
     with open(out_path, "w") as f:
         json.dump(results, f, indent=1)
-    if console:
-        on_console(f"deop {name_a}")
+    on_console(f"deop {name_a}")
+    lock.close()
     b.c.close()
     a.c.close()
 
@@ -683,7 +659,9 @@ def main() -> int:
     if len(sys.argv) >= 4 and sys.argv[1] == "record":
         tail = "".join(random.choices(string.ascii_lowercase, k=5))
         names = (sys.argv[4], sys.argv[5]) if len(sys.argv) >= 6 else (f"Watch{tail}", f"Hold{tail}")
-        record(int(sys.argv[2]), sys.argv[3], *names, sys.argv[6] if len(sys.argv) >= 7 else None, only or None)
+        if len(sys.argv) < 7:
+            raise SystemExit("record <port> <out.json> <name A> <name B> <console>: the console keeps the servers in step - compare.py has one")
+        record(int(sys.argv[2]), sys.argv[3], *names, sys.argv[6], only or None)
         return 0
     if len(sys.argv) == 4 and sys.argv[1] == "diff":
         return diff(sys.argv[2], sys.argv[3])

@@ -3,7 +3,8 @@
 """What does a server do with a chest, a furnace, a crafting grid and TNT - and with a smoker, a
 blast furnace, a barrel and chests of copper? Record it, on vanilla and on ours, and diff.
 
-    container_probe.py record <port> <out.json> [nameA nameB]
+    tools/vanilla/compare.py container_probe [--noise]  # both servers, both recordings, the diff
+    container_probe.py record <port> <out.json> <nameA> <nameB> <console>
     container_probe.py diff <vanilla.json> <ours.json>
 
 `record` joins two bots (tests/integration/mcproto.py, offline mode, creative): B acts, A stands
@@ -15,19 +16,16 @@ different ages and waxes; lights a TNT beside a second one. Every packet either 
 event, a sound, an explosion, primed TNT or an item on the ground is logged per step. `diff`
 lines two recordings up step by step.
 
-The reference is the vanilla server, run under the rules in AGENTS.md (gamemode=creative,
-level-type=flat, spawn-protection=0):
-
-    cd .cache/vanilla-server && /usr/lib/jvm/java-25-openjdk/bin/java -jar ../mc/26.3/server.jar --nogui
-    tools/vanilla/container_probe.py record 25577 /tmp/vanilla.json Cyd Dee     # then stop the server
-    build/release/elaine --server-ip=127.0.0.1 --server-port=25580 --online-mode=false --view-distance=2 &
-    tools/vanilla/container_probe.py record 25580 /tmp/ours.json Cyd Dee
-    tools/vanilla/container_probe.py diff /tmp/vanilla.json /tmp/ours.json
+The reference is the vanilla server, run under the rules in AGENTS.md. tools/vanilla/compare.py
+starts it and ours and hands `record` the console of each: the probe keeps a server in step by
+it (pace.py) - the game stands still but for the ticks a step asks for - so a recording is the
+same script at the same ticks on either server, and waits for no clock.
+(Vanilla needs gamemode=creative, level-type=flat, spawn-protection=0.)
 
 Reading the diff:
-  * Use names vanilla has not seen, and a spot it has not seen either: it saves players and the
-    world, so a second recording finds the first one's crater - where nothing can be placed.
-    Best a world of its own for every recording: start vanilla with `--world <a new name>`.
+  * The console takes the bots to a spot of their own, far from the world's spawn (pace.py,
+    `place`): the crater this recording leaves is in nobody's way, and compare.py gives vanilla
+    a world of its own for a session.
   * What is chance on one server is chance between two: a spilled stack falls into pieces of
     10 to 30, and a bot picks up what slides its way - from then on its inventory is another
     in every menu it is sent. Record each server twice and believe what differs in both pairs.
@@ -57,8 +55,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests" / "integrat
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mcproto as mc  # noqa: E402
 from inventory_probe import Actor, PICKUP, QUICK_MOVE  # noqa: E402
-from pace import TICK, ticks  # noqa: E402
-from pace import ticks as pace_ticks  # noqa: E402  (where a parameter is called ticks)
+from pace import Lockstep, console_of  # noqa: E402
 from mcproto import ITEM, varint  # noqa: E402
 
 MENU = {"container_set_content", "container_set_slot", "set_cursor_item", "set_player_inventory", "container_close",
@@ -100,36 +97,27 @@ class Prober(Actor):
         """container_click on the open screen, reporting no prediction."""
         body = varint(self.window) + varint(self.state_id) + struct.pack(">hb", slot, button) + varint(kind) + varint(0)
         self.c.send("container_click", body + mc.hashed_stack(None))
-        self.tick_end()
-        self.pump(ticks(2.4))
+        self.lock.sync()
 
     def close(self) -> None:
         self.c.send("container_close", varint(self.window))
         self.window = 0
 
 
-def record(port: int, out_path: str, name_a: str, name_b: str) -> None:
+def record(port: int, out_path: str, name_a: str, name_b: str, console: str) -> None:
     steps: list[dict] = []
+    lock = Lockstep(console_of(console))    # the game stands still but for the ticks of a step (pace.py)
     a, b = Prober(port, name_a), Prober(port, name_b)
     for bot in (a, b):
-        bot.join()
-        bot.pump(ticks(30))
-        bot.c.send("player_loaded")
-        bot.tick_end()
-        bot.pump(ticks(10))
+        bot.begin(lock)
+    lock.place((a, b), "container " + name_a + name_b)
 
     def step(name: str, action=None, ticks: int = 6):
-        t0 = time.time()
+        """Run `action`, let the game take `ticks` ticks, then log what arrived."""
         mark_a, mark_b = len(a.log), len(b.log)
-        for i in range(ticks):
-            if i == 0 and action:
-                action()
-            for bot in (b, a):
-                bot.tick_end()
-                bot.pump(0.001)
-            time.sleep(max(0.0, t0 + (i + 1) * TICK - time.time()))
-        a.pump(pace_ticks(3))
-        b.pump(pace_ticks(1))
+        if action:
+            action()
+        lock.step(ticks)
         steps.append({"step": name, "A": a.log[mark_a:], "B": b.log[mark_b:]})
         print(f"{name}: A {len(a.log) - mark_a}, B {len(b.log) - mark_b} packets")
 
@@ -139,9 +127,8 @@ def record(port: int, out_path: str, name_a: str, name_b: str) -> None:
             if abs(dx) < 1e-9 and abs(dz) < 1e-9:
                 return
             bot.move(dx=max(-2.0, min(2.0, dx)), dz=max(-2.0, min(2.0, dz)))
-            for other in (a, b):
-                other.tick_end()
-                other.pump(ticks(0.6))
+            bot.tick_end()
+            lock.mark()     # (one move a loop of the server)
 
     # A spot of its own for every pair of names, in the chunk the bots spawned in or the next.
     spot = zlib.crc32((name_a + name_b).encode()) % 49
@@ -312,6 +299,7 @@ def record(port: int, out_path: str, name_a: str, name_b: str) -> None:
     step("B lights the first", lambda: (b.select(7), b.use(at(0, 1, 4))), ticks=20)
     step("the fuse burns", ticks=70)
     step("after the first explosion", ticks=40)
+    lock.close()
     for bot in (a, b):
         bot.c.close()
     Path(out_path).write_text(json.dumps({"origin": origin, "ids": {"A": a.entity_id, "B": b.entity_id}, "steps": steps}))
@@ -462,8 +450,9 @@ def diff(path_ref: str, path_ours: str) -> int:
 
 def main() -> int:
     if len(sys.argv) >= 4 and sys.argv[1] == "record":
-        names = (sys.argv[4], sys.argv[5]) if len(sys.argv) >= 6 else ("ProbeC", "ProbeD")
-        record(int(sys.argv[2]), sys.argv[3], *names)
+        if len(sys.argv) < 7:
+            raise SystemExit("record <port> <out.json> <name A> <name B> <console>: the console keeps the servers in step - compare.py has one")
+        record(int(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6])
         return 0
     if len(sys.argv) >= 4 and sys.argv[1] == "diff":   # -v: also print what is not compared
         return 1 if diff(sys.argv[2], sys.argv[3]) else 0

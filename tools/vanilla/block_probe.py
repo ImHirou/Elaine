@@ -5,7 +5,6 @@ when a random tick falls? Record it, on vanilla and on ours, and diff.
 
     block_probe.py vanilla <out.json> [nameA nameB]         # runs the vanilla server itself
     block_probe.py ours <elaine> <out.json> [nameA nameB]   # runs ours
-    block_probe.py record <port> <out.json> [nameA nameB [random]]   # a server that runs already
     block_probe.py diff <vanilla.json> <ours.json> [-v]
 
 A recording is of two bots (tests/integration/mcproto.py, offline mode, creative): B builds, A
@@ -37,7 +36,8 @@ ticks and puts it back. `ours` starts this server on a port of its own with
 `--random-tick-speed=4096` - it has no command for it - and a world it does not keep.
 
 Every packet either bot receives about a block, a level event, a falling block, primed TNT or an
-item on the ground is logged per step, with the moment it arrived. `diff` lines two recordings
+item on the ground is logged per step, with the tick that brought it: the game stands still but
+for the ticks a step lets it take, one at a time (pace.py). `diff` lines two recordings
 up step by step; where the order and the timing are the point - which of four torches breaks
 first, how many ticks after its signal a lamp goes out, how long sand takes to become an entity
 and to land - both are compared: the events of a step in the order they came, and for each how
@@ -45,9 +45,9 @@ many ticks after the step's first it came.
 
 Reading the diff:
   * Positions are relative to the block B stands on; entity ids, UUIDs and seeds are cut.
-  * A tick is 50 ms, and what arrives is stamped a few ms late: an offset of n ticks is what
-    rounds to n, counted from the first thing of a step that a tick sends (block changes,
-    entities). Level events and sounds are compared by their order alone: vanilla sends them
+  * An offset of n ticks is n ticks of the game, counted from the first thing of a step that a
+    tick sends (block changes, entities): what a frozen game makes of the step's action is
+    tick 0. Level events and sounds are compared by their order alone: vanilla sends them
     the moment they happen - between two ticks when a packet was the cause - and this server
     with the tick. Random ticks have no timing to compare - a step waits until what it is about
     has happened, and what is compared is that it did.
@@ -88,8 +88,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mcproto as mc  # noqa: E402
 from container_probe import Prober  # noqa: E402
 from world_probe import PORT, SERVER_DIR, Vanilla  # noqa: E402
-import pace  # noqa: E402
-from pace import TICK  # noqa: E402
+from pace import Lockstep  # noqa: E402
 
 PROBE_WORLD = "block-probe"     # in .cache/vanilla-server/: this probe's, removed and made anew by `vanilla`
 RANDOM_TICK_SPEED = 4096        # every cell of a section, on average, once a tick
@@ -105,52 +104,58 @@ class Watcher(Prober):
 
     def __init__(self, port: int, name: str):
         super().__init__(port, name)
-        self.stamps: list[float] = []   # when each logged packet arrived
+        self.tick = 0                   # how many ticks the step it is in has run
+        self.stamps: list[int] = []     # the tick each logged packet came with
 
     def pump(self, seconds: float) -> None:
         super().pump(seconds)
-        now = time.time()
-        self.stamps += [now] * (len(self.log) - len(self.stamps))
+        self.stamps += [self.tick] * (len(self.log) - len(self.stamps))
 
 
-def record(port: int, out_path: str, name_a: str, name_b: str, random_ticks=None, console=None) -> None:
-    """`random_ticks`: None - the steps about random ticks are left out; otherwise a function
-    that is called with True before them and with False after (the game rule, where there is one).
-    `console`: types a line on the server's console; without one the steps that need it are left out."""
+def record(port: int, out_path: str, name_a: str, name_b: str, random_ticks, console) -> None:
+    """`random_ticks`: a function that is called with True before the steps about random ticks and
+    with False after (the game rule, where there is one). `console`: types a line on the server's
+    console - which is also what keeps the server in step (pace.py): the game stands still but
+    for the ticks a step lets it take, one at a time, and a packet is stamped with the tick that
+    brought it."""
     steps: list[dict] = []
+    lock = Lockstep(console)
     a, b = Watcher(port, name_a), Watcher(port, name_b)
     for bot in (a, b):
-        bot.join()
-        bot.pump(pace.ticks(30))
-        bot.c.send("player_loaded")
-        bot.tick_end()
-        bot.pump(pace.ticks(10))
+        bot.begin(lock)
 
     def step(name: str, action=None, ticks: int = 8, until=None, about=None, loose=False):
-        """`until(blocks)`: go on (at most `ticks`) until the block changes B has seen in this
+        """What a frozen game makes of `action` is tick 0; then `ticks` ticks, one by one.
+        `until(blocks)`: go on (at most `ticks`) until the block changes B has seen in this
         step satisfy it. `about`: the places a step about random ticks is about - what becomes
-        of them is what is compared. `loose`: a step of explosions - they are counted."""
+        of them is what is compared, not when: its ticks pass twenty at a time. `loose`: a step
+        of explosions - they are counted."""
         mark_a, mark_b = len(a.log), len(b.log)
-        t0 = time.time()
-        for i in range(ticks):
-            if i == 0 and action:
-                action()
-            for bot in (b, a):
-                bot.tick_end()
-            end = t0 + (i + 1) * TICK
-            while time.time() < end:    # short turns: a packet is stamped within a few ms of its arrival
-                for bot in (b, a):
-                    bot.pump(min(0.003, TICK / 10))
-            if until and until(_blocks(b.log[mark_b:])):
-                break
-        else:
-            if until:
-                print(f"!! {name}: it did not happen within {ticks} ticks")
         for bot in (a, b):
-            bot.pump(pace.ticks(0.4))
+            bot.tick = 0
+        if action:
+            action()
+        lock.sync()
+        if about is None and not loose:
+            # Tick by tick: what is read up to the mark that arms tick n + 1 is tick n's.
+            for ran in range(ticks):
+                for bot in (a, b):
+                    bot.tick = ran
+                lock.tick()
+            for bot in (a, b):
+                bot.tick = ticks
+            lock.settle()
+        else:
+            ran = 0
+            while ran < ticks and not (until and until(_blocks(b.log[mark_b:]))):
+                now = min(20, ticks - ran)
+                lock.run(now)
+                ran += now
+            if until and not until(_blocks(b.log[mark_b:])):
+                print(f"!! {name}: it did not happen within {ticks} ticks")
         steps.append({"step": name, "about": [list(p) for p in about] if about is not None else None, "loose": loose,
-                      "A": [(n, d, round((t - t0) * 1000)) for (n, d), t in zip(a.log[mark_a:], a.stamps[mark_a:])],
-                      "B": [(n, d, round((t - t0) * 1000)) for (n, d), t in zip(b.log[mark_b:], b.stamps[mark_b:])]})
+                      "A": [(n, d, t) for (n, d), t in zip(a.log[mark_a:], a.stamps[mark_a:])],
+                      "B": [(n, d, t) for (n, d), t in zip(b.log[mark_b:], b.stamps[mark_b:])]})
         print(f"{name}: A {len(a.log) - mark_a}, B {len(b.log) - mark_b} packets")
 
     def walk(bot, x: float, z: float):
@@ -159,15 +164,11 @@ def record(port: int, out_path: str, name_a: str, name_b: str, random_ticks=None
             if abs(dx) < 1e-9 and abs(dz) < 1e-9:
                 return
             bot.move(dx=max(-2.0, min(2.0, dx)), dz=max(-2.0, min(2.0, dz)))
-            for other in (a, b):
-                other.tick_end()
-                other.pump(pace.ticks(0.6))
+            bot.tick_end()
+            lock.mark()     # (one move a loop of the server)
 
     def idle(ticks: int) -> None:
-        for _ in range(ticks):
-            for bot in (a, b):
-                bot.tick_end()
-                bot.pump(pace.ticks(0.5))
+        lock.step(ticks)
 
     # A spot of its own for every pair of names, in the chunk the bots spawned in or the next.
     spot = zlib.crc32((name_a + name_b).encode()) % 16
@@ -486,7 +487,9 @@ def record(port: int, out_path: str, name_a: str, name_b: str, random_ticks=None
 
     for bot in (a, b):
         bot.c.close()
-    Path(out_path).write_text(json.dumps({"origin": origin, "ids": {"A": a.entity_id, "B": b.entity_id}, "tick_ms": TICK * 1000,
+    lock.close()
+    # (A packet's stamp is the tick that brought it: "tick_ms" 1. Older recordings stamped milliseconds.)
+    Path(out_path).write_text(json.dumps({"origin": origin, "ids": {"A": a.entity_id, "B": b.entity_id}, "tick_ms": 1,
                                           "steps": steps}))
     print(f"wrote {out_path}")
 
@@ -721,9 +724,6 @@ def record_vanilla(out: str, name_a: str, name_b: str) -> None:
         v.until(r"Done \(")
         v.cmd("gamerule minecraft:spawn_mobs false")     # (kept in this probe's world, which is made anew)
         v.until(r"Game rule \S*spawn_mobs is now set to", timeout=20)
-        if pace.RATE != 20:
-            v.cmd(f"tick rate {pace.RATE:g}")
-            v.until(r"Set the target tick rate", timeout=20)
         record(PORT, out, name_a, name_b, rule, v.cmd)
     finally:
         v.stop()
@@ -736,7 +736,7 @@ def record_ours(exe: str, out: str, name_a: str, name_b: str) -> None:
     tmp = Path(tempfile.mkdtemp(prefix="block-probe-"))
     log = open(tmp / "server.log", "w")
     proc = subprocess.Popen([exe, "--server-ip=127.0.0.1", f"--server-port={port}", "--online-mode=false", "--view-distance=2",
-                             "--simulation-distance=2", f"--random-tick-speed={RANDOM_TICK_SPEED}", "--config=/nonexistent", f"--tick-rate={pace.RATE:g}",
+                             "--simulation-distance=2", f"--random-tick-speed={RANDOM_TICK_SPEED}", "--config=/nonexistent",
                              "--level-name=", f"--ops-file={tmp / 'ops.json'}"], stdin=subprocess.PIPE, stdout=log, stderr=log)
     try:
         end = time.time() + 30
@@ -761,15 +761,13 @@ def record_ours(exe: str, out: str, name_a: str, name_b: str) -> None:
 def main() -> int:
     argv = [arg for arg in sys.argv[1:] if arg != "-v"]
     what, args = (argv[0], argv[1:]) if argv else ("", [])
-    fixed = {"vanilla": 1, "ours": 2, "record": 2}.get(what)
+    fixed = {"vanilla": 1, "ours": 2}.get(what)
     if fixed is not None and len(args) >= fixed:
         names = tuple(args[fixed:fixed + 2]) if len(args) >= fixed + 2 else ("ProbeG", "ProbeH")
         if what == "vanilla":
             record_vanilla(args[0], *names)
-        elif what == "ours":
-            record_ours(args[0], args[1], *names)
         else:
-            record(int(args[0]), args[1], *names, (lambda fast: None) if "random" in args[fixed:] else None)
+            record_ours(args[0], args[1], *names)
         return 0
     if what == "diff" and len(args) == 2:   # -v: print every step's rows, and what is not compared
         return 1 if diff(args[0], args[1]) else 0

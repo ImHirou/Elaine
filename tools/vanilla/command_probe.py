@@ -2,14 +2,14 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """What does a server answer to commands? Record it, on vanilla and on ours, and diff.
 
-    command_probe.py record <port> <out.json> [nameA nameB [console]] [--only=section,...]
+    command_probe.py record <port> <out.json> <nameA> <nameB> <console> [--only=section,...]
     command_probe.py diff <vanilla.json> <ours.json> [-v]
     tools/vanilla/compare.py command_probe [-k section ...]     # both servers at once, and the diff
 
 `record` joins two bots (tests/integration/mcproto.py, offline mode, creative). A has to be an
-operator and B must not be: once both are in, type `op <nameA>` on the server's console when
-the probe asks - or name a FIFO that is the server's stdin as `console`, and the probe types
-it itself (and `deop` at the end). Not before A has joined: a vanilla server asked to op a name
+operator and B must not be: `console` is a FIFO that is the server's stdin, and once both are
+in the probe types `op <nameA>` there (and `deop` at the end). It is also what keeps the server
+in step (pace.py): the game stands still but for the ticks a step asks for. Not before A has joined: a vanilla server asked to op a name
 it has not seen looks it up at Mojang, and ops the account of that name instead of the bot.
 A types commands, right ones and wrong ones; B watches, is given things, teleported, opped,
 deopped and in the end kicked. Per step everything either of them is told is logged: system
@@ -21,14 +21,10 @@ bot that joins, says a word and leaves - and the time: `/time` on a clock that i
 (so that it is where each command puts it), every set_time that names a clock, and what the
 server suggests for the lines a client asks it about. `diff` lines two recordings up step by step.
 
-The reference is the vanilla server, run under the rules in AGENTS.md (gamemode=creative,
-level-type=flat, spawn-protection=0):
-
-    cd .cache/vanilla-server && /usr/lib/jvm/java-25-openjdk/bin/java -jar ../mc/26.3/server.jar --nogui
-    tools/vanilla/command_probe.py record 25577 /tmp/vanilla.json Eve Fay       # `op Eve` when asked; then stop the server
-    build/release/elaine --server-ip=127.0.0.1 --server-port=25580 --online-mode=false --view-distance=2 --max-players=20 --ops-file=/tmp/ops.json
-    tools/vanilla/command_probe.py record 25580 /tmp/ours.json Eve Fay          # `op Eve` when asked
-    tools/vanilla/command_probe.py diff /tmp/vanilla.json /tmp/ours.json
+The reference is the vanilla server, run under the rules in AGENTS.md (gamemode=creative, level-type=flat, spawn-protection=0).
+tools/vanilla/compare.py starts it and ours and hands `record` the console of each: the probe
+keeps a server in step by it (pace.py), so a recording is the same script at the same ticks on
+either server, and waits for no clock.
 
 Reading the diff:
   * Use names vanilla has not seen: it saves players, and the first thing A does is teleport
@@ -63,10 +59,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests" / "integrat
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mcproto as mc  # noqa: E402
 from inventory_probe import Actor  # noqa: E402
-from pace import TICK, ticks  # noqa: E402
-from pace import ticks as pace_ticks  # noqa: E402  (where a parameter is called ticks)
+from pace import Lockstep, console_of  # noqa: E402
 
-LOGGED = {"system_chat", "player_chat", "disguised_chat", "set_time", "command_suggestions", "block_update", "section_blocks_update", "player_position", "sound", "stop_sound", "add_entity",
+LOGGED = {"system_chat", "player_chat", "disguised_chat", "set_time", "ticking_state", "ticking_step", "command_suggestions", "block_update", "section_blocks_update", "player_position", "sound", "stop_sound", "add_entity",
           "remove_entities", "entity_event", "commands", "disconnect", "set_entity_data", "container_set_slot",
           "set_player_inventory", "take_item_entity", "open_screen", "block_entity_data", "open_sign_editor", "level_event"}
 # The sounds a recording keeps beside the one of an item given: what a lock and a sign say.
@@ -91,10 +86,14 @@ class Prober(Actor):
         self.c.send("chat_command_signed", mc.mc_str(command) + struct.pack(">qq", int(time.time() * 1000), 0) +
                     mc.varint(0) + NOTHING_SEEN)
 
-    def suggest(self, line: str) -> None:
-        """command_suggestion: what could come next in this line (as typed, with its slash)?"""
-        self.asked = getattr(self, "asked", 0) + 1
-        self.c.send("command_suggestion", mc.varint(self.asked) + mc.mc_str(line))
+    def suggest(self, *lines: str) -> None:
+        """command_suggestion: what could come next in this line (as typed, with its slash)?
+        Several lines are asked in one write: they are read together."""
+        packets = []
+        for line in lines:
+            self.asked = getattr(self, "asked", 0) + 1
+            packets.append(("command_suggestion", mc.varint(self.asked) + mc.mc_str(line)))
+        self.c.send_together(*packets)
 
     def chat(self, message: str) -> None:
         self.c.send("chat", mc.mc_str(message) + struct.pack(">qq", int(time.time() * 1000), 0) + b"\x00" + NOTHING_SEEN)
@@ -105,14 +104,17 @@ class Prober(Actor):
                     b"\x7f" + mc.varint(1) + b"\x00\x01" + mc.varint(0))
 
 
-SECTIONS = ("basics", "blocks", "give", "moving", "entities", "nbt", "signs", "tellraw", "sounds", "talking", "time",
+SECTIONS = ("basics", "blocks", "give", "moving", "entities", "nbt", "signs", "tellraw", "sounds", "talking", "time", "tick",
             "permissions")
 
 
-def record(port: int, out_path: str, name_a: str, name_b: str, console: str | None = None, only: set | None = None) -> None:
+def record(port: int, out_path: str, name_a: str, name_b: str, console: str, only: set | None = None) -> None:
     """`only`: the sections to play (SECTIONS; a part of a name will do). The beginning - joining,
     the operator, the spot - is always played; a recording of some sections is compared with
-    another of the same ones."""
+    another of the same ones.
+
+    The game stands still but for the ticks of a step (pace.py): a line is read and answered by
+    a frozen game, then so many ticks pass, on either server the same."""
     steps: list[dict] = []
     current = ["setup"]
 
@@ -124,60 +126,35 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str | No
         return not only or current[0] == "setup" or any(word in current[0] for word in only)
 
     name_c = (name_a + "C")[:16]     # a third, who only comes by
+    type_line = console_of(console)
+    lock = Lockstep(type_line)
     a, b = Prober(port, name_a), Prober(port, name_b)
     for bot in (a, b):
-        bot.join()
-        bot.pump(ticks(30))
-        bot.c.send("player_loaded")
-        bot.tick_end()
-        bot.pump(ticks(10))
-
-
-    gone = set()   # the bots that were thrown out (B, at the end)
-
-    def pump(bot, seconds: float) -> None:
-        if bot in gone:
-            return
-        try:
-            bot.tick_end()
-            bot.pump(seconds)
-        except (ConnectionError, OSError):
-            gone.add(bot)
+        bot.begin(lock)
 
     def type_on_console(line: str) -> None:
-        if console:
-            with open(console, "w") as f:
-                f.write(line + "\n")
-        else:
-            print(f">>> type on the server's console now:  {line}")
-        for _ in range(1 if console else 8):
-            for bot in (a, b):
-                pump(bot, ticks(10))
+        type_line(line)
+        lock.step(2)
 
-    def step(name: str, action=None, ticks: int = 5):
-        """Does `action` and takes what the bots are sent for it. A step lasts `ticks` ticks at
-        most; one of the usual five is over as soon as something has come and two ticks have
-        then passed without anything more - an answer is there in a tick or two, and waiting
-        out the rest for each of four hundred lines is most of what a recording takes."""
+    def step(name: str, action=None, ticks: int = 5, loops: int = 0, until=None):
+        """Does `action` and takes what the bots are sent for it: what a frozen game answers,
+        and what `ticks` ticks of it bring. `loops`: so many loops of the server more, whatever
+        the game does in them; `until()`: ...and loops until that holds (the part about /tick,
+        where the game is A's to freeze and to run, and a step lets no ticks pass by itself)."""
         if not wanted():
             return
-        t0 = time.time()
         mark_a, mark_b = len(a.log), len(b.log)
-        seen, quiet = 0, 0
-        for i in range(ticks):
-            if i == 0 and action:
-                action()
-            for bot in (a, b):
-                pump(bot, 0.001)
-            time.sleep(max(0.0, t0 + (i + 1) * TICK - time.time()))
-            now = len(a.log) - mark_a + len(b.log) - mark_b
-            quiet = quiet + 1 if now == seen else 0
-            seen = now
-            if ticks == 5 and seen and quiet >= 2:
-                break
-        pump(a, pace_ticks(0.6))
-        pump(b, pace_ticks(0.2))
-        steps.append({"step": name, "A": a.log[mark_a:], "B": b.log[mark_b:]})
+        if action:
+            action()
+        lock.step(ticks)
+        for _ in range(loops):
+            lock.mark()
+        end = time.time() + 30
+        while until and not until(a.log[mark_a:]):
+            if time.time() > end:
+                raise SystemExit(f"{name}: what it waits for did not come")
+            lock.mark()
+        steps.append({"step": name, "section": current[0], "A": a.log[mark_a:], "B": b.log[mark_b:]})
         print(f"{name}: A {len(a.log) - mark_a}, B {len(b.log) - mark_b} packets")
 
     # (Nothing spawns by itself while this records: a horse that walks by is a row of its own.
@@ -196,8 +173,11 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str | No
     spot = zlib.crc32((name_a + name_b).encode())
     ox, oz = 4000 + spot % 500 * 32, 4000 + spot // 500 % 500 * 32
     oy = -60    # on top of a flat world's grass
-    step("A goes to its spot", lambda: a.say(f"tp {ox} {oy} {oz}"), ticks=30)
-    step("...and fetches B", lambda: a.say(f"tp {name_b} {ox + 2} {oy} {oz}"), ticks=30)
+    # (The chunks out there are made when somebody comes: waited for, before anything is done in them.)
+    step("A goes to its spot", lambda: a.say(f"tp {ox} {oy} {oz}"))
+    lock.chunks(a)
+    step("...and fetches B", lambda: a.say(f"tp {name_b} {ox + 2} {oy} {oz}"))
+    lock.chunks(b)
     origin = (ox, oy, oz)
 
     section("basics")
@@ -596,7 +576,7 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str | No
             return
         mark_a, mark_b = len(a.log), len(b.log)
         type_on_console(line)
-        steps.append({"step": "console: " + line, "A": a.log[mark_a:], "B": b.log[mark_b:]})
+        steps.append({"step": "console: " + line, "section": current[0], "A": a.log[mark_a:], "B": b.log[mark_b:]})
 
     says("hello")
     says("hello back", b)
@@ -641,17 +621,14 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str | No
     if wanted():
         mark_a, mark_b = len(a.log), len(b.log)
         c = Prober(port, name_c)
-        c.join()
-        c.pump(ticks(20))
-        for bot in (a, b):
-            pump(bot, ticks(6))
+        c.begin(lock)
+        lock.step(2)
         c.chat("just passing")
-        c.pump(ticks(10))
+        lock.step(2)
+        lock.leave(c)
         c.c.close()
-        for _ in range(4):
-            for bot in (a, b):
-                pump(bot, ticks(5))
-        steps.append({"step": "C joins, says something and leaves", "A": a.log[mark_a:], "B": b.log[mark_b:], "C": c.log})
+        lock.step(2)
+        steps.append({"step": "C joins, says something and leaves", "section": current[0], "A": a.log[mark_a:], "B": b.log[mark_b:], "C": c.log})
 
     section("time")
     # ---- the time: the world's clocks. The overworld's is stopped first, so that it is where
@@ -703,9 +680,77 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str | No
                  "/time q", "/time set", "time set n"):
         step("A asks what could follow: " + line, lambda line=line: a.suggest(line), ticks=3)
     step("B asks what could follow: /time set ", lambda: b.suggest("/time set "), ticks=3)
-    step("A asks twice in one tick", lambda: (a.suggest("/time set d"), a.suggest("/time set m")), ticks=3)
+    step("A asks twice in one tick", lambda: a.suggest("/time set d", "/time set m"), ticks=3)
     run("time resume")                                # as it was: running, at its own rate
     run("time resume")
+
+    section("tick")
+    # ---- /tick: how fast the game ticks, a game that stands still, its steps, a sprint. In this
+    # part the game is A's to freeze and to run: a step lets no ticks pass by itself, only loops
+    # of the server (pace.py), and the console says first that the game runs and last that it
+    # stands again. The game time is asked for while it stands: how far it has come since it
+    # was last asked is compared.
+    def on_tick_console(line: str) -> None:
+        if not wanted():
+            return
+        mark_a, mark_b = len(a.log), len(b.log)
+        type_line(line)
+        lock.sync()
+        steps.append({"step": "console: " + line, "section": current[0], "A": a.log[mark_a:], "B": b.log[mark_b:]})
+
+    def tick(command: str, bot=a, loops: int = 0, until=None):
+        step(("" if bot is a else "B: ") + "/" + command, lambda: bot.say(command), ticks=0, loops=loops, until=until)
+
+    def reported(log: list) -> bool:    # the server's account of a sprint, when it has ended
+        return any(kind == "system_chat" and b"commands.tick.sprint.report" in bytes.fromhex(data) for kind, data in log)
+
+    on_tick_console("tick unfreeze")
+    tick("tick query")
+    tick("tick rate 40")                              # (the next mark sets it back: a mark is a `tick rate`)
+    tick("tick rate 0.5")
+    tick("tick rate 10001")
+    tick("tick rate")
+    tick("tick step")                                 # only a frozen game steps
+    tick("tick step stop")
+    tick("tick sprint stop")
+    tick("tick freeze")
+    step("the game time, to count from", lambda: a.say("time query gametime"), ticks=0)
+    tick("tick freeze")                               # again: said again
+    tick("time query gametime")                       # it stands
+    tick("tick query")
+    tick("tick step 3", loops=6)
+    tick("time query gametime")
+    tick("tick step stop")                            # they are done
+    tick("tick step", loops=4)
+    tick("time query gametime")
+    tick("tick step 0")
+    tick("tick step -1")
+    tick("tick step 5x")
+    tick("tick sprint 0")
+    tick("tick sprint")
+    tick("tick sprint 50", until=reported)            # ...and the server's report of it
+    tick("time query gametime")                       # one tick more than was asked: the one that left the freeze
+    tick("tick step 1d")
+    tick("tick step stop")
+    # Sprints long enough that no server is through with them before the next line. (Vanilla
+    # runs a line of chat as a task of its server thread, between two ticks - and while it
+    # sprints, not before the fourth tick after: such a line is given the loops.)
+    tick("tick sprint 100d")
+    tick("tick query", loops=6)
+    tick("tick sprint stop", loops=6)
+    tick("tick sprint 100d")
+    tick("tick sprint 5", until=reported)             # in place of the other: what was before is a sprint now
+    tick("tick sprint 100d")
+    tick("tick freeze", loops=6)                      # ends it too
+    tick("tick unfreeze")
+    tick("tick unfreeze")
+    tick("tick")
+    tick("tick nonsense")
+    tick("tick freeze", b)                            # not a command to B
+    for line in ("/tick ", "/tick rate ", "/tick rate 2", "/tick rate 3", "/tick step ", "/tick step 1", "/tick step 5",
+                 "/tick sprint ", "/tick sprint 6", "/tick sprint 1", "/tick s"):
+        step("A asks what could follow: " + line, lambda line=line: a.suggest(line), ticks=0)
+    on_tick_console("tick freeze")
 
     # ---- what is not a command, and who may run what
     section("permissions")
@@ -726,6 +771,7 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str | No
 
     type_on_console(f"deop {name_a}")
     type_on_console("gamerule minecraft:spawn_mobs true")
+    lock.close()
     a.c.close()
     Path(out_path).write_text(json.dumps({"origin": origin, "names": [name_a, name_b, name_c], "recorded": int(time.time() * 1000), "steps": steps}))
     print(f"wrote {out_path}")
@@ -904,6 +950,7 @@ def _normalise(rec: dict, who: str, commands: set | None) -> tuple[dict[str, lis
     bots = {mc.offline_uuid(n) for n in rec["names"]}
     out, tree = {}, None
     own_id = None
+    counted = [0]   # the game time when it was last asked for (the part about /tick)
     for st in rec["steps"]:
         rows, appeared = [], []
         blocks = {}
@@ -946,6 +993,11 @@ def _normalise(rec: dict, who: str, commands: set | None) -> tuple[dict[str, lis
                         for c, (t, p, rate) in sorted(clocks.items()))))
                 else:
                     rows.append(("  (not compared)", "the game time"))
+            elif name == "ticking_state":
+                # (The rate to a tenth: its thousandths are the probe's marks - pace.py.)
+                rows.append((name, f"rate {round(r.f32(), 1)} frozen {r.bool()}"))
+            elif name == "ticking_step":
+                rows.append((name, f"{r.varint()} steps"))
             elif name == "command_suggestions":
                 asked, start, length = r.varint(), r.varint(), r.varint()
                 texts = []
@@ -964,6 +1016,22 @@ def _normalise(rec: dict, who: str, commands: set | None) -> tuple[dict[str, lis
                 if st["step"].endswith("/help") or st["step"].endswith("B: /help"):   # one line per command: only those both have
                     if commands is not None and line.split(" ")[0].lstrip("/") not in commands - PARTLY:
                         continue
+                if key == "commands.time.query.gametime" and st.get("section") == "tick":
+                    # Counted from when it was last asked: so many ticks a step or a sprint took.
+                    now = int(value["with"][0])
+                    since, counted[0] = now - counted[0], now
+                    rows.append((name, key + (f" +{since} since it was last asked" if st["step"].startswith("/") else " (to count from)")))
+                    continue
+                if key.startswith("commands.tick.query."):   # how long a tick takes is each server's own
+                    args = value["with"]
+                    shown = {"commands.tick.query.rate.running": f"rate {args[0]}, target {args[-1]}",
+                             "commands.tick.query.rate.sprinting": f"rate {args[0]}"}.get(key, f"of {args[-1]} samples")
+                    rows.append((name, f"{key} {shown} (the times are each server's own)"))
+                    continue
+                if key == "chat.type.admin" and isinstance(value["with"][1], dict) and \
+                        value["with"][1].get("translate") == "commands.tick.sprint.report":
+                    rows.append((name, f"{key} {_plain(value['with'][0])} commands.tick.sprint.report (how fast is each server's own)"))
+                    continue
                 if key == "commands.time.query.gametime" or (key == "commands.time.query.absolute" and "the_end" in line):
                     rows.append((name, key + " (a count of ticks: each server's own)"))
                     continue
@@ -1118,7 +1186,9 @@ def main() -> int:
         return 2
     if len(sys.argv) >= 4 and sys.argv[1] == "record":
         names = (sys.argv[4], sys.argv[5]) if len(sys.argv) >= 6 else ("ProbeE", "ProbeF")
-        record(int(sys.argv[2]), sys.argv[3], *names, sys.argv[6] if len(sys.argv) >= 7 else None, only or None)
+        if len(sys.argv) < 7:
+            raise SystemExit("record <port> <out.json> <name A> <name B> <console>: the console keeps the servers in step - compare.py has one")
+        record(int(sys.argv[2]), sys.argv[3], *names, sys.argv[6], only or None)
         return 0
     if len(sys.argv) >= 4 and sys.argv[1] == "diff":   # -v: every row, and what is not compared
         return 1 if diff(sys.argv[2], sys.argv[3]) else 0

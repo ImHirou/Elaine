@@ -2244,12 +2244,33 @@ stands under no node a client asks about, and would have to be taught first.
 - Everyone is told of a change as vanilla tells it: `ticking_state` (rate, frozen) whenever the
   rate or the freeze is set - set again to the same counts - and both packets on joining.
 - The console's lines are run where `DedicatedServer.tickConnection` runs them: after the
-  level and the connections have ticked. A `/tick freeze` from a player is among the packets at
-  the start of the loop and holds that very tick; one from the console holds the next.
+  level and the connections have ticked, so what a line changes is shown by the next loop. A
+  player's line is run here with its packets, at the start of a loop, and a `/tick freeze`
+  holds that very tick; vanilla runs a line of chat between two loops, as a task of the server
+  thread (and, while it sprints, not before the fourth tick after). Either way the first tick
+  after the line is the first it holds - a step of three is three ticks and a sprint of fifty
+  from a frozen game fifty-one on both, which `command_probe.py` counts.
+- An entity's age is the passes over the entities there have been since it was made
+  (`entity_tick_`, counted on as soon as a pass is done): a player picks an item up in the
+  loop of the item's fortieth tick - behind that pass - and in no loop of a frozen game before.
 
 What `/tick` suggests for a rate (`20`) and a time (`1t`, `1s`; `60s`, `1d`, `3d`) is the
 command's own list (`.suggests`), which takes the place of what the argument's type would
 offer: a registration says so with `<rate:float(1,10000)=20>`.
+
+**A frozen game is what a test wants**: time that passes only when asked, as fast as the
+machine goes. The probes of `tools/vanilla/` keep both servers that way (`pace.py`). What tells
+a bot that the server has come to a point is a `ticking_state` packet - every player is sent
+one whenever the rate or the freeze is set, changed or not - so the console sets the rate to
+what it is but for a thousandth that names the mark, and each bot reads up to the packet with
+that rate. A loop of the server reads the players' packets, ticks the level (the tracker shows
+what moved), ticks the connections, reads the console and flushes; so one mark is "the console
+was read once more", two are "a whole loop ran since" (what the bots sent has been read, acted
+on and shown), a sprint asked from the console ends with a `ticking_state` that says frozen
+again, and a single tick is `tick step 1` followed by marks. A frozen server still loops at
+its rate - that is how soon it reads anything, and the only clock left in a recording - and a
+tracker counts those loops, not the game's ticks: where an update interval falls is the one
+thing two recordings of one server may still differ by. `compare.py --noise` shows it.
 
 **Kept**: `world.json` has the game time and the clocks, written again with every autosave and
 when the server stops - by a worker (`server::Files`), as a player's file is. A world saved
