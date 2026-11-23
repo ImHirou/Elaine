@@ -49,6 +49,9 @@ constexpr unsigned char kClimate[] = {
 constexpr unsigned char kTerrain[] = {
 #embed "data/worldgen_terrain.bin"
 };
+constexpr unsigned char kSpawn[] = {
+#embed "data/worldgen_spawn.bin"
+};
 
 // A script being read.
 struct In {
@@ -602,6 +605,28 @@ TEST(Worldgen, TerrainOfAChunkIsVanillas) {
         if (n.children == 0) possible[n.first >> 6] |= 1ull << (n.first & 63);
     EXPECT_EQ(seen[0] & possible[0], possible[0]);
     EXPECT_EQ(seen[1] & possible[1], possible[1]);
+}
+
+// Where a world begins: the block NoiseSpawnFinder picks, for a handful of seeds.
+TEST(Worldgen, AWorldBeginsWhereVanillasDoes) {
+    In in(kSpawn);
+    in.magic("WGSPWN01");
+    const u32 seeds = in.num<u32>();
+    ASSERT_GE(seeds, 6u);
+    u32 away = 0;
+    for (u32 i = 0; i < seeds; ++i) {
+        const i64 seed = in.i64_();
+        const i32 want_x = in.i32_(), want_z = in.i32_();
+        const Noises noises(seed);
+        Sampler sampler(noises);
+        i32 x = 0, z = 0;
+        spawn_origin(sampler, x, z);
+        EXPECT_EQ(x, want_x) << "seed " << seed;
+        EXPECT_EQ(z, want_z) << "seed " << seed;
+        away += want_x != 0 || want_z != 0;
+    }
+    EXPECT_GT(away, 0u) << "every world of the script begins at 0, 0: the search was not tried";
+    EXPECT_EQ(in.p, in.end);
 }
 
 // The biomes a chunk's surface is made by are its own and a ring of its neighbours' - each

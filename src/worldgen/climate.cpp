@@ -204,6 +204,56 @@ void fill_biome_grid(Sampler& sampler, i32 chunk_x, i32 chunk_z, i32 min_y, u32 
 
 u16 climate_biome(i32 leaf) { return wg::kClimate[leaf].first; }
 
+void spawn_origin(Sampler& sampler, i32& x, i32& z) {
+    sampler.reset();
+    // getSpawnPositionAndFitness: how far the climate at a block is from the nearest of the
+    // points asked for, and - counting two thousand times less - how far the block is from 0, 0.
+    const auto fitness = [&](i32 block_x, i32 block_z) {
+        const i32 qx = (block_x >> 2) << 2, qz = (block_z >> 2) << 2;
+        i64 least = std::numeric_limits<i64>::max();
+        const wg::SpawnParameter* p = wg::kSpawnParameters;
+        for (const u8 count : wg::kSpawnPoints) {
+            i64 of_point = 0;
+            for (u32 i = 0; i < count; ++i, ++p) {
+                // Climate.Parameter.distance
+                const i64 value = quantize_coord(sampler.value(p->node, qx, 0, qz));
+                const i64 above = value - p->max, below = p->min - value;
+                const i64 d = above > 0 ? above : std::max<i64>(below, 0);
+                of_point += d * d;
+            }
+            least = std::min(least, of_point);
+        }
+        const i64 from_origin = static_cast<i64>(block_x) * block_x + static_cast<i64>(block_z) * block_z;
+        return least * (2048ll * 2048ll) + from_origin;
+    };
+    i32 best_x = 0, best_z = 0;
+    i64 best = fitness(0, 0);
+    // radialSearch: rings around the best so far, wide ones first.
+    const auto search = [&](float max_radius, float increment) {
+        float angle = 0.0f, radius = increment;
+        const i32 origin_x = best_x, origin_z = best_z;
+        while (radius <= max_radius) {
+            const i32 at_x = origin_x + static_cast<i32>(std::sin(static_cast<double>(angle)) * static_cast<double>(radius));
+            const i32 at_z = origin_z + static_cast<i32>(std::cos(static_cast<double>(angle)) * static_cast<double>(radius));
+            const i64 f = fitness(at_x, at_z);
+            if (f < best) {
+                best = f;
+                best_x = at_x;
+                best_z = at_z;
+            }
+            angle += increment / radius;
+            if (static_cast<double>(angle) > 6.283185307179586) {
+                angle = 0.0f;
+                radius += increment;
+            }
+        }
+    };
+    search(2048.0f, 512.0f);
+    search(512.0f, 32.0f);
+    x = best_x;
+    z = best_z;
+}
+
 void fill_biomes(Sampler& sampler, i32 chunk_x, i32 chunk_z, i32 min_y, u32 sections, u16* out, u8* tied_cells) {
     // MultiNoiseBiomeSource.createResolverForChunk: the six functions over the chunk's cells, one
     // volume each, in this order.

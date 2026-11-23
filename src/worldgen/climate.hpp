@@ -95,6 +95,11 @@ inline u16 zoomed_biome(const BiomeGrid& grid, i64 zoom_seed, i32 x, i32 y, i32 
     return grid.at(cell.x, cell.y, cell.z);
 }
 
+// NoiseSpawnFinder.findSpawnPosition: the block a world begins at - where, within two thousand
+// blocks of 0, 0, the climate is nearest to what the settings ask of a place to begin (land, and
+// no river), nearer the middle being better. `sampler` is begun anew.
+void spawn_origin(Sampler& sampler, i32& x, i32& z);
+
 // The biomes the carvers go by (BiomeSource.createUncachedResolver): not the cells a chunk was
 // filled with, but the climate asked again at the cell, a function at a time and by value - which
 // is not, to the last bit, what filled the chunk. `climate` is a context without caches. `last`

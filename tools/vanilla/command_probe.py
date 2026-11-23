@@ -187,6 +187,8 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str, onl
     run("list")
     run("list uuids")
     run("list", b)
+    run("seed")
+    run("seed", b)            # not an operator's: unknown to it
     run("help")
     run("help setblock")
     run("help tp")
@@ -1126,6 +1128,12 @@ def _normalise(rec: dict, who: str, commands: set | None) -> tuple[dict[str, lis
                 if key == "chat.type.admin" and isinstance(value["with"][1], dict) and \
                         value["with"][1].get("translate") == "commands.tick.sprint.report":
                     rows.append((name, f"{key} {_plain(value['with'][0])} commands.tick.sprint.report (how fast is each server's own)"))
+                    continue
+                if key == "commands.seed.success":
+                    # The seed is each world's own; how it is said - in brackets, green, copied by a click - is compared.
+                    seed = value["with"][0]["with"][0]["text"]
+                    assert re.fullmatch(r"-?\d+", seed), seed
+                    rows.append((name, mc.snbt(value).replace(seed, "<the seed>") + f" overlay {overlay}"))
                     continue
                 if key == "commands.time.query.gametime" or (key == "commands.time.query.absolute" and "the_end" in line):
                     rows.append((name, key + " (a count of ticks: each server's own)"))

@@ -85,8 +85,8 @@ void Text::write(Loose& l) const {
     if (underlined_) w.put_byte("underlined", 1);
     if (has_click_) {
         w.begin_compound("click_event");
-        w.put_string("action", "suggest_command");
-        w.put_string("command", click_);
+        w.put_string("action", click_copies_ ? "copy_to_clipboard" : "suggest_command");
+        w.put_string(click_copies_ ? "value" : "command", click_);
         w.end_compound();
     }
     if (has_insertion_) w.put_string("insertion", insertion_);
@@ -98,6 +98,12 @@ void Text::write(Loose& l) const {
                               static_cast<i32>(hover_uuid_.lo >> 32), static_cast<i32>(hover_uuid_.lo)};
         w.put_int_array("uuid", parts);
         w.begin_compound("name");
+        hover_text_[0].write(l);
+        w.end_compound();
+    } else if (hover_ == Hover::kText) {
+        w.begin_compound("hover_event");
+        w.put_string("action", "show_text");
+        w.begin_compound("value");
         hover_text_[0].write(l);
         w.end_compound();
     } else if (hover_ == Hover::kItem) {

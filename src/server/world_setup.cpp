@@ -13,6 +13,7 @@
 #include "server/import.hpp"
 #include "server/world_info.hpp"
 #include "world/block.hpp"
+#include "worldgen/generator.hpp"
 #include "worldgen/random.hpp"
 #include "worldgen/terrain.hpp"
 
@@ -190,11 +191,23 @@ WorldInfo::~WorldInfo() {
     if (lock_fd >= 0) ::close(lock_fd);
 }
 
+// MinecraftServer.setInitialSpawn, for a world of terrain that has no spawn yet: where its players
+// appear. True if it found one - the world has it from now on.
+static bool set_initial_spawn(WorldInfo& out) {
+    if (!out.noise || out.has_spawn) return false;
+    const worldgen::Overworld world(out.seed);
+    worldgen::find_world_spawn(world, out.spawn);
+    out.has_spawn = true;
+    LOG_INFO("the world begins at %d, %d, %d", out.spawn[0], out.spawn[1], out.spawn[2]);
+    return true;
+}
+
 bool open_world(const Settings& s, base::Workers& workers, WorldInfo& out, std::string& err) {
     out.biome = static_cast<u16>(proto::reg::worldgen_biome::kPlains);
     if (s.level_name.empty()) {
         if (!worldgen::parse_seed(s.level_seed, out.seed)) out.seed = random_seed();
         if (!new_generator(s, out, err)) return false;
+        set_initial_spawn(out);
         LOG_INFO("level-name is empty: the world is not kept");
         return true;
     }
@@ -227,8 +240,9 @@ bool open_world(const Settings& s, base::Workers& workers, WorldInfo& out, std::
                  : out.noise ? "noise"
                              : "void",
                  out.imported ? ", imported from vanilla" : "");
-        if (seeded) return true;
-        out.seed = random_seed();  // a world from before worlds had seeds: it has this one from now on
+        if (!seeded) out.seed = random_seed();  // a world from before worlds had seeds: it has this one from now on
+        // (...and a world of terrain from before worlds of terrain had a spawn gets one.)
+        if (!set_initial_spawn(out) && seeded) return true;
         return write_meta(meta, out, err);
     }
     // A world that is made here has the seed the settings name; one that vanilla made has its own.
@@ -238,6 +252,7 @@ bool open_world(const Settings& s, base::Workers& workers, WorldInfo& out, std::
     } else {
         if (!new_generator(s, out, err)) return false;
         LOG_INFO("world %s: a new %s world", out.dir.c_str(), out.flat ? "flat" : "noise");
+        set_initial_spawn(out);
     }
     return write_meta(meta, out, err);
 }

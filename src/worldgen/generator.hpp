@@ -24,4 +24,12 @@ class OverworldGenerator final : public world::ChunkGenerator {
     Overworld world_;
 };
 
+// MinecraftServer.setInitialSpawn for a world of this generator: the chunk the climate picks for
+// the world to begin in (NoiseSpawnFinder), then the first block one can stand on there or in the
+// chunks around, in a spiral five chunks out (PlayerSpawnFinder.getSpawnPosInChunk) - and where
+// there is none, the middle of that chunk at ChunkGenerator.getSpawnHeight. It makes the terrain
+// of the chunks it looks at: asked once, of a world that is new. (Vanilla looks at chunks that
+// have their trees, too: until the features are here the two need not agree.)
+void find_world_spawn(const Overworld& world, i32 spawn[3]);
+
 }  // namespace worldgen

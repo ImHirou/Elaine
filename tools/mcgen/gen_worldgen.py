@@ -644,6 +644,35 @@ struct Carver {
 """ + f"inline constexpr Carver kCarvers[{len(t.rows)}] = {{\n" + "".join(t.rows) + "};\n"
 
 
+def emit_spawn(settings: dict, roots: dict) -> str:
+    """noise_settings' spawn_target: the climates a world's origin is looked for in (SpawnTargetPoint)."""
+    points, rows = [], []
+    for i, point in enumerate(settings.get("spawn_target", [])):
+        points.append(len(point))
+        for function, span in point.items():
+            node = roots.get(f"spawn/{i}/{function}")
+            if node is None:
+                die(f"gen_worldgen: the spawn target's {function} is no root of the compiled program")
+            lo, hi = (span, span) if isinstance(span, (int, float)) else span
+            # Climate.Parameter.span: quantizeCoord of each end - (long) (v * 10000.0f)
+            rows.append(f"    {{{node}, {int(f32(f32(lo) * 10000.0))}, {int(f32(f32(hi) * 10000.0))}}},  // {i}: {function} {lo} .. {hi}\n")
+    if not points:
+        die("gen_worldgen: the overworld has no spawn target: its origin would be the chunk at 0, 0, and src/worldgen looks for one")
+    return f"""
+// ---------------------------------------------------------------------------------------------
+// noise_settings' spawn_target: where a world's origin is looked for (NoiseSpawnFinder) - points,
+// each a few functions of the climate with the span their value should lie in, as the climate
+// counts (Climate.quantizeCoord).
+struct SpawnParameter {{
+    u16 node;
+    i64 min, max;
+}};
+inline constexpr u8 kSpawnPoints[{len(points)}] = {{{', '.join(map(str, points))}}};  // how many parameters a point has
+inline constexpr SpawnParameter kSpawnParameters[{len(rows)}] = {{
+{''.join(rows)}}};
+"""
+
+
 RULE_OPS = ["kSequence", "kCondition", "kBlock", "kBandlands", "kOreVein"]
 CONDITION_OPS = ["kBiome", "kNoiseThreshold", "kVerticalGradient", "kYAbove", "kWater", "kSteep", "kNot", "kHole",
                  "kAbovePreliminarySurface", "kStoneDepth"]
@@ -942,6 +971,7 @@ inline constexpr BlendedLayer kBlendedLayers[{len(blended)}] = {{
     out.append(emit_material(material, blocks))
     climate, biomes = climate_table(version, vanilla)
     out.append(emit_carvers(CarverTables(vanilla, biomes, settings)))
+    out.append(emit_spawn(settings, dict(tables.roots)))
     out.append("\n}  // namespace proto::gen::worldgen\n")
     return {"worldgen.hpp": "".join(out), "worldgen_climate.hpp": emit_climate(hdr, climate),
             "worldgen_heightmaps.bin": state_bits(version, vanilla, blocks),

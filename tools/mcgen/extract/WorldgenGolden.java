@@ -885,6 +885,23 @@ final class WorldgenGolden {
         return o.save(file);
     }
 
+    /** Where a world begins (NoiseBasedChunkGenerator.getOrigin): NoiseSpawnFinder, for some seeds. */
+    static int spawn(Path file, WorldgenRef.World world) throws Exception {
+        Out o = new Out();
+        o.magic("WGSPWN01");
+        long[] seeds = {world.seed(), 2L, 7L, 0L, -1L, 1772835215L, 123456789L, -4530634556500121041L};
+        o.i32(seeds.length);
+        for (long seed : seeds) {
+            WorldgenRef.World w = seed == world.seed() ? world : WorldgenRef.world(world.registries(), seed);
+            net.minecraft.core.BlockPos pos = net.minecraft.world.level.levelgen.NoiseSpawnFinder.findSpawnPosition(w.settings().spawnTarget(),
+                w.state().samplersWithContext(SamplerContext.builder().enableCaches().build()));
+            o.i64(seed);
+            o.i32(pos.getX());
+            o.i32(pos.getZ());
+        }
+        return o.save(file);
+    }
+
     interface Writer {
         int write(Path file, WorldgenRef.World world) throws Exception;
     }
@@ -897,5 +914,6 @@ final class WorldgenGolden {
         FILES.put("density", WorldgenGolden::density);
         FILES.put("climate", WorldgenGolden::climate);
         FILES.put("terrain", WorldgenGolden::terrain);
+        FILES.put("spawn", WorldgenGolden::spawn);
     }
 }

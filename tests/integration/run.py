@@ -373,6 +373,14 @@ def a_world_of_terrain(srv: Server):
     assert set(j["chunks"]) == mc.view_chunks(cx, cz, 2)
     stone, water, lava = mc.BLOCK["kStone"], mc.BLOCK["kWater"], mc.BLOCK["kLava"]
     bedrock, deepslate = mc.BLOCK["kBedrock"], mc.BLOCK["kDeepslate"]
+    # The world begins where its climate says a world should (NoiseSpawnFinder: for this seed, 262
+    # blocks west of the origin's frozen sea), and a player appears on the ground there: grass under
+    # its feet, air about it.
+    x, y, z = (math.floor(v) for v in j["teleport"]["pos"])
+    assert (cx, cz) == (-17, -1) and (x >> 4, z >> 4) == (cx, cz), (j["teleport"], cx, cz)
+    here = j["chunks"][(cx, cz)]
+    assert mc.chunk_block(here, x & 15, y - 1, z & 15) == mc.BLOCK["kGrassBlock"], mc.chunk_block(here, x & 15, y - 1, z & 15)
+    assert mc.chunk_block(here, x & 15, y, z & 15) == 0 and mc.chunk_block(here, x & 15, y + 1, z & 15) == 0
     biomes = mc.load_registry("worldgen_biome")
     seen, kinds = set(), set()
     for ch in j["chunks"].values():
@@ -425,8 +433,8 @@ def a_world_of_terrain_comes_back():
         before = frames(b)
         far = lambda pos: max(abs(pos[0] - cx), abs(pos[1] - cz))
         # Within the simulation distance and one chunk more the chunks run their ticks, and there
-        # water has begun to run (in this world: a chunk north of the spawn); further out nothing
-        # has, but for what ran across a border.
+        # water has begun to run (in this world: in four chunks about the spawn); further out
+        # nothing has, but for what ran across a border.
         ran = sorted(pos for pos in b.chunks if flowing(b.chunks[pos]))
         assert ran and all(far(pos) <= 4 for pos in ran), ran
         assert srv.stop() == 0, srv.read_log()
@@ -446,12 +454,12 @@ def a_world_of_terrain_comes_back():
         differ = sorted(pos for pos in before if before[pos] != after[pos])
         assert not differ, f"chunks that came back different: {differ}"
         # Carol goes where no chunk has ticked yet: the marks those chunks were saved with are run
-        # now (seven chunks east there is water that has somewhere to go).
+        # now (seven chunks west there is water that has somewhere to go).
         x, y, z = jc["teleport"]["pos"]
-        c.send("move_player_pos", struct.pack(">dddB", x + 16.0 * 7, y, z, 1))
-        c.sync_chunks(6, (cx + 7, cz))
+        c.send("move_player_pos", struct.pack(">dddB", x - 16.0 * 7, y, z, 1))
+        c.sync_chunks(6, (cx - 7, cz))
         ran_now = {(pos[0] >> 4, pos[2] >> 4) for pos in collect(c)} | {pos for pos in c.chunks if flowing(c.chunks[pos])}
-        assert any(pos[0] - cx >= 6 for pos in ran_now), sorted(ran_now)
+        assert any(cx - pos[0] >= 6 for pos in ran_now), sorted(ran_now)
         assert srv.stop() == 0, srv.read_log()
         os.unlink(srv.log.name)
     finally:
@@ -4253,7 +4261,7 @@ def make_op(srv: Server, c: Client, name: str) -> None:
     assert c.permission_level == 4, c.permission_level
 
 
-@test()
+@test(level_seed=20261123)
 def command_tree_and_operators(srv: Server):
     """Who may run what: the tree a client is sent, the console, /op and /deop, what the other
     operators are told."""
@@ -4284,8 +4292,14 @@ def command_tree_and_operators(srv: Server):
     make_op(srv, a, "Alice")
     tree = a.commands["children"]
     assert sorted(tree) == ["data", "deop", "fill", "give", "help", "kick", "kill", "list", "me", "msg", "op", "playsound", "say",
-                            "setblock", "stop", "stopsound", "summon", "teammsg", "teleport", "tell", "tellraw", "tick", "time", "tm", "tp",
-                            "w"], sorted(tree)
+                            "seed", "setblock", "stop", "stopsound", "summon", "teammsg", "teleport", "tell", "tellraw", "tick", "time",
+                            "tm", "tp", "w"], sorted(tree)
+    # /seed (SeedCommand): the world's seed - this server was started with one - in brackets, green,
+    # copied by a click (ComponentUtils.copyOnClickText).
+    assert run_command(a, "seed")["said"] == [tr("commands.seed.success", tr("chat.square_brackets", {
+        "text": "20261123", "color": "green", "insertion": "20261123",
+        "click_event": {"action": "copy_to_clipboard", "value": "20261123"},
+        "hover_event": {"action": "show_text", "value": {"translate": "chat.copy.click"}}}))]
     assert tree["setblock"]["restricted"] and not tree["setblock"]["executable"] and not tree["list"]["restricted"]
     pos = tree["setblock"]["children"]["pos"]
     assert pos["parser"] == "kBlockPos" and not pos["executable"]

@@ -2284,14 +2284,26 @@ fluid's own tick, at once, whether or not the game is frozen. Most marks find no
 water against the wall of another aquifer - and where one does, what it starts is ordinary
 flowing water from then on.
 
+### Where a world begins
+
+`NoiseBasedChunkGenerator.getOrigin`: the noise settings name the climate a world should begin
+in - land, and no river - and `NoiseSpawnFinder` looks for it on rings around 0, 0, two thousand
+blocks out and then finer around the best, a place's distance from the middle counting against
+it (`spawn_origin`; the block it picks is held to the jar for a handful of seeds). From that
+chunk `MinecraftServer.setInitialSpawn` goes round in a spiral, five chunks out, for the first
+column whose top is ground and no water's bed, with a block to stand on
+(`PlayerSpawnFinder.getSpawnPosInChunk`: `find_world_spawn`, which makes the terrain of the
+chunks it looks at). That is asked once, when a world of terrain is opened without a spawn, and
+kept in world.json. Vanilla asks chunks that have their features, so until those are here the
+block may differ - a tree's leaves are a place to stand, to vanilla.
+
 ### What is there, and what is not
 
 There: biomes, and all of the `terrain` status - the shape of the ground with its aquifers
 (`doFill`); the surface, bedrock, deepslate and the ore veins (`buildSurface`); the caves and
 canyons of the carvers (`generateCarvers`).
 
-Not there yet: the world's spawn point (players appear at the origin, on whatever is there),
-features, structures. A world of terrain has its ground and no tree on it. Beyond those: only
+Not there yet: features, structures. A world of terrain has its ground and no tree on it. Beyond those: only
 the overworld, only the preset `normal`; an imported vanilla world does not go on with this
 generator yet.
 

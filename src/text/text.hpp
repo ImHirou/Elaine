@@ -119,6 +119,18 @@ class Text {
         underlined_ = true;
         return *this;
     }
+    Text& copy_to_clipboard(std::string_view value) & {  // ClickEvent.CopyToClipboard
+        has_click_ = click_copies_ = true;
+        click_ = value;
+        return *this;
+    }
+    Text& hover_text(Text shown) & {  // HoverEvent.ShowText
+        hover_ = Hover::kText;
+        hover_text_.assign(1, std::move(shown));
+        return *this;
+    }
+    Text&& copy_to_clipboard(std::string_view value) && { return std::move(copy_to_clipboard(value)); }
+    Text&& hover_text(Text shown) && { return std::move(hover_text(std::move(shown))); }
     Text& suggest_command(std::string_view command) & {  // ClickEvent.SuggestCommand
         has_click_ = true;
         click_ = command;
@@ -179,7 +191,7 @@ class Text {
         std::string s;
         std::vector<Text> text;  // one, for kText
     };
-    enum class Hover : u8 { kNone, kEntity, kItem };
+    enum class Hover : u8 { kNone, kEntity, kItem, kText };
 
     Text& add_arg(Arg a) {
         args_.push_back(std::move(a));
@@ -188,7 +200,7 @@ class Text {
     void write(struct Loose& w) const;
 
     bool translate_ = false;
-    bool italic_ = false, underlined_ = false, has_click_ = false, has_insertion_ = false;
+    bool italic_ = false, underlined_ = false, has_click_ = false, click_copies_ = false, has_insertion_ = false;
     Color color_ = Color::kNone;
     Hover hover_ = Hover::kNone;
     u32 hover_count_ = 1;

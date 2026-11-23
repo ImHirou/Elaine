@@ -372,13 +372,13 @@ def diff(a_path: str, b_path: str) -> int:
 
 
 def main() -> int:
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    args = [a for a in sys.argv[1:] if not a.startswith("-")]      # (compare.py hands on -v and --only: not this probe's)
     seed = next((int(a.split("=", 1)[1]) for a in sys.argv[1:] if a.startswith("--seed=")), SEED)
     if len(args) >= 2 and args[0] == "vanilla":
         record_vanilla(args[1], seed, args[2] if len(args) > 2 else None)   # (compare.py names the bot)
     elif len(args) >= 3 and args[0] == "ours":
         record_ours(args[1], args[2], seed)
-    elif len(args) == 3 and args[0] == "diff":
+    elif len(args) >= 3 and args[0] == "diff":
         return diff(args[1], args[2])
     else:
         print(__doc__)

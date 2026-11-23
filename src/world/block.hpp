@@ -101,6 +101,12 @@ ALWAYS_INLINE bool fluid_passes(BlockState from, BlockState to, u32 dir) {
         1);
 }
 
+// Block.isFaceFull(the collision shape, dir): the shape covers that whole face of its cell - what
+// the empty layer of a neighbour (class 0) could not cover the face without.
+ALWAYS_INLINE bool collision_face_full(BlockState s, u32 dir) {
+    return state::kFlowCovers[state::kFlowFace[state::kFlowFaces[s]][dir]] & 1;
+}
+
 // What a state means to the queries that ask a chunk about its sections first (Chunk::large_sections
 // and the masks beside it): bit 0 a collision shape that reaches out of its cell, bit 1 it acts on
 // an entity in it or on it, bit 2 it breaks a fall. (world/chunk.cpp)

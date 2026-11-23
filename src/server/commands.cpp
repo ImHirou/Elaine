@@ -1093,6 +1093,22 @@ struct Game::Commands {
     }
 
     // ---- /list [uuids]
+    // SeedCommand: the world's seed, in brackets, green, and copied when it is clicked
+    // (ComponentUtils.copyOnClickText). What it returns is the seed as an int.
+    static i32 seed(Invocation& in) {
+        const i64 seed = in.game.info_.seed;
+        const std::string digits = std::to_string(seed);
+        in.success(tr("commands.seed.success")
+                       .arg(tr("chat.square_brackets")
+                                .arg(Text::literal(digits)
+                                         .color(Color::kGreen)
+                                         .copy_to_clipboard(digits)
+                                         .hover_text(tr("chat.copy.click"))
+                                         .insertion(digits))),
+                   false);
+        return static_cast<i32>(seed);
+    }
+
     static i32 list(Invocation& in) {
         Game& g = in.game;
         const bool uuids = in.has("uuids");
@@ -1598,6 +1614,7 @@ void Game::init_commands() {
               "[<minVolume:float(0,1)>]]]]]]",
           cmd::kGamemasters, &C::playsound);
     r.add("say <message:message>", cmd::kGamemasters, &C::say);
+    r.add("seed", cmd::kGamemasters, &C::seed);  // (a dedicated server's: on a client's own world anyone may ask)
     r.add("setblock <pos:block_pos> <block:block_state> [(destroy|keep|replace|strict)]", cmd::kGamemasters, &C::setblock);
     r.add("stopsound <targets:players> [* <sound:sound>]", cmd::kGamemasters, &C::stopsound);
     r.add("stopsound <targets:players> " + sources + " [<sound:sound>]", cmd::kGamemasters, &C::stopsound);
