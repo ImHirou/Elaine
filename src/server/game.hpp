@@ -33,6 +33,7 @@
 #include "server/player_data.hpp"
 #include "server/prelogin.hpp"
 #include "server/settings.hpp"
+#include "server/tick_rate.hpp"
 #include "server/world_info.hpp"
 #include "world/collide.hpp"
 #include "world/dimension.hpp"
@@ -365,7 +366,7 @@ class Game {
         phys::ItemRest rest;
         u32 merge_at = 0;  // the tick of its next look around (every 40th of its life), as far as 32 bits say...
         u32 expires = 0;   // ...and of its last
-        u8 phase = 0;      // (tickCount + id) & 3 is (tick_ + phase) & 3
+        u8 phase = 0;      // (tickCount + id) & 3 is (entity_tick_ + phase) & 3
     };
     // tick_order_ holds entity slots; the top bits say what is at rest, so that a pass over the
     // list does not have to look anything up to skip it. (kNone, a hole, has them all.)
@@ -391,7 +392,7 @@ class Game {
     static float random_float_of(void* game) { return static_cast<Game*>(game)->random_float(); }
 
     // ---- the world's clocks (server/time.cpp)
-    void tick_clocks();
+    void tick_clocks(bool runs);
     void send_clocks(u32 pi);
     void clock_changed(u32 clock);
     proto::cb::SetTime::Clock clock_state(u32 clock) const;
@@ -399,6 +400,15 @@ class Game {
     void on_command_suggestion(u32 pi, const proto::sb::CommandSuggestion& c);
     void answer_suggestions();
     static void ask_server(void* game, const cmd::Registry::Asked& asked, std::vector<std::string>& out);
+    // ---- how fast the game ticks (server/time.cpp): ServerTickRateManager, with who is told
+    void set_tick_rate(float rate);
+    void set_frozen(bool frozen);
+    bool step_game_if_paused(i32 ticks);
+    bool stop_stepping();
+    bool stop_sprinting();
+    bool request_game_to_sprint(i32 ticks);
+    void finish_tick_sprint();
+    bool check_should_sprint_this_tick();
 
     // ---- chat (server/chat.cpp)
     void on_chat(u32 pi, const proto::sb::Chat& c);
@@ -677,17 +687,26 @@ class Game {
     std::vector<std::vector<u8>> opaque_;
     std::vector<u32> opaque_free_;
     std::vector<u16> update_pos_, update_state_;
-    u64 tick_ = 0;
-    // TickRateManager.setTickRate: a tick lasts a second over the rate (as a long of nanoseconds).
-    // What is counted in seconds is counted in ticks of this rate (MinecraftServer's autosave is).
-    u64 tick_ns_ = 0;
-    u64 ticks_of(u64 seconds) const { return std::max<u64>(1, static_cast<u64>(s_.tick_rate * static_cast<float>(seconds))); }
+    u64 tick_ = 0;  // MinecraftServer.tickCount: every tick, also one of a game that stands still
+    // The ticks in which the game ran (TickRateManager.runsNormally) and its entities ticked: what
+    // an entity's age is counted in. The same as tick_ in a game that was never frozen.
+    u64 entity_tick_ = 0;
+    // `/tick`: the rate (the `tick-rate` setting until a command says otherwise), frozen, stepping,
+    // sprinting. What is counted in seconds is counted in ticks of this rate (MinecraftServer's
+    // autosave is).
+    TickRate rate_;
+    u64 ticks_of(u64 seconds) const { return std::max<u64>(1, static_cast<u64>(rate_.rate * static_cast<float>(seconds))); }
+    // MinecraftServer.tickTimesNanos: how long each of the last hundred ticks took (`/tick query`).
+    static constexpr u32 kTickSamples = 100;
+    u64 tick_times_[kTickSamples] = {};
+    u64 tick_times_sum_ = 0;
+    u64 average_tick_ns() const { return tick_times_sum_ / std::min<u64>(kTickSamples, std::max<u64>(tick_, 1)); }
     u64 rng_;
 
     // Item entities: what an ItemEntity has beyond its row of the entity table (where its stack
     // is). Parallel arrays in no order, found from the entity's slot.
     std::vector<u32> item_slot_;      // the entity
-    std::vector<u64> item_born_;      // tick it was created in: Entity.tickCount is tick - born + 1 as it ticks
+    std::vector<u64> item_born_;      // (entity) tick it was created in: Entity.tickCount is tick - born + 1 as it ticks
     std::vector<u64> item_age_from_;  // tick ItemEntity.age counts from (a merge keeps the younger age)
     std::vector<u64> item_pickup_;    // first tick a player can pick it up in
     std::vector<u32> item_cell_;      // its position in its cell of item_grid_

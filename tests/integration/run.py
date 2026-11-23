@@ -692,16 +692,16 @@ def placement_rules(srv: Server):
     # A small view: the sixty ticks below run from the moment Alice joined, and the 441 chunks of
     # the default view take a sanitized server longer than that to make and send.
     join(a, "Alice", view=2)
-    join(b, "Bob", view=2)
-    skip_tab_updates(a, 1)
     grass, air = mc.BLOCK["kGrassBlock"], 0
 
     # Until the client says it finished loading (or 60 ticks pass) block actions are ignored - no
-    # acknowledgement either.
+    # acknowledgement either. (Before Bob joins: on a busy machine that alone is sixty ticks.)
     give(a, 36, mc.ITEM["kStone"])
     click(a, (8, -61, 10), 1, seq=1)
     dig(a, (8, -61, 10), seq=2)
     expect_quiet(a)
+    join(b, "Bob", view=2)
+    skip_tab_updates(a, 1)
     a.send("player_loaded")
     b.send("player_loaded")
 
@@ -3622,7 +3622,8 @@ def command_tree_and_operators(srv: Server):
     make_op(srv, a, "Alice")
     tree = a.commands["children"]
     assert sorted(tree) == ["data", "deop", "fill", "give", "help", "kick", "kill", "list", "me", "msg", "op", "playsound", "say",
-                            "setblock", "stop", "stopsound", "summon", "teammsg", "teleport", "tell", "tellraw", "time", "tm", "tp", "w"], sorted(tree)
+                            "setblock", "stop", "stopsound", "summon", "teammsg", "teleport", "tell", "tellraw", "tick", "time", "tm", "tp",
+                            "w"], sorted(tree)
     assert tree["setblock"]["restricted"] and not tree["setblock"]["executable"] and not tree["list"]["restricted"]
     pos = tree["setblock"]["children"]["pos"]
     assert pos["parser"] == "kBlockPos" and not pos["executable"]
@@ -4576,6 +4577,149 @@ def suggestions(c: Client, line: str, request: int = 1) -> tuple:
         assert not r.bool(), "a tooltip"
     r.done()
     return start, length, texts
+
+
+@test()
+def tick_command(srv: Server):
+    """/tick: the rate, which everyone is told; a game that stands still - its time, a fuse, what
+    falls - while its players go on; steps of it; a sprint, which is so many ticks with no wait
+    between them and then the game as it was. What the server suggests for a rate and a time."""
+    a, b = srv.client(), srv.client()
+    join(a, "Alice")
+    join(b, "Bob")
+    a.expect("player_info_update")
+    for cl in (a, b):
+        cl.send("player_loaded")
+    settle(a, b)
+    assert (a.tick_rate, a.tick_frozen, a.tick_steps) == (float(TICK_RATE), False, 0)
+    line = "tick freeze"
+    assert run_command(b, line)["said"] == [failure(tr("command.unknown.command")), here(line, 0)]   # an admin's
+    make_op(srv, a, "Alice")
+    tree = a.commands["children"]["tick"]["children"]
+    assert list(tree) == ["query", "rate", "step", "sprint", "unfreeze", "freeze"], list(tree)
+    rate = tree["rate"]["children"]["rate"]
+    assert rate["properties"] == {"min": 1.0, "max": 10000.0} and rate["suggestions"] == "minecraft:ask_server", rate
+    assert list(tree["step"]["children"]) == ["stop", "time"] and tree["step"]["executable"]
+    assert list(tree["sprint"]["children"]) == ["stop", "time"] and not tree["sprint"]["executable"]
+    for word in ("step", "sprint"):
+        time_node = tree[word]["children"]["time"]
+        assert time_node["properties"] == {"min": 1} and time_node["suggestions"] == "minecraft:ask_server", time_node
+
+    def tick(line: str) -> list:
+        """Run a /tick line as Alice: what she is told. Bob has been told the same of the ticks."""
+        said = run_command(a, "tick " + line)["said"]
+        settle(b)
+        assert (b.tick_rate, b.tick_frozen, b.tick_steps) == (a.tick_rate, a.tick_frozen, a.tick_steps), "Bob was told otherwise"
+        return said
+
+    def game_time() -> int:
+        (said,) = run_command(a, "time query gametime")["said"]
+        return int(said["with"][0])
+
+    # rate: told to everyone, said as Java's "%.1f" says it (a half goes up).
+    assert tick("rate 1000.25") == [tr("commands.tick.rate.success", "1000.3")] and a.tick_rate == 1000.25
+    assert tick(f"rate {TICK_RATE}") == [tr("commands.tick.rate.success", f"{TICK_RATE}.0")] and a.tick_rate == float(TICK_RATE)
+    line = "tick rate 0.5"
+    assert tick("rate 0.5") == [failure(tr("argument.float.low", mc.Float(1.0), mc.Float(0.5))), here(line, 10)]
+    # A game that runs has nothing to step, and nothing to stop.
+    assert tick("step") == [failure(tr("commands.tick.step.fail"))]
+    assert tick("step stop") == [failure(tr("commands.tick.step.stop.fail"))]
+    assert tick("sprint stop") == [failure(tr("commands.tick.sprint.stop.fail"))]
+
+    # ---- freeze: the game's time stands, a primed TNT hangs where it was with its fuse as it was.
+    fuse_of = mc.TNT_DATA["kFuse"]
+    run_command(a, "summon tnt ~ ~4 ~3")
+    assert tick("freeze") == [tr("commands.tick.status.frozen")] and a.tick_frozen is True
+    a.ticks(12)     # (where it was is told every tenth tick of the tracker, which goes on)
+    ((tid, tnt),) = of_type(a, "kTnt").items()
+    at, fuse, t0 = tnt.pos, tnt.data[fuse_of][1], game_time()
+    assert at[1] < -56.0 and fuse < 80, (at, fuse)      # it had begun to fall
+    a.ticks(25)
+    assert (tnt.pos, tnt.data[fuse_of][1], game_time()) == (at, fuse, t0)
+    # ...while a player is no part of what stands still: Alice walks, and Bob sees her.
+    a.send("move_player_pos", struct.pack(">dddB", 9.5, SPAWN[1], 8.5, 1))
+    settle(a, b)
+    assert b.entities[a.entity_id].pos == (9.5, SPAWN[1], 8.5), b.entities[a.entity_id].pos
+    # Whoever joins is told that it stands.
+    c = srv.client()
+    assert join(c, "Carol")["ticking"] == (float(TICK_RATE), True, 0)
+    for cl in (a, b):
+        cl.expect("player_info_update")
+    c.close()
+    for cl in (a, b):
+        cl.expect("player_info_remove")
+    settle(a, b)
+    a.mark_chat_read()
+
+    # ---- step: so many ticks all the same - of a frozen game only - and no more.
+    assert tick("step 3") == [tr("commands.tick.step.success", 3)] and a.tick_steps == 3
+    a.ticks(12)
+    assert (game_time(), tnt.data[fuse_of][1]) == (t0 + 3, fuse - 3)
+    assert tick("step stop") == [failure(tr("commands.tick.step.stop.fail"))]       # they are done
+    assert tick("step") == [tr("commands.tick.step.success", 1)] and a.tick_steps == 1
+    a.ticks(3)
+    assert game_time() == t0 + 4
+    assert tick("step 1d") == [tr("commands.tick.step.success", 24000)] and a.tick_steps == 24000
+    assert tick("step stop") == [tr("commands.tick.step.stop.success")] and a.tick_steps == 0
+    t1 = game_time()
+    assert t0 + 4 < t1 < t0 + 4 + 60, (t0, t1)
+    a.ticks(5)
+    assert game_time() == t1
+    run_command(a, "kill @e[type=tnt]")
+
+    # ---- sprint: the ticks asked for, one after the other without a wait - and one before them
+    # at the usual pace, the tick that takes the game out of its freeze - then frozen as before.
+    # The server says how fast it was, to its log and to the operators.
+    def sprint(line: str) -> tuple:
+        """Run a /tick line that ends a sprint, now or soon: what Alice is told besides the
+        server's report, and the report - which may come before her answer, or ticks after it."""
+        def is_report(m) -> bool:
+            return m.get("translate") == "chat.type.admin" and m["with"][0] == "Server" and \
+                m["with"][1]["translate"] == "commands.tick.sprint.report"
+        said = run_command(a, "tick " + line)["said"]
+        end = time.time() + 30
+        while not any(is_report(m) for m in said):
+            assert time.time() < end, f"the sprint did not end: {said}"
+            said += a.recv_pending_chat()
+        settle(a, b)
+        assert (b.tick_rate, b.tick_frozen, b.tick_steps) == (a.tick_rate, a.tick_frozen, a.tick_steps), "Bob was told otherwise"
+        (done,) = [m["with"][1] for m in said if is_report(m)]
+        assert len(done["with"]) == 2 and re.fullmatch(r"\d+\.\d\d", done["with"][1]), done
+        return [m for m in said if not is_report(m)], done
+
+    said, done = sprint("sprint 200")
+    assert said == [tr("commands.tick.status.sprinting")], said
+    per_second, ms_per_tick = done["with"]
+    assert per_second > 2 * TICK_RATE, done     # not at the pace of the clock
+    srv.wait_log(f"Sprint completed with {per_second} ticks per second, or {ms_per_tick} ms per tick")
+    assert a.tick_frozen is True
+    assert game_time() == t1 + 201
+    # A sprint is stopped by hand, or by the next one - after which "before" was a sprint, not a freeze.
+    assert tick("sprint 100d") == [tr("commands.tick.status.sprinting")] and a.tick_frozen is False
+    assert sprint("sprint stop")[0] == [tr("commands.tick.sprint.stop.success")] and a.tick_frozen is True
+    assert tick("sprint 100d") == [tr("commands.tick.status.sprinting")]
+    assert sprint("sprint 5")[0] == [tr("commands.tick.sprint.stop.success"), tr("commands.tick.status.sprinting")]
+    assert a.tick_frozen is False
+    # freeze ends a sprint too.
+    assert tick("sprint 100d") == [tr("commands.tick.status.sprinting")]
+    assert sprint("freeze")[0] == [tr("commands.tick.status.frozen")] and a.tick_frozen is True
+    assert tick("unfreeze") == [tr("commands.tick.status.running")] and a.tick_frozen is False
+
+    # ---- query: what it is doing, the rate with the time a tick takes and may take, and where
+    # the last hundred ticks lie.
+    said = tick("query")
+    assert len(said) == 3 and said[0]["translate"] in ("commands.tick.status.running", "commands.tick.status.lagging"), said
+    assert said[1]["translate"] == "commands.tick.query.rate.running" and said[1]["with"][0] == f"{TICK_RATE}.0" and \
+        said[1]["with"][2] == f"{1000 / TICK_RATE:.1f}", said
+    assert said[2]["translate"] == "commands.tick.query.percentiles" and said[2]["with"][3] == 100 and \
+        all(re.fullmatch(r"\d+\.\d", v) for v in said[1]["with"][1:2] + said[2]["with"][:3]), said
+
+    # ---- what the server suggests: TickCommand's own lists, not the units of a time.
+    assert suggestions(a, "/tick rate ") == (11, 0, ["20"])
+    assert suggestions(a, "/tick step ") == (11, 0, ["1s", "1t", "stop"])
+    assert suggestions(a, "/tick step 1") == (11, 1, ["1s", "1t"])
+    assert suggestions(a, "/tick sprint ") == (13, 0, ["1d", "3d", "60s", "stop"])
+    assert suggestions(b, "/tick rate ") == (0, 0, [])
 
 
 @test()

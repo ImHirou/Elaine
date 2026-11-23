@@ -313,6 +313,14 @@ bool Registry::add(std::string_view syntax, Level level, Handler run, void* user
             n.kind = Node::kArgument;
             n.name = token.substr(0, colon);
             std::string_view type = token.substr(colon + 1), bounds;
+            if (const usize equals = type.find('='); equals != std::string_view::npos) {
+                for (std::string_view words = type.substr(equals + 1); !words.empty();) {
+                    const usize bar = words.find('|');
+                    n.offers.emplace_back(words.substr(0, bar));
+                    words = bar == std::string_view::npos ? std::string_view() : words.substr(bar + 1);
+                }
+                type = type.substr(0, equals);
+            }
             if (const usize paren = type.find('('); paren != std::string_view::npos && type.ends_with(')')) {
                 bounds = type.substr(paren + 1, type.size() - paren - 2);
                 type = type.substr(0, paren);
@@ -801,6 +809,7 @@ void Registry::encode_tree(u8 level, base::ByteBuf& out) const {
         if (n.redirect != kNone) flags |= 8;
         const std::string_view suggestions =
             n.kind != Node::kArgument     ? std::string_view()
+            : !n.offers.empty()           ? "minecraft:ask_server"
             : n.type == Type::kSound      ? "minecraft:available_sounds"
             : n.type == Type::kSummonable ? "minecraft:summonable_entities"
             : n.type == Type::kTimeline || n.type == Type::kTimeMarker || n.type == Type::kStorage
@@ -932,6 +941,9 @@ void Registry::suggest(std::string_view line, u8 level, Ask ask, void* ctx, Sugg
         if (n.level > level) continue;
         if (n.kind == Node::kLiteral) {  // LiteralCommandNode.listSuggestions
             if (lower(n.name).starts_with(typed)) offer(start, n.name);
+        } else if (!n.offers.empty()) {  // SharedSuggestionProvider.suggest(String[]), in place of the type's own
+            for (const std::string& word : n.offers)
+                if (matches_sub_str(typed, lower(word))) offer(start, word);
         } else if (n.type == Type::kTime) {  // TimeArgument.listSuggestions: the units, behind a number
             Reader r{line, start};
             double value;

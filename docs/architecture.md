@@ -2216,6 +2216,41 @@ replace together. One answer a tick per player, to its latest question
 under `/time` offer; an argument type that suggests something else (coordinates, selectors)
 stands under no node a client asks about, and would have to be taught first.
 
+**`/tick`** is `TickCommand` over `ServerTickRateManager`, whose state is `server::TickRate`
+(`server/tick_rate.hpp`) and whose loop is `Game::run`, written after `MinecraftServer.runServer`:
+
+- *rate*: a tick lasts a second over the rate, as a long of nanoseconds. The `tick-rate` setting
+  is what it is until a command says otherwise. What is counted in seconds - keep-alives,
+  autosaves, a chunk's idle time - is counted in ticks of the rate as it is now.
+- *freeze*: `TickRateManager.tick()` decides at the start of every tick whether the game's
+  elements run (`runsNormally`). When they do not, the clocks, the game time, scheduled and
+  random ticks, block events, every entity but the players and the block entities stand - the
+  things `ServerLevel.tick` and `Level.tickBlockEntities` ask it for. Packets are read, players
+  tick (their menus, their chat), the tracker shows what changed, chunks come and go: a command
+  works in a frozen game, and its block changes are shown, but nothing it schedules runs.
+  So there are two counts of ticks: `tick_` (MinecraftServer.tickCount: every loop) for what
+  belongs to a connection or to the server - throttles, autosaves, the beat of `set_time` - and
+  `entity_tick_` (the loops in which the game ran) for what an entity's age is counted in: an
+  item's pickup delay does not run out while it hangs in a frozen game.
+- *step*: so many ticks a frozen game takes all the same, at its rate. A client is told the
+  number once (`ticking_step`) and counts down by itself.
+- *sprint*: so many ticks without the wait between them. It ends at the top of the loop after
+  its last tick - the server reports how fast it was (to its log and the operators) and the game
+  is frozen again if it was. Two things a reader of the jar would not guess, both kept: a sprint
+  asked of a frozen game is preceded by one tick at the usual pace (`checkShouldSprintThisTick`
+  waits for `runGameElements`, which the tick before had computed while frozen) - 50 ticks
+  asked, 51 taken; and a sprint that takes the place of another remembers that other as what
+  was "before", so the game is left running even if it stood before the first.
+- Everyone is told of a change as vanilla tells it: `ticking_state` (rate, frozen) whenever the
+  rate or the freeze is set - set again to the same counts - and both packets on joining.
+- The console's lines are run where `DedicatedServer.tickConnection` runs them: after the
+  level and the connections have ticked. A `/tick freeze` from a player is among the packets at
+  the start of the loop and holds that very tick; one from the console holds the next.
+
+What `/tick` suggests for a rate (`20`) and a time (`1t`, `1s`; `60s`, `1d`, `3d`) is the
+command's own list (`.suggests`), which takes the place of what the argument's type would
+offer: a registration says so with `<rate:float(1,10000)=20>`.
+
 **Kept**: `world.json` has the game time and the clocks, written again with every autosave and
 when the server stops - by a worker (`server::Files`), as a player's file is. A world saved
 before there was time begins at 0. A vanilla world's time is imported: `Time` of `level.dat`,
@@ -2226,20 +2261,23 @@ the clocks of `data/minecraft/world_clocks.dat`.
 `tools/vanilla/command_probe.py` runs `/time` on both servers with the overworld's clock stopped
 (so that it is where each command puts it) - every branch, right and wrong - and asks for
 suggestions at the end of some twenty lines, as an operator and as somebody who is none; it compares every answer, every `set_time` that names a
-clock, and every list of suggestions. `tools/vanilla/block_probe.py` puts the clock to either
+clock, and every list of suggestions. It runs `/tick` the same way - rate, freeze, step, sprint,
+each stopped and each wrong - and compares every answer, every `ticking_state` and `ticking_step`
+both bots are sent, and how far the game time has come after a step and after a sprint. `tools/vanilla/block_probe.py` puts the clock to either
 side of the two ticks of the day at which grass begins and stops spreading, and compares what
 becomes of a hole in the grass. What differs is listed here:
 
 - the beat of every twentieth tick falls where each server's count of ticks has it; the game
   time itself is each world's own;
-- `ticking_state` / `ticking_step` (`/tick`) are not sent on joining: there is no tick rate
-  manager, and a client assumes the rate it is.
+- what `/tick query` and a sprint's report say of how long a tick takes is each server's own;
+- an autosave comes every `autosave-seconds` in ticks of the rate, also while sprinting (vanilla
+  estimates a sprint's ticks a second from how long its ticks take).
 
 ### Not there
 
 Weather (and what rain takes from the sky's light), game rules as such (`/gamerule`), beds and
 sleeping (the one thing in vanilla that moves a clock without a command), everything else the
-timelines carry for a server - when monsters burn, when villagers work - and `/tick`.
+timelines carry for a server - when monsters burn, when villagers work.
 
 ## Wire format handling
 

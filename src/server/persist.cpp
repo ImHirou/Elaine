@@ -314,10 +314,10 @@ void Game::write_entities(u64 chunk, base::ByteBuf& out) {
             const u32 k = item_of_slot_[slot];
             item::write_untrusted(out, ents_.item[row]);
             // ItemEntity: Age and PickupDelay are shorts; an item is gone at 6000.
-            const u64 age = std::min<u64>(tick_ - item_age_from_[k], 32766);
-            const u64 delay = item_pickup_[k] == kNever ? kNeverPickUp
-                              : item_pickup_[k] > tick_ ? std::min<u64>(item_pickup_[k] - tick_, 32766)
-                                                        : 0;
+            const u64 age = std::min<u64>(entity_tick_ - item_age_from_[k], 32766);
+            const u64 delay = item_pickup_[k] == kNever        ? kNeverPickUp
+                              : item_pickup_[k] > entity_tick_ ? std::min<u64>(item_pickup_[k] - entity_tick_, 32766)
+                                                               : 0;
             p = out.reserve(5);
             p = put_be16(p, static_cast<u16>(age));
             p = put_be16(p, static_cast<u16>(delay));

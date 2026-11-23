@@ -50,7 +50,7 @@ Game::Game(const Settings& s, std::vector<std::unique_ptr<net::Reactor>>& reacto
       files_(workers, s.sync_chunk_writes),
       rng_(base::now_ns() | 1),
       console_(console) {
-    tick_ns_ = static_cast<u64>(static_cast<double>(base::kNsPerSec) / static_cast<double>(std::max(s.tick_rate, 1.0f)));
+    rate_.set_rate(s.tick_rate);
     random_value_ = static_cast<u32>(random());  // Level.randValue: RandomSource.create().nextInt()
     time_ = static_cast<u64>(world.time.game_time);
     for (u32 i = 0; i < kClocks; ++i) clocks_[i] = world.time.clocks[i];
@@ -119,26 +119,39 @@ void Game::run(const std::atomic<bool>& stop) {
     u64 next = base::now_ns();
     u64 busy_ns = 0, worst_ns = 0, track_ns = 0, move_ns = 0, flush_ns = 0, block_ns = 0, sent_bytes = 0;
     while (!stop.load(std::memory_order_relaxed) && !stop_requested_) {
+        // MinecraftServer.runServer: a tick of a sprint is not waited for - and the first loop
+        // after the last of them is where the sprint ends, before anything of that tick.
+        const bool sprinting = rate_.sprinting() && check_should_sprint_this_tick();
+        if (sprinting) next = base::now_ns();
+        next += sprinting ? 0 : rate_.ns_per_tick;
         const u64 t0 = base::now_ns();
-        // Same order as MinecraftServer.tickChildren: packets, then the level - its clock, the
+        // Same order as MinecraftServer.processPacketsAndTick, tickServer and tickChildren:
+        // packets, then - if the game is not frozen - the clocks; the level - its time, the
         // scheduled block ticks, the chunks' random ticks, block and light changes go out to
         // whoever sees them (ServerChunkCache.broadcastChangedChunks), the entities are shown (ChunkMap.tick),
         // block events are sent, the entities tick (items, primed TNT; ServerPlayer.tick, which
         // is the menu), then the block entities (furnaces) - then the per-connection tick (block
-        // change acks, the player's own tick), and one flush per player at the end.
+        // change acks, the player's own tick), the console, and one flush per player at the end.
         entities_ticked_ = false;
         pump_chunks(t0);  // the chunks the workers have ready enter the world
         for (u32 ri = 0; ri < reactors_.size(); ++ri) drain(ri);
         if (UNLIKELY(!joining_.empty())) admit_joining();
         if (UNLIKELY(!suggestion_requests_.empty())) answer_suggestions();
-        run_console();  // DedicatedServer.tickConnection: the console's lines after the players' packets
-        tick_clocks();  // MinecraftServer.tickChildren: the clocks, then (every 20th tick) the time to everyone
-        // ServerLevel.tick: tickTime - what packets scheduled was scheduled by the tick before -
-        // then the block ticks that are due, then (ServerChunkCache.tickChunks) the random ticks.
-        world_.set_time(++time_);
+        // TickRateManager.tick, the first thing of tickServer: a `/tick freeze` among this tick's
+        // packets holds this tick already, one from the console (below) the next. What a frozen
+        // game leaves out is what ServerLevel.tick and Level.tickBlockEntities ask runsNormally()
+        // for; a player is no frozen entity (isEntityFrozen), and nothing rides one here.
+        rate_.tick();
+        const bool runs = rate_.runs_normally();
+        tick_clocks(runs);  // MinecraftServer.tickChildren: the clocks, then (every 20th tick) the time to everyone
         const u64 t_blocks = base::now_ns();
-        run_block_ticks();
-        run_random_ticks();
+        if (LIKELY(runs)) {
+            // ServerLevel.tick: tickTime - what packets scheduled was scheduled by the tick before -
+            // then the block ticks that are due, then (ServerChunkCache.tickChunks) the random ticks.
+            world_.set_time(++time_);
+            run_block_ticks();
+            run_random_ticks();
+        }
         block_ns += base::now_ns() - t_blocks;
         broadcast_changes();
         tend_chunks();  // ChunkMap.tick: what nobody needs is saved and leaves (the change lists are empty here)
@@ -151,14 +164,20 @@ void Game::run(const std::atomic<bool>& stop) {
         tracker_.set_pending_chunks(pending_views_.data());
         tracker_.tick(out_.data());
         track_ns += base::now_ns() - t1;
-        run_block_events();  // ...block events after the chunks and the tracker, before the entities
+        if (LIKELY(runs)) run_block_events();  // ...block events after the chunks and the tracker, before the entities
         const u64 t_entities = base::now_ns();
-        tick_entities();
+        if (LIKELY(runs)) tick_entities();
         move_ns += base::now_ns() - t_entities;
         sync_menus();
-        tick_furnaces();  // block entities tick after the entities
-        if (UNLIKELY(!editing_signs_.empty())) tick_signs();
+        if (LIKELY(runs)) {
+            tick_furnaces();  // block entities tick after the entities
+            if (UNLIKELY(!editing_signs_.empty())) tick_signs();
+            ++entity_tick_;
+        }
         tick_players();
+        // DedicatedServer.tickConnection: the console's lines after the connections' tick - so
+        // what a line changes is shown by the next tick, and a `/tick` typed there is that tick's.
+        run_console();
         autosave_players();
         if (UNLIKELY((tick_ + 1) % ticks_of(s_.autosave_seconds) == 0)) save_time();  // (with the autosave: what time it is)
         // Not t0: a player who joined during drain() has keepalive_sent_ns > t0, and the unsigned
@@ -175,6 +194,9 @@ void Game::run(const std::atomic<bool>& stop) {
         const u64 t3 = base::now_ns();
         flush_ns += t3 - t2;
         const u64 took = t3 - t0;
+        u64& sample = tick_times_[tick_ % kTickSamples];  // MinecraftServer.tickServer, "tallying"
+        tick_times_sum_ += took - sample;
+        sample = took;
         busy_ns += took;
         worst_ns = std::max(worst_ns, took);
         if (tick_ % kStatsEvery == 0) {
@@ -193,9 +215,10 @@ void Game::run(const std::atomic<bool>& stop) {
             busy_ns = worst_ns = track_ns = move_ns = flush_ns = block_ns = sent_bytes = 0;
         }
 
-        next += tick_ns_;
         const u64 now = base::now_ns();
-        if (now < next) {
+        if (UNLIKELY(sprinting)) {
+            rate_.sprint_time_spent += now - rate_.sprint_tick_start;  // ServerTickRateManager.endTickWork
+        } else if (now < next) {
             timespec ts{static_cast<time_t>(next / base::kNsPerSec), static_cast<long>(next % base::kNsPerSec)};
             clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, nullptr);
         } else if (now - next > base::kNsPerSec) {
@@ -459,9 +482,9 @@ void Game::finish_join(u32 ri, const InHeader& h, const net::JoinTransport& t, J
          cb::SetDefaultSpawnPosition{kOverworld, floor_int(spawn_[0]), static_cast<i32>(spawn_y), floor_int(spawn_[2]), 0, 0});
     send(pi, cb::GameEvent{cb::GameEvent::kLevelChunksLoadStart, 0});
     // ServerTickRateManager.updateJoiningPlayer, at the end of sendLevelInfo: how fast the world
-    // ticks, that it does not stand still, and that there is nothing to step.
-    send(pi, cb::TickingState{std::max(s_.tick_rate, 1.0f), false});
-    send(pi, cb::TickingStep{0});
+    // ticks, whether it stands still, and how many ticks it is still to step.
+    send(pi, cb::TickingState{rate_.rate, rate_.frozen});
+    send(pi, cb::TickingStep{static_cast<u32>(rate_.frozen_ticks_to_run)});
     // ServerLevel.addNewPlayer -> ChunkMap.updatePlayerStatus: the view is the player's from here
     // on. Its chunks go out batch by batch, from the end of this tick on (send_chunks).
     apply_view(pi, pcx_[pi], pcz_[pi], pview_[pi]);

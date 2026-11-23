@@ -629,10 +629,10 @@ Game::Saved Game::save_entity(u32 row, base::ByteBuf& out) {
     }
     if (is_item) {  // ---- ItemEntity
         const u32 k = item_of_slot_[slot];
-        const u64 age = std::min<u64>(tick_ - item_age_from_[k], 32766);
-        const u64 delay = item_pickup_[k] == kNever ? record::kNeverPickUp
-                          : item_pickup_[k] > tick_ ? std::min<u64>(item_pickup_[k] - tick_, 32766)
-                                                    : 0;
+        const u64 age = std::min<u64>(entity_tick_ - item_age_from_[k], 32766);
+        const u64 delay = item_pickup_[k] == kNever        ? record::kNeverPickUp
+                          : item_pickup_[k] > entity_tick_ ? std::min<u64>(item_pickup_[k] - entity_tick_, 32766)
+                                                           : 0;
         w.put_short("Health", item_health_[k]);
         w.put_short("Age", static_cast<i16>(age));
         w.put_short("PickupDelay", static_cast<i16>(delay));

@@ -385,3 +385,52 @@ TEST(TimeCommandArguments, WhatTheServerSuggests) {
     EXPECT_EQ(suggest("", cmd::kAll), "0+0: list");
     EXPECT_EQ(suggest("time set ", cmd::kAll), "0+0:");
 }
+
+TEST(TickCommandArguments, ItsSuggestionsAreItsOwn) {
+    // TickCommand gives its rate and its times suggestions of its own (`.suggests`): a fixed
+    // list each, which the server is asked for - in place of what the type would offer.
+    cmd::Registry r;
+    r.add("tick rate <rate:float(1,10000)=20>", cmd::kAll, &nothing);
+    r.add("tick step", cmd::kAll, &nothing);
+    r.add("tick step stop", cmd::kAll, &nothing);
+    r.add("tick step <time:time(1)=1t|1s>", cmd::kAll, &nothing);
+    r.add("tick sprint stop", cmd::kAll, &nothing);
+    r.add("tick sprint <time:time(1)=60s|1d|3d>", cmd::kAll, &nothing);
+    base::ByteBuf buf;
+    r.encode_tree(cmd::kAll, buf);
+    const Bytes tree(buf.data, buf.data + buf.len);
+    const auto holds = [&](const Bytes& part) {
+        return std::search(tree.begin(), tree.end(), part.begin(), part.end()) != tree.end();
+    };
+    namespace argument = proto::gen::command::argument;
+    const Bytes asks{2 | 4 | 16, 0};  // an argument that runs, with suggestions of its own; no children
+    EXPECT_TRUE(
+        holds(asks + str("rate") + vi(argument::kFloat) + Bytes{3} + f32(1.0f) + f32(10000.0f) + str("minecraft:ask_server")));
+    EXPECT_TRUE(holds(asks + str("time") + vi(argument::kTime) + (Bytes{0, 0, 0, 1}) + str("minecraft:ask_server")));
+
+    const auto suggest = [&](std::string_view line) {
+        cmd::Registry::Suggestions s;
+        r.suggest(line, cmd::kOwners, nullptr, nullptr, s);
+        std::string out = std::to_string(s.start) + "+" + std::to_string(s.length) + ":";
+        for (const std::string& t : s.texts) out += " " + t;
+        return out;
+    };
+    EXPECT_EQ(suggest("tick rate "), "10+0: 20");
+    EXPECT_EQ(suggest("tick rate 2"), "10+1: 20");
+    EXPECT_EQ(suggest("tick rate 20"), "0+0:");  // (it is there in full)
+    EXPECT_EQ(suggest("tick rate 3"), "0+0:");
+    // A word and the list, side by side; the units a time would offer behind a number are not.
+    EXPECT_EQ(suggest("tick step "), "10+0: 1s 1t stop");
+    EXPECT_EQ(suggest("tick step 1"), "10+1: 1s 1t");
+    EXPECT_EQ(suggest("tick step 5"), "0+0:");
+    EXPECT_EQ(suggest("tick sprint "), "12+0: 1d 3d 60s stop");
+    EXPECT_EQ(suggest("tick sprint 6"), "12+1: 60s");
+    // What is read is a time all the same, with its least.
+    cmd::Parsed parsed;
+    r.parse("tick sprint 3s", cmd::kOwners, parsed);
+    ASSERT_NE(parsed.run, nullptr);
+    EXPECT_EQ(parsed.steps.back().value.integer, 60);
+    cmd::Parsed too_few;
+    r.parse("tick step 0", cmd::kOwners, too_few);
+    EXPECT_EQ(too_few.run, nullptr);
+}

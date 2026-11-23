@@ -1293,6 +1293,77 @@ struct Game::Commands {
         return wrap_time(time);
     }
 
+    // ---- /tick query | rate <rate> | step [stop | <time>] | sprint (stop | <time>) | unfreeze | freeze
+    // TickCommand. The numbers are strings in vanilla too: String.format("%.1f").
+    static std::string ns_as_ms(u64 ns) {  // nanosToMilisString
+        return base::java_format_fixed(static_cast<double>(static_cast<float>(ns) / 1e6f), 1);
+    }
+    static i32 tick_query(Invocation& in) {
+        Game& g = in.game;
+        const TickRate& rate = g.rate_;
+        const u64 average = g.average_tick_ns();
+        const std::string busy = ns_as_ms(average);
+        const std::string per_second = base::java_format_fixed(static_cast<double>(rate.rate), 1);
+        if (rate.sprinting()) {
+            in.success(tr("commands.tick.status.sprinting"), false);
+            in.success(tr("commands.tick.query.rate.sprinting").arg(per_second).arg(busy), false);
+        } else {
+            in.success(tr(rate.frozen                  ? "commands.tick.status.frozen"
+                          : rate.ns_per_tick < average ? "commands.tick.status.lagging"
+                                                       : "commands.tick.status.running"),
+                       false);
+            in.success(tr("commands.tick.query.rate.running").arg(per_second).arg(busy).arg(ns_as_ms(rate.ns_per_tick)), false);
+        }
+        u64 samples[kTickSamples];
+        std::copy(std::begin(g.tick_times_), std::end(g.tick_times_), samples);
+        std::sort(std::begin(samples), std::end(samples));
+        in.success(tr("commands.tick.query.percentiles")
+                       .arg(ns_as_ms(samples[kTickSamples / 2]))
+                       .arg(ns_as_ms(samples[static_cast<u32>(kTickSamples * 0.95)]))
+                       .arg(ns_as_ms(samples[static_cast<u32>(kTickSamples * 0.99)]))
+                       .arg(static_cast<i32>(kTickSamples)),
+                   false);
+        return static_cast<i32>(rate.rate);
+    }
+    static i32 tick_rate(Invocation& in) {
+        const float rate = static_cast<float>(in.number("rate"));
+        in.game.set_tick_rate(rate);
+        in.success(tr("commands.tick.rate.success").arg(base::java_format_fixed(static_cast<double>(rate), 1)));
+        return static_cast<i32>(rate);
+    }
+    static i32 tick_step(Invocation& in) {
+        const i32 advance = in.integer("time", 1);
+        if (!in.game.step_game_if_paused(advance)) return in.fail(tr("commands.tick.step.fail"));
+        in.success(tr("commands.tick.step.success").arg(advance));
+        return 1;
+    }
+    static i32 tick_step_stop(Invocation& in) {
+        if (!in.game.stop_stepping()) return in.fail(tr("commands.tick.step.stop.fail"));
+        in.success(tr("commands.tick.step.stop.success"));
+        return 1;
+    }
+    static i32 tick_sprint(Invocation& in) {
+        if (in.game.request_game_to_sprint(in.integer("time"))) in.success(tr("commands.tick.sprint.stop.success"));
+        in.success(tr("commands.tick.status.sprinting"));
+        return 1;
+    }
+    static i32 tick_sprint_stop(Invocation& in) {
+        if (!in.game.stop_sprinting()) return in.fail(tr("commands.tick.sprint.stop.fail"));
+        in.success(tr("commands.tick.sprint.stop.success"));
+        return 1;
+    }
+    static i32 tick_freeze(Invocation& in) {  // ...and unfreeze
+        Game& g = in.game;
+        const bool freeze = in.has("freeze");
+        if (freeze) {
+            if (g.rate_.sprinting()) g.stop_sprinting();
+            if (g.rate_.stepping_forward()) g.stop_stepping();
+        }
+        g.set_frozen(freeze);
+        in.success(tr(freeze ? "commands.tick.status.frozen" : "commands.tick.status.running"));
+        return freeze ? 1 : 0;
+    }
+
     // ---- /kick <targets> [<reason>]
     // ---- /data get (entity <target> | block <target> | storage <target>) [<path> [<scale>]]
     // DataCommands, the reading third of it: what something saves as, a tag in it, a number in
@@ -1550,6 +1621,16 @@ void Game::init_commands() {
         r.add(at + " query <timeline:timeline> [repetition]", cmd::kGamemasters, &C::time_query_timeline);
         if (at == "time") r.add("time query gametime", cmd::kGamemasters, &C::time_query_gametime);
     }
+    // TickCommand: what it suggests for a rate and a time is its own (`.suggests`), not the types'.
+    r.add("tick query", cmd::kAdmins, &C::tick_query);
+    r.add("tick rate <rate:float(1,10000)=20>", cmd::kAdmins, &C::tick_rate);
+    r.add("tick step", cmd::kAdmins, &C::tick_step);
+    r.add("tick step stop", cmd::kAdmins, &C::tick_step_stop);
+    r.add("tick step <time:time(1)=1t|1s>", cmd::kAdmins, &C::tick_step);
+    r.add("tick sprint stop", cmd::kAdmins, &C::tick_sprint_stop);
+    r.add("tick sprint <time:time(1)=60s|1d|3d>", cmd::kAdmins, &C::tick_sprint);
+    r.add("tick unfreeze", cmd::kAdmins, &C::tick_freeze);
+    r.add("tick freeze", cmd::kAdmins, &C::tick_freeze);
     r.add("deop <targets:profile>", cmd::kAdmins, &C::deop);
     r.add("op <targets:profile>", cmd::kAdmins, &C::op);
     r.add("stop", cmd::kOwners, &C::stop);

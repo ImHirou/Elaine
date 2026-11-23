@@ -57,7 +57,7 @@ time, following the newest release.*
 - [ ] The Nether 
 - [ ] The End
 - [x] The time of day
-- [x] The tick rate as a setting (what vanilla's `/tick rate` sets); not yet the `/tick` command
+- [x] `/tick`: the rate (a setting too), freezing, stepping, sprinting, as vanilla's `TickCommand`
 - [ ] Weather
 - [ ] Export back to Anvil; worlds of older versions
 

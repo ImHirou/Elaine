@@ -15,6 +15,8 @@
 //
 //     word                a literal
 //     <name:type>         an argument; types below (Type), numbers take bounds: int(1), float(0,2)
+//     <name:type=a|b>     ...that the server suggests these words for, whatever its type would
+//                         (vanilla's `.suggests(...)` over a fixed list: "tick rate" offers 20)
 //     (a|b|c)             one literal of several, each followed by the rest of the line
 //     [ ... ]             optional from here on: the command also runs without what follows.
 //                         Brackets nest and close at the end of the line.
@@ -351,6 +353,7 @@ class Registry {
         u8 level = kAll;
         double min = 0, max = 0;
         std::string name;
+        std::vector<std::string> offers;  // "=a|b": what the server suggests in place of the type's own
         Handler run = nullptr;
         void* user = nullptr;
         u32 redirect = kNone;

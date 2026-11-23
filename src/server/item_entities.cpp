@@ -88,12 +88,12 @@ u32 Game::add_item(Uuid uuid, float yaw, ItemStack stack, double x, double y, do
     item_cell_.push_back(item_grid_.add(item_cell_of(x), item_cell_of(z), slot));
     // Its first tick: this tick's, unless the entities have had theirs already (what an
     // explosion or a broken chest leaves while they tick is ticked from the next one on).
-    const u64 first = tick_ + (entities_ticked_ ? 1 : 0);
+    const u64 first = entity_tick_ + (entities_ticked_ ? 1 : 0);
     item_born_.push_back(first);
     item_age_from_.push_back(first - age);  // (modulo 2^64, as every difference taken from it is)
     // The delay counts down in the item's own tick, which runs before the players': after its
     // 40th tick an item with a delay of 40 can be taken. kNever: ItemEntity.setNeverPickUp.
-    item_pickup_.push_back(pickup_delay == kNever ? kNever : pickup_delay ? first + pickup_delay - 1 : tick_);
+    item_pickup_.push_back(pickup_delay == kNever ? kNever : pickup_delay ? first + pickup_delay - 1 : entity_tick_);
     item_health_.push_back(health);
     start_ticking(slot, proto::gen::physics::kMoverItem);
     return slot;
@@ -146,7 +146,7 @@ void Game::tick_item(u32 slot, u32 row) {
     const double ox = ents_.x[row], oy = ents_.y[row], oz = ents_.z[row];
     phys::Motion m = motion_of(row);
     phys::World w{world_, phys_scratch_};
-    const u32 tick_count = static_cast<u32>(tick_ - item_born_[k] + 1);  // Entity.tickCount
+    const u32 tick_count = static_cast<u32>(entity_tick_ - item_born_[k] + 1);  // Entity.tickCount
     const i32 id = ents_.net_id(row);
     if (UNLIKELY(phys::item_tick(w, m, movers_[slot].body, tick_count, id, &random_float_of, this) == phys::Fate::kGone))
         return remove_item(slot);  // it fell out of the world
@@ -167,23 +167,23 @@ void Game::tick_item(u32 slot, u32 row) {
         }
     }
     // age++, then "age >= 6000 -> discard": the item has had `age` ticks, this one included.
-    if (UNLIKELY(tick_ - item_age_from_[k] + 1 >= kLifetime)) return remove_item(slot);
+    if (UNLIKELY(entity_tick_ - item_age_from_[k] + 1 >= kLifetime)) return remove_item(slot);
 
     // At rest? Asked when a tick in which it tried the ground left it where it was, and - of an
     // item that then was not (one on a slime block never is) - less and less often.
     // (`row` is not to be used down here: a merge may have removed another item, and rows move.)
     Mover& mv = movers_[slot];
     const bool tried = (static_cast<u32>(static_cast<i32>(tick_count) + id) & 3) == 0;
-    if (tried && mv.body.on_ground && tick_ >= mv.retry && ox == m.pos[0] && oy == m.pos[1] && oz == m.pos[2]) {
+    if (tried && mv.body.on_ground && entity_tick_ >= mv.retry && ox == m.pos[0] && oy == m.pos[1] && oz == m.pos[2]) {
         ItemSleep& rest = item_sleep_[slot];
         if (phys::item_rests(w, m, mv.body, tick_count, id, rest.rest)) {
             rest.phase = static_cast<u8>((1 - item_born_[k] + static_cast<u64>(id)) & 3);
-            rest.merge_at = static_cast<u32>(tick_ + (kMergePeriod - tick_count % kMergePeriod));
+            rest.merge_at = static_cast<u32>(entity_tick_ + (kMergePeriod - tick_count % kMergePeriod));
             rest.expires = static_cast<u32>(item_age_from_[k] + kLifetime - 1);
             sleep(slot);
         } else {
             mv.patience = static_cast<u8>(std::min<u32>(mv.patience + 1u, 6u));
-            mv.retry = tick_ + (4ull << mv.patience);
+            mv.retry = entity_tick_ + (4ull << mv.patience);
         }
     }
 }
@@ -193,7 +193,7 @@ void Game::tick_item(u32 slot, u32 row) {
 void Game::rest_item(u32 slot) {
     ItemSleep& rest = item_sleep_[slot];
     const u32 row = ents_.by_slot(slot);
-    const u32 now = static_cast<u32>(tick_);
+    const u32 now = static_cast<u32>(entity_tick_);
     if (phys::item_rest_tick(ents_.vx[row], ents_.vy[row], ents_.vz[row], (now + rest.phase) & 3, rest.rest))
         ents_.flags[row] |= entity::flag::kNeedsSync;
     if (UNLIKELY(now == rest.merge_at)) {
@@ -223,7 +223,8 @@ void Game::merge_item(u32 k) {
     // isMergable: alive, not at its end, and with room in its stack.
     const auto mergable = [&](u32 i, u32 row) {
         const ItemStack& s = ents_.item[row];
-        return !s.empty() && item_pickup_[i] != kNever && tick_ - item_age_from_[i] < kLifetime && s.count() < s.max_stack();
+        return !s.empty() && item_pickup_[i] != kNever && entity_tick_ - item_age_from_[i] < kLifetime &&
+               s.count() < s.max_stack();
     };
     const u32 row = ents_.by_slot(item_slot_[k]);
     if (!mergable(k, row)) return;
@@ -279,7 +280,8 @@ void Game::pick_up_items(u32 pi) {
     item_grid_.for_each(item_cell_of(area.min[0] - kItemHalfWidth), item_cell_of(area.min[2] - kItemHalfWidth),
                         item_cell_of(area.max[0] + kItemHalfWidth), item_cell_of(area.max[2] + kItemHalfWidth), [&](u32 slot) {
                             if (!area.intersects(item_box(ents_, ents_.by_slot(slot)))) return;
-                            if (tick_ >= item_pickup_[item_of_slot_[slot]]) item_scratch_.push_back(slot);  // pickupDelay == 0
+                            if (entity_tick_ >= item_pickup_[item_of_slot_[slot]])
+                                item_scratch_.push_back(slot);  // pickupDelay == 0
                         });
     if (LIKELY(item_scratch_.empty())) return;
     Player& p = players_[pi];
