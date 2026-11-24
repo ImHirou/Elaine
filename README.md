@@ -19,9 +19,6 @@ finished - compared with a real vanilla server, byte for byte where that is poss
 
 ### Protocol
 
-*An unmodified vanilla client cannot tell Elaine from a vanilla server; one Minecraft version at a
-time, following the newest release.*
-
 - [x] Minecraft 26.3 (protocol 777): packet ids, registries, tags and block states generated from the official jar
 - [x] Encryption (AES-CFB8)
 - [x] Whatever goes to more than one player is encoded
@@ -30,8 +27,6 @@ time, following the newest release.*
 - [ ] Proxy forwarding (Velocity), per-connection rate limits, IPv6 by default
 
 ### Server
-
-*An operator's server: starts in seconds, stops cleanly, runs for weeks and says what it is doing.*
 
 - [x] The console
 - [x] A clean stop on SIGTERM or `/stop`
@@ -53,7 +48,7 @@ time, following the newest release.*
 - [x] A region format of its own: checksums, and a chunk is never overwritten in place
 - [x] A vanilla (Anvil) world is imported at startup
 - [x] The flat generator
-- [ ] Terrain generation: vanilla's, the same world from the same seed
+- [x] Terrain generation: vanilla's, the same world from the same seed (WIP)
 - [ ] The Nether 
 - [ ] The End
 - [x] The time of day
@@ -114,8 +109,6 @@ Every block, done or to do, class by class: [docs/blocks-roadmap.md](docs/blocks
 - [ ] Enchanting, the anvil, brewing and the other menus
 
 ### Commands
-
-*Every vanilla command, read by Brigadier's rules and answered in vanilla's words.*
 
 - [x] Brigadier's tree
 - [x] `stop`, `setblock`, `fill`, `teleport`, `give`, `playsound`, `stopsound`, `summon`, `kill`, `list`, `kick`, `op`, `deop`, `help`, `say`, `me`, `msg`, `teammsg`, `time`, `tellraw`, `data get`
