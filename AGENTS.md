@@ -113,7 +113,9 @@ src/worldgen/ random.* (the random sources a world is drawn from: Xoroshiro128++
               tables - the surface of each biome, bedrock, deepslate, ore veins, icebergs), carver.* (caves and canyons:
               what the carvers of the chunks around mark in a chunk, and what becomes of the marks),
               terrain.* (a chunk's terrain as it is made: what a world has one of, a chunk's context, the steps of
-              vanilla's `terrain` status), generator.* (the world::ChunkGenerator of it: a worker's whole chunk),
+              vanilla's `terrain` status), region.* (the chunks a decoration works in: vanilla's WorldGenRegion over chunks that
+              are being generated - blocks, the six heightmaps, the biome of a block, marks, ticks, block entities),
+              generator.* (the world::ChunkGenerator of it: a worker's whole chunk),
               mth.hpp (Mth's and Java's arithmetic, as written)
 src/entity/   store.* (the entity table: SoA columns, slots, handles), tracker.* (who sees whom + the per-tick
               encode-once fan-out, equipment), visibility.hpp (its SIMD kernel), grid.hpp (entities by cell: 64 blocks for
@@ -152,7 +154,8 @@ src/world/    section.* (palette container), chunk*, chunk_codec.* (wire), light
               fluid asks of the blocks before it moves: FlowingFluid's getNewLiquid, getSpread, canPassThroughWall; which
               way it runs, for what is in it: getFlow), chunk_io.* (a
               chunk as bytes, and the chunk a worker makes of them), region.* (region files), store.* (which chunk is
-              where on disk, what waits to be written: the tick thread's side of the workers), generator.*, block.* (state/item
+              where on disk, what waits to be written: the tick thread's side of the workers), generator.*, gen_chunk.* (a chunk
+              while it is generated: what a ProtoChunk is between its terrain and the world), block.* (state/item
               tables), collide.* (a box against the blocks: Entity.collide with every shape and the step up, the block
               stood on, line of sight; a look - BlockGetter.clip, with outlines and fluids; an explosion's rays),
               pool.hpp, bits.hpp

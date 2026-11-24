@@ -192,6 +192,7 @@ add_library(core STATIC
   src/worldgen/terrain.cpp
   src/worldgen/material.cpp
   src/worldgen/carver.cpp
+  src/worldgen/region.cpp
   src/worldgen/generator.cpp
   src/phys/physics.cpp
   src/item/components.cpp
@@ -266,6 +267,7 @@ if(MC_TESTS)
       tests/unit/chat_test.cpp
       tests/unit/time_test.cpp
       tests/unit/worldgen_test.cpp
+      tests/unit/region_test.cpp
     )
     target_link_libraries(unit_tests PRIVATE core GTest::gtest_main OpenSSL::Crypto)
     if(MC_PCH)

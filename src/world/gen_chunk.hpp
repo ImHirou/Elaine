@@ -47,8 +47,10 @@ struct GenChunk {
     u8 version = 0;          // how many passes of decoration it has been through
     bool decorated = false;  // its own features have run (ChunkStatus.FEATURES)
     Section sections[kMaxSections];
-    // The biome of every cell (4x4x4 blocks), by section, and in one by y << 4 | z << 2 | x.
+    // The biome of every cell (4x4x4 blocks), by section, and in one by y << 4 | z << 2 | x - and
+    // which biomes there are among them, a bit each.
     u16 cells[kMaxSections * 64];
+    u64 biomes_present[2] = {0, 0};
     // The first free y of every column for each heightmap, counted from the bottom of the world;
     // by x + z * 16.
     i16 height[heightmap::kCount][256];

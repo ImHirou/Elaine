@@ -116,6 +116,8 @@ void OverworldGenerator::make_base(i32 cx, i32 cz, world::GenChunk& out) {
     out.decorated = false;
     for (u32 si = 0; si < Terrain::kSections; ++si) out.sections[si].assign(out.alloc, &t.blocks[si * 4096]);
     std::copy(std::begin(w.biome), std::end(w.biome), out.cells);
+    out.biomes_present[0] = out.biomes_present[1] = 0;
+    for (const u16 biome : w.biome) out.biomes_present[biome >> 6] |= u64{1} << (biome & 63);
 
     // The two heightmaps the terrain was made by stay as they are; the four a chunk keeps are
     // counted now, each column from the top down to the first block that counts for it.

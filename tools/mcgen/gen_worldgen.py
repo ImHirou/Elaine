@@ -480,6 +480,13 @@ inline constexpr u8 kWorldSurfaceWg = 1, kWorldSurface = 2, kOceanFloorWg = 4, k
 inline constexpr unsigned char kHeightmaps[] = {{
 #embed "worldgen_heightmaps.bin"
 }};
+
+// What else generation asks of a block state. BlockState.getPostProcessPos: a block that marks
+// itself, or the block above it, to be looked at when its chunk first ticks.
+inline constexpr u8 kMarksItself = 1, kMarksAbove = 2;
+inline constexpr unsigned char kStateFacts[] = {{
+#embed "worldgen_state_facts.bin"
+}};
 """
 
 
@@ -494,6 +501,19 @@ def heightmap_bits(version: str) -> bytes:
     if len(column) != states["state_count"] or max(column) > 63:
         die("gen_worldgen: gamedata/states.json: heightmap_opaque is not six bits a state")
     return bytes(column)
+
+
+def state_facts(version: str, blocks: Blocks) -> bytes:
+    """A byte a block state: what generation asks of it beyond the heightmaps (kMarksItself, kMarksAbove)."""
+    facts = bytearray(len(heightmap_bits(version)))
+    post = worldgen.load(version, "features")["post_process"]
+    for bit, names in ((1, post["self"]), (2, post["above"])):
+        for name in names:
+            if name not in blocks.blocks:
+                die(f"gen_worldgen: features.json names {name}, which is no block")
+            for s in blocks.blocks[name]["states"]:
+                facts[s["id"]] |= bit
+    return bytes(facts)
 
 
 def resolve_anchor(value: dict, min_y: int, height: int) -> int:
@@ -847,7 +867,8 @@ struct OreVein {
 // The names positional random factories are made by (RandomState.getOrCreateRandomFactory): a
 // vertical gradient's, by its place in this list; then what the generator itself names.
 """)
-    names = t.randoms + [n for n in ("minecraft:ore", "minecraft:aquifer", "minecraft:clay_bands") if n not in t.randoms]
+    names = t.randoms + [n for n in ("minecraft:ore", "minecraft:aquifer", "minecraft:clay_bands", "minecraft:worldgen_region_random")
+                         if n not in t.randoms]
     out.append(f"inline constexpr Hash kRandomNames[{len(names)}] = {{\n")
     for name in names:
         a, b = md5_seed(name)
@@ -975,6 +996,7 @@ inline constexpr BlendedLayer kBlendedLayers[{len(blended)}] = {{
     out.append("\n}  // namespace proto::gen::worldgen\n")
     return {"worldgen.hpp": "".join(out), "worldgen_climate.hpp": emit_climate(hdr, climate),
             "worldgen_heightmaps.bin": state_bits(version, vanilla, blocks),
+            "worldgen_state_facts.bin": state_facts(version, blocks),
             "_stats": {"noises": len(noises), "noise_layers": len(layers) + len(blended), "density_nodes": len(tables.nodes),
                        "climate_nodes": len(climate), "climate_biomes": len(biomes),
                        "material_rules": len(material.rules), "material_conditions": len(material.conditions)}}
