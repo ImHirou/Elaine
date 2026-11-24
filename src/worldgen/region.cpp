@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "worldgen/region.hpp"
 
+#include "nbt/nbt.hpp"
+
 #include <algorithm>
 #include <cstring>
 
@@ -240,6 +242,38 @@ void Region::schedule_tick(i32 x, i32 y, i32 z, u32 type, bool fluid, i32 priori
     (fluid ? chunk.fluid_ticks : chunk.block_ticks).push_back({type, lx, lz, up, 0, static_cast<i8>(priority)});
 }
 
+bool Region::has_block_tick(i32 x, i32 y, i32 z, u32 block) const {
+    const u32 slot = slot_of(x >> 4, z >> 4);
+    if (UNLIKELY(slot == kNoSlot || outside_height(y))) return false;
+    const std::vector<u64>& table = work_.ticks;
+    const u64 key = u64{slot} << 48 | u64{block} << 17 | u64{static_cast<u32>(y - kMinY)} << 8 |
+                    u64{static_cast<u32>(z & 15)} << 4 | static_cast<u32>(x & 15);
+    const usize mask = table.size() - 1;
+    for (usize at = (key * 0x9E3779B97F4A7C15ull) >> 20 & mask;; at = (at + 1) & mask) {
+        if (table[at] == key + 1) return true;
+        if (table[at] == 0) return false;
+    }
+}
+
+void Region::reset_countdown(i32 x, i32 y, i32 z) {
+    // (What stands there is potent sulfur, and its block entity one of its own: nothing else of a
+    // world in the making sets one over another without a block between them that has none.)
+    if (!block_entity(x, y, z)) return;
+    base::ByteBuf& tag = work_.tag;
+    tag.len = 0;
+    nbt::Writer w(tag);
+    w.root(nbt::kCompound);
+    w.begin_compound("components");
+    w.end_compound();
+    w.put_int("countdown", -1);  // PotentSulfurBlockEntity.resetCountdown
+    w.put_string("id", "minecraft:potent_sulfur");
+    w.put_int("x", x);
+    w.put_int("y", y);
+    w.put_int("z", z);
+    w.end_compound();
+    set_block_entity_tag(x, y, z, {tag.data, tag.len});
+}
+
 const world::GenBlockEntity* Region::block_entity(i32 x, i32 y, i32 z) const {
     const u32 slot = slot_of(x >> 4, z >> 4);
     if (slot == kNoSlot || outside_height(y)) return nullptr;
@@ -273,10 +307,9 @@ bool Region::set_block_entity_tag(i32 x, i32 y, i32 z, std::span<const u8> tag) 
 
 void Region::put_placeholder(world::GenChunk& chunk, u32 at) {
     for (world::GenBlockEntity& e : chunk.block_entities)
-        if (e.at == at) {
-            e.len = 0;  // ProtoChunk.setBlockEntityNbt: the placeholder takes the place of what was known
-            return;
-        }
+        // A block entity that was made of its placeholder (WorldGenRegion.getBlockEntity: one with a tag)
+        // stays what it is under a new placeholder - ProtoChunk asks for the entity before the tag.
+        if (e.at == at) return;
     chunk.block_entities.push_back({at, 0, 0});
 }
 

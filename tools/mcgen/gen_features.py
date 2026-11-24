@@ -31,6 +31,7 @@ from mcgen import die, vdir
 import worldgen
 from gen_trees import TreeTables, emit_trees
 from gen_caves import CaveTables, emit_caves
+from gen_templates import TemplateTables, emit_templates, liquid_containers, takes_water
 
 HEIGHTMAPS = ["WORLD_SURFACE_WG", "WORLD_SURFACE", "OCEAN_FLOOR_WG", "OCEAN_FLOOR", "MOTION_BLOCKING", "MOTION_BLOCKING_NO_LEAVES"]
 DIRECTIONS = ["down", "up", "north", "south", "west", "east"]
@@ -50,9 +51,10 @@ PORTED_FEATURES = {
     "vegetation_patch": "kVegetationPatch", "waterlogged_vegetation_patch": "kVegetationPatch", "root_system": "kRootSystem",
     "speleothem": "kSpeleothem", "speleothem_cluster": "kSpeleothemCluster", "large_dripstone": "kLargeDripstone", "geode": "kGeode",
     "multiface_growth": "kMultifaceGrowth", "sculk_patch": "kSculkPatch", "monster_room": "kMonsterRoom",
+    "template": "kTemplate", "fossil": "kFossil",
 }
-# ...and the types of the overworld that wait for theirs. A type in neither list stops the run.
-UNPORTED_FEATURES = {"template", "fossil"}
+# ...and the types of the overworld that wait for theirs: none now. A type in neither list stops the run.
+UNPORTED_FEATURES: set[str] = set()
 # BlockStateProvider types that wait for theirs: none of the overworld's now.
 UNPORTED_PROVIDERS: set = set()
 
@@ -190,11 +192,12 @@ class Pool:
         return first
 
 
-class FeatureTables(TreeTables, CaveTables):
+class FeatureTables(TreeTables, CaveTables, TemplateTables):
     def __init__(self, version: str, vanilla, blocks, settings: dict):
         self.vanilla, self.blocks, self.version = vanilla, blocks, version
         self.init_trees()
         self.init_caves()
+        self.init_templates()
         self.sets = StateSets(version, vanilla, blocks)
         self.min_y, self.height = settings["noise"]["min_y"], settings["noise"]["height"]
         self.biome_ids = {name: i for i, name in enumerate(vanilla.entries("worldgen/biome"))}
@@ -1006,6 +1009,10 @@ class FeatureTables(TreeTables, CaveTables):
         elif kind == "monster_room":
             self.need(kind, value, set())
             row = ("kMonsterRoom", 0, 0, 0)
+        elif kind == "template":
+            row = self.template_feature(value)
+        elif kind == "fossil":
+            row = self.fossil(value)
         else:
             die(f"gen_features: {kind} is listed as ported and has no table")
         self.nested.update(uses)
@@ -1104,13 +1111,14 @@ struct Modifier {
 // if it can stay; with a tick asked for if c. kBlockColumn: kColumns[a]. kBamboo: kBamboos[a]. kVines:
 // one of kProviderStates[a .. a + 5), a vine on the side up, north, south, west, east. kCoralTree,
 // kCoralClaw: of the placed feature a, block by block. kHugeBrownMushroom, kHugeRedMushroom:
-// kMushrooms[a]. kTree: kTrees[a]. kFallenTree: kFallenTrees[a]. kUnported: a type that waits for its code.
+// kMushrooms[a]. kTree: kTrees[a]. kFallenTree: kFallenTrees[a]. kTemplate: kTemplateFeatures[a]. kFossil:
+// kFossils[a]. kUnported: a type that waits for its code.
 enum class FeatureType : u8 {
     kUnported, kNoOp, kRandomSelector, kSimpleRandomSelector, kWeightedRandomSelector, kRandomBooleanSelector, kSequence, kOverlay,
     kOre, kDisk, kUnderwaterMagma, kBlockBlob, kSpring, kLake, kBlueIce, kSpike, kIceberg, kFreezeTopLayer, kSimpleBlock,
     kBlockColumn, kBamboo, kVines, kCoralTree, kCoralClaw, kHugeBrownMushroom, kHugeRedMushroom, kTree, kFallenTree,
     kVegetationPatch, kRootSystem, kSpeleothem, kSpeleothemCluster, kLargeDripstone, kGeode, kMultifaceGrowth, kSculkPatch,
-    kMonsterRoom,
+    kMonsterRoom, kTemplate, kFossil,
 };
 struct Feature {
     FeatureType type;
@@ -1363,6 +1371,7 @@ struct Placed {
                + ", ".join("{" + ", ".join(map(str, row)) + "}" for row in t.lakes.rows) + "};\n")
     emit_trees(t, out)
     emit_caves(t, out)
+    emit_templates(t, out)
     # What feature.cpp asks of a state by name: sets like any other, each with a name of its own.
     sets = t.sets
     code = {"kSetLiquid": sets.facts["liquid"], "kSetSnowSurvivesOn": sets.facts["snow_survives_on"],
@@ -1400,6 +1409,14 @@ struct Placed {
         ("kSetSolid", "that is solid", sets.facts["solid"]),                                                         # BlockState.isSolid()
         ("kSetNoFluidButWater", "that holds water and nothing else of a fluid",                                      # FluidState.isEmpty() || is(Fluids.WATER)
          sum(1 << i for i, f in enumerate(sets.fluid_of) if sets.fluid_names[f] in ("minecraft:empty", "minecraft:water"))),
+        # Structure templates (template.cpp) and the blocks that stand in them (shape.hpp).
+        ("kSetTakesWater", "that is waterlogged by water put into it", takes_water(t)),                              # SimpleWaterloggedBlock.placeLiquid
+        ("kSetLiquidContainer", "that a fluid put into it is handed to", liquid_containers(t)),                      # instanceof LiquidBlockContainer
+        ("kSetSpeleothems", "of speleothems", tag("speleothems")),
+        ("kSetContinuousGeyser", "under which potent sulfur erupts without end", tag("causes_continuous_geyser_eruptions")),
+        ("kSetPeriodicGeyser", "under which potent sulfur erupts now and then", tag("causes_periodic_geyser_eruptions")),
+        ("kSetSourceIfFluid", "that holds no fluid, or a source of one",                                             # PotentSulfurBlock.isSourceIfFluid
+         sets.facts["fluid_source"] | sum(1 << i for i, f in enumerate(sets.fluid_of) if sets.fluid_names[f] == "minecraft:empty")),
     ):
         code[name] = bits
         names[name] = "kSet " + words

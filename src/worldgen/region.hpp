@@ -36,6 +36,7 @@
 #include <memory>
 #include <vector>
 
+#include "base/buf.hpp"
 #include "world/block.hpp"
 #include "world/gen_chunk.hpp"
 #include "worldgen/climate.hpp"
@@ -53,6 +54,7 @@ struct RegionWork {
     std::unique_ptr<u16[]> flat;
     std::vector<u64> ticks;  // the (chunk, list, type, block) that have a tick: an open-addressing set
     u32 tick_count = 0;
+    base::ByteBuf tag;  // a block entity's tag while the region writes one
 };
 
 class Region {
@@ -158,6 +160,12 @@ class Region {
     void schedule_tick(i32 x, i32 y, i32 z, u32 type, bool fluid, i32 priority = 0);
 
     // The block entity at a block: nullptr, or the record - whose tag is empty until one is set.
+    // ProtoChunkTicks.hasScheduledTick: is a tick of that block asked for there.
+    bool has_block_tick(i32 x, i32 y, i32 z, u32 block) const;
+    // PotentSulfurBlock.validBlockState, where a block that was no geyser becomes one: it reaches for its
+    // block entity - WorldGenRegion.getBlockEntity makes the real one of the placeholder - and has it count
+    // anew, which is what the block entity saves from then on.
+    void reset_countdown(i32 x, i32 y, i32 z);
     const world::GenBlockEntity* block_entity(i32 x, i32 y, i32 z) const;
     std::span<const u8> block_entity_tag(i32 x, i32 y, i32 z) const;
     // What a feature filled in (one nameless NBT compound). False: there is no block entity there.

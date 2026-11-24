@@ -1163,10 +1163,8 @@ bool Decorator::place_sculk_patch(const ft::SculkPatch& patch, FeatureRandom& ra
 
 // ----------------------------------------------------------------------------- MonsterRoomFeature
 
-namespace {
+namespace {}  // namespace
 
-// What a block entity saves besides what it holds, as a chunk in the making writes it
-// (BlockEntity.saveWithFullMetadata).
 void end_block_entity(nbt::Writer& w, std::string_view id, Pos p) {
     w.begin_compound("components");
     w.end_compound();
@@ -1176,8 +1174,6 @@ void end_block_entity(nbt::Writer& w, std::string_view id, Pos p) {
     w.put_int("z", p.z);
     w.end_compound();
 }
-
-}  // namespace
 
 // A room of cobblestone round a spawner, with a chest or two - where there is a hollow with a
 // floor, a ceiling and a few ways in.

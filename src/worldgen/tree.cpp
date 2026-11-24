@@ -1199,29 +1199,10 @@ struct TreeBuilder {
     }
 
     // ------------------------------------------------------------- updateLeaves, updateShapeAtEdge
-    struct Box {
-        i32 x0, y0, z0, x1, y1, z1;
-        bool inside(Pos p) const { return p.x >= x0 && p.x <= x1 && p.z >= z0 && p.z <= z1 && p.y >= y0 && p.y <= y1; }
-        i32 xs() const { return x1 - x0 + 1; }
-        i32 ys() const { return y1 - y0 + 1; }
-        i32 zs() const { return z1 - z0 + 1; }
-    };
-    struct Shape {  // BitSetDiscreteVoxelShape
-        std::vector<u64>& bits;
-        const Box& box;
-        usize index(Pos p) const {
-            return (static_cast<usize>(p.x - box.x0) * static_cast<usize>(box.ys()) + static_cast<usize>(p.y - box.y0)) *
-                       static_cast<usize>(box.zs()) +
-                   static_cast<usize>(p.z - box.z0);
-        }
-        void fill(Pos p) {
-            const usize i = index(p);
-            bits[i >> 6] |= u64{1} << (i & 63);
-        }
-        bool full(Pos p) const {
-            const usize i = index(p);
-            return bits[i >> 6] >> (i & 63) & 1;
-        }
+    using Box = ShapeBox;
+    struct Shape : ShapeBits {  // (by position)
+        void fill(Pos p) { ShapeBits::fill(p.x, p.y, p.z); }
+        bool full(Pos p) const { return ShapeBits::full(p.x, p.y, p.z); }
     };
 
     // TreeFeature.updateLeaves: how far every leaf is from a log, as far as that is under seven -
@@ -1229,7 +1210,7 @@ struct TreeBuilder {
     void update_leaves(Shape& shape, const Box& box) {
         const auto fill_set = [&](const JavaHashSet& set) {
             set.each([&](i32 x, i32 y, i32 z) {
-                if (box.inside({x, y, z})) shape.fill({x, y, z});
+                if (box.inside(x, y, z)) shape.fill({x, y, z});
             });
         };
         fill_set(work.decorations);
@@ -1243,7 +1224,7 @@ struct TreeBuilder {
             if (smallest >= 7) break;
             Pos p;
             to_check[smallest].pop_first(p.x, p.y, p.z);
-            if (!box.inside(p)) continue;
+            if (!box.inside(p.x, p.y, p.z)) continue;
             if (smallest != 0) {
                 const u16 state = block(p);
                 DCHECK(prop::has(state, Prop::kDistance));
@@ -1252,7 +1233,7 @@ struct TreeBuilder {
             shape.fill(p);
             for (u32 direction = 0; direction < 6; ++direction) {
                 const Pos n = moved(p, direction);
-                if (!box.inside(n) || shape.full(n)) continue;
+                if (!box.inside(n.x, n.y, n.z) || shape.full(n)) continue;
                 const i32 distance = optional_leaf_distance(block(n));
                 if (distance < 0) continue;
                 const i32 next = std::min(distance, smallest + 1);
@@ -1261,41 +1242,6 @@ struct TreeBuilder {
                 smallest = std::min(smallest, next);
             }
         }
-    }
-
-    // StructureTemplate.updateShapeAtEdge: every face between a block of the tree and one that is
-    // not - the block inside is told of its neighbour, then the neighbour of it.
-    void update_face(Pos p, u32 direction) {
-        const Pos n = moved(p, direction);
-        const u16 state = block(p), beside = block(n);
-        u64 unported = 0;
-        const u16 made = update_shape(region, state, p.x, p.y, p.z, direction, beside, unported);
-        if (made != state) region.set_block(p.x, p.y, p.z, made, 2);
-        const u16 made_beside = update_shape(region, beside, n.x, n.y, n.z, world::opposite(direction), made, unported);
-        if (made_beside != beside) region.set_block(n.x, n.y, n.z, made_beside, 2);
-        if (unported) region.note_unported_shapes(unported);
-    }
-    // DiscreteVoxelShape.forAllFaces: along z for every (x, y), along y for every (z, x), along x for every (y, z).
-    void update_shape_at_edge(const Shape& shape, const Box& box) {
-        const auto run = [&](u32 a_size, u32 b_size, u32 c_size, u32 negative, auto&& at) {
-            for (u32 a = 0; a < a_size; ++a)
-                for (u32 b = 0; b < b_size; ++b) {
-                    bool last = false;
-                    for (u32 c = 0; c <= c_size; ++c) {
-                        const bool full = c != c_size && shape.full(at(a, b, c));
-                        if (!last && full) update_face(at(a, b, c), negative);
-                        if (last && !full) update_face(at(a, b, c - 1), negative ^ 1);
-                        last = full;
-                    }
-                }
-        };
-        const u32 xs = static_cast<u32>(box.xs()), ys = static_cast<u32>(box.ys()), zs = static_cast<u32>(box.zs());
-        const auto pos = [&](u32 x, u32 y, u32 z) {
-            return Pos{box.x0 + static_cast<i32>(x), box.y0 + static_cast<i32>(y), box.z0 + static_cast<i32>(z)};
-        };
-        run(xs, ys, zs, world::kNorth, [&](u32 a, u32 b, u32 c) { return pos(a, b, c); });
-        run(zs, xs, ys, world::kDown, [&](u32 a, u32 b, u32 c) { return pos(b, c, a); });
-        run(ys, zs, xs, world::kWest, [&](u32 a, u32 b, u32 c) { return pos(c, a, b); });
     }
 
     // TreeFeature.place
@@ -1336,7 +1282,7 @@ struct TreeBuilder {
         work.shape.assign((cells + 63) / 64, 0);
         Shape shape{work.shape, box};
         update_leaves(shape, box);
-        update_shape_at_edge(shape, box);
+        update_shape_at_edge(region, shape, 2);  // (TreeFeature passes 3: less the bit that tells neighbours)
         return true;
     }
 };

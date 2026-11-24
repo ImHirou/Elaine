@@ -14,6 +14,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "nbt/nbt.hpp"
+#include "nbt/snbt.hpp"
 #include "world/gen_chunk.hpp"
 #include "worldgen/feature.hpp"
 #include "worldgen/generator.hpp"
@@ -84,7 +86,7 @@ struct Script {
             for (u32 areas = in.num<u32>(); areas; --areas) {
                 in.skip(8);
                 for (u32 chunk = 0; chunk < 4; ++chunk) in.skip(usize{in.num<u32>()} * 21);
-                in.skip(16 * 40);
+                in.skip(16 * 48);
             }
         }
     }
@@ -97,7 +99,7 @@ struct Script {
                     in.skip(9);
                     in.skip(usize{in.num<u32>()} * 20);
                 }
-                in.skip(9 * 40);
+                in.skip(9 * 48);
             }
         }
     }
@@ -314,6 +316,28 @@ void expect_chunk(In& in, const world::GenChunk& c, const std::string& name) {
     EXPECT_EQ(c.block_ticks.size(), in.num<u32>()) << name << ": the block ticks of chunk " << c.x << ", " << c.z;
     EXPECT_EQ(c.fluid_ticks.size(), in.num<u32>()) << name << ": the fluid ticks of chunk " << c.x << ", " << c.z;
     EXPECT_EQ(c.block_entities.size(), in.num<u32>()) << name << ": the block entities of chunk " << c.x << ", " << c.z;
+    // The block entities from the bottom up: where each is and its tag as text - of a placeholder, vanilla's.
+    std::vector<world::GenBlockEntity> entities = c.block_entities;
+    std::sort(entities.begin(), entities.end(),
+              [](const world::GenBlockEntity& a, const world::GenBlockEntity& b) { return a.at < b.at; });
+    u64 tags = kFnv;
+    std::string said;
+    for (const world::GenBlockEntity& e : entities) {
+        tags = fnv(tags, e.at);
+        std::string text;
+        if (e.len == 0) {
+            text = "{id:\"DUMMY\",x:" + std::to_string(c.x * 16 + static_cast<i32>(e.at & 15)) +
+                   ",y:" + std::to_string(static_cast<i32>(e.at >> 8) + Region::kMinY) +
+                   ",z:" + std::to_string(c.z * 16 + static_cast<i32>(e.at >> 4 & 15)) + "}";
+        } else {
+            nbt::Doc doc;
+            ASSERT_EQ(doc.parse({c.tags.data() + e.tag, e.len}), nbt::Error::kNone);
+            nbt::print_snbt(doc.root(), text);
+        }
+        for (const char ch : text) tags = fnv(tags, static_cast<u32>(static_cast<unsigned char>(ch)));
+        said += text + "\n";
+    }
+    EXPECT_EQ(tags, in.num<u64>()) << name << ": the tags of the block entities of chunk " << c.x << ", " << c.z << ":\n" << said;
 }
 
 // Whole decorations: areas of 4 x 4 chunks of terrain, the inner four decorated one after the
@@ -470,6 +494,8 @@ TEST(WorldgenFeature, FeaturesPlacedAgainAndAgainAreVanillas) {
                         wanted == name + ":" + std::to_string(cx) + ":" + std::to_string(cz) + ":" + std::to_string(attempt))
                         region.set_trace(&trace);
                     decorator.place(row, random, origin, &top);
+                    if (attempt == 0 && std::getenv("FEATURE_SITES"))
+                        std::fprintf(stderr, "SITE %s %d %d\n", name.c_str(), cx, cz);
                     region.set_log(nullptr);
                     region.set_trace(nullptr);
                     for (usize i = 0; i + 3 < trace.size(); i += 4)
@@ -598,6 +624,9 @@ TEST(WorldgenFeature, BlocksTakeTheShapeVanillasWould) {
         i32 light;
         std::vector<u32> ticks;
         bool elsewhere = false;
+        bool has_tick = false;
+        bool has_block_tick(i32, i32, i32, u32) const { return has_tick; }
+        void reset_countdown(i32, i32, i32) { ticks.push_back(1u << 21); }
         u16 block(i32 x, i32 y, i32 z) const {
             if (x < -1 || x > 1 || y < -2 || y > 2 || z < -1 || z > 1) return rest;
             return cell[((x + 1) * 5 + (y + 2)) * 3 + (z + 1)];
@@ -641,6 +670,7 @@ TEST(WorldgenFeature, BlocksTakeTheShapeVanillasWould) {
             const u32 direction = static_cast<u32>((mix.next() >> 1) % 6);
             const u16 beside = level.block(world::kStepX[direction], world::kStepY[direction], world::kStepZ[direction]);
             level.ticks.clear();
+            level.has_tick = (mix.next() & 1) != 0;
             const u16 made = update_shape(level, static_cast<u16>(id), 0, 0, 0, direction, beside, unported);
             std::sort(level.ticks.begin(), level.ticks.end());
             level.ticks.erase(std::unique(level.ticks.begin(), level.ticks.end()), level.ticks.end());

@@ -12,6 +12,8 @@
 // A template over whoever can say what block is where and take a tick: the generator's Region.
 #pragma once
 
+#include <vector>
+
 #include "worldgen/props.hpp"
 #include "worldgen/survive.hpp"
 
@@ -62,7 +64,37 @@ u16 mossy_carpet_updated(Level& level, u16 state, i32 x, i32 y, i32 z, bool crea
     return state;
 }
 
-// `level`: block(x, y, z), raw_brightness(x, y, z), schedule_tick(x, y, z, type, fluid).
+// SpeleothemBlock: a spike of dripstone or sulfur. Its tip points up (0) or down (1); it is a tip
+// where two meet, a tip, the piece behind a tip, a middle piece, the base (0 .. 4).
+inline bool speleothem_pointing(u32 state, u32 tip) {  // isSpeleothemWithDirection
+    namespace ft = proto::gen::worldgen::feature;
+    return state_in(ft::kSetSpeleothems, state) &&
+           (prop::get(state, ft::Prop::kVerticalDirection) == 1 ? world::kDown : world::kUp) == tip;
+}
+// isValidSpeleothemPlacement: on a whole face, or on more of itself that points the same way.
+template <class Level>
+bool speleothem_stays(Level& level, u32 block, i32 x, i32 y, i32 z, u32 tip) {
+    namespace ft = proto::gen::worldgen::feature;
+    const u16 behind = level.block(x, y - world::kStepY[tip], z);
+    return state_in(ft::kSetSturdy[tip], behind) || (speleothem_pointing(behind, tip) && world::block_of(behind) == block);
+}
+// calculateSpeleothemThickness
+template <class Level>
+u32 speleothem_thickness(Level& level, u32 block, i32 x, i32 y, i32 z, u32 tip, bool merge_opposing_tips) {
+    namespace ft = proto::gen::worldgen::feature;
+    enum : u32 { kTipMerge, kTip, kFrustum, kMiddle, kBase };
+    const u32 base = world::opposite(tip);
+    const u16 in_front = level.block(x, y + world::kStepY[tip], z);
+    if (speleothem_pointing(in_front, base) && world::block_of(in_front) == block)
+        return merge_opposing_tips || prop::get(in_front, ft::Prop::kThickness) == kTipMerge ? kTipMerge : kTip;
+    if (!speleothem_pointing(in_front, tip)) return kTip;
+    if (prop::get(in_front, ft::Prop::kThickness) <= kTip) return kFrustum;
+    return speleothem_pointing(level.block(x, y - world::kStepY[tip], z), tip) ? kMiddle : kBase;
+}
+
+// `level`: block(x, y, z), raw_brightness(x, y, z), schedule_tick(x, y, z, type, fluid),
+// has_block_tick(x, y, z, block) - is a tick of that block asked for there - and
+// reset_countdown(x, y, z): the potent sulfur there reaches for its block entity.
 // `direction`: from the block to the neighbour whose state is `neighbour`.
 template <class Level>
 u16 update_shape(Level& level, u16 state, i32 x, i32 y, i32 z, u32 direction, u16 neighbour, u64& unported) {
@@ -184,10 +216,121 @@ u16 update_shape(Level& level, u16 state, i32 x, i32 y, i32 z, u32 direction, u1
             for (u32 d = 2; d < 6; ++d) any |= prop::get(made, kMossyWall[d]) != 0;
             return any ? made : static_cast<u16>(world::kAir);
         }
+        case ShapeOp::kSpeleothem: {
+            if (prop::flag(state, Prop::kWaterlogged)) water_tick();
+            if (direction != world::kUp && direction != world::kDown) return state;
+            const u32 tip = prop::get(state, Prop::kVerticalDirection) == 1 ? world::kDown : world::kUp;
+            // (One that hangs and is about to fall is left as it is.)
+            if (tip == world::kDown && level.has_block_tick(x, y, z, block)) return state;
+            if (direction == world::opposite(tip) && !speleothem_stays(level, block, x, y, z, tip)) {
+                block_tick();  // (in two ticks if it hangs, in one if it stands: a chunk in the making keeps no delay)
+                return state;
+            }
+            const bool merge = prop::get(state, Prop::kThickness) == 0;
+            return prop::with(state, Prop::kThickness, speleothem_thickness(level, block, x, y, z, tip, merge));
+        }
+        case ShapeOp::kPotentSulfur: {
+            // PotentSulfurBlock.validBlockState: dry without a source of water on it; under water a geyser
+            // by what lies below - lava: without end; magma: now and then - or merely wet.
+            enum : u32 { kDry, kWet, kDormant, kErupting, kContinuous };
+            if (!state_in(ft::kSetWaterSource, level.block(x, y + 1, z)))
+                return prop::with(state, Prop::kPotentSulfurState, kDry);
+            const u16 below = level.block(x, y - 1, z);
+            if (state_in(ft::kSetContinuousGeyser, below) && state_in(ft::kSetSourceIfFluid, below))
+                return prop::with(state, Prop::kPotentSulfurState, kContinuous);
+            if (state_in(ft::kSetPeriodicGeyser, below) && state_in(ft::kSetSourceIfFluid, below)) {
+                const u32 now = prop::get(state, Prop::kPotentSulfurState);
+                if (now != kErupting && now != kDormant) level.reset_countdown(x, y, z);
+                return now == kErupting ? state : prop::with(state, Prop::kPotentSulfurState, kDormant);
+            }
+            return prop::with(state, Prop::kPotentSulfurState, kWet);
+        }
         case ShapeOp::kUnported: break;
     }
     ++unported;
     return state;
+}
+
+// Block.updateFromNeighbourShapes: a block told of all six of its neighbours, in the order shapes
+// are asked in - west, east, north, south, down, up.
+template <class Level>
+u16 update_from_neighbour_shapes(Level& level, u16 state, i32 x, i32 y, i32 z, u64& unported) {
+    constexpr u32 kOrder[6] = {world::kWest, world::kEast, world::kNorth, world::kSouth, world::kDown, world::kUp};
+    for (const u32 direction : kOrder) {
+        const u16 neighbour =
+            level.block(x + world::kStepX[direction], y + world::kStepY[direction], z + world::kStepZ[direction]);
+        state = update_shape(level, state, x, y, z, direction, neighbour, unported);
+    }
+    return state;
+}
+
+// BitSetDiscreteVoxelShape: a box of blocks, and which of them something set.
+struct ShapeBox {
+    i32 x0, y0, z0, x1, y1, z1;
+    bool inside(i32 x, i32 y, i32 z) const { return x >= x0 && x <= x1 && z >= z0 && z <= z1 && y >= y0 && y <= y1; }
+    i32 xs() const { return x1 - x0 + 1; }
+    i32 ys() const { return y1 - y0 + 1; }
+    i32 zs() const { return z1 - z0 + 1; }
+    usize cells() const { return static_cast<usize>(xs()) * static_cast<usize>(ys()) * static_cast<usize>(zs()); }
+};
+struct ShapeBits {
+    std::vector<u64>& bits;
+    const ShapeBox& box;
+    usize index(i32 x, i32 y, i32 z) const {
+        return (static_cast<usize>(x - box.x0) * static_cast<usize>(box.ys()) + static_cast<usize>(y - box.y0)) *
+                   static_cast<usize>(box.zs()) +
+               static_cast<usize>(z - box.z0);
+    }
+    void fill(i32 x, i32 y, i32 z) {
+        const usize i = index(x, y, z);
+        bits[i >> 6] |= u64{1} << (i & 63);
+    }
+    bool full(i32 x, i32 y, i32 z) const {
+        const usize i = index(x, y, z);
+        return bits[i >> 6] >> (i & 63) & 1;
+    }
+};
+
+// StructureTemplate.updateShapeAtEdge: every face between a block that was set and one that was
+// not - the block inside is told of its neighbour, then the neighbour of it. The faces in the
+// order of DiscreteVoxelShape.forAllFaces: along z for every (x, y), along y for every (z, x),
+// along x for every (y, z). `flags`: what a block that changes is set with (the caller's, less
+// the bit that tells neighbours). `level`: update_shape's, and set_block and note_unported_shapes.
+template <class Level>
+void update_shape_at_edge(Level& level, const ShapeBits& shape, u32 flags) {
+    const ShapeBox& box = shape.box;
+    const auto face = [&](i32 x, i32 y, i32 z, u32 direction) {
+        const i32 nx = x + world::kStepX[direction], ny = y + world::kStepY[direction], nz = z + world::kStepZ[direction];
+        const u16 state = level.block(x, y, z), beside = level.block(nx, ny, nz);
+        u64 unported = 0;
+        const u16 made = update_shape(level, state, x, y, z, direction, beside, unported);
+        if (made != state) level.set_block(x, y, z, made, flags);
+        const u16 made_beside = update_shape(level, beside, nx, ny, nz, world::opposite(direction), made, unported);
+        if (made_beside != beside) level.set_block(nx, ny, nz, made_beside, flags);
+        if (unported) level.note_unported_shapes(unported);
+    };
+    const auto run = [&](u32 a_size, u32 b_size, u32 c_size, u32 negative, auto&& at) {
+        for (u32 a = 0; a < a_size; ++a)
+            for (u32 b = 0; b < b_size; ++b) {
+                bool last = false;
+                for (u32 c = 0; c <= c_size; ++c) {
+                    const bool full = c != c_size && at(a, b, c, false, 0);
+                    if (!last && full) at(a, b, c, true, negative);
+                    if (last && !full) at(a, b, c - 1, true, negative ^ 1);
+                    last = full;
+                }
+            }
+    };
+    const u32 xs = static_cast<u32>(box.xs()), ys = static_cast<u32>(box.ys()), zs = static_cast<u32>(box.zs());
+    const auto cell = [&](u32 x, u32 y, u32 z, bool tell, u32 direction) {
+        const i32 wx = box.x0 + static_cast<i32>(x), wy = box.y0 + static_cast<i32>(y), wz = box.z0 + static_cast<i32>(z);
+        if (!tell) return shape.full(wx, wy, wz);
+        face(wx, wy, wz, direction);
+        return true;
+    };
+    run(xs, ys, zs, world::kNorth, [&](u32 a, u32 b, u32 c, bool tell, u32 d) { return cell(a, b, c, tell, d); });
+    run(zs, xs, ys, world::kDown, [&](u32 a, u32 b, u32 c, bool tell, u32 d) { return cell(b, c, a, tell, d); });
+    run(ys, zs, xs, world::kWest, [&](u32 a, u32 b, u32 c, bool tell, u32 d) { return cell(c, a, b, tell, d); });
 }
 
 }  // namespace worldgen

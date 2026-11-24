@@ -6,8 +6,9 @@
 // class has a rule. Of each state so many worlds - the blocks within one of the place and two above and
 // below it: a state of the same block, one of a few that a rule is likely to tell apart, or any state at
 // all - and a direction; the neighbour is the block the world has there. What comes of it - the state, and
-// which ticks were asked for (of a block or a fluid; a tick asked twice is one) - is folded into a number a
-// state. A state whose method asks what such a world cannot say (lava, how fast it flows here) is marked
+// which ticks were asked for (of a block or a fluid; a tick asked twice is one), and whether the block reached
+// for its block entity - is folded into a number a state. Whether a tick of the block is already asked for
+// where it stands (a speleothem asks) is drawn with the world. A state whose method asks what such a world cannot say (lava, how fast it flows here) is marked
 // and left out.
 
 import java.lang.reflect.InvocationHandler;
@@ -33,6 +34,13 @@ final class WorldgenShape {
     static final class Ticks implements InvocationHandler {
         final TreeSet<Integer> asked = new TreeSet<>();
         boolean elsewhere;
+        boolean has;  // what hasScheduledTick answers
+        final Object blockTicks = java.lang.reflect.Proxy.newProxyInstance(
+            WorldgenShape.class.getClassLoader(), new Class<?>[] {net.minecraft.world.ticks.LevelTickAccess.class}, (proxy, method, args) -> {
+                if (method.getName().equals("hasScheduledTick")) return has;
+                if (method.getDeclaringClass() == Object.class) return method.invoke(this, args);
+                throw new UnsupportedOperationException(method.getName());
+            });
         final ScheduledTickAccess access = (ScheduledTickAccess) java.lang.reflect.Proxy.newProxyInstance(
             WorldgenShape.class.getClassLoader(), new Class<?>[] {ScheduledTickAccess.class}, this);
 
@@ -44,6 +52,7 @@ final class WorldgenShape {
                 else asked.add(BuiltInRegistries.BLOCK.getId((Block) args[1]));
                 return null;
             }
+            if (method.getName().equals("getBlockTicks")) return blockTicks;
             if (method.getDeclaringClass() == Object.class) return method.invoke(this, args);
             throw new UnsupportedOperationException(method.getName());
         }
@@ -67,6 +76,11 @@ final class WorldgenShape {
                                                                                                    BlockStateProperties.EAST, BlockStateProperties.SOUTH,
                                                                                                    BlockStateProperties.WEST})
             telling.add(Blocks.VINE.defaultBlockState().setValue(side, true));
+        // Speleothems, which tell their own kind from the other, a tip from a base, up from down.
+        for (String name : new String[] {"minecraft:pointed_dripstone", "minecraft:sulfur_spike"}) {
+            var spikes = BuiltInRegistries.BLOCK.getValue(net.minecraft.resources.Identifier.parse(name)).getStateDefinition().getPossibleStates();
+            for (int i = 0; i < spikes.size(); i += 3) telling.add(spikes.get(i));
+        }
         o.i32(telling.size());
         for (BlockState state : telling) o.i32(Block.getId(state));
         java.nio.file.Path list = WorldgenRef.out.resolve("shape_states.txt");
@@ -106,6 +120,8 @@ final class WorldgenShape {
                 Direction direction = Direction.values()[(int) ((mix.next() >>> 1) % 6)];
                 BlockPos beside = WorldgenSurvive.AT.relative(direction);
                 Ticks ticks = new Ticks();
+                ticks.has = (mix.next() & 1) != 0;
+                probe.entity = false;
                 BlockState made;
                 try {
                     made = state.updateShape(probe.level, ticks.access, WorldgenSurvive.AT, direction, beside, probe.blocks.get(beside), RandomSource.create(0L));
@@ -117,6 +133,7 @@ final class WorldgenShape {
                     WorldgenRef.problem(state + " asks for a tick somewhere else than where it stands");
                     return;
                 }
+                if (probe.entity) ticks.asked.add(1 << 21);
                 fold = WorldgenGolden.fnv(fold, Block.getId(made));
                 fold = WorldgenGolden.fnv(fold, ticks.asked.size());
                 for (int tick : ticks.asked) fold = WorldgenGolden.fnv(fold, tick);

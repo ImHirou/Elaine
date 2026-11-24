@@ -2503,15 +2503,16 @@ for them - and every placed feature of the kind tried with source after source, 
 on what the ones before left, until a dozen have written something. What a chunk rarely has
 (an iceberg: one chunk in sixteen; a blue one: one in two hundred) happens here by the dozen,
 and what was built is in the way of what follows. Every attempt writes what vanilla's writes -
-or nothing where vanilla's writes nothing - and the nine chunks end the same: 94005 attempts
-of twenty-four kinds, 1769 of them writing. Beside the placements, the golden script has whole decorations:
+or nothing where vanilla's writes nothing - and the nine chunks end the same: 166436 attempts
+of twenty-eight kinds, 1956 of them writing. Beside the placements, the golden script has whole decorations:
 with the features of one kind alone - so far ores: four areas of 4 x 4 chunks (windswept hills,
 badlands, dripstone and lush caves) - and with every feature that is ported (nineteen areas; the
 tables say which, `ported_features.txt`), the inner four chunks decorated one after the other
-in the order of a task. Of each of the features that run (404 and 4154): everything it wrote, where and
+in the order of a task. Of each of the features that run (404 and 4322): everything it wrote, where and
 what, folded into one number (on vanilla's side by sections that say what is set in them - an
 ore's raw writes too), and the long its source gives afterwards; then the sixteen chunks -
-blocks, heightmaps, marks, ticks. A feature that goes wrong is named by the test, with its chunk.
+blocks, heightmaps, marks, ticks, and the tag of every block entity as text (`Tag.toString`: a
+placeholder's `{id:"DUMMY"}`, a chest's loot table and seed). A feature that goes wrong is named by the test, with its chunk.
 
 **Held to a vanilla server** (`tools/vanilla/compare.py feature_probe`). The same replay as
 the stand's, with src/worldgen in its place (`tools/vanilla/feature_dump.cpp`: chunks made and
@@ -2519,12 +2520,15 @@ decorated in the order it is given). A world is not the same without the feature
 ported - an ore does not lie where a lake is - so vanilla's world has a data pack in which every
 feature of a biome that is not ported places nothing, under its own name: `FeatureSorter` goes
 by which features the biomes name, so the order, and with it each feature's random source,
-stays. With the 167 placed features that are ported: 352 chunks the server saved before they
-were chunks of the world, 160 with their own features and the rest with what the neighbours' put
+stays. With all 171 placed features: 355 chunks the server saved before they
+were chunks of the world, 163 with their own features and the rest with what the neighbours' put
 into them - blobs of ore, lakes, icebergs and the crowns of trees lie across the borders of
 chunks, so this is the order replayed, too - the same block for block, heightmaps, the marks in
 order, the scheduled ticks of springs, lakes and leaves in order. (Some two hundred blocks are
 left out: where a mushroom asked for the light beside a chunk the server was lighting - above.)
+`--stops=X:Z,...` takes the player to other chunks, for what is rare: around a chunk of sulfur
+caves the springs of fifteen chunks were the server's. A fossil (one chunk in sixty-four) and a
+well (one in a thousand) were in none of the chunks compared: those two are held to the jar alone.
 
 **Trees** (`tree.cpp`, `tools/mcgen/gen_trees.py`). `TreeFeature` is the largest feature there
 is, and nearly all of it is data: a trunk placer (ten types), a foliage placer (twelve), a size
@@ -2618,6 +2622,45 @@ draws them are the JVM's, all of them. Held to the jar besides: every one of the
 placed again and again (eight kinds, 2759 attempts, 237 that wrote), and the deep dark, the pale
 garden and the sulfur caves among the whole decorations.
 
+**Structure templates** (`template.cpp`, `tools/mcgen/gen_templates.py`). Four placed features
+are made of templates: the desert's well (`TemplateFeature`, three of them laid over each other),
+the two fossils (`FossilFeature`) and the sulfur spring under its roots of sulfur. A template is
+not read from the jar's `.nbt` by a reader of ours: the extractor has the game load it
+(`StructureTemplateManager`) and writes each one's blocks in the order `StructureTemplate` keeps
+them - whole blocks, then the others, then the ones with a tag, each by height - which is the
+order they are processed and set in; and `BlockState.rotate` of every state, of which the
+templates need two rows (a bone block's axis). 28 templates, 12 000 blocks.
+
+What is ported of `StructureTemplate.placeInWorld` is what these features use: one palette (and
+the draw that picks it, though there is nothing to pick), a rotation about the origin, no mirror,
+no entities. Every block goes through the processors before one is set - `block_rot` (a draw a
+block), `protected_blocks` (what is in the world stays), `rule` (the first rule that holds says
+what the block becomes; `append_loot` gives its block entity a loot table and a seed off a source
+made of the block's place) - and a fossil's blocks only within the chunks around its own. Then
+each is set: over a barrier where it carries a tag, so that whatever block entity was there is
+gone; a block that brings a source of water keeps it, one that can hold water takes what was there
+(`SimpleWaterloggedBlock.placeLiquid`), and what took none takes it from a source above or beside
+it that the template did not bring. At the end the blocks at the template's edge and their
+neighbours are told of each other (`updateShapeAtEdge`, the tree's), and every block that was set
+of all six of its own (`Block.updateFromNeighbourShapes`) - which is where a spring's potent
+sulfur becomes dry, wet or a geyser by what is above and below it, and a spike of sulfur a tip or
+a base.
+
+Two things of a chunk in the making that only these features reach: whether a tick is already
+asked for where a block stands (`ProtoChunkTicks.hasScheduledTick`: a hanging spike that is
+about to fall is left as it is - `Region::has_block_tick`), and a block entity that is *made*.
+A proto chunk has a placeholder for most block entities; `WorldGenRegion.getBlockEntity` makes
+the real one of it, and from then on the chunk saves what that one saves, even under a new
+placeholder (`ProtoChunk` asks for the entity before the tag - so does `Region::put_placeholder`).
+Potent sulfur that was no geyser and becomes one reaches for its block entity to have it count
+anew (`Region::reset_countdown`): its tag is `countdown: -1` from then on.
+
+Held to the jar: wells, fossils and springs placed again and again (three kinds, 49832 attempts,
+96 that wrote - a well is one attempt in a thousand), with the tag of every block entity; the
+rules of `updateShape` that came with them (slabs, brushable blocks, potent sulfur, speleothems:
+663 states in all, 300 worlds each, with a tick asked for or not as a draw says); the sets
+(`kSetTakesWater` by `placeLiquid` itself, in a level that says yes to everything).
+
 ### Features: one order, and the workers (`world/gen_pipeline.*`)
 
 A feature of one chunk writes into the chunks around it, and finds there what the features of
@@ -2697,24 +2740,25 @@ canyons of the carvers (`generateCarvers`).
 And of the `features` status: ores, disks, springs, lava lakes, magma, forest rocks, ice
 spikes, icebergs, blue ice, snow and ice, the plants that are one block (or two), what grows
 in a column, vines, corals, the big mushrooms, trees with what hangs on them and lies under
-them, what grows in caves - moss, dripstone, geodes, lichen, sculk - and monster rooms: 167
-of the 171 placed features of the biomes, in every chunk of a world.
+them, what grows in caves - moss, dripstone, geodes, lichen, sculk - monster rooms, and what
+is made of structure templates - the desert's well, fossils, sulfur springs: all 171 placed
+features of the biomes, in every chunk of a world.
 
 **Block entities of generation.** A feature that sets a block with a block entity leaves a
 record with the chunk it is making (`world::GenBlockEntity`): only that one is there - what
 vanilla's `{id: "DUMMY"}` says - or, where the feature fills it in, its tag as a chunk in the
 making saves it (`BlockEntity.saveWithFullMetadata`): a monster room's spawner with the mob drawn
 for it, its chests with the loot table they name and the seed drawn for each, a tree's nest with
-two or three bees and how long each has been in. The tags are held to a vanilla server's with
-the rest of a chunk (`feature_probe.py`). When the chunk arrives the game takes them over
+two or three bees and how long each has been in, the suspicious sand of a well with the loot
+table a processor gave it and a seed drawn from where it lies. The tags are held to the jar's
+(the golden test) and to a vanilla server's with the rest of a chunk (`feature_probe.py`). When the chunk arrives the game takes them over
 (`ChunkParts::made_block_entities` -> `Game::read_made_block_entities`) as it takes an imported
 world's: a chest, a furnace or a sign it can read becomes its own, anything else is kept as the
 tag and written with the chunk - so a dungeon's chest is there, with its loot table unrolled,
 until loot tables are (`a_world_of_terrain_comes_back` asks a spawner, a chest and a nest what
 they hold, before a restart and after).
 
-Not there yet: the four features made of templates - fossils above and below, the desert's
-well, a sulfur spring - and structures. Beyond those:
+Not there yet: structures. Beyond those:
 only the overworld, only the preset `normal`; an imported vanilla world does not go on with this
 generator yet.
 

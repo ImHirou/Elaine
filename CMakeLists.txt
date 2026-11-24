@@ -199,6 +199,7 @@ add_library(core STATIC
   src/worldgen/feature.cpp
   src/worldgen/tree.cpp
   src/worldgen/cave.cpp
+  src/worldgen/template.cpp
   src/worldgen/generator.cpp
   src/phys/physics.cpp
   src/item/components.cpp
@@ -229,7 +230,7 @@ if(MC_SANITIZE)
   # it timed out. Optimized, the sanitizers still see every load and store of what places features.
   set_source_files_properties(
     src/worldgen/generator.cpp src/worldgen/region.cpp src/worldgen/feature.cpp
-    src/worldgen/jmath.cpp src/worldgen/tree.cpp src/worldgen/java_hash.cpp src/worldgen/cave.cpp
+    src/worldgen/jmath.cpp src/worldgen/tree.cpp src/worldgen/java_hash.cpp src/worldgen/cave.cpp src/worldgen/template.cpp
     PROPERTIES COMPILE_OPTIONS "-O2")
   # The terrain itself - noise, density, biomes, aquifers, the surface, the carvers - is the larger part
   # by far (a chunk of features needs the terrain of 96): with the sanitizers a new world's first chunk

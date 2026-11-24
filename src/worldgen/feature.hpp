@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "base/buf.hpp"
+#include "nbt/nbt.hpp"
 #include "worldgen/java_hash.hpp"
 #include "worldgen/noise.hpp"
 #include "worldgen/region.hpp"
@@ -80,6 +81,19 @@ struct FeatureWork {
         i32 facings;
     };
     std::vector<SculkCursor> cursors;
+
+    // Structure templates (template.cpp).
+    struct TemplateBlock {  // a block of a template once the processors are through with it
+        Pos pos;
+        u16 state;    // as the template has it: not turned yet
+        bool tagged;  // it carries a tag for its block entity
+        u16 loot;     // kLootTables: what a rule gave that block entity (0: nothing)
+        i64 loot_seed;
+    };
+    std::vector<TemplateBlock> template_blocks;
+    std::vector<Pos> template_placed;  // what was set, in that order
+    std::vector<Pos> template_fill;    // toFill: what may yet take water from beside it
+    JavaHashSet template_locked;       // lockedFluids: the sources the template brought
 };
 
 // IntProvider.sample, HeightProvider.sample.
@@ -159,6 +173,8 @@ class Decorator {
     bool place_multiface_growth(const ft::Multiface& growth, FeatureRandom& random, Pos origin);
     bool place_sculk_patch(const ft::SculkPatch& patch, FeatureRandom& random, Pos origin);
     bool place_monster_room(FeatureRandom& random, Pos origin);
+    bool place_template(const ft::TemplateFeature& feature, FeatureRandom& random, Pos origin);
+    bool place_fossil(const ft::Fossil& fossil, FeatureRandom& random, Pos origin);
     friend struct TreeBuilder;  // (tree.cpp)
     u16 noise_state(const ft::NoiseProvider& provider, FeatureRandom& random, Pos at);
     i32 optional_state(const ft::Provider& provider, FeatureRandom& random, Pos at);
@@ -181,5 +197,13 @@ void place_mossy_carpet(Region& region, Pos at);
 
 // RuleTest.test: what a block state at a height is to whoever would replace it.
 bool test(const ft::Rule& rule, u32 state, i32 y);
+
+// WeightedList.getRandomOrThrow: of entries[first .. first + count), whose weights sum to `total`, the
+// row of the one a draw falls into.
+u32 pick_weighted(const ft::Entry* entries, u32 first, u32 count, i32 total, FeatureRandom& random);
+
+// What a block entity saves besides what it holds, as a chunk in the making writes it
+// (BlockEntity.saveWithFullMetadata): closes the tag.
+void end_block_entity(nbt::Writer& w, std::string_view id, Pos at);
 
 }  // namespace worldgen

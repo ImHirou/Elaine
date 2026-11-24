@@ -53,6 +53,7 @@ final class WorldgenSurvive {
         BlockState rest = Blocks.AIR.defaultBlockState();
         final TreeSet<BlockPos> asked = new TreeSet<>();
         boolean other;  // a question that is not about a block
+        boolean entity;  // the block entity of the place itself was asked for (there is none)
         Integer light;  // what getRawBrightness answers; none: that is such a question
         final LevelReader level = (LevelReader) java.lang.reflect.Proxy.newProxyInstance(
             WorldgenSurvive.class.getClassLoader(), new Class<?>[] {LevelReader.class}, this);
@@ -66,6 +67,11 @@ final class WorldgenSurvive {
                 return name.equals("getBlockState") ? state : state.getFluidState();
             }
             if (name.equals("getRawBrightness") && light != null) return light;
+            // (Its own: a block beside it may be asked for one by its shape, which is answered below.)
+            if (name.equals("getBlockEntity") && AT.equals(args[0])) {
+                entity = true;
+                return null;
+            }
             // What an interface says in terms of its other methods comes back here.
             if (method.isDefault()) return InvocationHandler.invokeDefault(proxy, method, args);
             if (method.getDeclaringClass() == Object.class) return method.invoke(this, args);

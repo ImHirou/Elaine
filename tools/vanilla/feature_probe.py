@@ -4,6 +4,8 @@
 
     feature_probe.py run [--keep=DIR]               # vanilla, the jar's own classes in its order, their diff: is the probe sound?
     feature_probe.py ported <exe> [--only=WORD,...] [--keep=DIR]   # vanilla, src/worldgen in its order, their diff
+                                                    # --stops=X:Z,X:Z: the chunks the player is taken to, where a feature is
+                                                    # rare (FEATURE_SITES=1 has the unit test of the attempts name some)
     feature_probe.py vanilla <out.json> [bot] [--ported=<exe>] [--only=WORD,...]
                                                     # runs vanilla in a world of this probe's own; what it saved, and in which order it made it
     feature_probe.py jar <out.bin> <vanilla.json>   # the jar's own classes, asked without a server, decorating in that order
@@ -482,6 +484,9 @@ def main() -> int:
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
     option = lambda name: next((a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith(f"--{name}=")), None)
     seed = int(option("seed") or SEED)
+    if option("stops"):
+        global STOPS
+        STOPS = [tuple(int(v) for v in stop.split(":")) for stop in option("stops").split(",")]
     words = [w for w in (option("only") or "").split(",") if w]
     keep = option("keep")
     if len(args) >= 2 and args[0] == "vanilla":

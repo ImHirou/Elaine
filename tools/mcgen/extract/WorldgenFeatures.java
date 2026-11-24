@@ -1094,7 +1094,7 @@ final class WorldgenFeatures {
         int states = net.minecraft.world.level.block.Block.BLOCK_STATE_REGISTRY.size();
         Map<String, Long> sets = new TreeMap<>();
         java.util.ArrayDeque<com.google.gson.JsonElement> open = new java.util.ArrayDeque<>();
-        for (String kind : new String[] {"worldgen/placed_feature", "worldgen/feature", "worldgen/block_state_provider"})
+        for (String kind : new String[] {"worldgen/placed_feature", "worldgen/feature", "worldgen/block_state_provider", "worldgen/processor_list"})
             for (var found : resources.listResources(kind, id -> id.getPath().endsWith(".json")).entrySet())
                 try (java.io.Reader reader = found.getValue().openAsReader()) {
                     open.add(com.google.gson.JsonParser.parseReader(reader));
@@ -1104,6 +1104,15 @@ final class WorldgenFeatures {
             if (e.isJsonArray()) e.getAsJsonArray().forEach(open::add);
             if (!e.isJsonObject()) continue;
             e.getAsJsonObject().asMap().values().forEach(open::add);
+            // (The blocks a structure processor names - what it leaves alone, what it lets rot: sets of states the same way.)
+            if (e.getAsJsonObject().has("processor_type"))
+                for (String blocks : new String[] {"value", "rottable_blocks"})
+                    if (e.getAsJsonObject().has(blocks)) {
+                        JsonObject same = new JsonObject();
+                        same.addProperty("type", "minecraft:matching_blocks");
+                        same.add("blocks", e.getAsJsonObject().get(blocks));
+                        open.add(same);
+                    }
             // (What a tree's trunk and roots grow through, and where its roots are muddy: sets of states the same way.)
             for (String blocks : new String[] {"can_grow_through", "muddy_roots_in", "replaceable", "root_replaceable", "replaceable_blocks", "cannot_replace",
                                                "invalid_blocks", "can_be_placed_on"})
@@ -1218,6 +1227,13 @@ final class WorldgenFeatures {
         facts.put("kSet that no feature takes the place of", state -> state.is(net.minecraft.tags.BlockTags.FEATURES_CANNOT_REPLACE));
         facts.put("kSet of the overworld's stone", state -> state.is(net.minecraft.tags.BlockTags.BASE_STONE_OVERWORLD));
         facts.put("kSet whose fluid fills the block", state -> state.getFluidState().isFull());
+        // Structure templates, and the blocks that stand in them.
+        facts.put("kSet that is waterlogged by water put into it", WorldgenFeatures::takesWater);
+        facts.put("kSet that a fluid put into it is handed to", state -> state.getBlock() instanceof net.minecraft.world.level.block.LiquidBlockContainer);
+        facts.put("kSet of speleothems", state -> state.is(net.minecraft.tags.BlockTags.SPELEOTHEMS));
+        facts.put("kSet under which potent sulfur erupts without end", state -> state.is(net.minecraft.tags.BlockTags.CAUSES_CONTINUOUS_GEYSER_ERUPTIONS));
+        facts.put("kSet under which potent sulfur erupts now and then", state -> state.is(net.minecraft.tags.BlockTags.CAUSES_PERIODIC_GEYSER_ERUPTIONS));
+        facts.put("kSet that holds no fluid, or a source of one", state -> state.getFluidState().isEmpty() || state.getFluidState().isSource());
         facts.put("kSet that holds lava", state -> state.getFluidState().is(net.minecraft.tags.FluidTags.LAVA));
         facts.put("kSet that is solid", BlockState::isSolid);
         facts.put("kSet that holds water and nothing else of a fluid", state -> state.getFluidState().isEmpty()
@@ -1363,7 +1379,7 @@ final class WorldgenFeatures {
             "minecraft:deep_dark", "minecraft:pale_garden", "minecraft:sulfur_caves"},
     };
 
-    static void chunkState(WorldgenGolden.Out o, ProtoChunk chunk) {
+    static void chunkState(WorldgenGolden.Out o, Stand stand, ProtoChunk chunk) {
         long blocks = 0xcbf29ce484222325L;
         for (int s = 0; s < chunk.getSectionsCount(); ++s) {
             var section = chunk.getSection(s);
@@ -1392,7 +1408,18 @@ final class WorldgenFeatures {
         o.i64(marks);
         o.i32(((net.minecraft.world.ticks.ProtoChunkTicks<?>) chunk.getBlockTicks()).pack(0L).size());
         o.i32(((net.minecraft.world.ticks.ProtoChunkTicks<?>) chunk.getFluidTicks()).pack(0L).size());
-        o.i32(chunk.getBlockEntitiesPos().size());
+        // The block entities, from the bottom up: where each is and the tag it saves, as text (a compound's
+        // entries by name: Tag.toString) - a placeholder's too, which is all a chunk in the making has of most.
+        List<BlockPos> entities = new ArrayList<>(chunk.getBlockEntitiesPos());
+        entities.sort(java.util.Comparator.comparingInt((BlockPos pos) -> (pos.getY() - chunk.getMinY()) << 8 | (pos.getZ() & 15) << 4 | (pos.getX() & 15)));
+        o.i32(entities.size());
+        long tags = 0xcbf29ce484222325L;
+        for (BlockPos pos : entities) {
+            tags = WorldgenGolden.fnv(tags, (pos.getY() - chunk.getMinY()) << 8 | (pos.getZ() & 15) << 4 | (pos.getX() & 15));
+            for (byte b : chunk.getBlockEntityNbtForSaving(pos, stand.world.registries()).toString().getBytes(java.nio.charset.StandardCharsets.UTF_8))
+                tags = WorldgenGolden.fnv(tags, b & 0xFF);
+        }
+        o.i64(tags);
     }
 
     /**
@@ -1475,7 +1502,7 @@ final class WorldgenFeatures {
                     ran += made.size();
                 }
                 for (int dz = 0; dz < 4; ++dz)
-                    for (int dx = 0; dx < 4; ++dx) chunkState(o, stand.terrain(x0 + dx, z0 + dz));
+                    for (int dx = 0; dx < 4; ++dx) chunkState(o, stand, stand.terrain(x0 + dx, z0 + dz));
             }
             System.err.println("worldgen: golden features: " + kind[0] + ": " + (kind.length - 2) + " areas, " + ran + " features placed");
         }
@@ -1528,6 +1555,10 @@ final class WorldgenFeatures {
         {"sculk_patch", "=minecraft:sculk_patch_deep_dark", "200", "minecraft:deep_dark"},
         {"monster_room", "=minecraft:monster_room,minecraft:monster_room_deep", "4000", "minecraft:plains", "minecraft:dripstone_caves", "minecraft:forest",
             "minecraft:jungle", "minecraft:windswept_hills"},
+        // Structure templates: the desert's well (one attempt in a thousand makes one), fossils, sulfur springs.
+        {"desert_well", "=minecraft:desert_well", "60000", "minecraft:desert"},
+        {"fossil", "=minecraft:fossil_upper,minecraft:fossil_lower", "6000", "minecraft:desert", "minecraft:swamp", "minecraft:mangrove_swamp"},
+        {"sulfur_spring", "=minecraft:rooted_sulfur_spring", "3000", "minecraft:sulfur_caves"},
         {"simple_block", "SimpleBlockFeature", "300", "minecraft:plains", "minecraft:flower_forest", "minecraft:meadow", "minecraft:forest", "minecraft:swamp",
             "minecraft:taiga", "minecraft:desert", "minecraft:jungle", "minecraft:lush_caves", "minecraft:warm_ocean", "minecraft:mushroom_fields",
             "minecraft:savanna", "minecraft:cherry_grove", "minecraft:old_growth_pine_taiga", "minecraft:sunflower_plains", "minecraft:mangrove_swamp",
@@ -1650,7 +1681,7 @@ final class WorldgenFeatures {
                 stand.region = null;
                 if (o != null)
                     for (int dz = -1; dz <= 1; ++dz)
-                        for (int dx = -1; dx <= 1; ++dx) chunkState(o, stand.terrain(cx + dx, cz + dz));
+                        for (int dx = -1; dx <= 1; ++dx) chunkState(o, stand, stand.terrain(cx + dx, cz + dz));
             }
         }
         return new int[] {wrote, tried};
@@ -1777,6 +1808,7 @@ final class WorldgenFeatures {
             collisionFull.add(net.minecraft.world.level.block.Block.stateById(id).isCollisionShapeFullBlock(
                 net.minecraft.world.level.EmptyBlockGetter.INSTANCE, BlockPos.ZERO) ? 1 : 0);
         root.add("collision_full", collisionFull);
+        templates(root, registries);
         return root;
     }
 
@@ -1803,6 +1835,92 @@ final class WorldgenFeatures {
         return out;
     }
 
+    /**
+     * The structure templates the features name, as the game holds them once they are loaded - each palette's blocks in
+     * the order StructureTemplate keeps them (whole blocks, then the others, then the ones with a block entity; each by
+     * height) with a tag as the bytes it is written as - and BlockState.rotate for every state it changes: clockwise a
+     * quarter, a half, and a quarter the other way.
+     */
+    @SuppressWarnings("unchecked")
+    static void templates(JsonObject root, RegistryAccess registries) throws Exception {
+        StructureTemplateManager manager = blank(StructureTemplateManager.class);
+        Field lister = StructureTemplateManager.class.getDeclaredField("RESOURCE_STRUCTURE_LISTER");
+        lister.setAccessible(true);
+        set(manager, "structureRepository", new ConcurrentHashMap<>());
+        set(manager, "sources", List.of(new ResourceManagerTemplateSource(DataFixers.getDataFixer(), registries.lookupOrThrow(Registries.BLOCK),
+            resources, (FileToIdConverter) lister.get(null))));
+        java.util.TreeSet<String> ids = new java.util.TreeSet<>();
+        java.util.ArrayDeque<com.google.gson.JsonElement> open = new java.util.ArrayDeque<>();
+        for (String kind : new String[] {"worldgen/placed_feature", "worldgen/feature"})
+            for (var file : resources.listResources(kind, id -> id.getPath().endsWith(".json")).entrySet())
+                try (java.io.Reader reader = file.getValue().openAsReader()) {
+                    open.add(com.google.gson.JsonParser.parseReader(reader));
+                }
+        while (!open.isEmpty()) {
+            com.google.gson.JsonElement e = open.poll();
+            if (e.isJsonArray()) e.getAsJsonArray().forEach(open::add);
+            if (!e.isJsonObject()) continue;
+            JsonObject o = e.getAsJsonObject();
+            o.asMap().values().forEach(open::add);
+            if (o.has("templates") && o.get("templates").isJsonArray())
+                for (com.google.gson.JsonElement entry : o.getAsJsonArray("templates")) ids.add(entry.getAsJsonObject().getAsJsonObject("data").get("id").getAsString());
+            for (String list : new String[] {"fossil_structures", "overlay_structures"})
+                if (o.has(list)) o.getAsJsonArray(list).forEach(id -> ids.add(id.getAsString()));
+        }
+        JsonObject out = new JsonObject();
+        for (String id : ids) {
+            var template = manager.get(net.minecraft.resources.Identifier.parse(id)).orElse(null);
+            if (template == null) {
+                WorldgenRef.problem("the structure template " + id + " is not there");
+                continue;
+            }
+            if (!((List<?>) field(template.getClass(), "entityInfoList").get(template)).isEmpty())
+                WorldgenRef.problem("the structure template " + id + " has entities: src/worldgen places none");
+            JsonObject of = new JsonObject();
+            JsonArray size = new JsonArray();
+            size.add(template.getSize().getX());
+            size.add(template.getSize().getY());
+            size.add(template.getSize().getZ());
+            of.add("size", size);
+            JsonArray palettes = new JsonArray();
+            for (Object palette : (List<Object>) field(template.getClass(), "palettes").get(template)) {
+                JsonArray blocks = new JsonArray();
+                for (var info : ((net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplate.Palette) palette).blocks()) {
+                    JsonArray block = new JsonArray();
+                    block.add(info.pos().getX());
+                    block.add(info.pos().getY());
+                    block.add(info.pos().getZ());
+                    block.add(net.minecraft.world.level.block.Block.getId(info.state()));
+                    if (info.nbt() != null) block.add(info.nbt().toString());
+                    blocks.add(block);
+                }
+                palettes.add(blocks);
+            }
+            of.add("palettes", palettes);
+            out.add(id, of);
+        }
+        root.add("templates", out);
+        JsonArray rotations = new JsonArray();
+        for (int id = 0; id < net.minecraft.world.level.block.Block.BLOCK_STATE_REGISTRY.size(); ++id) {
+            BlockState state = net.minecraft.world.level.block.Block.stateById(id);
+            int[] to = new int[3];
+            boolean changes = false;
+            net.minecraft.world.level.block.Rotation[] by = {net.minecraft.world.level.block.Rotation.CLOCKWISE_90,
+                                                             net.minecraft.world.level.block.Rotation.CLOCKWISE_180,
+                                                             net.minecraft.world.level.block.Rotation.COUNTERCLOCKWISE_90};
+            for (int r = 0; r < 3; ++r) {
+                to[r] = net.minecraft.world.level.block.Block.getId(state.rotate(by[r]));
+                changes |= to[r] != id;
+            }
+            if (!changes) continue;
+            JsonArray row = new JsonArray();
+            row.add(id);
+            for (int v : to) row.add(v);
+            rotations.add(row);
+        }
+        root.add("rotations", rotations);
+    }
+
     static java.lang.reflect.Field field(Class<?> owner, String name) throws Exception {
         java.lang.reflect.Field f = owner.getDeclaredField(name);
         f.setAccessible(true);
@@ -1818,7 +1936,7 @@ final class WorldgenFeatures {
         var ops = registries.createSerializationContext(com.mojang.serialization.JsonOps.INSTANCE);
         java.util.Set<String> seen = new java.util.HashSet<>();
         java.util.ArrayDeque<com.google.gson.JsonElement> open = new java.util.ArrayDeque<>();
-        for (String kind : new String[] {"worldgen/placed_feature", "worldgen/feature", "worldgen/block_state_provider"})
+        for (String kind : new String[] {"worldgen/placed_feature", "worldgen/feature", "worldgen/block_state_provider", "worldgen/processor_list"})
             for (var found : resources.listResources(kind, id -> id.getPath().endsWith(".json")).entrySet())
                 try (java.io.Reader reader = found.getValue().openAsReader()) {
                     open.add(com.google.gson.JsonParser.parseReader(reader));
@@ -1828,6 +1946,15 @@ final class WorldgenFeatures {
             if (e.isJsonArray()) e.getAsJsonArray().forEach(open::add);
             if (!e.isJsonObject()) continue;
             e.getAsJsonObject().asMap().values().forEach(open::add);
+            // (The blocks a structure processor names - what it leaves alone, what it lets rot: sets of states the same way.)
+            if (e.getAsJsonObject().has("processor_type"))
+                for (String blocks : new String[] {"value", "rottable_blocks"})
+                    if (e.getAsJsonObject().has(blocks)) {
+                        JsonObject same = new JsonObject();
+                        same.addProperty("type", "minecraft:matching_blocks");
+                        same.add("blocks", e.getAsJsonObject().get(blocks));
+                        open.add(same);
+                    }
             if (!e.getAsJsonObject().has("type") || !e.getAsJsonObject().has("noise") || !e.getAsJsonObject().has("seed")) continue;
             var parsed = net.minecraft.world.level.levelgen.feature.stateproviders.BlockStateProvider.DIRECT_CODEC.parse(ops, e).result();
             if (parsed.isEmpty() || !(parsed.get() instanceof net.minecraft.world.level.levelgen.feature.stateproviders.NoiseBasedStateProvider provider)) continue;
@@ -1854,6 +1981,28 @@ final class WorldgenFeatures {
                     return method.invoke(net.minecraft.world.level.EmptyBlockGetter.INSTANCE, args);
                 throw new UnsupportedOperationException(method.getName());
             });
+    }
+
+    /** SimpleWaterloggedBlock.placeLiquid, handed a source of water: does the block take it. (The method itself, in a level that says yes to everything.) */
+    static boolean takesWater(BlockState state) {
+        if (!(state.getBlock() instanceof net.minecraft.world.level.block.SimpleWaterloggedBlock block)) return false;
+        var level = (net.minecraft.world.level.LevelAccessor) java.lang.reflect.Proxy.newProxyInstance(
+            WorldgenFeatures.class.getClassLoader(), new Class<?>[] {net.minecraft.world.level.LevelAccessor.class}, (proxy, method, args) -> {
+                // (A campfire that goes out hisses and smokes: whatever else the block does with the level comes to nothing.)
+                switch (method.getName()) {
+                    case "setBlock", "setBlockAndUpdate": return true;
+                    case "getRandom": return net.minecraft.util.RandomSource.create(0L);
+                    default:
+                        Class<?> type = method.getReturnType();
+                        if (type == boolean.class) return false;
+                        if (type == int.class) return 0;
+                        if (type == long.class) return 0L;
+                        if (type == float.class) return 0f;
+                        if (type == double.class) return 0d;
+                        return null;
+                }
+            });
+        return block.placeLiquid(level, BlockPos.ZERO, state, net.minecraft.world.level.material.Fluids.WATER.getSource(false));
     }
 
     static int vineAttaches(BlockState neighbour) {

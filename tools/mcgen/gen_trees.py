@@ -46,6 +46,7 @@ PROPS = [
     ("kWallSouth", "south", ["none", "low", "tall"]),
     ("kWallWest", "west", ["none", "low", "tall"]),
     ("kCanSummon", "can_summon", ["true", "false"]),
+    ("kPotentSulfurState", "potent_sulfur_state", ["dry", "wet", "dormant", "erupting", "continuous"]),
 ]
 
 TRUNKS = {
@@ -94,6 +95,11 @@ SHAPES = {
     "BeehiveBlock": "kNone",          # (it lets its bees out beside a fire: nothing of the block changes)
     "CreakingHeartBlock": "kTick",
     "MossyCarpetBlock": "kMossyCarpet",
+    # What stands in a structure template, and at its edge (template.cpp).
+    "SlabBlock": "kWaterTick",
+    "BrushableBlock": "kTick",
+    "PotentSulfurBlock": "kPotentSulfur",
+    "SpeleothemBlock": "kSpeleothem",
 }
 # Which of them ask BlockState.canSurvive.
 SHAPES_THAT_SURVIVE = {"kSurviveOrAir", "kDoublePlant", "kSeagrass", "kCocoa", "kShelfMushroom", "kMangrovePropagule", "kSurviveOrTick",

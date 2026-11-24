@@ -23,9 +23,15 @@ i32 wrapping_add(i32 a, i32 b) { return static_cast<i32>(static_cast<u32>(a) + s
 // Mth.nextInt(random, min, max): nothing is drawn where there is nothing to choose.
 i32 next_between(FeatureRandom& random, i32 min, i32 max) { return min >= max ? min : random.next_int(max - min + 1) + min; }
 
-// WeightedList.getRandomOrThrow: the entry a draw below the sum of the weights falls into.
 template <usize N>
 u32 pick(const ft::Entry (&entries)[N], u32 first, u32 count, i32 total, FeatureRandom& random) {
+    return pick_weighted(entries, first, count, total, random);
+}
+
+}  // namespace
+
+// WeightedList.getRandomOrThrow: the entry a draw below the sum of the weights falls into.
+u32 pick_weighted(const ft::Entry* entries, u32 first, u32 count, i32 total, FeatureRandom& random) {
     i32 selection = random.next_int(total);
     for (u32 i = first; i < first + count; ++i) {
         selection -= entries[i].weight;
@@ -34,8 +40,6 @@ u32 pick(const ft::Entry (&entries)[N], u32 first, u32 count, i32 total, Feature
     DCHECK(false);
     return entries[first].value;
 }
-
-}  // namespace
 
 i32 sample(const ft::Int& p, FeatureRandom& random) {
     switch (p.op) {
@@ -354,6 +358,8 @@ bool Decorator::place_feature(u32 feature, FeatureRandom& random, Pos at) {
         case ft::FeatureType::kMultifaceGrowth: return place_multiface_growth(ft::kMultifaces[f.a], random, at);
         case ft::FeatureType::kSculkPatch: return place_sculk_patch(ft::kSculkPatches[f.a], random, at);
         case ft::FeatureType::kMonsterRoom: return place_monster_room(random, at);
+        case ft::FeatureType::kTemplate: return place_template(ft::kTemplateFeatures[f.a], random, at);
+        case ft::FeatureType::kFossil: return place_fossil(ft::kFossils[f.a], random, at);
     }
     return false;
 }
