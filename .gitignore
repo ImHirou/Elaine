@@ -22,6 +22,7 @@ perf.data*
 
 # Per-user tool state
 /.claude/settings.local.json
+/.claude/worktrees/
 /.idea/
 /.vscode/
 .obsidian/
