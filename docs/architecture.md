@@ -2292,10 +2292,12 @@ blocks out and then finer around the best, a place's distance from the middle co
 it (`spawn_origin`; the block it picks is held to the jar for a handful of seeds). From that
 chunk `MinecraftServer.setInitialSpawn` goes round in a spiral, five chunks out, for the first
 column whose top is ground and no water's bed, with a block to stand on
-(`PlayerSpawnFinder.getSpawnPosInChunk`: `find_world_spawn`, which makes the terrain of the
-chunks it looks at). That is asked once, when a world of terrain is opened without a spawn, and
-kept in world.json. Vanilla asks chunks that have their features, so until those are here the
-block may differ - a tree's leaves are a place to stand, to vanilla.
+(`PlayerSpawnFinder.getSpawnPosInChunk`: `Game::find_spawn`, `worldgen::spawn_in_chunk`). The
+chunks it looks at are the world's own, loaded as any chunk is - with their trees, as vanilla's
+are: a tree's leaves are a place to stand, and a world may well begin on top of one. That is
+asked once, when the game first runs a world of terrain that has no spawn, and kept in
+world.json. (The generator only says where to begin looking - `ChunkGenerator::spawn_origin`;
+the search needs chunks that are finished, and those are the dimension's to make.)
 
 ### Features: what a decoration is, before any is ported
 
@@ -2501,12 +2503,12 @@ for them - and every placed feature of the kind tried with source after source, 
 on what the ones before left, until a dozen have written something. What a chunk rarely has
 (an iceberg: one chunk in sixteen; a blue one: one in two hundred) happens here by the dozen,
 and what was built is in the way of what follows. Every attempt writes what vanilla's writes -
-or nothing where vanilla's writes nothing - and the nine chunks end the same: 88676 attempts
-of fifteen kinds, 1340 of them writing. Beside the placements, the golden script has whole decorations:
+or nothing where vanilla's writes nothing - and the nine chunks end the same: 91066 attempts
+of sixteen kinds, 1523 of them writing. Beside the placements, the golden script has whole decorations:
 with the features of one kind alone - so far ores: four areas of 4 x 4 chunks (windswept hills,
-badlands, dripstone and lush caves) - and with every feature that is ported (six areas; the
+badlands, dripstone and lush caves) - and with every feature that is ported (sixteen areas; the
 tables say which, `ported_features.txt`), the inner four chunks decorated one after the other
-in the order of a task. Of each of the features that run (404 and 1110): everything it wrote, where and
+in the order of a task. Of each of the features that run (404 and 3176): everything it wrote, where and
 what, folded into one number (on vanilla's side by sections that say what is set in them - an
 ore's raw writes too), and the long its source gives afterwards; then the sixteen chunks -
 blocks, heightmaps, marks, ticks. A feature that goes wrong is named by the test, with its chunk.
@@ -2517,12 +2519,64 @@ decorated in the order it is given). A world is not the same without the feature
 ported - an ore does not lie where a lake is - so vanilla's world has a data pack in which every
 feature of a biome that is not ported places nothing, under its own name: `FeatureSorter` goes
 by which features the biomes name, so the order, and with it each feature's random source,
-stays. With the 125 placed features that are ported: 352 chunks the server saved before they
+stays. With the 150 placed features that are ported: 352 chunks the server saved before they
 were chunks of the world, 160 with their own features and the rest with what the neighbours' put
-into them - blobs of ore, lakes and icebergs lie across the borders of chunks, so this is the
-order replayed, too - the same block for block, heightmaps, the marks in order, the scheduled
-ticks of springs and lakes in order. (Some two hundred blocks are left out: where a mushroom
-asked for the light beside a chunk the server was lighting - above.)
+into them - blobs of ore, lakes, icebergs and the crowns of trees lie across the borders of
+chunks, so this is the order replayed, too - the same block for block, heightmaps, the marks in
+order, the scheduled ticks of springs, lakes and leaves in order. (Some two hundred blocks are
+left out: where a mushroom asked for the light beside a chunk the server was lighting - above.)
+
+**Trees** (`tree.cpp`, `tools/mcgen/gen_trees.py`). `TreeFeature` is the largest feature there
+is, and nearly all of it is data: a trunk placer (ten types), a foliage placer (twelve), a size
+that says how much room the tree needs, a root placer for the mangrove, and decorators (eleven:
+bee nests, cocoa, vines on leaves and on logs, podzol round a big spruce, leaf litter, the
+propagules of a mangrove, shelf mushrooms). Each type is a function written from its class, and
+a tree is a row that names them with their numbers; `FallenTreeFeature` - a stump and the log
+beside it - shares the decorators. Three things about a tree are not what they look like:
+
+- *The order of a hash set is part of the tree.* `TreeFeature.place` keeps what it set in four
+  `HashSet<BlockPos>`: roots, trunk, leaves, decorations. A decorator is handed the logs and the
+  leaves as lists - the sets' order, then sorted by height, which keeps the order of blocks that
+  are level - and draws for each: which leaf gets a vine, which log a cocoa pod, follows from
+  the order a Java `HashSet` iterates in. That is no order one could name: by bucket of the
+  position's hash, in a bucket by arrival, in a table that doubles - and a bucket that grows
+  past eight becomes a red-black tree whose order is the tree's doing (a new node stands behind
+  its parent, the root is moved to the front), which a crown of a few hundred leaves does reach.
+  `worldgen::JavaHashSet` (`java_hash.*`) is that order, written from how OpenJDK's `HashMap`
+  behaves - not from its source - and held to a JVM by scripts: 800 of them, positions put in,
+  the first taken out, the order read, half of them crowding a few buckets so that buckets
+  become trees, are split by a growing table and shrink again.
+- *A leaf's distance is whatever `updateLeaves` leaves it at.* After the decorators the tree
+  counts how far each leaf is from a log, outwards from the logs: seven sets, a leaf taken off
+  the nearest set that has any, its neighbours put into the next. A leaf that is still waiting
+  in its set when a neighbour of the same distance is taken is put into the next set *as
+  well*, and when it comes off that one its distance is set again - to one more than it is.
+  Which of two leaves that touch ends up the farther one is decided by which came off the set
+  first: by the hash set's order, again, and by an element taken out through an iterator (which
+  leaves a bucket's tree as it is, however small). So a generated tree has leaves whose
+  distance is "wrong" - vanilla's are the same wrong, and a leaf at the tree's edge asks for a
+  tick that will put it right.
+- *The tree tells its neighbours.* The last thing a tree does is
+  `StructureTemplate.updateShapeAtEdge`: every face between a block of the tree and a block
+  that is not, each told of the other (`BlockState.updateShape`). A leaf asks for a tick, water
+  beside a mangrove's root is asked to flow, the grass a trunk took the snow off stops being
+  snowy, the upper half of a fern whose lower half became a leaf goes. A hundred classes have
+  that method; which a block has is a table (gamedata's owner of the hook), and the classes
+  that can stand beside a tree in a world of terrain have a rule in `shape.hpp` - twenty of
+  them. Each rule is held to the method itself: 231 states, told of a neighbour in 300 worlds
+  drawn at random each, become what vanilla's become and ask for the same ticks. A class
+  without a rule is not guessed at: the call is counted (`Region::Counts::unported_shapes`),
+  and the tests and the probe hold the count at nothing.
+
+`Math.sin` comes in once more (the limbs of a big oak leave the trunk at an angle that is twice
+a float, as a double, times pi): another domain of `WorldgenMath.java`, all 2^24 of its angles
+the JVM's. A bee nest is the first block entity a feature fills in - two or three bees, each so
+long in the hive; the tag is written as a chunk in the making saves it, and does not reach the
+game yet (the nest stands empty there). Held to the jar: every placed feature of trees there
+is, in 24 places - forests of every kind, the mangrove swamp, the cherry grove, the dappled
+forest - placed again and again on what the attempts before left, 183 attempts that wrote; and
+whole decorations of sixteen areas, ten of them wooded. Not ported: the two trees of the pale
+garden, whose decorator places a patch of moss (a feature of the caves' kind).
 
 ### Features: one order, and the workers (`world/gen_pipeline.*`)
 
@@ -2592,7 +2646,7 @@ polls and sweeps in an order drawn at random. The same through a `Dimension` wit
 goes on). And `a_world_is_the_same_whoever_makes_it`: two servers of one seed, one with three
 workers and one with all there are, send their clients the same bytes. The task itself - the
 generator's `decorate` over an area of real terrain - is held to the jar's classes with the
-decorations above ("ported": six areas, 1110 features).
+decorations above ("ported": sixteen areas, 3176 features).
 
 ### What is there, and what is not
 
@@ -2602,11 +2656,12 @@ canyons of the carvers (`generateCarvers`).
 
 And of the `features` status: ores, disks, springs, lava lakes, magma, forest rocks, ice
 spikes, icebergs, blue ice, snow and ice, the plants that are one block (or two), what grows
-in a column, vines, corals and the big mushrooms - 125 of the 171 placed features of the
-biomes, in every chunk of a world.
+in a column, vines, corals, the big mushrooms, and trees with what hangs on them and lies
+under them - 150 of the 171 placed features of the biomes, in every chunk of a world.
 
-Not there yet: trees; the moss, dripstone, sculk and geodes of caves; fossils and the other
-features made of templates; monster rooms; and structures. Where a world begins is still looked for on bare terrain. Beyond those:
+Not there yet: the moss, dripstone, sculk and geodes of caves, and the pale garden's trees;
+fossils and the other features made of templates; monster rooms; what a block entity the
+generator made holds; and structures. Beyond those:
 only the overworld, only the preset `normal`; an imported vanilla world does not go on with this
 generator yet.
 

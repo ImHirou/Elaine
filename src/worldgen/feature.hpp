@@ -24,6 +24,8 @@
 #include <span>
 #include <vector>
 
+#include "base/buf.hpp"
+#include "worldgen/java_hash.hpp"
 #include "worldgen/region.hpp"
 
 #include PROTO_GEN_WORLDGEN_FEATURES_HPP
@@ -42,6 +44,28 @@ struct FeatureWork {
     std::vector<u16> waiting_at;  // ...and which (modifierIndices)
     std::vector<Pos> made;        // modifiedPositions: what the placement at hand made
     std::vector<u64> tested;      // OreFeature.doPlace: the blocks of its box an ore has looked at
+
+    // A tree (tree.cpp). What it set, as TreeFeature.place keeps it - in sets with a Java HashSet's order...
+    JavaHashSet roots, trunks, foliage, decorations;
+    JavaHashSet to_check[7];  // updateLeaves: the leaves still to be given their distance, a set a distance
+    JavaHashSet blacklist;    // AttachedToLeavesDecorator: where nothing more is hung
+    JavaHashSet fallen;       // FallenTreeFeature: the log that lies
+    // ...and as its decorators are handed it (TreeDecorator.Context): lists by height.
+    std::vector<Pos> logs, leaves, root_list;
+    std::vector<Pos> list;  // whatever a placer or a decorator makes a list of
+    struct Attachment {     // FoliagePlacer.FoliageAttachment: where a trunk wants leaves
+        i32 x, y, z;
+        i32 radius_offset;
+        bool double_trunk;
+    };
+    std::vector<Attachment> attachments;
+    struct Limb {  // FancyTrunkPlacer.FoliageCoords
+        Pos pos;
+        i32 branch_base;
+    };
+    std::vector<Limb> fancy;
+    std::vector<u64> shape;  // the blocks of the tree, a bit a block of its box (BitSetDiscreteVoxelShape)
+    base::ByteBuf tag;       // a block entity's tag while it is written (a nest's bees)
 };
 
 // IntProvider.sample, HeightProvider.sample.
@@ -110,6 +134,9 @@ class Decorator {
     bool place_coral_tree(u32 block, FeatureRandom& random, Pos origin);
     bool place_coral_claw(u32 block, FeatureRandom& random, Pos origin);
     bool place_huge_mushroom(const ft::Mushroom& mushroom, bool red, FeatureRandom& random, Pos origin);
+    bool place_tree(const ft::Tree& tree, FeatureRandom& random, Pos origin);
+    bool place_fallen_tree(const ft::FallenTree& fallen, FeatureRandom& random, Pos origin);
+    friend struct TreeBuilder;  // (tree.cpp)
     u16 noise_state(const ft::NoiseProvider& provider, FeatureRandom& random, Pos at);
     i32 optional_state(const ft::Provider& provider, FeatureRandom& random, Pos at);
     u16 state_of(const ft::Provider& provider, FeatureRandom& random, Pos at);

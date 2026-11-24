@@ -117,7 +117,8 @@ final class WorldgenSurvive {
         }
         // ...and what features place by name in their code, where a block asks whether it can stay.
         for (Block block : new Block[] {Blocks.BAMBOO, Blocks.BAMBOO_SAPLING, Blocks.VINE, Blocks.SNOW, Blocks.KELP, Blocks.KELP_PLANT, Blocks.SEAGRASS,
-                                        Blocks.TALL_SEAGRASS, Blocks.SEA_PICKLE, Blocks.COCOA, Blocks.BROWN_MUSHROOM, Blocks.RED_MUSHROOM})
+                                        Blocks.TALL_SEAGRASS, Blocks.SEA_PICKLE, Blocks.COCOA, Blocks.BROWN_MUSHROOM, Blocks.RED_MUSHROOM,
+                                        Blocks.SHELF_MUSHROOM, Blocks.MANGROVE_PROPAGULE, Blocks.CACTUS, Blocks.SUGAR_CANE})
             found.put(BuiltInRegistries.BLOCK.getKey(block).toString(), block);
         return new ArrayList<>(found.values());
     }

@@ -63,6 +63,7 @@ class Region {
     // What happened that vanilla's features do not do (and what a stand reports).
     struct Counts {
         u64 far_reads = 0, refused_writes = 0, far_marks = 0, far_ticks = 0, outside_height = 0;
+        u64 unported_shapes = 0;  // BlockState.updateShape of a class worldgen/shape.hpp has no rule for
     };
 
     // `chunks`: width * depth of them, by x + z * width, the first at (x0, z0); at most
@@ -83,6 +84,7 @@ class Region {
     i32 center_z() const { return center_z_; }
     const Overworld& world() const { return world_; }
     const Counts& counts() const { return counts_; }
+    void note_unported_shapes(u64 count) { counts_.unported_shapes += count; }
 
     static constexpr i32 kMinY = settings::kMinY, kHeight = settings::kHeight;
     static bool outside_height(i32 y) { return static_cast<u32>(y - kMinY) >= static_cast<u32>(kHeight); }

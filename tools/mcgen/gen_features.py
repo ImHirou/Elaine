@@ -29,6 +29,7 @@ import struct
 from mcgen import die, vdir
 
 import worldgen
+from gen_trees import TreeTables, emit_trees
 
 HEIGHTMAPS = ["WORLD_SURFACE_WG", "WORLD_SURFACE", "OCEAN_FLOOR_WG", "OCEAN_FLOOR", "MOTION_BLOCKING", "MOTION_BLOCKING_NO_LEAVES"]
 DIRECTIONS = ["down", "up", "north", "south", "west", "east"]
@@ -44,10 +45,11 @@ PORTED_FEATURES = {
     "blue_ice": "kBlueIce", "spike": "kSpike", "iceberg": "kIceberg", "freeze_top_layer": "kFreezeTopLayer",
     "simple_block": "kSimpleBlock", "block_column": "kBlockColumn", "bamboo": "kBamboo", "vines": "kVines",
     "coral_tree": "kCoralTree", "coral_claw": "kCoralClaw", "huge_brown_mushroom": "kHugeBrownMushroom", "huge_red_mushroom": "kHugeRedMushroom",
+    "tree": "kTree", "fallen_tree": "kFallenTree",
 }
 # ...and the types of the overworld that wait for theirs. A type in neither list stops the run.
 UNPORTED_FEATURES = {
-    "tree", "template", "fallen_tree", "vegetation_patch", "speleothem", "multiface_growth", "fossil", "speleothem_cluster", "root_system",
+    "template", "vegetation_patch", "speleothem", "multiface_growth", "fossil", "speleothem_cluster", "root_system",
     "geode", "monster_room", "large_dripstone", "waterlogged_vegetation_patch", "sculk_patch",
 }
 # BlockStateProvider types that wait for theirs: none of the overworld's now.
@@ -104,6 +106,8 @@ class StateSets:
         import gamedata as _gamedata
         amounts = [f["amount"] for f in _gamedata.load(version, "fluids")["states"]]
         self.facts["fluid_full"] = column(amounts[f] == 8 for f in sturdy["columns"]["fluid_state"])
+        sources = [f["source"] for f in _gamedata.load(version, "fluids")["states"]]
+        self.facts["fluid_source"] = column(sources[f] for f in sturdy["columns"]["fluid_state"])
         self.kept: list[int] = []
         self.sources: list[str] = []   # of each: the predicate it was first made of, as the jar writes it
         self.index: dict[int, int] = {}
@@ -181,9 +185,10 @@ class Pool:
         return first
 
 
-class FeatureTables:
+class FeatureTables(TreeTables):
     def __init__(self, version: str, vanilla, blocks, settings: dict):
-        self.vanilla, self.blocks = vanilla, blocks
+        self.vanilla, self.blocks, self.version = vanilla, blocks, version
+        self.init_trees()
         self.sets = StateSets(version, vanilla, blocks)
         self.min_y, self.height = settings["noise"]["min_y"], settings["noise"]["height"]
         self.biome_ids = {name: i for i, name in enumerate(vanilla.entries("worldgen/biome"))}
@@ -968,6 +973,12 @@ class FeatureTables:
                 self.simple_blocks.rows.append((state, rule, *self.double_plant(state)))
             parts = parts and has
             row = ("kSimpleBlock", provider, first | (len(self.simple_blocks.rows) - first) << 20, int(bool(value.get("schedule_tick", False))))
+        elif kind == "tree":
+            row, has = self.tree(value)
+            parts = parts and has
+        elif kind == "fallen_tree":
+            row, has = self.fallen_tree(value)
+            parts = parts and has
         else:
             die(f"gen_features: {kind} is listed as ported and has no table")
         self.nested.update(uses)
@@ -977,6 +988,7 @@ class FeatureTables:
 
 def emit(hdr: str, version: str, vanilla, blocks, settings: dict) -> dict:
     t = FeatureTables(version, vanilla, blocks, settings)
+    t.make_shapes()
     order = t.order
     if len(order["steps"]) != len(STEPS):
         die(f"gen_features: {len(order['steps'])} decoration steps: GenerationStep.Decoration had {len(STEPS)}")
@@ -1065,11 +1077,11 @@ struct Modifier {
 // if it can stay; with a tick asked for if c. kBlockColumn: kColumns[a]. kBamboo: kBamboos[a]. kVines:
 // one of kProviderStates[a .. a + 5), a vine on the side up, north, south, west, east. kCoralTree,
 // kCoralClaw: of the placed feature a, block by block. kHugeBrownMushroom, kHugeRedMushroom:
-// kMushrooms[a]. kUnported: a type that waits for its code.
+// kMushrooms[a]. kTree: kTrees[a]. kFallenTree: kFallenTrees[a]. kUnported: a type that waits for its code.
 enum class FeatureType : u8 {
     kUnported, kNoOp, kRandomSelector, kSimpleRandomSelector, kWeightedRandomSelector, kRandomBooleanSelector, kSequence, kOverlay,
     kOre, kDisk, kUnderwaterMagma, kBlockBlob, kSpring, kLake, kBlueIce, kSpike, kIceberg, kFreezeTopLayer, kSimpleBlock,
-    kBlockColumn, kBamboo, kVines, kCoralTree, kCoralClaw, kHugeBrownMushroom, kHugeRedMushroom,
+    kBlockColumn, kBamboo, kVines, kCoralTree, kCoralClaw, kHugeBrownMushroom, kHugeRedMushroom, kTree, kFallenTree,
 };
 struct Feature {
     FeatureType type;
@@ -1320,6 +1332,7 @@ struct Placed {
                + ", ".join(f"{{{a}, {b}, {'true' if c else 'false'}, {d}, {e}, {f}}}" for a, b, c, d, e, f in t.springs.rows) + "};\n")
     out.append(f"inline constexpr Lake kLakes[{max(1, len(t.lakes.rows))}] = {{"
                + ", ".join("{" + ", ".join(map(str, row)) + "}" for row in t.lakes.rows) + "};\n")
+    emit_trees(t, out)
     # What feature.cpp asks of a state by name: sets like any other, each with a name of its own.
     sets = t.sets
     code = {"kSetLiquid": sets.facts["liquid"], "kSetSnowSurvivesOn": sets.facts["snow_survives_on"],
@@ -1327,6 +1340,27 @@ struct Placed {
             "kSetMushroomGrowsThrough": sets.facts["air"] | sets.block_tag("minecraft:replaceable_by_mushrooms"),
             "kSetMushroomHasRoomIn": sets.facts["air"] | sets.block_tag("minecraft:leaves")}
     names = {"kSetMushroomGrowsThrough": "kSet a big mushroom grows through", "kSetMushroomHasRoomIn": "kSet a big mushroom has room in"}
+    # Trees (tree.cpp) and the block updates at their edges (shape.hpp).
+    tag = lambda name: sets.block_tag("minecraft:" + name)
+    for name, words, bits in (
+        ("kSetTreeGrowsThrough", "a tree grows through", sets.facts["air"] | tag("replaceable_by_trees")),            # TreeFeature.validTreePos
+        ("kSetLogs", "of logs", tag("logs")),
+        ("kSetAirOrLeaves", "a big mushroom has room in", sets.facts["air"] | tag("leaves")),                        # TreeFeature.isAirOrLeaves
+        ("kSetKeepsLeaves", "that keeps leaves from decaying", tag("prevents_nearby_leaf_decay")),                    # LeavesBlock.getOptionalDistanceAt
+        ("kSetSnowySetting", "that makes the ground under it snowy", tag("snow")),                                  # SnowyBlock.isSnowySetting
+        ("kSetSolidRender", "of whole blocks that let no light through", sets.facts["solid_render"]),
+        ("kSetReplaceable", "that gives way to a block placed", sets.facts["replaceable"]),                          # BlockState.canBeReplaced()
+        ("kSetHoldsWater", "that holds water", sets.fluids_in("#minecraft:water")),                                   # FluidState.is(FluidTags.WATER)
+        ("kSetWaterSource", "that holds a source of water", sum(1 << i for i, f in enumerate(sets.fluid_of) if sets.fluid_names[f] == "minecraft:water")),
+        ("kSetFluidSource", "whose fluid is a source", sets.facts["fluid_source"]),                                  # FluidState.isSource()
+        ("kSetBubbleColumnBelow", "a column of bubbles rises from", tag("enables_bubble_column_drag_down") | tag("enables_bubble_column_push_up")),
+        ("kSetBubbleColumnIn", "a column of bubbles takes the place of",                                              # LiquidBlock.shouldBubbleColumnOccupy
+         sets.fluids_in("#minecraft:bubble_column_can_occupy") & sets.facts["fluid_source"] & sets.facts["fluid_full"]),
+        ("kSetPaleOakLogs", "of pale oak logs", tag("pale_oak_logs")),
+        ("kSetSturdyUp", "with a whole face on top", sets.facts["sturdy_up"]),                                       # BlockState.isFaceSturdy(.., UP)
+    ):
+        code[name] = bits
+        names[name] = "kSet " + words
     out.append("\n// Sets of block states that src/worldgen/feature.cpp asks about by name: BlockState.liquid(); what a\n"
                "// layer of snow may lie on (SnowLayerBlock.canSurvive, asked of the state below); and - a set a\n"
                "// direction, by its ordinal - whether BlockState.getFaceOcclusionShape(direction) is a whole face.\n")

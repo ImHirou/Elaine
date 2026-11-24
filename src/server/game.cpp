@@ -35,8 +35,42 @@ constexpr u64 kClientLoadTimeoutTicks = 60;
 constexpr proto::gen::dimension::Type kOverworldType = proto::gen::dimension::kTypes[reg::dimension_type::kOverworld];
 }  // namespace
 
+// MinecraftServer.setInitialSpawn, for a world whose generator says where it begins (a world of
+// terrain) and that has no spawn yet: the chunk the generator names, then the ones around it in a
+// spiral five chunks out, until one has a block to stand on (PlayerSpawnFinder.getSpawnPosInChunk) -
+// and where none has, the middle of the first at the generator's height. The chunks are the
+// world's own, as they are made: with their trees. Asked once; the world has its spawn from then on.
+void Game::find_spawn() {
+    i32 origin_x = 0, origin_z = 0;
+    if (!generator_.spawn_origin(origin_x, origin_z)) return;
+    const i32 cx = origin_x >> 4, cz = origin_z >> 4;
+    info_.spawn[0] = cx * 16 + 8;
+    info_.spawn[1] = generator_.spawn_height();
+    info_.spawn[2] = cz * 16 + 8;
+    i32 dx = 0, dz = 0, step_x = 0, step_z = -1;
+    for (i32 i = 0; i < 11 * 11; ++i) {
+        if (dx >= -5 && dx <= 5 && dz >= -5 && dz <= 5) {
+            const i32 x0 = (cx + dx) * 16, z0 = (cz + dz) * 16;
+            world_.load(cx + dx, cz + dz);
+            if (worldgen::spawn_in_chunk(
+                    cx + dx, cz + dz, [&](i32 x, i32 y, i32 z) { return world_.block(x0 + x, y, z0 + z); }, info_.spawn))
+                break;
+        }
+        if (dx == dz || (dx < 0 && dx == -dz) || (dx > 0 && dx == 1 - dz)) {
+            const i32 old = step_x;
+            step_x = -step_z;
+            step_z = old;
+        }
+        dx += step_x;
+        dz += step_z;
+    }
+    info_.has_spawn = true;
+    LOG_INFO("the world begins at %d, %d, %d", info_.spawn[0], info_.spawn[1], info_.spawn[2]);
+    save_time();  // (world.json: the spawn is the world's from now on)
+}
+
 Game::Game(const Settings& s, std::vector<std::unique_ptr<net::Reactor>>& reactors, std::atomic<u32>& online, Console* console,
-           const WorldInfo& world, base::Workers& workers)
+           WorldInfo& world, base::Workers& workers)
     : s_(s),
       reactors_(reactors),
       online_(online),
@@ -65,13 +99,14 @@ Game::Game(const Settings& s, std::vector<std::unique_ptr<net::Reactor>>& reacto
     sky_darken_ = sky_darken(clocks_[reg::world_clock::kOverworld].total_ticks);
     world_.set_time(time_);
     world_.keep_adopted(true);
+    if (!info_.has_spawn) find_spawn();
     // Where players appear: on top of what stands at the world's spawn (the chunk is read for
     // it, once, here), or where the world says when nothing stands there.
-    const i32 sx = world.has_spawn ? world.spawn[0] : 8, sz = world.has_spawn ? world.spawn[2] : 8;
+    const i32 sx = info_.has_spawn ? info_.spawn[0] : 8, sz = info_.has_spawn ? info_.spawn[2] : 8;
     const world::Chunk& at_spawn = world_.load(sx >> 4, sz >> 4);
     const u32 top = at_spawn.motion_blocking.get(static_cast<u32>(sx & 15) + static_cast<u32>(sz & 15) * 16);
     spawn_[0] = sx + 0.5;
-    spawn_[1] = top ? world_.min_y() + static_cast<i32>(top) : world.has_spawn ? world.spawn[1] : generator_.spawn_height();
+    spawn_[1] = top ? world_.min_y() + static_cast<i32>(top) : info_.has_spawn ? info_.spawn[1] : generator_.spawn_height();
     spawn_[2] = sz + 0.5;
     pump_chunks(0);  // (what the spawn chunk holds of the game's)
     pcx_.reserve(s.max_players);

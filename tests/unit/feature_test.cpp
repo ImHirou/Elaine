@@ -17,7 +17,9 @@
 #include "world/gen_chunk.hpp"
 #include "worldgen/feature.hpp"
 #include "worldgen/generator.hpp"
+#include "worldgen/java_hash.hpp"
 #include "worldgen/jmath.hpp"
+#include "worldgen/shape.hpp"
 #include "worldgen/survive.hpp"
 
 using namespace worldgen;
@@ -98,6 +100,12 @@ struct Script {
                 in.skip(9 * 40);
             }
         }
+    }
+    void skip_hash_sets() { in.skip(usize{in.num<u32>()} * 8); }
+    void skip_shapes() {
+        in.skip(usize{in.num<u32>()} * 4);
+        const u32 states = in.num<u32>();
+        in.skip(4 + usize{states} * 13);
     }
     void skip_survive() {
         in.skip(usize{in.num<u32>()} * 4);
@@ -372,6 +380,7 @@ TEST(WorldgenFeature, DecorationsAreVanillas) {
             }
             EXPECT_EQ(region.counts().far_reads, 0u);
             EXPECT_EQ(region.counts().refused_writes, 0u);
+            EXPECT_EQ(region.counts().unported_shapes, 0u) << name;
             region.commit();
             // The same area as one step of the generator's own - a worker's task: the same chunks.
             std::vector<std::unique_ptr<world::GenChunk>> again;
@@ -482,6 +491,8 @@ TEST(WorldgenFeature, FeaturesPlacedAgainAndAgainAreVanillas) {
                 ASSERT_EQ(writers, 0u);
             }
             EXPECT_EQ(region.counts().far_reads, 0u);
+            // (No block at the edge of a tree was of a class whose updateShape is not ported.)
+            EXPECT_EQ(region.counts().unported_shapes, 0u) << name << " at chunk " << cx << ", " << cz;
             region.commit();
             for (const world::GenChunk* c : nine) expect_chunk(in, *c, name);
         }
@@ -559,6 +570,181 @@ TEST(WorldgenFeature, BlocksStayWhereVanillasWould) {
     (void)waiting;
 }
 
+// The rules of BlockState.updateShape (shape.hpp), each held to the method itself in worlds drawn at
+// random: a few states of every block that has a rule, told of a neighbour in some direction - what
+// the state becomes, and which ticks it asks for.
+TEST(WorldgenFeature, BlocksTakeTheShapeVanillasWould) {
+    Script s;
+    s.skip_ints();
+    s.skip_heights();
+    s.skip_sets();
+    s.skip_placements();
+    s.skip_decorations();
+    s.skip_attempts();
+    s.skip_survive();
+    In& in = s.in;
+    struct Mix {  // (SplitMix64: the same numbers as WorldgenSurvive.Mix)
+        u64 x;
+        u64 next() {
+            x += 0x9E3779B97F4A7C15ull;
+            u64 z = x;
+            z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+            z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+            return z ^ (z >> 31);
+        }
+    };
+    struct Cells {
+        u16 cell[45], rest;
+        i32 light;
+        std::vector<u32> ticks;
+        bool elsewhere = false;
+        u16 block(i32 x, i32 y, i32 z) const {
+            if (x < -1 || x > 1 || y < -2 || y > 2 || z < -1 || z > 1) return rest;
+            return cell[((x + 1) * 5 + (y + 2)) * 3 + (z + 1)];
+        }
+        i32 raw_brightness(i32, i32, i32) const { return light; }
+        void schedule_tick(i32 x, i32 y, i32 z, u32 type, bool fluid, i32 = 0) {
+            elsewhere |= x != 0 || y != 0 || z != 0;
+            ticks.push_back((fluid ? 1u << 20 : 0u) | type);
+        }
+    };
+    std::vector<u16> telling(in.num<u32>());
+    for (u16& state : telling) state = static_cast<u16>(in.num<i32>());
+    const u32 states = in.num<u32>(), trials = in.num<u32>();
+    ASSERT_GT(states, 100u);
+    const u32 all = proto::gen::block::kStateCount;
+    u32 held = 0;
+    for (u32 n = 0; n < states; ++n) {
+        const u32 id = static_cast<u32>(in.num<i32>());
+        const bool said = in.num<u8>() != 0;
+        const u64 want = in.num<u64>();
+        if (!said) continue;
+        const world::BlockInfo& info = world::block_info_of(static_cast<u16>(id));
+        Cells level;
+        u64 fold = kFnv, unported = 0;
+        for (u32 trial = 0; trial < trials; ++trial) {
+            Mix mix{u64{id} * 1000003ull + trial};
+            const auto pick = [&]() {
+                const u64 r = mix.next();
+                const u32 kind = static_cast<u32>(r & 3);
+                const u64 at = r >> 2;
+                return static_cast<u16>(kind == 0   ? info.first_state + at % info.state_count
+                                        : kind == 3 ? at % all
+                                                    : telling[at % telling.size()]);
+            };
+            level.light = (mix.next() & 1) != 0 ? 15 : 0;
+            level.rest = pick();
+            for (i32 dx = -1; dx <= 1; ++dx)
+                for (i32 dy = -2; dy <= 2; ++dy)
+                    for (i32 dz = -1; dz <= 1; ++dz) level.cell[((dx + 1) * 5 + (dy + 2)) * 3 + (dz + 1)] = pick();
+            level.cell[(1 * 5 + 2) * 3 + 1] = static_cast<u16>(id);
+            const u32 direction = static_cast<u32>((mix.next() >> 1) % 6);
+            const u16 beside = level.block(world::kStepX[direction], world::kStepY[direction], world::kStepZ[direction]);
+            level.ticks.clear();
+            const u16 made = update_shape(level, static_cast<u16>(id), 0, 0, 0, direction, beside, unported);
+            std::sort(level.ticks.begin(), level.ticks.end());
+            level.ticks.erase(std::unique(level.ticks.begin(), level.ticks.end()), level.ticks.end());
+            fold = fnv(fold, made);
+            fold = fnv(fold, static_cast<u32>(level.ticks.size()));
+            for (const u32 tick : level.ticks) fold = fnv(fold, tick);
+        }
+        EXPECT_EQ(fold, want) << "the shape of state " << id << " (" << world::block_name(world::block_of(static_cast<u16>(id)))
+                              << ")";
+        EXPECT_EQ(unported, 0u) << "state " << id;
+        EXPECT_FALSE(level.elsewhere);
+        ++held;
+    }
+    EXPECT_GT(held, 100u);
+}
+
+// The order of a java.util.HashSet<BlockPos> (worldgen/java_hash.hpp), by the scripts of
+// tools/mcgen/extract/WorldgenHash.java: positions put in, the first taken out, the order read -
+// the same script run here, and what comes of it the number a JVM's set gave.
+TEST(WorldgenFeature, AHashSetOfPositionsHasTheJvmsOrder) {
+    Script s;
+    s.skip_ints();
+    s.skip_heights();
+    s.skip_sets();
+    s.skip_placements();
+    s.skip_decorations();
+    s.skip_attempts();
+    s.skip_survive();
+    s.skip_shapes();
+    In& in = s.in;
+    struct Mix {  // (SplitMix64: the same numbers as WorldgenSurvive.Mix)
+        u64 x;
+        u64 next() {
+            x += 0x9E3779B97F4A7C15ull;
+            u64 z = x;
+            z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+            z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+            return z ^ (z >> 31);
+        }
+    };
+    const auto order = [](u64 h, const JavaHashSet& set) {
+        set.each(
+            [&](i32 x, i32 y, i32 z) { h = fnv(fnv(fnv(h, static_cast<u32>(x)), static_cast<u32>(y)), static_cast<u32>(z)); });
+        return fnv(h, set.size());
+    };
+    const u32 cases = in.num<u32>();
+    ASSERT_GT(cases, 100u);
+    JavaHashSet set, copy;
+    u32 wrong = 0;
+    for (u32 c = 0; c < cases; ++c) {
+        Mix m{0x4A485348ull + c};
+        const u32 mode = c & 3;
+        const bool taking = (c & 4) != 0;
+        const i32 ox = static_cast<i32>(m.next() >> 38) - (1 << 25);
+        const i32 oy = static_cast<i32>(m.next() >> 56) - 64;
+        const i32 oz = static_cast<i32>(m.next() >> 38) - (1 << 25);
+        const u32 modulus = 1u << (6 + static_cast<u32>(m.next() >> 61));
+        const u32 ops = 200 + static_cast<u32>(m.next() >> 53);
+        set.clear();
+        u64 h = kFnv;
+        for (u32 i = 0; i < ops; ++i) {
+            const u32 kind = static_cast<u32>(m.next() >> 60);
+            const u64 q = m.next();
+            const i32 a = static_cast<i32>(q & 0xFFFF), b = static_cast<i32>(q >> 16 & 0xFFFF),
+                      d = static_cast<i32>(q >> 32 & 0xFFFF);
+            const u32 e = static_cast<u32>(q >> 48 & 0xFFFF);
+            const bool crowd = mode == 2 || (mode == 3 && (e & 1) != 0);
+            i32 x, y, z;
+            if (mode == 1) {
+                x = ox + a % 5, y = oy + b % 5, z = oz + d % 5;
+            } else if (!crowd) {
+                x = ox + a % 16, y = oy + b % 31, z = oz + d % 16;
+            } else {
+                const u32 want = static_cast<u32>(a % 3 * 7), k = static_cast<u32>(b % 256);
+                y = oy + static_cast<i32>(k % 8), z = oz + static_cast<i32>(k / 8 % 8);
+                x = static_cast<i32>(static_cast<u32>(ox) + want + modulus * k -
+                                     (static_cast<u32>(y) + static_cast<u32>(z) * 31u) * 31u);
+            }
+            if (kind < (taking ? 8u : 11u)) {
+                h = fnv(h, set.add(x, y, z) ? 1 : 0);
+            } else if (kind < 14) {
+                if (set.empty()) continue;
+                i32 fx, fy, fz;
+                set.pop_first(fx, fy, fz);
+                h = fnv(fnv(fnv(h, static_cast<u32>(fx)), static_cast<u32>(fy)), static_cast<u32>(fz));
+            } else if (kind == 14) {
+                h = fnv(h, set.contains(x, y, z) ? 1 : 0);
+            } else {
+                h = order(h, set);
+            }
+        }
+        h = order(h, set);
+        copy.clear();
+        set.each([&](i32 x, i32 y, i32 z) { copy.add(x, y, z); });
+        h = order(h, copy);
+        const u64 want = in.num<u64>();
+        if (h != want && ++wrong <= 5) ADD_FAILURE() << "script " << c << " (mode " << mode << ", " << ops << " steps)";
+    }
+    EXPECT_EQ(wrong, 0u);
+    // (The scripts do what they are for: buckets became trees, and elements were taken out of trees.)
+    EXPECT_GT(set.trees_built(), 1000u);
+    EXPECT_GT(set.taken_from_trees(), 1000u);
+}
+
 // Math.sin and Math.cos of every angle an ore can have - its random float times pi - are the
 // JVM's, all 2^24 of them: our own sine, and the table of where HotSpot's is the next double.
 TEST(WorldgenFeature, SineAndCosineOfEveryAngleOfAFloatAreTheJvms) {
@@ -570,6 +756,8 @@ TEST(WorldgenFeature, SineAndCosineOfEveryAngleOfAFloatAreTheJvms) {
     s.skip_decorations();
     s.skip_attempts();
     s.skip_survive();
+    s.skip_shapes();
+    s.skip_hash_sets();
     In& in = s.in;
     const u64 want_sines = in.num<u64>(), want_cosines = in.num<u64>();
     u64 sines = kFnv, cosines = kFnv;
@@ -598,11 +786,27 @@ TEST(WorldgenFeature, SineAndCosineOfEveryAngleOfAFloatAreTheJvms) {
     // ...and of the angles that are the same in every world, each written out: the rings of the
     // search for where a world begins (NoiseSpawnFinder.radialSearch).
     const u32 lists = in.num<u32>();
-    ASSERT_EQ(lists, 1u);
+    ASSERT_EQ(lists, 2u);
     for (u32 list = 0; list < lists; ++list) {
         const std::string name = in.str();
         const u32 count = in.num<u32>();
         ASSERT_GT(count, 100u) << name;
+        if (count > 4096) {
+            // ...and of the other angles that are made of a float, all of them again: the limbs of a
+            // big oak (FancyTrunkPlacer.placeTrunk: twice a float, as a double times pi).
+            ASSERT_EQ(name, "fancy trunk");
+            ASSERT_EQ(count, 1u << 24);
+            u64 sine_fold = kFnv, cosine_fold = kFnv;
+            for (u32 k = 0; k < count; ++k) {
+                const double x = static_cast<double>((static_cast<float>(k) * 5.9604645E-8f) * 2.0f) * 3.141592653589793;
+                const u64 sine = std::bit_cast<u64>(jmath::sin(x)), cosine = std::bit_cast<u64>(jmath::cos(x));
+                sine_fold = fnv(fnv(sine_fold, static_cast<u32>(sine)), static_cast<u32>(sine >> 32));
+                cosine_fold = fnv(fnv(cosine_fold, static_cast<u32>(cosine)), static_cast<u32>(cosine >> 32));
+            }
+            EXPECT_EQ(sine_fold, in.num<u64>()) << name;
+            EXPECT_EQ(cosine_fold, in.num<u64>()) << name;
+            continue;
+        }
         for (u32 i = 0; i < count; ++i) {
             const double x = std::bit_cast<double>(in.num<u64>());
             const u64 sine = in.num<u64>(), cosine = in.num<u64>();

@@ -62,7 +62,7 @@ class Game {
     // the world is kept and what makes its chunks (server/world_info.hpp); `workers`: the threads
     // that read, write and generate them.
     Game(const Settings& s, std::vector<std::unique_ptr<net::Reactor>>& reactors, std::atomic<u32>& online, Console* console,
-         const WorldInfo& world, base::Workers& workers);
+         WorldInfo& world, base::Workers& workers);
     ~Game();
 
     void run(const std::atomic<bool>& stop);  // blocks; call on the tick thread
@@ -414,6 +414,7 @@ class Game {
     void clock_changed(u32 clock);
     proto::cb::SetTime::Clock clock_state(u32 clock) const;
     void save_time();
+    void find_spawn();
     void on_command_suggestion(u32 pi, const proto::sb::CommandSuggestion& c);
     void answer_suggestions();
     static void ask_server(void* game, const cmd::Registry::Asked& asked, std::vector<std::string>& out);
@@ -678,7 +679,7 @@ class Game {
     std::vector<std::unique_ptr<net::Reactor>>& reactors_;
     std::atomic<u32>& online_;
     base::Workers& workers_;
-    const WorldInfo& info_;
+    WorldInfo& info_;  // (the server's; the game gives a new world of terrain its spawn)
     world::FlatGenerator flat_generator_;
     world::EmptyGenerator empty_generator_;
     std::unique_ptr<worldgen::OverworldGenerator> noise_generator_;  // the overworld's terrain, of a world that has it

@@ -343,6 +343,8 @@ bool Decorator::place_feature(u32 feature, FeatureRandom& random, Pos at) {
         case ft::FeatureType::kCoralClaw: return place_coral_claw(f.a, random, at);
         case ft::FeatureType::kHugeBrownMushroom: return place_huge_mushroom(ft::kMushrooms[f.a], false, random, at);
         case ft::FeatureType::kHugeRedMushroom: return place_huge_mushroom(ft::kMushrooms[f.a], true, random, at);
+        case ft::FeatureType::kTree: return place_tree(ft::kTrees[f.a], random, at);
+        case ft::FeatureType::kFallenTree: return place_fallen_tree(ft::kFallenTrees[f.a], random, at);
     }
     return false;
 }

@@ -150,6 +150,11 @@ final class WorldgenMath {
         return (double) dir;
     }
 
+    /** FancyTrunkPlacer.placeTrunk: the angle a limb leaves the trunk at - twice a random float, as a double times pi. */
+    static double fancyTrunkAngle(int k) {
+        return (double) ((k * 5.9604645E-8F) * 2.0F) * 3.141592653589793;
+    }
+
     /**
      * NoiseSpawnFinder.radialSearch: the angles of its rings, which are the same for every world -
      * (2048, 512) first, then (512, 32), as its constructor has them.
@@ -182,7 +187,8 @@ final class WorldgenMath {
      */
     static Domain[] domains() {
         double[] spawn = spawnSearchAngles();
-        return new Domain[] {new Domain("ore", FLOATS, WorldgenMath::oreAngle), new Domain("spawn search", spawn.length, k -> spawn[k])};
+        return new Domain[] {new Domain("ore", FLOATS, WorldgenMath::oreAngle), new Domain("spawn search", spawn.length, k -> spawn[k]),
+                             new Domain("fancy trunk", FLOATS, WorldgenMath::fancyTrunkAngle)};
     }
 
     private static void list(ByteArrayOutputStream out, TreeMap<Long, Byte> corrections) {
@@ -260,6 +266,19 @@ final class WorldgenMath {
         for (int d = 1; d < domains.length; ++d) {
             o.str(domains[d].name());
             o.i32(domains[d].count());
+            if (domains[d].count() > 4096) {
+                // Too many to write out: folded into a number a function, as the first domain is (the test has the formula).
+                long sineFold = 0xcbf29ce484222325L, cosineFold = 0xcbf29ce484222325L;
+                for (int k = 0; k < domains[d].count(); ++k) {
+                    double x = domains[d].of().applyAsDouble(k);
+                    long sine = Double.doubleToRawLongBits(Math.sin(x)), cosine = Double.doubleToRawLongBits(Math.cos(x));
+                    sineFold = WorldgenGolden.fnv(WorldgenGolden.fnv(sineFold, (int) sine), (int) (sine >>> 32));
+                    cosineFold = WorldgenGolden.fnv(WorldgenGolden.fnv(cosineFold, (int) cosine), (int) (cosine >>> 32));
+                }
+                o.i64(sineFold);
+                o.i64(cosineFold);
+                continue;
+            }
             for (int k = 0; k < domains[d].count(); ++k) {
                 double x = domains[d].of().applyAsDouble(k);
                 o.i64(Double.doubleToRawLongBits(x));

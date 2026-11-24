@@ -70,8 +70,8 @@ void finish_chunk(GenChunk& g, LoadedChunk& out) {
     base::ByteBuf scratch;
     out.parts.ticks = packed_ticks(g.block_ticks, out.arena, scratch);
     out.parts.fluid_ticks = packed_ticks(g.fluid_ticks, out.arena, scratch);
-    // (Block entities are the game's records, written by the game: nothing makes one yet.)
-    DCHECK(g.block_entities.empty());
+    // (Block entities are the game's records, written by the game. What generation made of them - a
+    // nest of bees in a tree - does not reach it yet: the block stands, and holds nothing.)
 }
 
 }  // namespace world

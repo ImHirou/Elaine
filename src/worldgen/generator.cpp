@@ -50,59 +50,12 @@ Terrain& make_terrain(Work& w, const Overworld& world, i32 cx, i32 cz) {
     return t;
 }
 
-// PlayerSpawnFinder.getSpawnPosInChunk, getLevelRespawnPos: the first column - x, then z - with
-// ground on top of it that is no water's bed, and above that ground a block to stand on.
-bool spawn_in_chunk(const Terrain& t, i32 spawn[3]) {
-    namespace wg = proto::gen::worldgen;
-    const i32 min_y = settings::kMinY, top_of_world = settings::kMinY + settings::kHeight - 1;
-    for (i32 x = 0; x < 16; ++x) {
-        for (i32 z = 0; z < 16; ++z) {
-            // ChunkAccess.getHeight of three heightmaps: the highest block that counts for each.
-            const auto height = [&](u8 bit) {
-                i32 y = top_of_world;
-                while (y >= min_y && !(wg::kHeightmaps[t.block(x, y, z)] & bit)) --y;
-                return y;
-            };
-            const i32 top = height(wg::kMotionBlocking);
-            if (top < min_y) continue;
-            const i32 surface = height(wg::kWorldSurface);
-            if (surface <= top && surface > height(wg::kOceanFloor)) continue;
-            for (i32 y = top + 1; y >= min_y; --y) {
-                const u16 state = t.block_or_air(x, y, z);
-                if (world::flags_of(state) & world::state::kHasFluid) break;
-                if (!world::collision_face_full(state, 1)) continue;  // (Direction.UP)
-                spawn[0] = t.chunk_x * 16 + x;
-                spawn[1] = y + 1;
-                spawn[2] = t.chunk_z * 16 + z;
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
 }  // namespace
 
-void find_world_spawn(const Overworld& world, i32 spawn[3]) {
-    Work& w = work_for(world);
-    i32 origin_x = 0, origin_z = 0;
-    spawn_origin(w.biomes, origin_x, origin_z);
-    const i32 cx = origin_x >> 4, cz = origin_z >> 4;
-    spawn[0] = cx * 16 + 8;
-    spawn[1] = 64;  // ChunkGenerator.getSpawnHeight
-    spawn[2] = cz * 16 + 8;
-    // MinecraftServer.setInitialSpawn's spiral: the chunk itself, then round it, further each turn.
-    i32 dx = 0, dz = 0, step_x = 0, step_z = -1;
-    for (i32 i = 0; i < 11 * 11; ++i) {
-        if (dx >= -5 && dx <= 5 && dz >= -5 && dz <= 5 && spawn_in_chunk(make_terrain(w, world, cx + dx, cz + dz), spawn)) return;
-        if (dx == dz || (dx < 0 && dx == -dz) || (dx > 0 && dx == 1 - dz)) {
-            const i32 old = step_x;
-            step_x = -step_z;
-            step_z = old;
-        }
-        dx += step_x;
-        dz += step_z;
-    }
+bool OverworldGenerator::spawn_origin(i32& x, i32& z) {
+    Work& w = work_for(world_);
+    worldgen::spawn_origin(w.biomes, x, z);
+    return true;
 }
 
 void OverworldGenerator::make_base(i32 cx, i32 cz, world::GenChunk& out) {

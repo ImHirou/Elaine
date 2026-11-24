@@ -1036,6 +1036,8 @@ final class WorldgenFeatures {
      *   decorations whole decorations with the features of one kind alone, kind by kind (decorations())
      *   attempts    a kind of feature placed again and again in one place (attempts())
      *   survive     the rules of canSurvive held to the method in worlds drawn at random (WorldgenSurvive.golden)
+     *   shapes      the rules of updateShape held to the method in worlds drawn at random (WorldgenShape.golden)
+     *   hash sets   the order of a HashSet of positions, by scripts run from a number (WorldgenHash.golden)
      *   math        Math.sin and Math.cos of every angle a feature can make of a float: all of the answers
      *               as one number, and a few of them written out (WorldgenMath.golden; at the end of the file)
      *   placements  chunks of real terrain around which, between them, every feature of the overworld's
@@ -1102,6 +1104,14 @@ final class WorldgenFeatures {
             if (e.isJsonArray()) e.getAsJsonArray().forEach(open::add);
             if (!e.isJsonObject()) continue;
             e.getAsJsonObject().asMap().values().forEach(open::add);
+            // (What a tree's trunk and roots grow through, and where its roots are muddy: sets of states the same way.)
+            for (String blocks : new String[] {"can_grow_through", "muddy_roots_in"})
+                if (e.getAsJsonObject().has(blocks)) {
+                    JsonObject same = new JsonObject();
+                    same.addProperty("type", "minecraft:matching_blocks");
+                    same.add("blocks", e.getAsJsonObject().get(blocks));
+                    open.add(same);
+                }
             if (e.getAsJsonObject().has("valid_blocks")) {
                 // (A spring's blocks are a set of states to src/worldgen as well: the predicate that names the same blocks.)
                 JsonObject same = new JsonObject();
@@ -1183,6 +1193,21 @@ final class WorldgenFeatures {
             || state.is(net.minecraft.tags.BlockTags.SUPPORTS_SUGAR_CANE_ADJACENTLY));
         facts.put("kSet a mushroom needs no dark on", state -> state.is(net.minecraft.tags.BlockTags.OVERRIDES_MUSHROOM_LIGHT_REQUIREMENT));
         facts.put("kSet of whole blocks that let no light through", BlockState::isSolidRender);
+        // Trees, and the block updates at their edges.
+        facts.put("kSet a tree grows through", state -> state.isAir() || state.is(net.minecraft.tags.BlockTags.REPLACEABLE_BY_TREES));
+        facts.put("kSet of logs", state -> state.is(net.minecraft.tags.BlockTags.LOGS));
+        facts.put("kSet that keeps leaves from decaying", state -> state.is(net.minecraft.tags.BlockTags.PREVENTS_NEARBY_LEAF_DECAY));
+        facts.put("kSet that makes the ground under it snowy", state -> state.is(net.minecraft.tags.BlockTags.SNOW));
+        facts.put("kSet that gives way to a block placed", BlockState::canBeReplaced);
+        facts.put("kSet that holds water", state -> state.getFluidState().is(net.minecraft.tags.FluidTags.WATER));
+        facts.put("kSet whose fluid is a source", state -> state.getFluidState().isSource());
+        facts.put("kSet a column of bubbles rises from", state -> state.is(net.minecraft.tags.BlockTags.ENABLES_BUBBLE_COLUMN_DRAG_DOWN)
+            || state.is(net.minecraft.tags.BlockTags.ENABLES_BUBBLE_COLUMN_PUSH_UP));
+        facts.put("kSet a column of bubbles takes the place of", state -> state.getFluidState().is(net.minecraft.tags.FluidTags.BUBBLE_COLUMN_CAN_OCCUPY)
+            && state.getFluidState().isSource() && state.getFluidState().isFull());
+        facts.put("kSet of pale oak logs", state -> state.is(net.minecraft.tags.BlockTags.PALE_OAK_LOGS));
+        facts.put("kSet with a whole face on top", state -> state.isFaceSturdy(net.minecraft.world.level.EmptyBlockGetter.INSTANCE, BlockPos.ZERO,
+            net.minecraft.core.Direction.UP));
         for (var fact : facts.entrySet()) {
             byte[] bits = new byte[(states + 7) / 8];
             for (int id = 0; id < states; ++id)
@@ -1306,6 +1331,8 @@ final class WorldgenFeatures {
         decorations(o, world, steps, every);
         attempts(o, world, steps, every);
         WorldgenSurvive.golden(o);
+        WorldgenShape.golden(o);
+        WorldgenHash.golden(o);
         WorldgenMath.golden(o);
         return o.save(file);
     }
@@ -1317,7 +1344,8 @@ final class WorldgenFeatures {
         // No class: every feature src/worldgen places as its tables stand (ported_features.txt, which
         // `mcgen.py generate` writes) - a chunk's whole decoration as the server's generator makes it.
         {"ported", null, "minecraft:windswept_hills", "minecraft:badlands", "minecraft:dripstone_caves", "minecraft:lush_caves", "minecraft:plains",
-            "minecraft:ocean"},
+            "minecraft:ocean", "minecraft:forest", "minecraft:jungle", "minecraft:old_growth_spruce_taiga", "minecraft:swamp", "minecraft:dark_forest",
+            "minecraft:mangrove_swamp", "minecraft:savanna", "minecraft:cherry_grove", "minecraft:dappled_forest", "minecraft:bamboo_jungle"},
     };
 
     static void chunkState(WorldgenGolden.Out o, ProtoChunk chunk) {
@@ -1460,6 +1488,18 @@ final class WorldgenFeatures {
         // (By the names of placed features: what they are made of is the kind - corals, the big mushrooms.)
         {"coral", "=minecraft:warm_ocean_vegetation", "300", "minecraft:warm_ocean"},
         {"huge_mushroom", "=minecraft:mushroom_island_vegetation", "300", "minecraft:mushroom_fields"},
+        // Trees, by the placed features of the biomes that have them: every trunk and foliage placer, the roots, the decorators.
+        {"tree", "=minecraft:trees_plains,minecraft:trees_birch_and_oak_leaf_litter,minecraft:trees_birch,minecraft:birch_tall,minecraft:trees_flower_forest,"
+            + "minecraft:trees_taiga,minecraft:trees_snowy,minecraft:trees_grove,minecraft:trees_windswept_hills,minecraft:trees_windswept_forest,"
+            + "minecraft:trees_old_growth_pine_taiga,minecraft:trees_old_growth_spruce_taiga,minecraft:trees_savanna,minecraft:trees_windswept_savanna,"
+            + "minecraft:trees_jungle,minecraft:trees_sparse_jungle,minecraft:bamboo_vegetation,minecraft:trees_swamp,minecraft:trees_mangrove,"
+            + "minecraft:dark_forest_vegetation,minecraft:trees_cherry,minecraft:trees_meadow,minecraft:trees_badlands,"
+            + "minecraft:trees_dappled_forest", "60",
+            "minecraft:plains", "minecraft:forest", "minecraft:birch_forest", "minecraft:old_growth_birch_forest", "minecraft:flower_forest",
+            "minecraft:taiga", "minecraft:snowy_taiga", "minecraft:grove", "minecraft:windswept_hills", "minecraft:windswept_forest",
+            "minecraft:old_growth_pine_taiga", "minecraft:old_growth_spruce_taiga", "minecraft:savanna", "minecraft:windswept_savanna",
+            "minecraft:jungle", "minecraft:sparse_jungle", "minecraft:bamboo_jungle", "minecraft:swamp", "minecraft:mangrove_swamp",
+            "minecraft:dark_forest", "minecraft:cherry_grove", "minecraft:meadow", "minecraft:wooded_badlands", "minecraft:dappled_forest"},
         {"simple_block", "SimpleBlockFeature", "300", "minecraft:plains", "minecraft:flower_forest", "minecraft:meadow", "minecraft:forest", "minecraft:swamp",
             "minecraft:taiga", "minecraft:desert", "minecraft:jungle", "minecraft:lush_caves", "minecraft:warm_ocean", "minecraft:mushroom_fields",
             "minecraft:savanna", "minecraft:cherry_grove", "minecraft:old_growth_pine_taiga", "minecraft:sunflower_plains", "minecraft:mangrove_swamp",

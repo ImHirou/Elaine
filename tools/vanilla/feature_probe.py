@@ -306,13 +306,15 @@ def record_ours(exe: str, out: str, vanilla_path: str) -> None:
     if made.returncode != 0:
         raise SystemExit(f"feature_dump failed:\n{made.stdout[-2000:]}{made.stderr[-2000:]}")
     r = In(Path(out).read_bytes())
-    assert r.bytes(8) == b"FEATDMP1"
-    _, count, *counted = r.take("qI5Q")
+    assert r.bytes(8) == b"FEATDMP2"
+    _, count, *counted = r.take("qI6Q")
     print(f"src/worldgen: {sum(1 for what, _, _ in steps(theirs['events']) if what == 'F')} chunks decorated in the server's order, {count} with terrain -> {out}")
     for n, what in zip(counted, ("reads beyond the nine chunks of a decoration", "writes refused there", "marks beyond them", "ticks beyond them",
-                                 "blocks set outside the world's height")):
+                                 "blocks set outside the world's height", "block updates of a class that has no rule (worldgen/shape.hpp)")):
         if n:
             print(f"  {n} {what}")
+    if counted[5]:
+        raise SystemExit("a block at a tree's edge is of a class whose updateShape is not ported: its rule goes into src/worldgen/shape.hpp")
 
 
 class In:
@@ -358,9 +360,9 @@ def read_replay(path: str) -> tuple[int, dict]:
 def read_ours(path: str) -> tuple[int, dict]:
     """feature_dump's file (tools/vanilla/feature_dump.cpp), in the same shape."""
     r = In(Path(path).read_bytes())
-    assert r.bytes(8) == b"FEATDMP1", "not a file of feature_dump"
+    assert r.bytes(8) == b"FEATDMP2", "not a file of feature_dump"
     seed, count = r.take("q"), r.take("I")
-    r.take("5Q")
+    r.take("6Q")
     registries = json.loads((ROOT / ".cache" / "mc" / mc.META["version"] / "reports" / "registries.json").read_text())
     names = {kind: {e["protocol_id"]: name for name, e in registries[f"minecraft:{kind}"]["entries"].items()} for kind in ("block", "fluid")}
     chunks = {}

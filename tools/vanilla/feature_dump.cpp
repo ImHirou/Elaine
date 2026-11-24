@@ -13,8 +13,9 @@
 // --only <file>: of the features of the biomes, only the ones named there (a line each) are placed.
 // feature_dump --ported: every feature of a biome by name, and whether src/worldgen places it.
 //
-// The file, little-endian: "FEATDMP1", i64 seed, u32 chunks, u64 far reads, refused writes, marks
-// and ticks beyond the nine chunks, blocks set outside the world's height; of each chunk
+// The file, little-endian: "FEATDMP2", i64 seed, u32 chunks, u64 far reads, refused writes, marks
+// and ticks beyond the nine chunks, blocks set outside the world's height, block updates of a class
+// that has no rule (worldgen/shape.hpp); of each chunk
 //   i32 x, z; u8 decorated
 //   u32 packed bytes; the blocks, deflated (raw): u16 state[sections * 4096], by section and in it y << 8 | z << 4 | x
 //   i32 height[4][256]            WORLD_SURFACE, OCEAN_FLOOR, MOTION_BLOCKING, MOTION_BLOCKING_NO_LEAVES: the
@@ -153,6 +154,7 @@ int main(int argc, char** argv) {
             counts.far_marks += c.far_marks;
             counts.far_ticks += c.far_ticks;
             counts.outside_height += c.outside_height;
+            counts.unported_shapes += c.unported_shapes;
             for (const Pos& p : asked) {
                 const i32 cx = p.x >> 4, cz = p.z >> 4;
                 bool lit = false;
@@ -167,11 +169,12 @@ int main(int argc, char** argv) {
     }
 
     std::vector<u8> out, packed;
-    out.insert(out.end(), {'F', 'E', 'A', 'T', 'D', 'M', 'P', '1'});
+    out.insert(out.end(), {'F', 'E', 'A', 'T', 'D', 'M', 'P', '2'});
     put(out, seed);
     put(out, static_cast<u32>(chunks.size()));
-    const u64 counted[5] = {counts.far_reads, counts.refused_writes, counts.far_marks, counts.far_ticks, counts.outside_height};
-    put(out, counted, 5);
+    const u64 counted[6] = {counts.far_reads, counts.refused_writes, counts.far_marks,
+                            counts.far_ticks, counts.outside_height, counts.unported_shapes};
+    put(out, counted, 6);
     std::vector<u16> blocks(usize{Terrain::kSections} * 4096);
     namespace hm = world::heightmap;
     for (const auto& [at, chunk] : chunks) {

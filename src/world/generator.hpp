@@ -34,6 +34,9 @@ class ChunkGenerator {
     // (2, 1), (1, 2), (2, 2), in that order, each reading and writing the nine around it - and all
     // sixteen leave at version `pass`. One virtual call a task.
     virtual void decorate(GenChunk* const* /*area*/, i32 /*x0*/, i32 /*z0*/, u32 /*pass*/) {}
+    // Where a world of this generator begins: the block its players are to appear around, if the
+    // generator has a say in that (a world of terrain: where the climate is right). False: it has none.
+    virtual bool spawn_origin(i32& /*x*/, i32& /*z*/) { return false; }
     virtual i32 sea_level() const = 0;     // ChunkGenerator.getSeaLevel(): sent in the login packet
     virtual i32 spawn_height() const = 0;  // ChunkGenerator.getSpawnHeight(): first free y at spawn
     virtual bool is_flat() const = 0;      // "isFlat" in the login packet (changes the client's horizon)

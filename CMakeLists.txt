@@ -193,9 +193,11 @@ add_library(core STATIC
   src/worldgen/terrain.cpp
   src/worldgen/material.cpp
   src/worldgen/carver.cpp
+  src/worldgen/java_hash.cpp
   src/worldgen/jmath.cpp
   src/worldgen/region.cpp
   src/worldgen/feature.cpp
+  src/worldgen/tree.cpp
   src/worldgen/generator.cpp
   src/phys/physics.cpp
   src/item/components.cpp
@@ -227,7 +229,7 @@ if(MC_SANITIZE)
   set_source_files_properties(
     src/worldgen/noise.cpp src/worldgen/density.cpp src/worldgen/climate.cpp src/worldgen/aquifer.cpp src/worldgen/terrain.cpp
     src/worldgen/material.cpp src/worldgen/carver.cpp src/worldgen/generator.cpp src/worldgen/region.cpp src/worldgen/feature.cpp
-    src/worldgen/jmath.cpp
+    src/worldgen/jmath.cpp src/worldgen/tree.cpp src/worldgen/java_hash.cpp
     PROPERTIES COMPILE_OPTIONS "-O2")
 endif()
 if(MC_PCH)

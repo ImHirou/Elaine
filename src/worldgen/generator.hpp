@@ -5,6 +5,7 @@
 // its thread's own.
 #pragma once
 
+#include "world/block.hpp"
 #include "world/generator.hpp"
 #include "worldgen/terrain.hpp"
 
@@ -25,6 +26,8 @@ class OverworldGenerator final : public world::ChunkGenerator {
     bool generate_whole(world::LoadedChunk& out) override;
     i32 sea_level() const override { return settings::kSeaLevel; }
     i32 spawn_height() const override { return 64; }  // ChunkGenerator.getSpawnHeight
+    // NoiseSpawnFinder: the block the climate picks for the world to begin around.
+    bool spawn_origin(i32& x, i32& z) override;
     bool is_flat() const override { return false; }
     const Overworld& world() const { return world_; }
 
@@ -32,12 +35,37 @@ class OverworldGenerator final : public world::ChunkGenerator {
     Overworld world_;
 };
 
-// MinecraftServer.setInitialSpawn for a world of this generator: the chunk the climate picks for
-// the world to begin in (NoiseSpawnFinder), then the first block one can stand on there or in the
-// chunks around, in a spiral five chunks out (PlayerSpawnFinder.getSpawnPosInChunk) - and where
-// there is none, the middle of that chunk at ChunkGenerator.getSpawnHeight. It makes the terrain
-// of the chunks it looks at: asked once, of a world that is new. (Vanilla looks at chunks that
-// have their trees, too: until the features are here the two need not agree.)
-void find_world_spawn(const Overworld& world, i32 spawn[3]);
+// PlayerSpawnFinder.getSpawnPosInChunk, getLevelRespawnPos: the first column of a chunk - x, then
+// z - with ground on top of it that is no water's bed, and above that ground a block to stand on.
+// `block(x, y, z)`: the chunk's blocks, by x and z within it. True: `spawn` is that place.
+template <class BlockAt>
+bool spawn_in_chunk(i32 chunk_x, i32 chunk_z, BlockAt&& block, i32 spawn[3]) {
+    namespace wg = proto::gen::worldgen;
+    const i32 min_y = settings::kMinY, top_of_world = settings::kMinY + settings::kHeight - 1;
+    for (i32 x = 0; x < 16; ++x) {
+        for (i32 z = 0; z < 16; ++z) {
+            // ChunkAccess.getHeight of three heightmaps: the highest block that counts for each.
+            const auto height = [&](u8 bit) {
+                i32 y = top_of_world;
+                while (y >= min_y && !(wg::kHeightmaps[block(x, y, z)] & bit)) --y;
+                return y;
+            };
+            const i32 top = height(wg::kMotionBlocking);
+            if (top < min_y) continue;
+            const i32 surface = height(wg::kWorldSurface);
+            if (surface <= top && surface > height(wg::kOceanFloor)) continue;
+            for (i32 y = top + 1; y >= min_y; --y) {
+                const u16 state = y > top_of_world ? world::kAir : block(x, y, z);
+                if (world::flags_of(state) & world::state::kHasFluid) break;
+                if (!world::collision_face_full(state, 1)) continue;  // (Direction.UP)
+                spawn[0] = chunk_x * 16 + x;
+                spawn[1] = y + 1;
+                spawn[2] = chunk_z * 16 + z;
+                return true;
+            }
+        }
+    }
+    return false;
+}
 
 }  // namespace worldgen
