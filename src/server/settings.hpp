@@ -46,7 +46,11 @@ struct Settings {
     bool sync_chunk_writes = true;  // sync-chunk-writes: fdatasync around every write of a region (world/region.hpp)
     u32 worker_threads = 0;         // worker-threads: threads that read, write and generate chunks; 0 = by the machine
     u32 chunk_unload_seconds = 10;  // chunk-unload-seconds: how long a chunk stays loaded once nobody is near
-    u32 autosave_seconds = 300;     // autosave-seconds: how long a chunk that changed may wait to be written
+    // generation-cache-mb: how much of what the generator made beyond what was asked for - chunks
+    // nobody is near yet, the halves of areas further out - is kept for the next chunk beside it.
+    // (The default was chosen without a measurement.)
+    u32 generation_cache_mb = 256;
+    u32 autosave_seconds = 300;  // autosave-seconds: how long a chunk that changed may wait to be written
     // max-chained-neighbor-updates: how many neighbour updates one block change may set off
     // before the rest are skipped (CollectingNeighborUpdater); negative: any number.
     i32 max_chained_neighbor_updates = 1000000;

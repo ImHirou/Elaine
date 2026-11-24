@@ -13,6 +13,7 @@
 #include <map>
 #include <random>
 
+#include "base/clock.hpp"
 #include "base/workers.hpp"
 #include "nbt/nbt.hpp"
 #include "nbt_bytes.hpp"
@@ -23,6 +24,7 @@
 #include "world/chunk_codec.hpp"
 #include "world/chunk_io.hpp"
 #include "world/dimension.hpp"
+#include "world/gen_pipeline.hpp"
 #include "world/region.hpp"
 
 #include PROTO_GEN_STATIC_IDS_HPP
@@ -147,6 +149,32 @@ TEST(Workers, MoreTasksAtOnceThanTheRingsHold) {
     workers.drain();
     EXPECT_EQ(sum, kTasks * (kTasks + 1) / 2 + kTasks);
     EXPECT_EQ(workers.in_flight(), 0u);
+}
+
+// The owner sleeps until a task is done or its time is up, whichever is first.
+TEST(Workers, TheOwnerWaitsForATaskOrForItsDeadline) {
+    base::Workers workers(2);
+    u64 t0 = base::now_ns();
+    EXPECT_FALSE(workers.wait(t0 + 5 * base::kNsPerMs));  // nothing is out
+    EXPECT_GE(base::now_ns() - t0, 5 * base::kNsPerMs);
+    static std::atomic<u32> done_count;
+    done_count = 0;
+    for (u32 round = 0; round < 200; ++round) {
+        workers.submit({[](base::Task&) { std::this_thread::sleep_for(std::chrono::microseconds(200)); },
+                        [](base::Task&) { done_count.fetch_add(1); }, nullptr, nullptr, 0, 0, 0, 0});
+        workers.kick();
+        t0 = base::now_ns();
+        ASSERT_TRUE(workers.wait(t0 + 10 * base::kNsPerSec)) << "round " << round;
+        EXPECT_LT(base::now_ns() - t0, 5 * base::kNsPerSec);
+        EXPECT_EQ(workers.poll(), 1u);
+    }
+    EXPECT_EQ(done_count.load(), 200u);
+    // Without threads a task is done when it is handed in.
+    base::Workers none(0);
+    EXPECT_FALSE(none.wait(base::now_ns() + base::kNsPerMs));
+    none.submit({[](base::Task&) {}, nullptr, nullptr, nullptr, 0, 0, 0, 0});
+    EXPECT_TRUE(none.wait(base::now_ns() + base::kNsPerMs));
+    EXPECT_EQ(none.poll(), 1u);
 }
 
 TEST(Workers, ADoneMaySubmitTheNextStep) {
@@ -621,6 +649,205 @@ TEST(Persistence, RequestedChunksAreLitAndTickAsTheirNeighboursArrive) {
         EXPECT_TRUE(dim.frame_if_ready(c).empty());  // it changed: the frame is stale, another is on its way
         dim.update_light();
         dim.end_tick();
+    }
+}
+
+namespace {
+
+// A generator that makes its chunks in stages (world/gen_pipeline.hpp): ground whose height is a
+// number made of the chunk's place, and "features" that reach into the chunks around - a chunk
+// that is decorated looks at the glass in the nine chunks around it and puts a block of glass
+// into each of the nine, where what it saw says. A chunk decorated out of its turn has its glass
+// elsewhere.
+struct Stages final : ChunkGenerator {
+    bool staged() const override { return true; }
+    void make_base(i32 cx, i32 cz, GenChunk& out) override {
+        out.x = cx;
+        out.z = cz;
+        out.sections_count = static_cast<u8>(kOverworld.sections);
+        out.version = 0;
+        out.decorated = false;
+        std::vector<BlockState> states(Section::kVolume, kAir);
+        const u32 top = 2 + Hills::hash(cx, cz) % 5;
+        for (u32 i = 0; i < top << 8; ++i) states[i] = static_cast<BlockState>(blk::kStone);
+        out.sections[0].assign(out.alloc, states.data());
+        std::fill(std::begin(out.cells), std::end(out.cells), u16{0});
+        for (auto& map : out.height) std::fill(std::begin(map), std::end(map), i16{0});
+        made.fetch_add(1);
+    }
+    void decorate(GenChunk* const* area, i32, i32, u32 pass) override {
+        for (i32 i = 0; i < 4; ++i) {
+            const i32 cx = 1 + (i & 1), cz = 1 + (i >> 1);
+            const GenChunk& centre = *area[cx + cz * 4];
+            u32 seen = 0;
+            for (i32 k = 0; k < 9; ++k) {
+                const Section& s = area[(cx + k % 3 - 1) + (cz + k / 3 - 1) * 4]->sections[1];
+                for (u32 b = 0; b < Section::kVolume; ++b)
+                    if (s.get(b) == blk::kGlass) seen = seen * 31 + b + 1 + 7 * static_cast<u32>(k);
+            }
+            for (i32 k = 0; k < 9; ++k) {
+                GenChunk& c = *area[(cx + k % 3 - 1) + (cz + k / 3 - 1) * 4];
+                const u32 place = Hills::hash(static_cast<i32>(seen) + k, centre.x * 131 + centre.z) % Section::kVolume;
+                c.sections[1].set(c.alloc, place, static_cast<BlockState>(blk::kGlass));
+            }
+        }
+        for (i32 i = 0; i < 16; ++i) area[i]->version = static_cast<u8>(pass);
+    }
+    i32 sea_level() const override { return 0; }
+    i32 spawn_height() const override { return 0; }
+    bool is_flat() const override { return false; }
+
+    std::atomic<u32> made{0};
+};
+
+using Place = std::pair<i32, i32>;
+
+std::vector<BlockState> blocks_of(const Section* sections) {
+    std::vector<BlockState> out;
+    for (u32 si = 0; si < 2; ++si)
+        for (u32 b = 0; b < Section::kVolume; ++b) out.push_back(sections[si].get(b));
+    return out;
+}
+
+// The chunks of `Stages` from -r to r the long way: a square of ground, then every area of each
+// pass in turn that lies in it with all its chunks through the pass before.
+std::map<Place, std::vector<BlockState>> stages_the_long_way(i32 r) {
+    constexpr i32 kMargin = 12;
+    Stages gen;
+    std::map<Place, std::unique_ptr<GenChunk>> chunks;
+    for (i32 z = -r - kMargin; z <= r + kMargin; ++z)
+        for (i32 x = -r - kMargin; x <= r + kMargin; ++x) {
+            auto& c = chunks[{x, z}];
+            c = std::make_unique<GenChunk>();
+            gen.make_base(x, z, *c);
+        }
+    for (u32 pass = 1; pass <= GenPipeline::kPasses; ++pass)
+        for (i32 b = GenPipeline::area_b(pass, -r - kMargin) - 1; b <= GenPipeline::area_b(pass, r + kMargin) + 1; ++b)
+            for (i32 a = GenPipeline::area_a(pass, -r - kMargin) - 1; a <= GenPipeline::area_a(pass, r + kMargin) + 1; ++a) {
+                GenChunk* area[16];
+                bool whole = true;
+                for (i32 i = 0; i < 16 && whole; ++i) {
+                    const auto it =
+                        chunks.find({GenPipeline::area_x0(pass, a) + (i & 3), GenPipeline::area_z0(pass, b) + (i >> 2)});
+                    whole = it != chunks.end() && it->second->version == pass - 1;
+                    if (whole) area[i] = it->second.get();
+                }
+                if (whole) gen.decorate(area, GenPipeline::area_x0(pass, a), GenPipeline::area_z0(pass, b), pass);
+            }
+    std::map<Place, std::vector<BlockState>> out;
+    for (i32 z = -r; z <= r; ++z)
+        for (i32 x = -r; x <= r; ++x) {
+            const GenChunk& c = *chunks.at({x, z});
+            EXPECT_EQ(c.version, GenPipeline::kPasses);
+            out[{x, z}] = blocks_of(c.sections);
+        }
+    return out;
+}
+
+}  // namespace
+
+// A chunk of which only tags were kept (an import that had entities for it and no blocks), read
+// where the generator makes chunks in stages: what a worker has of it at first is everything but
+// the blocks, and says so; when they come it is the generator's chunk with what was kept.
+TEST(ChunkBytes, WhatWasKeptWaitsForBlocksMadeInStages) {
+    Stages gen;
+    Chunk only_tags;
+    only_tags.x = 3;
+    only_tags.z = -2;
+    only_tags.sections_count = static_cast<u8>(kOverworld.sections);
+    only_tags.light_count = static_cast<u8>(kOverworld.sections + 2);
+    u8 tags[] = {10, 0, 0, 1, 0, 1, 'a', 7, 0};
+    only_tags.keep = {sizeof tags, tags};
+    base::ByteBuf blob;
+    encode_kept(only_tags, blob);
+    LoadedChunk lc;
+    std::string err;
+    ASSERT_TRUE(load_chunk({blob.data, blob.len}, 3, -2, kOverworld, gen, lc, err)) << err;
+    EXPECT_TRUE(lc.unmade);
+    EXPECT_FALSE(lc.fresh);
+    EXPECT_EQ(gen.made.load(), 0u);
+    ASSERT_EQ(lc.chunk.keep.len, sizeof tags);
+    GenChunk blocks;
+    gen.make_base(3, -2, blocks);
+    const std::vector<BlockState> want = blocks_of(blocks.sections);
+    made_chunk(blocks, kOverworld, lc);
+    EXPECT_FALSE(lc.unmade);
+    EXPECT_TRUE(lc.chunk.dirty);
+    EXPECT_EQ(blocks_of(lc.chunk.sections), want);
+    ASSERT_EQ(lc.chunk.keep.len, sizeof tags);
+    EXPECT_EQ(std::memcmp(lc.chunk.keep.bytes, tags, sizeof tags), 0);
+    // Bytes that are no chunk are an error the first time already, with a generator of any kind.
+    blob.data[blob.len - 1] ^= 0x40;
+    LoadedChunk broken;
+    EXPECT_FALSE(load_chunk({blob.data, blob.len - 3}, 3, -2, kOverworld, gen, broken, err));
+}
+
+// The chunks of a generator that works in stages come into the world as any others do - asked
+// for, adopted in the order of asking - and are what the one order of decoration makes them. One
+// that nobody waits for any more does not come; asked for again, it does. And what was saved is
+// read, not made again.
+TEST(Persistence, ChunksMadeInStagesComeAsTheyWereAskedFor) {
+    constexpr i32 r = 3;
+    const std::map<Place, std::vector<BlockState>> want = stages_the_long_way(r);
+    for (const u32 threads : {0u, 2u}) {
+        TempDir dir;
+        base::Workers workers(threads);
+        const auto pump_until = [&](Dimension& dim, usize chunks, std::vector<Place>* came) {
+            for (u64 tick = 0; dim.chunk_count() < chunks && tick < 10'000'000; ++tick) {
+                dim.pump(tick);
+                for (const Dimension::Adopted& a : dim.adopted())
+                    if (came) came->push_back({a.chunk->x, a.chunk->z});
+                dim.release_adopted();
+                dim.ready().clear();
+                if (threads) std::this_thread::yield();
+            }
+            ASSERT_EQ(dim.chunk_count(), chunks);
+        };
+        {
+            Stages gen;
+            Dimension dim(proto::reg::dimension_type::kOverworld, "minecraft:overworld", gen, 256, &workers, dir.path, false);
+            ASSERT_NE(dim.store().generation(), nullptr);
+            dim.keep_adopted(true);
+            std::vector<Place> asked, came;
+            for (i32 x = -r; x <= r; ++x)
+                for (i32 z = -r; z <= r; ++z) {
+                    dim.request(x, z);
+                    if (x != 1) asked.push_back({x, z});
+                }
+            // Second thoughts about a row: nothing has come back from a worker yet, so all of it
+            // is still waiting to be made, and none of it comes.
+            for (i32 z = -r; z <= r; ++z) {
+                EXPECT_TRUE(dim.loading(1, z));
+                dim.forget(1, z);
+                EXPECT_FALSE(dim.loading(1, z));
+            }
+            pump_until(dim, asked.size(), &came);
+            EXPECT_EQ(came, asked);
+            EXPECT_EQ(dim.loading_count(), 0u);
+            for (i32 z = -r; z <= r; ++z) {
+                EXPECT_EQ(dim.find(1, z), nullptr);
+                dim.request(1, z);
+            }
+            pump_until(dim, 49, nullptr);
+            for (const auto& [at, blocks] : want)
+                EXPECT_EQ(blocks_of(dim.find(at.first, at.second)->sections), blocks) << at.first << ", " << at.second;
+            dim.for_each([](Chunk& c) { EXPECT_TRUE(c.dirty); });  // nothing on disk holds them yet
+            save_and_unload_all(dim);
+        }
+        Stages again;
+        Dimension dim(proto::reg::dimension_type::kOverworld, "minecraft:overworld", again, 256, &workers, dir.path, false);
+        for (i32 x = r; x >= -r; --x)
+            for (i32 z = -r; z <= r; ++z) dim.request(x, z);
+        pump_until(dim, 49, nullptr);
+        EXPECT_EQ(again.made.load(), 0u);
+        for (const auto& [at, blocks] : want)
+            EXPECT_EQ(blocks_of(dim.find(at.first, at.second)->sections), blocks) << at.first << ", " << at.second;
+        // Beyond what was saved the world goes on as the same world: the chunk beside the square
+        // is made with everything around it, the saved chunks' part in it too, from the seed alone.
+        dim.request(r + 1, 0);
+        pump_until(dim, 50, nullptr);
+        EXPECT_GT(again.made.load(), 0u);
+        EXPECT_EQ(blocks_of(dim.find(r + 1, 0)->sections), stages_the_long_way(r + 1).at({r + 1, 0}));
     }
 }
 

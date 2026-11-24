@@ -124,6 +124,12 @@ class Dimension {
         map_.set_loading(cx, cz, true);
         store_.load(cx, cz);
     }
+    bool loading(i32 cx, i32 cz) const { return map_.loading(cx, cz); }
+    // Nobody needs the chunk that was asked for any more. If it is still waiting to be made it
+    // will not come, and can be asked for again; one that is being read comes all the same.
+    void forget(i32 cx, i32 cz) {
+        if (map_.loading(cx, cz) && store_.forget(cx, cz)) map_.set_loading(cx, cz, false);
+    }
     // Once a tick: take what the workers have finished. Chunks are adopted - until `deadline_ns`
     // has passed (0: all of them), the rest wait for the next call - then lit and made ticking as
     // far as their neighbours allow.

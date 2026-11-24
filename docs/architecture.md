@@ -2352,8 +2352,7 @@ below ("Java's sine").
 ### Features: the engine (`region.*`, `feature.*`, `tools/mcgen/gen_features.py`)
 
 What exists of the `features` status so far is everything around a feature, and the first
-kind of feature: ores. No chunk of a world has them yet - a worker's chunk is still its terrain;
-what decorates chunks on the workers is the next thing to be built.
+kind of feature: ores. How the chunks of a world come by them is the section after this one.
 
 **A chunk between its terrain and the world** is a `world::GenChunk`: packed sections in an
 arena of its own, the biome of every cell, vanilla's six heightmaps (the two the terrain was made
@@ -2432,10 +2431,11 @@ section holds nothing but cave air it sees cave air, not the plain air `ProtoChu
 (`Region::raw`, `put_raw`). An ore that shuns the open draws a number for a block only once a
 target's rule held for it - the order of the draws is the order of the blocks.
 
-**Decorations held to the jar.** Beside the placements, the golden script has whole decorations
+**Decorations held to the jar.** Beside the placements, the golden script has whole decorations:
 with the features of one kind alone - so far ores: four areas of 4 x 4 chunks (windswept hills,
-badlands, dripstone and lush caves), the inner four decorated one after the other in the order
-the pipeline will have. Of each of the 404 features that run: everything it wrote, where and
+badlands, dripstone and lush caves) - and with every feature that is ported (six areas; the
+tables say which, `ported_features.txt`), the inner four chunks decorated one after the other
+in the order of a task. Of each of the features that run (404 and 612): everything it wrote, where and
 what, folded into one number (on vanilla's side by sections that say what is set in them - an
 ore's raw writes too), and the long its source gives afterwards; then the sixteen chunks -
 blocks, heightmaps, marks, ticks. A feature that goes wrong is named by the test, with its chunk.
@@ -2451,16 +2451,88 @@ of the world, 160 with their own ores and 192 with what the neighbours' put into
 lie across the borders of chunks, so this is the order replayed, too - the same block for block,
 heightmaps, marks and ticks. (And of the 128 chunks of the world that never ticked, all.)
 
+### Features: one order, and the workers (`world/gen_pipeline.*`)
+
+A feature of one chunk writes into the chunks around it, and finds there what the features of
+other chunks wrote before. Vanilla decorates one chunk at a time, in whatever order its tickets
+come up; its world along the borders of chunks is an accident of who walked where. Here a chunk is
+a function of the seed and its place (AGENTS.md, rule 12), so the order has to be one that is the same for
+everyone - and one that several workers can keep at once without waiting for each other.
+
+**Four passes.** The plane of chunks is cut into areas of 4 x 4, four times over, each cut
+shifted two chunks against the one before: pass 1 at (0, 0), pass 2 at (2, 0), pass 3 at (2, 2),
+pass 4 at (0, 2). The task of an area decorates the four chunks in its middle, one after the
+other; the nine chunks around each of the four - all a decoration may write to - lie in the area.
+A chunk is in the middle of an area in exactly one of the four passes. So "all areas of pass 1,
+then all of pass 2, of 3, of 4" decorates every chunk of the world once, each after some of its
+neighbours and before the others: one of the orders a vanilla server could have taken. And two
+areas of one pass share no chunk, so they can be made at the same time by two workers that know
+nothing of each other. (The census of vanilla's own features says the nine chunks are enough:
+none reads further. A feature that did would find an empty chunk here.)
+
+**A chunk moves.** A `world::GenChunk` is in one place at a time. Made - its terrain: version 0 -
+it waits with the area of pass 1 that holds it. That area's task takes its sixteen and hands them
+back at version 1; they go to the two areas of pass 2 they lie in, eight to each. And so on: what
+an area of pass 4 hands back is finished. Nothing is copied, nothing is counted, nothing is
+locked; a worker is handed sixteen chunks and hands sixteen back (`ChunkGenerator::decorate`: one
+`worldgen::Region` over the area, the four decorations, the sections that were touched packed
+again). What a chunk costs follows from the geometry alone: an area of pass 4 is made of two of
+pass 3, those of four of pass 2, those of six of pass 1 - thirteen tasks and the terrain of 96
+chunks for the first chunk of a world, where vanilla makes the terrain of 25; a view of 25 x 25
+chunks takes the terrain of 1152 where vanilla's takes 841.
+
+**Everything is a cache.** A chunk that is asked for (`GenPipeline::request`) makes its area of
+pass 4 wanted, that the areas it is made of, down to the terrain; what is wanted and has all its
+chunks is run, what the earliest request needs first, and no more tasks are out than the workers
+will come to soon (twice their number) - a task that has been handed over cannot be taken back
+when something more urgent turns up. What a task leaves that nobody asked for - the fifteen other
+chunks of the area, finished; the halves of areas further out - stays where it is. It is what
+the next request beside it starts from: a player who walks on finds half of every area ahead
+made already. Until it has lain unasked for ten minutes, or what is kept is more than
+`generation-cache-mb` (256 by default, chosen without a measurement); then the oldest goes, and
+is made again if it is ever needed - the same to the bit, which a build with DCHECKs checks
+whenever it makes something a second time while the first is still there. A request can be taken
+back (`Dimension::forget`, when a view has moved on and nobody else is near): what is wanted is
+then worked out anew from the requests that are left, and what was wanted for that chunk alone
+is not made ahead of what the player needs where it is now.
+
+**Into the world.** The store asks the pipeline where it used to call the generator: a chunk
+with nothing on disk - or one of which an import kept only entities - waits with whatever was
+read of it (`LoadedChunk::unmade`) until its blocks come, then a worker makes of the two what it
+makes of any chunk: palettes of biomes, heightmaps, the marks for its first tick. Chunks still
+enter the world in the order they were asked for (the light engine's bookkeeping goes by which
+of two neighbours came first); a request that was taken back leaves a gap that is stepped over.
+Between two ticks the tick thread no longer sleeps through what the workers finish
+(`Workers::wait`): a task's `done` hands its chunks on and starts what they were waiting for at
+once, or five stages would take five ticks with the workers idle in between. What is saved is
+read, never made again; beyond the saved chunks a world goes on as the same world, their part
+in the chunks beside them made from the seed like everything else.
+
+**Held to** the long way (`tests/unit/gen_pipeline_test.cpp`): a generator whose "features" mix
+what they read in the nine chunks into what they write - any chunk decorated out of turn, twice,
+or beside the wrong version of a neighbour comes out as other numbers, and so does everything
+made of it - against the same world made by plain loops, pass by pass. With no worker thread, one
+and four; asked in three orders; with nothing kept at all (every chunk from nothing, 96 terrains
+each); with requests taken back and made again; and with four thousand requests, second thoughts,
+polls and sweeps in an order drawn at random. The same through a `Dimension` with a directory
+(`store_test.cpp`: order of arrival, a chunk that is forgotten, a world that is read back and
+goes on). And `a_world_is_the_same_whoever_makes_it`: two servers of one seed, one with three
+workers and one with all there are, send their clients the same bytes. The task itself - the
+generator's `decorate` over an area of real terrain - is held to the jar's classes with the
+decorations above ("ported": six areas, 612 features).
+
 ### What is there, and what is not
 
 There: biomes, and all of the `terrain` status - the shape of the ground with its aquifers
 (`doFill`); the surface, bedrock, deepslate and the ore veins (`buildSurface`); the caves and
 canyons of the carvers (`generateCarvers`).
 
-Not there yet: features in a world - of the features only ores are ported, and no chunk a worker
-makes is decorated yet - and structures. A world of terrain has its ground and no tree on it.
-Beyond those: only the overworld, only the preset `normal`; an imported vanilla world does not go
-on with this generator yet.
+And of the `features` status the ores, in every chunk of a world.
+
+Not there yet: the other features - a world of terrain has its ground, its ores and no tree on
+it - and structures. Where a world begins is still looked for on bare terrain. Beyond those:
+only the overworld, only the preset `normal`; an imported vanilla world does not go on with this
+generator yet.
 
 ## NBT and text components (src/nbt/, src/text/)
 

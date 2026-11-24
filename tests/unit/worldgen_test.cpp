@@ -700,10 +700,18 @@ TEST(Worldgen, GeneratorHandsAWorkerItsChunk) {
     EXPECT_FALSE(generator.is_flat());
     EXPECT_EQ(generator.sea_level(), 63);
     const world::Layout layout{settings::kMinY, settings::kMinY >> 4, Terrain::kSections, true};
+    // A chunk of this generator is made in stages: what a worker has of it before they are run
+    // says so, and then takes the blocks as they come - here from the first stage alone.
+    EXPECT_TRUE(generator.staged());
     world::LoadedChunk made;
     std::string err;
     ASSERT_TRUE(world::load_chunk({}, cx, cz, layout, generator, made, err)) << err;
     EXPECT_TRUE(made.fresh);
+    ASSERT_TRUE(made.unmade);
+    world::GenChunk terrain_of_it;
+    generator.make_base(cx, cz, terrain_of_it);
+    world::made_chunk(terrain_of_it, layout, made);
+    EXPECT_FALSE(made.unmade);
     // Its blocks are vanilla's (the hash the script has of them).
     u64 blocks = kFnv;
     for (u32 si = 0; si < Terrain::kSections; ++si)
@@ -745,7 +753,6 @@ TEST(Worldgen, ChunkOfTerrainHasTheHeightmapsItKeeps) {
     in.num<u32>();
     const i32 cx = in.i32_(), cz = in.i32_();
     OverworldGenerator generator(seed);
-    EXPECT_FALSE(generator.staged());  // (until a chunk's features are made)
     world::GenChunk made;
     generator.make_base(cx, cz, made);
     EXPECT_EQ(made.x, cx);

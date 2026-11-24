@@ -7,6 +7,7 @@
 #include "world/gen_chunk.hpp"
 #include "worldgen/carver.hpp"
 #include "worldgen/climate.hpp"
+#include "worldgen/feature.hpp"
 #include "worldgen/material.hpp"
 
 namespace worldgen {
@@ -146,6 +147,26 @@ void OverworldGenerator::make_base(i32 cx, i32 cz, world::GenChunk& out) {
     out.fluid_ticks.clear();
     out.block_entities.clear();
     out.tags.clear();
+}
+
+void OverworldGenerator::decorate(world::GenChunk* const* area, i32 x0, i32 z0, u32 pass) {
+    // What a thread decorates with: three megabytes of blocks spread out, kept from one area to the next.
+    struct Decoration {
+        RegionWork region;
+        FeatureWork features;
+    };
+    thread_local std::unique_ptr<Decoration> work;
+    if (!work) work = std::make_unique<Decoration>();
+    Region region(work->region, world_, area, x0, z0, 4, 4);
+    for (i32 i = 0; i < 4; ++i) {
+        region.begin(x0 + 1 + (i & 1), z0 + 1 + (i >> 1));
+        Decorator(region, work->features).decorate();
+    }
+    region.commit();
+    for (u32 i = 0; i < 16; ++i) {
+        DCHECK(area[i]->version == pass - 1);
+        area[i]->version = static_cast<u8>(pass);
+    }
 }
 
 bool OverworldGenerator::generate_whole(world::LoadedChunk& out) {

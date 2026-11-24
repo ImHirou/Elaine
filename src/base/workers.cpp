@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "base/workers.hpp"
 
+#include <linux/futex.h>
 #include <pthread.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 
 #include <cstdio>
 #include <cstdlib>
@@ -13,13 +16,20 @@ namespace base {
 
 namespace {
 constexpr u32 kRing = 4096;  // tasks queued per worker; a full ring makes the owner wait for room
+
+// (std::atomic's own wait has no time limit.)
+long futex(std::atomic<u32>& word, int op, u32 value, const timespec* timeout) {
+    static_assert(sizeof(std::atomic<u32>) == sizeof(u32));
+    return syscall(SYS_futex, reinterpret_cast<u32*>(&word), op, value, timeout, nullptr, 0);
 }
+}  // namespace
 
 Workers::Workers(u32 threads) {
     for (u32 i = 0; i < threads; ++i) {
         workers_.push_back(std::make_unique<Worker>(kRing));
         Worker* w = workers_.back().get();
         w->index = i;
+        w->owner = &owner_;
         auto start = [](void* arg) -> void* {
             Worker& me = *static_cast<Worker*>(arg);
             char name[16];
@@ -56,6 +66,11 @@ void Workers::run(Worker& w) {
             any = true;
             t.work(t);
             while (UNLIKELY(!w.out.push(t))) std::this_thread::yield();  // the owner is behind with poll()
+            // An owner that sleeps until something is done (wait()) is woken. The count first, then
+            // the look: the owner says it sleeps first, then looks at the count.
+            w.owner->finished.fetch_add(1, std::memory_order_seq_cst);
+            if (UNLIKELY(w.owner->sleeping.load(std::memory_order_seq_cst) != 0))
+                futex(w.owner->finished, FUTEX_WAKE_PRIVATE, 1, nullptr);
         }
         if (any) continue;
         if (w.stop.load(std::memory_order_acquire)) return;
@@ -140,6 +155,26 @@ u32 Workers::poll(u64 deadline_ns) {
     }
     kick();  // a `done` may have submitted the next step
     return n;
+}
+
+bool Workers::wait(u64 deadline_ns) {
+    if (workers_.empty()) return !inline_done_.empty();
+    for (;;) {
+        const u32 seen = owner_.finished.load(std::memory_order_seq_cst);
+        if (held_at_ < held_.size()) return true;
+        for (auto& w : workers_)
+            if (!w->out.empty()) return true;
+        const u64 now = now_ns();
+        if (now >= deadline_ns) return false;
+        const u64 left = deadline_ns - now;
+        const timespec timeout{static_cast<time_t>(left / kNsPerSec), static_cast<long>(left % kNsPerSec)};
+        // Whatever finished before `seen` was read is in a ring and was found above; whatever
+        // finishes after it changes the count, and the kernel does not sleep on a count that is
+        // not `seen` - or finds `sleeping` set, and wakes.
+        owner_.sleeping.store(1, std::memory_order_seq_cst);
+        futex(owner_.finished, FUTEX_WAIT_PRIVATE, seen, &timeout);
+        owner_.sleeping.store(0, std::memory_order_seq_cst);
+    }
 }
 
 void Workers::drain() {

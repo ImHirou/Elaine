@@ -124,6 +124,7 @@ void Game::apply_view(u32 pi, i32 cx, i32 cz, i32 distance) {
     // What has to be in the world for this view: a request for a chunk that is there, or on its
     // way, is two lookups. Ring by ring from the middle - the workers take them in this order, and
     // the chunk the player stands in is the first that can tick.
+    if (had) forget_view(ocx, ocz, od);
     const i32 reach = distance + 1 + (kLoadMargin - kViewMargin);
     world_.request(cx, cz);
     for (i32 ring = 1; ring <= reach; ++ring) {
@@ -133,6 +134,20 @@ void Game::apply_view(u32 pi, i32 cx, i32 cz, i32 distance) {
                 if (in_view(cx, cz, distance, x, z, kLoadMargin)) world_.request(x, z);
         }
     }
+}
+
+// A view around (cx, cz) is no more. The chunks it asked for that have not come and that nobody's
+// view holds now are not waited for: one that is still to be made (world::GenPipeline) is not
+// made for the sake of a player who has gone on, ahead of what the player needs where it is now.
+void Game::forget_view(i32 cx, i32 cz, i32 distance) {
+    if (!world_.store().generation() || world_.loading_count() == 0) return;
+    const u32 n = static_cast<u32>(players_.size());
+    const i32 reach = distance + 1 + (kLoadMargin - kViewMargin);
+    for (i32 z = cz - reach; z <= cz + reach; ++z)
+        for (i32 x = cx - reach; x <= cx + reach; ++x)
+            if (world_.loading(x, z) && in_view(cx, cz, distance, x, z, kLoadMargin) &&
+                !any_in_view(pcx_.data(), pcz_.data(), pview_.data(), n, x, z, kLoadMargin))
+                world_.forget(x, z);
 }
 
 // DistanceManager.addPlayer / removePlayer, as ChunkMap.move calls them: a player's simulation

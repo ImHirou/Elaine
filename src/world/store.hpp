@@ -17,14 +17,19 @@
 //            runs and hands the new table back.
 //   between  a chunk that is asked for while its bytes wait or are being written is decoded from
 //            those bytes - they are newer than the file.
+//   made     a generator that makes chunks in stages has its own way through the workers
+//            (world/gen_pipeline.hpp): a chunk whose blocks are its to make waits here, with
+//            whatever else was read of it, until they come.
 #pragma once
 
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "base/workers.hpp"
 #include "world/chunk_io.hpp"
+#include "world/gen_pipeline.hpp"
 #include "world/region.hpp"
 
 namespace world {
@@ -47,8 +52,18 @@ class ChunkStore {
     // world makes of them (the light engine's bookkeeping depends on which of two neighbours
     // came first) is then the same on every run, with any number of workers.
     void load(i32 cx, i32 cz);
+    // Nobody wants the chunk that was asked for any more. True: it will not arrive - it was still
+    // waiting to be made, and what was to be made for it alone is left. False: it is too far on
+    // its way (read, or being read), and arrives.
+    bool forget(i32 cx, i32 cz);
     // The chunks that have arrived; the caller takes them out and deletes each when done with it.
     std::vector<LoadedChunk*>& loaded() { return loaded_; }
+    // What makes the chunks of a generator that works in stages, or none.
+    GenPipeline* generation() { return pipeline_.get(); }
+    // Nothing more is made from here on: the server stops. Chunks that wait to be made never arrive.
+    void stop_generation() {
+        if (pipeline_) pipeline_->stop();
+    }
 
     // Keep these bytes (encode_chunk's) as the chunk at (cx, cz); they replace what was waiting.
     void save(i32 cx, i32 cz, std::span<const u8> bytes);
@@ -105,6 +120,9 @@ class ChunkStore {
     void load_known(Region& r, u16 index, u64 seq);
     static Blob* find(std::vector<Item>& items, u16 index);
     void release(Blob* b);
+    void arrive(u64 seq, LoadedChunk* chunk);
+    void await_made(LoadJob* job);
+    static void made(void* ctx, i32 cx, i32 cz, GenChunk* chunk);
 
     static void load_work(base::Task& t);
     static void load_done(base::Task& t);
@@ -126,12 +144,16 @@ class ChunkStore {
     std::unordered_map<u64, Region*> regions_;  // looked at once per chunk loaded or saved, never per tick
     std::vector<Region*> dirty_;                // regions with something pending
     std::vector<LoadedChunk*> loaded_;
-    struct Arrived {
-        u64 seq;
-        LoadedChunk* chunk;
+    // The requests that have not been handed on, by their number: a ring, each place taken when
+    // its chunk is done (or will never be: forgotten) and waiting for the ones asked for earlier.
+    struct Arrival {
+        LoadedChunk* chunk = nullptr;
+        bool here = false;
     };
-    std::vector<Arrived> arrived_;  // done, and waiting for one that was asked for earlier
-    u64 asked_ = 0, handed_ = 0;    // requests so far; of them, how many are in loaded_ or were
+    std::vector<Arrival> ring_;
+    u64 asked_ = 0, handed_ = 0;  // requests so far; of them, how many are in loaded_ or were
+    std::unique_ptr<GenPipeline> pipeline_;
+    std::unordered_map<u64, LoadJob*> unmade_;  // chunks that wait for their blocks, by place
 };
 
 }  // namespace world

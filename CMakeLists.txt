@@ -181,6 +181,7 @@ add_library(core STATIC
   src/world/ticks.cpp
   src/world/fluid.cpp
   src/world/gen_chunk.cpp
+  src/world/gen_pipeline.cpp
   src/world/generator.cpp
   src/world/dimension.cpp
   src/world/collide.cpp
@@ -225,7 +226,8 @@ if(MC_SANITIZE)
   # it timed out. Optimized, the sanitizers still see every load and store of it.
   set_source_files_properties(
     src/worldgen/noise.cpp src/worldgen/density.cpp src/worldgen/climate.cpp src/worldgen/aquifer.cpp src/worldgen/terrain.cpp
-    src/worldgen/material.cpp src/worldgen/carver.cpp
+    src/worldgen/material.cpp src/worldgen/carver.cpp src/worldgen/generator.cpp src/worldgen/region.cpp src/worldgen/feature.cpp
+    src/worldgen/jmath.cpp
     PROPERTIES COMPILE_OPTIONS "-O2")
 endif()
 if(MC_PCH)
@@ -270,6 +272,7 @@ if(MC_TESTS)
       tests/unit/time_test.cpp
       tests/unit/worldgen_test.cpp
       tests/unit/region_test.cpp
+      tests/unit/gen_pipeline_test.cpp
       tests/unit/feature_test.cpp
     )
     target_link_libraries(unit_tests PRIVATE core GTest::gtest_main OpenSSL::Crypto)

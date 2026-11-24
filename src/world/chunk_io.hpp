@@ -62,14 +62,22 @@ struct LoadedChunk {
     SectionAllocator alloc{arena};
     Chunk chunk;
     ChunkParts parts;
-    bool fresh = false;  // made by the generator just now: it has never been saved
-    u32 traits = 0;      // derive(): bit 0 large collision shapes, bit 1 blocks that act on entities
+    bool fresh = false;   // made by the generator just now: it has never been saved
+    bool unmade = false;  // its blocks are still to come from a generator that makes chunks in stages
+    u32 traits = 0;       // derive(): bit 0 large collision shapes, bit 1 blocks that act on entities
 };
 
 // Make `out` the chunk at (cx, cz) that `blob` holds - or, with an empty blob, the one the
 // generator makes - and derive what follows from its blocks. False (with `err`) if the blob is
 // not a chunk of this layout; `out` is then not to be used.
+//
+// A generator that makes chunks in stages (ChunkGenerator::staged) is not run from here. Where
+// the blocks are its to make, `out` has everything but them and says so (`unmade`): the caller has
+// the chunk made (world/gen_pipeline.hpp) and hands it to made_chunk.
 bool load_chunk(std::span<const u8> blob, i32 cx, i32 cz, const Layout& l, ChunkGenerator& gen, LoadedChunk& out,
                 std::string& err);
+// The blocks of a chunk load_chunk left unmade - what the generator's stages made of it, which is
+// empty afterwards - and what follows from them.
+void made_chunk(GenChunk& made, const Layout& l, LoadedChunk& out);
 
 }  // namespace world

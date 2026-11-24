@@ -857,6 +857,9 @@ inline constexpr unsigned char kCorrections[] = {
 """
     ported = sum(1 for at in range(t.named) if t.placed[at][3])
     where = sum(1 for at in range(t.named) if t.placed[at][4])
+    # For the golden script (WorldgenFeatures.decorations): which features of the biomes src/worldgen
+    # places as the tables stand, so that vanilla's side of a whole decoration is made of the same.
+    (vdir(version) / "worldgen" / "ported_features.txt").write_text("".join(f"{t.placed_names[at]}\n" for at in range(t.named) if t.placed[at][3]))
     return {"worldgen_features.hpp": "".join(out), "worldgen_state_sets.bin": t.sets.bytes() or b"\0",
             "worldgen_math.hpp": math_hpp, "worldgen_math.bin": math,
             "_stats": {"placed_features": len(t.placed), "placed_features_named": t.named, "placed_features_ported": ported, "placed_features_whose_placements_are": where,

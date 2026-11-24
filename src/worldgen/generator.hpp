@@ -16,8 +16,12 @@ class OverworldGenerator final : public world::ChunkGenerator {
 
     // The chunk as the `biomes` and `terrain` statuses leave it, with the heightmaps a chunk keeps
     // from then on (Heightmap.primeHeightmaps, at the end of buildTerrain).
+    bool staged() const override { return true; }
     void make_base(i32 cx, i32 cz, world::GenChunk& out) override;
-    // A chunk of terrain alone, in one go: make_base, handed on as it is.
+    // ChunkGenerator.applyBiomeDecoration for the four chunks in the middle of the area.
+    void decorate(world::GenChunk* const* area, i32 x0, i32 z0, u32 pass) override;
+    // A chunk of terrain alone, in one go: make_base, handed on as it is (tests and tools; a world's
+    // chunks come by the stages above).
     bool generate_whole(world::LoadedChunk& out) override;
     i32 sea_level() const override { return settings::kSeaLevel; }
     i32 spawn_height() const override { return 64; }  // ChunkGenerator.getSpawnHeight

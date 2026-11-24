@@ -396,6 +396,45 @@ def a_world_of_terrain(srv: Server):
     assert len(seen) > 1 and "minecraft:the_void" not in seen, seen
 
 
+@test(alone=True)
+def a_world_is_the_same_whoever_makes_it():
+    """A chunk of terrain is made in stages on the workers - its features reach into the chunks around
+    it, in one order that is the same everywhere (world/gen_pipeline.hpp) - and comes out the same
+    however many workers there are and whichever was done first: two servers of one seed send the
+    same bytes. And the chunks have what the features put there: ores, so far."""
+    def made_by(**workers) -> dict:
+        srv = Server(EXE, level_type="minecraft:normal", level_seed=20261124, simulation_distance=2, **workers)
+        try:
+            srv.console("tick freeze")
+            srv.wait_log("The game is frozen", timeout=60)     # (the chunk the world begins in is made first)
+            a = srv.client()
+            join(a, "Alice")
+            a.send("player_loaded")
+            collect(a, ticks=4)
+            # Bob looks when it is all there, as in a_world_of_terrain_comes_back.
+            b = srv.client()
+            join(b, "Bob")
+            settle(b)
+            assert srv.stop() == 0, srv.read_log()
+            return {"frames": frames(b), "chunks": dict(b.chunks.items())}
+        finally:
+            srv.stop()
+    few, many = made_by(worker_threads=3), made_by()
+    assert set(few["frames"]) == set(many["frames"]) and len(few["frames"]) >= 25
+    differ = sorted(pos for pos in few["frames"] if few["frames"][pos] != many["frames"][pos])
+    assert not differ, f"chunks that three workers and all of them made differently: {differ}"
+    # What a feature put there: ore in the stone, somewhere in every chunk or nearly.
+    ores = {mc.BLOCK[name] for name in ("kCoalOre", "kIronOre", "kCopperOre", "kDeepslateIronOre", "kDeepslateRedstoneOre")}
+    with_ore = 0
+    for ch in few["chunks"].values():
+        states = set()
+        for section in ch["sections"]:
+            blocks = section["blocks"]
+            states |= set(blocks["palette"]) if blocks["palette"] else {mc.paletted_get(blocks, i) for i in range(4096)}
+        with_ore += bool(states & ores)
+    assert with_ore > len(few["chunks"]) * 3 // 4, (with_ore, len(few["chunks"]))
+
+
 def flowing(ch: dict) -> bool:
     """Whether a chunk holds water or lava that has run: a state of them that is no source."""
     water, lava = mc.BLOCK["kWater"], mc.BLOCK["kLava"]
@@ -421,13 +460,15 @@ def a_world_of_terrain_comes_back():
         srv.console("tick freeze")
         srv.wait_log("The game is frozen")
         a = srv.client()
-        ja = join(a, "Alice", view=6)
+        ja = join(a, "Alice", view=4)
         a.send("player_loaded")
-        settle(a)
+        # (A chunk is sent as soon as it may be, and the water of the chunk beside it may run into
+        # it afterwards: Alice is told of blocks that changed, as she would be anywhere.)
+        collect(a, ticks=4)
         cx, cz = ja["center"]
         # Bob comes to look when all of it is there.
         b = srv.client()
-        jb = join(b, "Bob", view=6)
+        jb = join(b, "Bob", view=4)
         assert jb["center"] == (cx, cz)
         settle(b)
         before = frames(b)
@@ -445,7 +486,7 @@ def a_world_of_terrain_comes_back():
         srv.console("tick freeze")
         srv.wait_log("The game is frozen")
         c = srv.client()
-        jc = join(c, "Carol", view=6)
+        jc = join(c, "Carol", view=4)
         assert jc["center"] == (cx, cz) and jc["login"]["seed"] == hashed_seed(7) and jc["login"]["is_flat"] is False
         c.send("player_loaded")
         settle(c)
@@ -454,12 +495,13 @@ def a_world_of_terrain_comes_back():
         differ = sorted(pos for pos in before if before[pos] != after[pos])
         assert not differ, f"chunks that came back different: {differ}"
         # Carol goes where no chunk has ticked yet: the marks those chunks were saved with are run
-        # now (seven chunks west there is water that has somewhere to go).
+        # now. Four chunks west - she has those chunks already, as they were saved - there is water
+        # that has somewhere to go, and she is told.
         x, y, z = jc["teleport"]["pos"]
         c.send("move_player_pos", struct.pack(">dddB", x - 16.0 * 7, y, z, 1))
-        c.sync_chunks(6, (cx - 7, cz))
-        ran_now = {(pos[0] >> 4, pos[2] >> 4) for pos in collect(c)} | {pos for pos in c.chunks if flowing(c.chunks[pos])}
-        assert any(cx - pos[0] >= 6 for pos in ran_now), sorted(ran_now)
+        c.sync_chunks(4, (cx - 7, cz))
+        ran_now = {(pos[0] >> 4, pos[2] >> 4) for pos in collect(c)}
+        assert any(cx - pos[0] >= 4 for pos in ran_now), sorted(ran_now)
         assert srv.stop() == 0, srv.read_log()
         os.unlink(srv.log.name)
     finally:

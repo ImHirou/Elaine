@@ -55,6 +55,10 @@ Game::Game(const Settings& s, std::vector<std::unique_ptr<net::Reactor>>& reacto
       rng_(base::now_ns() | 1),
       console_(console) {
     rate_.set_rate(s.tick_rate);
+    if (world::GenPipeline* generation = world_.store().generation()) {
+        generation->set_budget(usize{s.generation_cache_mb} << 20);
+        generation->set_keep(ticks_of(600));  // what nobody came near in ten minutes
+    }
     random_value_ = static_cast<u32>(random());  // Level.randValue: RandomSource.create().nextInt()
     time_ = static_cast<u64>(world.time.game_time);
     for (u32 i = 0; i < kClocks; ++i) clocks_[i] = world.time.clocks[i];
@@ -217,14 +221,16 @@ void Game::run(const std::atomic<bool>& stop) {
                 "tick: %.3f ms avg, %.3f ms worst, %.3f ms of it the entity tracker, %.3f ms the entities' own ticks, %.3f ms "
                 "flush, %.3f ms block ticks; "
                 "%.1f KiB/tick sent; %zu players, %u entities (%u at rest), %zu chunks (%zu on their way, %zu to be written, "
-                "%zu with random ticks to run), %llu scheduled ticks, %.1f MiB of world",
+                "%zu with random ticks to run), %llu scheduled ticks, %.1f MiB of world, %.1f MiB of chunks half made",
                 static_cast<double>(busy_ns) / kStatsEvery / 1e6, static_cast<double>(worst_ns) / 1e6,
                 static_cast<double>(track_ns) / kStatsEvery / 1e6, static_cast<double>(move_ns) / kStatsEvery / 1e6,
                 static_cast<double>(flush_ns) / kStatsEvery / 1e6, static_cast<double>(block_ns) / kStatsEvery / 1e6,
                 static_cast<double>(sent_bytes) / kStatsEvery / 1024.0, players_.size(), ents_.size(), asleep_,
                 world_.chunk_count(), world_.loading_count(), world_.store().waiting(), world_.random_chunks().size(),
                 static_cast<unsigned long long>(world_.block_ticks().count() + world_.fluid_ticks().count()),
-                static_cast<double>(world_.memory_bytes()) / (1024.0 * 1024.0));
+                static_cast<double>(world_.memory_bytes()) / (1024.0 * 1024.0),
+                static_cast<double>(world_.store().generation() ? world_.store().generation()->kept_bytes() : 0) /
+                    (1024.0 * 1024.0));
             busy_ns = worst_ns = track_ns = move_ns = flush_ns = block_ns = sent_bytes = 0;
         }
 
@@ -232,8 +238,14 @@ void Game::run(const std::atomic<bool>& stop) {
         if (UNLIKELY(sprinting)) {
             rate_.sprint_time_spent += now - rate_.sprint_tick_start;  // ServerTickRateManager.endTickWork
         } else if (now < next) {
-            timespec ts{static_cast<time_t>(next / base::kNsPerSec), static_cast<long>(next % base::kNsPerSec)};
-            clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, nullptr);
+            // Until the next tick. What the workers finish meanwhile is taken as it comes: a chunk
+            // that is made in stages goes on to its next stage now, not a tick later - which would
+            // be a tick a stage, with the workers idle in between.
+            while (workers_.in_flight() != 0 && workers_.wait(next)) workers_.poll(next);
+            if (base::now_ns() < next) {
+                timespec ts{static_cast<time_t>(next / base::kNsPerSec), static_cast<long>(next % base::kNsPerSec)};
+                clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, nullptr);
+            }
         } else if (now - next > base::kNsPerSec) {
             next = now;  // fell more than a second behind: do not try to replay the backlog
         }
@@ -242,6 +254,7 @@ void Game::run(const std::atomic<bool>& stop) {
     for (const Joining& j : joining_) refuse(j.reactor, j.h, j.t, "Server closed");
     joining_.clear();  // (their files, when they come, find nobody waiting)
     for (auto& r : reactors_) r->wake();
+    world_.store().stop_generation();  // what is not made yet is not waited for
     save_world();
 }
 
@@ -547,7 +560,9 @@ void Game::remove_player(u32 pi) {
             if (chest != kNone && chests_[chest].alive) chest_closed(chest);
     }
 
-    if (senders_[pi].has_view) move_simulation(true, pcx_[pi], pcz_[pi], false, 0, 0);  // DistanceManager.removePlayer
+    const bool had_view = senders_[pi].has_view;
+    const i32 view_x = pcx_[pi], view_z = pcz_[pi], view = pview_[pi];
+    if (had_view) move_simulation(true, pcx_[pi], pcz_[pi], false, 0, 0);  // DistanceManager.removePlayer
 
     // PlayerList.remove: the entity goes first - whoever saw it gets remove_entities - then the
     // tab-list entry. The store fills the row with its last player, as we do with ours below.
@@ -581,6 +596,7 @@ void Game::remove_player(u32 pi) {
     dirty_.pop_back();
     out_.pop_back();
     online_.store(static_cast<u32>(players_.size()), std::memory_order_relaxed);
+    if (had_view) forget_view(view_x, view_z, view);
     broadcast(cb::PlayerInfoRemove{uuid});
 }
 

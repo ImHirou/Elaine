@@ -30,6 +30,7 @@ struct ChunkStore::LoadJob {
     u64 seq;
     LoadedChunk* out = nullptr;
     std::string error;
+    GenChunk* made = nullptr;  // the second time round: the blocks `out` was waiting for
 };
 struct ChunkStore::OpenJob {
     ChunkStore* store;
@@ -52,6 +53,7 @@ struct ChunkStore::WriteJob {
 
 ChunkStore::ChunkStore(base::Workers& workers, const Layout& layout, ChunkGenerator& gen, std::string dir, bool sync)
     : workers_(workers), layout_(layout), gen_(gen), dir_(std::move(dir)), sync_(sync) {
+    if (gen_.staged()) pipeline_ = std::make_unique<GenPipeline>(workers_, gen_, &made, this);
     if (dir_.empty()) return;
     std::error_code ec;
     std::filesystem::create_directories(dir_, ec);
@@ -70,31 +72,43 @@ ChunkStore::ChunkStore(base::Workers& workers, const Layout& layout, ChunkGenera
 }
 
 void ChunkStore::finish() {
-    if (!persistent()) return workers_.drain();
-    flush_ = true;
-    u64 before = written_;
-    for (u32 idle = 0;;) {
-        tick(now_);
+    // (Waiting for the workers is not waiting for every chunk that is asked for to be made: what
+    // is out comes back, and nothing new is begun meanwhile.)
+    if (pipeline_) pipeline_->hold(true);
+    if (!persistent()) {
         workers_.drain();
-        if (waiting_ == 0 && jobs_ == 0) break;
-        // A round may only open a region; three that write nothing mean that what is left waits
-        // on a region that cannot be written.
-        idle = written_ == before ? idle + 1 : 0;
-        before = written_;
-        if (idle >= 3) {
-            LOG_ERROR("%zu chunk(s) could not be saved", waiting_);
-            break;
+    } else {
+        flush_ = true;
+        u64 before = written_;
+        for (u32 idle = 0;;) {
+            tick(now_);
+            workers_.drain();
+            if (waiting_ == 0 && jobs_ == 0) break;
+            // A round may only open a region; three that write nothing mean that what is left waits
+            // on a region that cannot be written.
+            idle = written_ == before ? idle + 1 : 0;
+            before = written_;
+            if (idle >= 3) {
+                LOG_ERROR("%zu chunk(s) could not be saved", waiting_);
+                break;
+            }
+            now_ += kRetryAfter;  // (nobody is counting ticks any more)
         }
-        now_ += kRetryAfter;  // (nobody is counting ticks any more)
+        flush_ = false;
     }
-    flush_ = false;
+    if (pipeline_) pipeline_->hold(false);
 }
 
 ChunkStore::~ChunkStore() {
     // What is still out with a worker points into this object: have it back first.
+    stop_generation();
     workers_.drain();
     for (LoadedChunk* lc : loaded_) delete lc;
-    for (const Arrived& a : arrived_) delete a.chunk;
+    for (const Arrival& a : ring_) delete a.chunk;
+    for (auto& [key, job] : unmade_) {
+        delete job->out;
+        delete job;
+    }
     for (auto& [key, r] : regions_) {
         for (const Item& it : r->pending) std::free(it.blob);
         for (const Item& it : r->in_flight) std::free(it.blob);
@@ -129,8 +143,26 @@ void ChunkStore::release(Blob* b) {
 
 // ---------------------------------------------------------------------------- loading
 
+// A request's chunk is done - or, with none, will never be: handed on if it is its turn, with
+// whatever was waiting behind it.
+void ChunkStore::arrive(u64 seq, LoadedChunk* chunk) {
+    const u64 mask = ring_.size() - 1;
+    ring_[seq & mask] = {chunk, true};
+    while (handed_ != asked_ && ring_[handed_ & mask].here) {
+        Arrival& a = ring_[handed_++ & mask];
+        if (a.chunk) loaded_.push_back(a.chunk);
+        a = {};
+    }
+}
+
 void ChunkStore::load(i32 cx, i32 cz) {
     const u64 seq = asked_++;
+    if (UNLIKELY(asked_ - handed_ > ring_.size())) {
+        // (As many places as there are requests that have not been handed on.)
+        std::vector<Arrival> wider(std::max<usize>(64, ring_.size() * 2));
+        for (u64 at = handed_; at + 1 < asked_; ++at) wider[at & (wider.size() - 1)] = ring_[at & (ring_.size() - 1)];
+        ring_.swap(wider);
+    }
     if (!persistent()) return start_load(nullptr, cx, cz, {}, nullptr, seq);
     Region& r = region(cx >> 5, cz >> 5);
     r.last_used = now_;
@@ -157,14 +189,59 @@ void ChunkStore::load_known(Region& r, u16 index, u64 seq) {
 void ChunkStore::start_load(Region* r, i32 cx, i32 cz, const RegionEntry& entry, Blob* blob, u64 seq) {
     if (r) ++r->readers;
     if (blob) ++blob->refs;
-    auto* job = new LoadJob{this, r, cx, cz, r ? r->file->fd : -1, entry, blob, seq, nullptr, {}};
+    auto* job = new LoadJob{this, r, cx, cz, r ? r->file->fd : -1, entry, blob, seq, nullptr, {}, nullptr};
+    if (pipeline_ && !r && !blob) {
+        // Nothing to read, and the generator's chunk comes in stages: there is no work for a
+        // worker yet (load_chunk of nothing only says what the chunk is to be).
+        job->out = new LoadedChunk();
+        load_chunk({}, cx, cz, layout_, gen_, *job->out, job->error);
+        return await_made(job);
+    }
     ++jobs_;
     workers_.submit({&load_work, &load_done, this, job, 0, 0, 0, 0}, 2);
+}
+
+// The chunk has everything but its blocks: the pipeline is asked for them, and made() goes on.
+void ChunkStore::await_made(LoadJob* job) {
+    DCHECK(job->out && job->out->unmade);
+    unmade_[key_of(job->cx, job->cz)] = job;
+    pipeline_->request(job->cx, job->cz, job->seq);
+}
+
+void ChunkStore::made(void* ctx, i32 cx, i32 cz, GenChunk* chunk) {
+    ChunkStore& s = *static_cast<ChunkStore*>(ctx);
+    const auto it = s.unmade_.find(key_of(cx, cz));
+    DCHECK(it != s.unmade_.end());
+    LoadJob* job = it->second;
+    s.unmade_.erase(it);
+    job->made = chunk;
+    ++s.jobs_;
+    s.workers_.submit({&load_work, &load_done, &s, job, 0, 0, 0, 0}, 2);
+}
+
+bool ChunkStore::forget(i32 cx, i32 cz) {
+    const auto it = unmade_.find(key_of(cx, cz));
+    if (it == unmade_.end()) return false;
+    LoadJob* job = it->second;
+    unmade_.erase(it);
+    pipeline_->forget(cx, cz);
+    arrive(job->seq, nullptr);
+    delete job->out;
+    delete job;
+    return true;
 }
 
 void ChunkStore::load_work(base::Task& t) {
     auto* job = static_cast<LoadJob*>(t.data);
     ChunkStore& s = *job->store;
+    if (job->made) {
+        // The second time: the blocks have come. The sections change hands; palettes of biomes,
+        // heightmaps and the rest are worked out here.
+        made_chunk(*job->made, s.layout_, *job->out);
+        delete job->made;
+        job->made = nullptr;
+        return;
+    }
     thread_local std::vector<u8> raw;
     std::span<const u8> bytes;
     if (job->blob) {
@@ -192,21 +269,13 @@ void ChunkStore::load_done(base::Task& t) {
     --s.jobs_;
     if (job->region) --job->region->readers;
     if (job->blob) s.release(job->blob);
+    job->region = nullptr;
+    job->blob = nullptr;
     if (!job->error.empty()) LOG_ERROR("chunk %d, %d cannot be read (%s): generated anew", job->cx, job->cz, job->error.c_str());
-    // Handed on in the order of asking: this one, if it is next, and whatever was waiting behind it.
-    s.arrived_.push_back({job->seq, job->out});
-    for (bool found = true; found;) {
-        found = false;
-        for (usize i = 0; i < s.arrived_.size(); ++i) {
-            if (s.arrived_[i].seq != s.handed_) continue;
-            s.loaded_.push_back(s.arrived_[i].chunk);
-            s.arrived_[i] = s.arrived_.back();
-            s.arrived_.pop_back();
-            ++s.handed_;
-            found = true;
-            break;
-        }
-    }
+    job->error.clear();
+    // What was read of it has no blocks, and the generator makes its chunks in stages: it waits for them.
+    if (job->out->unmade) return s.await_made(job);
+    s.arrive(job->seq, job->out);
     delete job;
 }
 
@@ -359,6 +428,7 @@ void ChunkStore::write_done(base::Task& t) {
 
 void ChunkStore::tick(u64 now) {
     now_ = now;
+    if (pipeline_) pipeline_->tick(now);
     for (usize i = 0; i < dirty_.size();) {
         Region& r = *dirty_[i];
         if (r.pending.empty()) {  // written, or taken by a write that is under way

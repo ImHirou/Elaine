@@ -89,6 +89,7 @@ Dimension::Dimension(u32 type_id, std::string name, ChunkGenerator& gen, i32 com
       fluid_ticks_(kFluidTickTypes, min_y_, sections_ * 16, &Chunk::fluid_ticks) {}
 
 Dimension::~Dimension() {
+    store_.stop_generation();
     store_.finish();  // what waits to be written is written; nothing of ours is out with a worker after this
     release_adopted();
     map_.for_each([this](Chunk& c) {

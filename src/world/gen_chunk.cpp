@@ -24,8 +24,9 @@ std::span<const u8> packed_ticks(const std::vector<SavedTick>& ticks, ChunkArena
 void finish_chunk(GenChunk& g, LoadedChunk& out) {
     Chunk& c = out.chunk;
     DCHECK(c.sections_count == g.sections_count);
-    // The sections stay where they are: the arena they are in becomes the chunk's.
-    out.arena.swap(g.arena);
+    // The sections stay where they are: the arena they are in becomes the chunk's, beside
+    // whatever the chunk had in its own.
+    out.arena.absorb(g.arena);
     for (u32 si = 0; si < g.sections_count; ++si) {
         c.sections[si] = g.sections[si];
         g.sections[si] = Section{};

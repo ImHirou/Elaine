@@ -260,6 +260,7 @@ class Game {
 
     // ---- chunks: who sees which, what is loaded, what is saved (server/chunks.cpp)
     void apply_view(u32 pi, i32 cx, i32 cz, i32 distance);
+    void forget_view(i32 cx, i32 cz, i32 distance);
     void chunk_ready(world::Chunk& c);
     void send_chunks();
     void on_chunk_batch_received(u32 pi, float desired);

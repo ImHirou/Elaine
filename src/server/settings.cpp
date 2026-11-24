@@ -99,6 +99,8 @@ bool set_key(Settings& s, std::string_view k, std::string_view v, std::string& e
         ok = parse_num(v, s.worker_threads, 0, 64);
     else if (k == "chunk-unload-seconds")
         ok = parse_num(v, s.chunk_unload_seconds, 1, 86400);
+    else if (k == "generation-cache-mb")
+        ok = parse_num(v, s.generation_cache_mb, 0, 1 << 20);
     else if (k == "autosave-seconds")
         ok = parse_num(v, s.autosave_seconds, 1, 86400);
     else if (k == "max-chained-neighbor-updates")

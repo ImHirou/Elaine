@@ -63,9 +63,9 @@ struct GenChunk {
     std::vector<u8> tags;
 };
 
-// What `out` is made of when generation is over: the chunk's blocks (its arena changes hands - `g`
-// is empty afterwards), its biomes as a section's palette, what is left to be done when it first
-// ticks, its scheduled ticks. `out.chunk` has its place and its height (load_chunk); what follows
+// What `out` is made of when generation is over: the chunk's blocks (what its arena holds changes
+// hands - `g` is empty afterwards), its biomes as a section's palette, what is left to be done when
+// it first ticks, its scheduled ticks. `out.chunk` has its place and its height (load_chunk); what follows
 // from the blocks is derive()'s, as for a chunk that was read.
 void finish_chunk(GenChunk& g, LoadedChunk& out);
 

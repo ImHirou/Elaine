@@ -1249,6 +1249,10 @@ final class WorldgenFeatures {
     static final String[][] KINDS_OF_FEATURE = {
         {"ore", "net.minecraft.world.level.levelgen.feature.OreFeature", "minecraft:windswept_hills", "minecraft:badlands", "minecraft:dripstone_caves",
             "minecraft:lush_caves"},
+        // No class: every feature src/worldgen places as its tables stand (ported_features.txt, which
+        // `mcgen.py generate` writes) - a chunk's whole decoration as the server's generator makes it.
+        {"ported", null, "minecraft:windswept_hills", "minecraft:badlands", "minecraft:dripstone_caves", "minecraft:lush_caves", "minecraft:plains",
+            "minecraft:ocean"},
     };
 
     static void chunkState(WorldgenGolden.Out o, ProtoChunk chunk) {
@@ -1292,8 +1296,24 @@ final class WorldgenFeatures {
     static void decorations(WorldgenGolden.Out o, WorldgenRef.World world, List<net.minecraft.world.level.biome.FeatureSorter.StepFeatureData> steps,
                             Map<String, List<int[]>> every) throws Exception {
         o.i32(KINDS_OF_FEATURE.length);
+        var names = world.registries().lookupOrThrow(net.minecraft.core.registries.Registries.PLACED_FEATURE);
         for (String[] kind : KINDS_OF_FEATURE) {
-            Class<?> type = Class.forName(kind[1]);
+            java.util.function.Predicate<net.minecraft.world.level.levelgen.placement.PlacedFeature> wanted;
+            if (kind[1] != null) {
+                Class<?> type = Class.forName(kind[1]);
+                wanted = placed -> type.isInstance(placed.feature().value());
+            } else {
+                java.nio.file.Path list = WorldgenRef.out.resolve("ported_features.txt");
+                if (!Files.exists(list)) {
+                    WorldgenRef.problem("no " + list + ": `mcgen.py generate` writes which features src/worldgen places");
+                    return;
+                }
+                java.util.Set<String> ported = new java.util.HashSet<>(Files.readAllLines(list));
+                wanted = placed -> {
+                    var key = names.getKey(placed);
+                    return key != null && ported.contains(key.toString());
+                };
+            }
             Stand stand = new Stand(world);
             o.str(kind[0]);
             o.i32(kind.length - 2);
@@ -1326,7 +1346,7 @@ final class WorldgenFeatures {
                         }
                         for (int index : indices) {
                             var feature = steps.get(s).features().get(index);
-                            if (!type.isInstance(feature.feature().value())) continue;
+                            if (!wanted.test(feature)) continue;
                             random.setFeatureSeed(decorationSeed, index, s);
                             stand.writes = 0xcbf29ce484222325L;
                             stand.logging = true;

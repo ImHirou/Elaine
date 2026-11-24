@@ -120,6 +120,19 @@ class ChunkArena {
         std::swap(reserved_, o.reserved_);
         slabs_.swap(o.slabs_);
     }
+    // Everything `o` holds becomes this arena's, beside what it has; pointers into either stay
+    // good, and `o` is left empty.
+    void absorb(ChunkArena& o) {
+        slabs_.insert(slabs_.end(), o.slabs_.begin(), o.slabs_.end());
+        reserved_ += o.reserved_;
+        if (o.left_ > left_) {  // (go on in whichever slab has more room)
+            at_ = o.at_;
+            left_ = o.left_;
+        }
+        o.slabs_.clear();
+        o.at_ = nullptr;
+        o.left_ = o.reserved_ = 0;
+    }
 
   private:
     static constexpr usize kSlabBytes = 64 * 1024;

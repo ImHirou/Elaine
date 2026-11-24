@@ -53,13 +53,23 @@ class Workers {
     // (0 = no deadline; at least one is always taken). Returns how many.
     u32 poll(u64 deadline_ns = 0);
     u32 in_flight() const { return in_flight_; }
+    // Sleep until a task has finished or now_ns() reaches `deadline_ns`. True: poll() has something
+    // to take. For the owner's idle time: what one task's `done` starts need not wait for a tick.
+    bool wait(u64 deadline_ns);
     // Block until everything submitted has come back (shutdown, tests).
     void drain();
 
   private:
+    // What wakes an owner that sleeps in wait(): a count of finished tasks to sleep on (a futex),
+    // and whether anybody does - a worker that finishes makes a system call only then.
+    struct Owner {
+        CACHE_ALIGNED std::atomic<u32> finished{0};
+        std::atomic<u32> sleeping{0};
+    };
     struct Worker {
         explicit Worker(u32 ring) : in(ring), out(ring) {}
         SpscRing<Task> in, out;
+        Owner* owner = nullptr;
         CACHE_ALIGNED std::atomic<u32> signal{0};
         std::atomic<bool> stop{false};
         pthread_t thread{};  // (not a std::thread: <thread> is 0.9 s of every file that includes this one)
@@ -69,6 +79,7 @@ class Workers {
     };
     static void run(Worker& w);
 
+    Owner owner_;
     std::vector<std::unique_ptr<Worker>> workers_;
     std::vector<Task> inline_done_;  // Workers(0): finished, `done` not yet run
     std::vector<Task> held_;         // finished, taken out of a full ring by submit(), `done` not yet run

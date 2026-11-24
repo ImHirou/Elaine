@@ -54,6 +54,13 @@ class SpscRing {
         head_.store(h + 1, std::memory_order_release);
         return true;
     }
+    // Consumer: nothing to pop.
+    ALWAYS_INLINE bool empty() {
+        const u64 h = head_.load(std::memory_order_relaxed);
+        if (h != tail_cache_) return false;
+        tail_cache_ = tail_.load(std::memory_order_acquire);
+        return h == tail_cache_;
+    }
 
   private:
     T* slots_;

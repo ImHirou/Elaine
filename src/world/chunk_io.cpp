@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "world/chunk_io.hpp"
 
+#include "world/gen_chunk.hpp"
 #include "world/ticks.hpp"
 
 namespace world {
@@ -188,7 +189,10 @@ bool load_chunk(std::span<const u8> blob, i32 cx, i32 cz, const Layout& l, Chunk
         c.loaded_lit = terrain && (flags & kLit) != 0;
     }
     if (!terrain) {
-        if (!gen.generate_whole(out)) gen.generate(c, out.alloc);
+        if (gen.staged())
+            out.unmade = true;
+        else if (!gen.generate_whole(out))
+            gen.generate(c, out.alloc);
         out.fresh = blob.empty();
         c.dirty = true;  // nothing on disk holds these blocks
     } else {
@@ -253,8 +257,15 @@ bool load_chunk(std::span<const u8> blob, i32 cx, i32 cz, const Layout& l, Chunk
             !ticks_valid(out.parts.fluid_ticks, kFluidTickTypes, l.sections * 16))
             return fail("scheduled ticks that are none");
     }
-    out.traits = derive(c, l);
+    if (!out.unmade) out.traits = derive(c, l);
     return true;
+}
+
+void made_chunk(GenChunk& made, const Layout& l, LoadedChunk& out) {
+    DCHECK(out.unmade && made.x == out.chunk.x && made.z == out.chunk.z);
+    finish_chunk(made, out);
+    out.unmade = false;
+    out.traits = derive(out.chunk, l);
 }
 
 }  // namespace world

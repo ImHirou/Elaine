@@ -261,10 +261,11 @@ TEST(WorldgenFeature, PlacementsComeToWhereVanillasDo) {
     RecordProperty("placements_waiting", static_cast<int>(waiting));
 }
 
-// Whole decorations with the features of one kind alone: areas of 4 x 4 chunks of terrain, the
-// inner four decorated one after the other. Every feature that runs writes what vanilla's writes
+// Whole decorations: areas of 4 x 4 chunks of terrain, the inner four decorated one after the
+// other - with the features of one kind alone, kind by kind, and with every feature that is
+// ported, which is the server's decoration. Every feature that runs writes what vanilla's writes
 // and leaves its source where vanilla's is; and the sixteen chunks end as vanilla's do.
-TEST(WorldgenFeature, DecorationsOfOneKindAreVanillas) {
+TEST(WorldgenFeature, DecorationsAreVanillas) {
     Script s;
     s.skip_ints();
     s.skip_heights();
@@ -279,13 +280,17 @@ TEST(WorldgenFeature, DecorationsOfOneKindAreVanillas) {
     ASSERT_GT(kinds, 0u);
     for (u32 kind = 0; kind < kinds; ++kind) {
         const std::string name = in.str();
+        // "ported": every feature that is ported, which is what a decoration is to the server.
+        const bool everything = name == "ported";
         ft::FeatureType type = ft::FeatureType::kUnported;
         if (name == "ore") type = ft::FeatureType::kOre;
-        ASSERT_NE(type, ft::FeatureType::kUnported)
+        ASSERT_TRUE(everything || type != ft::FeatureType::kUnported)
             << "the script has decorations of " << name << ", which is no kind this test knows";
         std::vector<u8> only(ft::kStepFirst[ft::kSteps]);
-        for (u32 slot = 0; slot < only.size(); ++slot)
-            only[slot] = ft::kFeatures[ft::kPlaced[ft::kStepPlaced[slot]].feature].type == type;
+        for (u32 slot = 0; slot < only.size(); ++slot) {
+            const ft::Placed& placed = ft::kPlaced[ft::kStepPlaced[slot]];
+            only[slot] = everything ? placed.ported : ft::kFeatures[placed.feature].type == type;
+        }
         for (u32 areas = in.num<u32>(); areas; --areas) {
             const i32 x0 = in.num<i32>(), z0 = in.num<i32>();
             std::vector<std::unique_ptr<world::GenChunk>> owned;
@@ -321,8 +326,31 @@ TEST(WorldgenFeature, DecorationsOfOneKindAreVanillas) {
             EXPECT_EQ(region.counts().far_reads, 0u);
             EXPECT_EQ(region.counts().refused_writes, 0u);
             region.commit();
+            // The same area as one step of the generator's own - a worker's task: the same chunks.
+            std::vector<std::unique_ptr<world::GenChunk>> again;
+            world::GenChunk* task[16];
+            if (everything) {
+                for (i32 i = 0; i < 16; ++i) {
+                    again.push_back(std::make_unique<world::GenChunk>());
+                    generator.make_base(x0 + (i & 3), z0 + (i >> 2), *again.back());
+                    task[i] = again.back().get();
+                }
+                generator.decorate(task, x0, z0, 1);
+            }
             for (i32 i = 0; i < 16; ++i) {
                 const world::GenChunk& c = *sixteen[i];
+                if (everything) {
+                    const world::GenChunk& t = *task[i];
+                    EXPECT_EQ(t.version, 1);
+                    EXPECT_EQ(t.decorated, c.decorated);
+                    u32 differ = 0;
+                    for (u32 si = 0; si < c.sections_count; ++si)
+                        for (u32 b = 0; b < 4096; ++b) differ += t.sections[si].get(b) != c.sections[si].get(b);
+                    EXPECT_EQ(differ, 0u) << "chunk " << c.x << ", " << c.z << " as a task of the generator's";
+                    EXPECT_EQ(t.marks, c.marks);
+                    for (const u32 map : {hm::kWorldSurface, hm::kOceanFloor, hm::kMotionBlocking, hm::kMotionBlockingNoLeaves})
+                        EXPECT_TRUE(std::equal(std::begin(t.height[map]), std::end(t.height[map]), std::begin(c.height[map])));
+                }
                 u64 blocks = kFnv;
                 for (u32 si = 0; si < c.sections_count; ++si)
                     for (u32 b = 0; b < 4096; ++b) blocks = fnv(blocks, c.sections[si].get(b));

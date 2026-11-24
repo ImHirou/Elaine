@@ -29,6 +29,11 @@ class ChunkGenerator {
     virtual bool staged() const { return false; }
     // The chunk at (cx, cz) as it is before any feature: version 0.
     virtual void make_base(i32 /*cx*/, i32 /*cz*/, GenChunk& /*out*/) {}
+    // One step of the features (world/gen_pipeline.hpp): `area` is 4 x 4 chunks, by x + z * 4, the
+    // first at (x0, z0), all at version `pass` - 1. The four in the middle are decorated - (1, 1),
+    // (2, 1), (1, 2), (2, 2), in that order, each reading and writing the nine around it - and all
+    // sixteen leave at version `pass`. One virtual call a task.
+    virtual void decorate(GenChunk* const* /*area*/, i32 /*x0*/, i32 /*z0*/, u32 /*pass*/) {}
     virtual i32 sea_level() const = 0;     // ChunkGenerator.getSeaLevel(): sent in the login packet
     virtual i32 spawn_height() const = 0;  // ChunkGenerator.getSpawnHeight(): first free y at spawn
     virtual bool is_flat() const = 0;      // "isFlat" in the login packet (changes the client's horizon)
