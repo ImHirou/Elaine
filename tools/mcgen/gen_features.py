@@ -42,14 +42,13 @@ PORTED_FEATURES = {
     "sequence": "kSequence", "overlay": "kOverlay", "ore": "kOre",
     "disk": "kDisk", "underwater_magma": "kUnderwaterMagma", "block_blob": "kBlockBlob", "spring_feature": "kSpring", "lake": "kLake",
     "blue_ice": "kBlueIce", "spike": "kSpike", "iceberg": "kIceberg", "freeze_top_layer": "kFreezeTopLayer",
-    "simple_block": "kSimpleBlock",
+    "simple_block": "kSimpleBlock", "block_column": "kBlockColumn", "bamboo": "kBamboo", "vines": "kVines",
+    "coral_tree": "kCoralTree", "coral_claw": "kCoralClaw", "huge_brown_mushroom": "kHugeBrownMushroom", "huge_red_mushroom": "kHugeRedMushroom",
 }
 # ...and the types of the overworld that wait for theirs. A type in neither list stops the run.
 UNPORTED_FEATURES = {
-    "tree", "block_column", "template", "coral_tree", "coral_claw", "fallen_tree", "vegetation_patch",
-    "speleothem", "multiface_growth", "fossil", "bamboo", "speleothem_cluster", "root_system",
-    "geode", "monster_room", "huge_brown_mushroom", "huge_red_mushroom",
-    "vines", "large_dripstone", "waterlogged_vegetation_patch", "sculk_patch",
+    "tree", "template", "fallen_tree", "vegetation_patch", "speleothem", "multiface_growth", "fossil", "speleothem_cluster", "root_system",
+    "geode", "monster_room", "large_dripstone", "waterlogged_vegetation_patch", "sculk_patch",
 }
 # BlockStateProvider types that wait for theirs: none of the overworld's now.
 UNPORTED_PROVIDERS: set = set()
@@ -94,6 +93,12 @@ class StateSets:
             self.facts[f"face_occludes_{name}"] = column(v >> d & 1 for v in faces)
         self.facts["snow_survives_on"] = column(worldgen.load(version, "features")["snow_survives_on"])
         self.facts["solid_render"] = column(states["solid_render"])
+        self.facts["air"] = column(states["air"])
+        attaches = worldgen.load(version, "features").get("vine_attaches")
+        if not attaches:
+            die("gen_features: worldgen/features.json does not say what vines hold on to - run: mcgen.py worldgen")
+        for d, name in enumerate(DIRECTIONS):
+            self.facts[f"vine_attaches_{name}"] = column(v >> d & 1 for v in attaches)
         self.facts["sturdy_center_down"] = column(v >> 0 & 1 for v in sturdy["columns"]["sturdy_center"])
         # A state's fluid, as much as there is of it (gamedata: FluidState.getAmount).
         import gamedata as _gamedata
@@ -202,6 +207,7 @@ class FeatureTables:
         self.survive_of: dict[int, int] = {}       # state -> its row of self.survive
         self.survive_ported: list[bool] = []
         self.simple_blocks = Pool()
+        self.columns, self.column_layers, self.bamboos, self.mushrooms, self.mushroom_caps = Pool(), Pool(), Pool(), Pool(), Pool()
         import gamedata
         self.classes = {b["name"]: b["class"] for b in gamedata.load(version, "blocks")["blocks"]}   # a block's class and what it extends
         self.by_state = {}                          # state id -> (block name, properties)
@@ -902,6 +908,54 @@ class FeatureTables:
         elif kind == "iceberg":
             self.need(kind, value, {"state"})
             row = ("kIceberg", self.blocks.state(value["state"]), 0, 0)
+        elif kind == "block_column":
+            self.need(kind, value, {"layers", "direction", "allowed_placement", "prioritize_tip"})
+            layers = []
+            for layer in value["layers"]:
+                if set(layer) != {"height", "provider"}:
+                    die(f"gen_features: a layer of a column written as {canon(layer)[:200]}")
+                provider, has = self.provider(layer["provider"])
+                parts = parts and has
+                layers.append((self.int_provider(layer["height"]), provider))
+            allowed, has = self.predicate(value["allowed_placement"])
+            parts = parts and has
+            row = ("kBlockColumn", self.columns.run([(self.column_layers.run(layers), len(layers), DIRECTIONS.index(value["direction"]), allowed,
+                                                    int(bool(value["prioritize_tip"])))]), 0, 0)
+        elif kind == "bamboo":
+            self.need(kind, value, {"probability"})
+            stalk = lambda **properties: self.blocks.state({"id": "minecraft:bamboo", "properties": {"age": "1", "leaves": "none", "stage": "0", **properties}})
+            # (BambooFeature's own states: BAMBOO_TRUNK, BAMBOO_FINAL_LARGE, BAMBOO_TOP_LARGE, BAMBOO_TOP_SMALL.)
+            rule, has = self.survive_rule(self.blocks.state("minecraft:bamboo"))
+            parts = parts and has
+            under = self.sets.keep(self.sets.block_tag("minecraft:beneath_bamboo_podzol_replaceable"), "kSet podzol takes the place of under bamboo")
+            row = ("kBamboo", self.bamboos.run([(float(value["probability"]), rule, stalk(), stalk(leaves="large", stage="1"), stalk(leaves="large"),
+                                                 stalk(leaves="small"), self.blocks.state("minecraft:podzol"), under)]), 0, 0)
+        elif kind == "vines":
+            self.need(kind, value, set())
+            # Direction.values() without DOWN: the vine that hangs on that side of its block.
+            first, _ = self._states([{"id": "minecraft:vine", "properties": {d: "true"}} for d in DIRECTIONS[1:]])
+            row = ("kVines", first, 0, 0)
+        elif kind in ("coral_tree", "coral_claw"):
+            self.need(kind, value, {"feature"})
+            uses = [self.placed_ref(value["feature"])]
+            row = (PORTED_FEATURES[kind], uses[0], 0, 0)
+        elif kind in ("huge_brown_mushroom", "huge_red_mushroom"):
+            self.need(kind, value, {"cap_provider", "stem_provider", "can_place_on"}, {"foliage_radius"})
+            cap, has_cap = self.provider(value["cap_provider"])
+            stem, has_stem = self.provider(value["stem_provider"])
+            on, has_on = self.predicate(value["can_place_on"])
+            parts = parts and has_cap and has_stem and has_on
+            # A cap's block with its faces as the cap says: by up << 4 | west << 3 | east << 2 | north << 1 | south.
+            caps = []
+            for state in sorted(self.outcomes(value["cap_provider"])):
+                name, properties = self.by_state[state]
+                if not {"up", "west", "east", "north", "south"} <= set(properties):
+                    continue  # (HugeMushroomBlock's properties: a cap of anything else stays as it is)
+                flag = lambda bit: "true" if bit else "false"
+                caps.append((state, int(properties["up"] == "true"),
+                             *[self.blocks.state({"id": name, "properties": {**properties, "up": flag(i >> 4 & 1), "west": flag(i >> 3 & 1), "east": flag(i >> 2 & 1),
+                                                                             "north": flag(i >> 1 & 1), "south": flag(i & 1)}}) for i in range(32)]))
+            row = (PORTED_FEATURES[kind], self.mushrooms.run([(cap, stem, value.get("foliage_radius", 2), on, self.mushroom_caps.run(caps), len(caps))]), 0, 0)
         elif kind == "simple_block":
             self.need(kind, value, {"to_place"}, {"schedule_tick"})
             provider, has = self.provider(value["to_place"])
@@ -1008,10 +1062,14 @@ struct Modifier {
 // predicate b holds for. kSpring: kSprings[a]. kLake: kLakes[a]. kSpike: state a, on what predicate b
 // holds for, through what predicate c holds for. kIceberg: of state a. kBlueIce, kFreezeTopLayer: no
 // more to say. kSimpleBlock: what the provider a gives - one of kSimpleBlocks[b & 0xFFFFF .. + (b >> 20)) -
-// if it can stay; with a tick asked for if c. kUnported: a type that waits for its code.
+// if it can stay; with a tick asked for if c. kBlockColumn: kColumns[a]. kBamboo: kBamboos[a]. kVines:
+// one of kProviderStates[a .. a + 5), a vine on the side up, north, south, west, east. kCoralTree,
+// kCoralClaw: of the placed feature a, block by block. kHugeBrownMushroom, kHugeRedMushroom:
+// kMushrooms[a]. kUnported: a type that waits for its code.
 enum class FeatureType : u8 {
     kUnported, kNoOp, kRandomSelector, kSimpleRandomSelector, kWeightedRandomSelector, kRandomBooleanSelector, kSequence, kOverlay,
     kOre, kDisk, kUnderwaterMagma, kBlockBlob, kSpring, kLake, kBlueIce, kSpike, kIceberg, kFreezeTopLayer, kSimpleBlock,
+    kBlockColumn, kBamboo, kVines, kCoralTree, kCoralClaw, kHugeBrownMushroom, kHugeRedMushroom,
 };
 struct Feature {
     FeatureType type;
@@ -1134,6 +1192,39 @@ struct Lake {
     u16 can_place_feature, can_replace_with_air_or_fluid, can_replace_with_barrier;
 };
 
+// BlockColumnFeature: kColumnLayers[first .. first + layers), each so many blocks of what its provider
+// says, one after the other in a direction, as far as the predicate allows.
+struct ColumnLayer {
+    u16 height;  // kInts
+    u16 provider;
+};
+struct Column {
+    u16 first, layers;
+    u8 direction;
+    u16 allowed_placement;
+    bool prioritize_tip;
+};
+// BambooFeature: how often podzol lies round it, the rule the stalk stays by, and the blocks it is made of.
+struct Bamboo {
+    float probability;
+    u16 survive;
+    u16 trunk, final_large, top_large, top_small, podzol;
+    u16 podzol_replaces;  // a state set
+};
+// The big mushrooms: kMushroomCaps[caps .. caps + cap_count) say what a block of the cap is with its
+// faces set, for every state the cap's provider gives.
+struct Mushroom {
+    u16 cap, stem;  // providers
+    i32 foliage_radius;
+    u16 can_place_on;
+    u16 caps, cap_count;
+};
+struct MushroomCap {
+    u16 state;
+    u8 up;       // whether the state itself has its upper face
+    u16 to[32];  // by up << 4 | west << 3 | east << 2 | north << 1 | south
+};
+
 // PlacedFeature: kModifiers[first .. first + modifiers), then the feature.
 struct Placed {
     u16 feature;
@@ -1205,6 +1296,16 @@ struct Placed {
                + ", ".join(f"{{SurviveOp::{op}, {a}, {b}, {c}}}" for op, a, b, c in t.survive.rows) + "};\n")
     out.append(f"inline constexpr SurvivePair kSurvivePairs[{max(1, len(t.survive_pairs.rows))}] = {{"
                + ", ".join(f"{{{dx}, {dy}, {dz}, {at}}}" for dx, dy, dz, at in t.survive_pairs.rows) + "};\n")
+    out.append(f"inline constexpr ColumnLayer kColumnLayers[{max(1, len(t.column_layers.rows))}] = {{"
+               + ", ".join(f"{{{a}, {b}}}" for a, b in t.column_layers.rows) + "};\n")
+    out.append(f"inline constexpr Column kColumns[{max(1, len(t.columns.rows))}] = {{"
+               + ", ".join(f"{{{a}, {b}, {c}, {d}, {'true' if e else 'false'}}}" for a, b, c, d, e in t.columns.rows) + "};\n")
+    out.append(f"inline constexpr Bamboo kBamboos[{max(1, len(t.bamboos.rows))}] = {{"
+               + ", ".join(f"{{{cfloat(row[0])}, {', '.join(map(str, row[1:]))}}}" for row in t.bamboos.rows) + "};\n")
+    out.append(f"inline constexpr Mushroom kMushrooms[{max(1, len(t.mushrooms.rows))}] = {{"
+               + ", ".join("{" + ", ".join(map(str, row)) + "}" for row in t.mushrooms.rows) + "};\n")
+    out.append(f"inline constexpr MushroomCap kMushroomCaps[{max(1, len(t.mushroom_caps.rows))}] = {{"
+               + ", ".join(f"{{{row[0]}, {row[1]}, {{{', '.join(map(str, row[2:]))}}}}}" for row in t.mushroom_caps.rows) + "};\n")
     out.append(f"inline constexpr SimpleBlock kSimpleBlocks[{max(1, len(t.simple_blocks.rows))}] = {{"
                + ", ".join(f"{{{state}, {rule}, {{{a}, {b}, {c}, {d}}}}}" for state, rule, a, b, c, d in t.simple_blocks.rows) + "};\n")
     # For the golden script (WorldgenSurvive.golden) and the test of the rules: which rule a state stays by.
@@ -1221,13 +1322,19 @@ struct Placed {
                + ", ".join("{" + ", ".join(map(str, row)) + "}" for row in t.lakes.rows) + "};\n")
     # What feature.cpp asks of a state by name: sets like any other, each with a name of its own.
     sets = t.sets
-    code = {"kSetLiquid": sets.facts["liquid"], "kSetSnowSurvivesOn": sets.facts["snow_survives_on"]}
+    code = {"kSetLiquid": sets.facts["liquid"], "kSetSnowSurvivesOn": sets.facts["snow_survives_on"],
+            # AbstractHugeMushroomFeature: what a block of a mushroom takes the place of, and what its room may hold.
+            "kSetMushroomGrowsThrough": sets.facts["air"] | sets.block_tag("minecraft:replaceable_by_mushrooms"),
+            "kSetMushroomHasRoomIn": sets.facts["air"] | sets.block_tag("minecraft:leaves")}
+    names = {"kSetMushroomGrowsThrough": "kSet a big mushroom grows through", "kSetMushroomHasRoomIn": "kSet a big mushroom has room in"}
     out.append("\n// Sets of block states that src/worldgen/feature.cpp asks about by name: BlockState.liquid(); what a\n"
                "// layer of snow may lie on (SnowLayerBlock.canSurvive, asked of the state below); and - a set a\n"
                "// direction, by its ordinal - whether BlockState.getFaceOcclusionShape(direction) is a whole face.\n")
     for name, bits in code.items():
-        out.append(f"inline constexpr u32 {name} = {sets.keep(bits, name)};\n")
+        out.append(f"inline constexpr u32 {name} = {sets.keep(bits, names.get(name, name))};\n")
     out.append("inline constexpr u32 kSetFaceOccludes[6] = {" + ", ".join(str(sets.keep(sets.facts[f'face_occludes_{d}'], f'kSetFaceOccludes {d}')) for d in DIRECTIONS) + "};\n")
+    out.append("// VineBlock.isAcceptableNeighbour: what a vine holds on to, lying in that direction from it.\n")
+    out.append("inline constexpr u32 kSetVineAttaches[6] = {" + ", ".join(str(sets.keep(sets.facts[f'vine_attaches_{d}'], f'kSetVineAttaches {d}')) for d in DIRECTIONS) + "};\n")
     # SnowyBlock.SNOWY: a state without snow on it, and the same with.
     snowy = []
     for name, block in t.blocks.blocks.items():

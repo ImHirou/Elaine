@@ -1151,6 +1151,11 @@ final class WorldgenFeatures {
         for (net.minecraft.core.Direction direction : net.minecraft.core.Direction.values())
             facts.put("kSetFaceOccludes " + direction.getName(), state -> (faceOccludes(state) >> direction.ordinal() & 1) != 0);
         facts.put("kSetSnowSurvivesOn", WorldgenFeatures::snowSurvivesOn);
+        for (net.minecraft.core.Direction direction : net.minecraft.core.Direction.values())
+            facts.put("kSetVineAttaches " + direction.getName(), state -> (vineAttaches(state) >> direction.ordinal() & 1) != 0);
+        facts.put("kSet a big mushroom grows through", state -> state.isAir() || state.is(net.minecraft.tags.BlockTags.REPLACEABLE_BY_MUSHROOMS));
+        facts.put("kSet a big mushroom has room in", state -> state.isAir() || state.is(net.minecraft.tags.BlockTags.LEAVES));
+        facts.put("kSet podzol takes the place of under bamboo", state -> state.is(net.minecraft.tags.BlockTags.BENEATH_BAMBOO_PODZOL_REPLACEABLE));
         // The sets the rules of canSurvive that are written by hand are made of (src/worldgen/survive.hpp).
         facts.put("kSet a cactus has beside it", state -> !(state.isSolid() || state.getFluidState().is(net.minecraft.tags.FluidTags.LAVA)));
         facts.put("kSet a cactus stands on", state -> state.is(net.minecraft.world.level.block.Blocks.CACTUS) || state.is(net.minecraft.tags.BlockTags.SUPPORTS_CACTUS));
@@ -1448,6 +1453,13 @@ final class WorldgenFeatures {
         {"iceberg", "IcebergFeature", "3000", "minecraft:frozen_ocean", "minecraft:deep_frozen_ocean"},
         {"freeze_top_layer", "SnowAndFreezeFeature", "2", "minecraft:snowy_plains", "minecraft:frozen_ocean", "minecraft:grove", "minecraft:windswept_hills",
             "minecraft:frozen_peaks"},
+        {"block_column", "BlockColumnFeature", "300", "minecraft:desert", "minecraft:swamp", "minecraft:ocean", "minecraft:lush_caves", "minecraft:river",
+            "minecraft:badlands"},
+        {"bamboo", "BambooFeature", "300", "minecraft:bamboo_jungle", "minecraft:jungle"},
+        {"vines", "VinesFeature", "300", "minecraft:jungle", "minecraft:lush_caves", "minecraft:swamp"},
+        // (By the names of placed features: what they are made of is the kind - corals, the big mushrooms.)
+        {"coral", "=minecraft:warm_ocean_vegetation", "300", "minecraft:warm_ocean"},
+        {"huge_mushroom", "=minecraft:mushroom_island_vegetation", "300", "minecraft:mushroom_fields"},
         {"simple_block", "SimpleBlockFeature", "300", "minecraft:plains", "minecraft:flower_forest", "minecraft:meadow", "minecraft:forest", "minecraft:swamp",
             "minecraft:taiga", "minecraft:desert", "minecraft:jungle", "minecraft:lush_caves", "minecraft:warm_ocean", "minecraft:mushroom_fields",
             "minecraft:savanna", "minecraft:cherry_grove", "minecraft:old_growth_pine_taiga", "minecraft:sunflower_plains", "minecraft:mangrove_swamp",
@@ -1465,8 +1477,16 @@ final class WorldgenFeatures {
     static void attempts(WorldgenGolden.Out o, WorldgenRef.World world, List<net.minecraft.world.level.biome.FeatureSorter.StepFeatureData> steps,
                          Map<String, List<int[]>> every) throws Exception {
         o.i32(KINDS_TO_ATTEMPT.length);
+        var names = world.registries().lookupOrThrow(net.minecraft.core.registries.Registries.PLACED_FEATURE);
         for (String[] kind : KINDS_TO_ATTEMPT) {
-            Class<?> type = Class.forName("net.minecraft.world.level.levelgen.feature." + kind[1]);
+            java.util.function.Predicate<net.minecraft.world.level.levelgen.placement.PlacedFeature> type;
+            if (kind[1].startsWith("=")) {
+                java.util.Set<String> wanted = java.util.Set.of(kind[1].substring(1).split(","));
+                type = placed -> names.getKey(placed) != null && wanted.contains(names.getKey(placed).toString());
+            } else {
+                Class<?> of = Class.forName("net.minecraft.world.level.levelgen.feature." + kind[1]);
+                type = placed -> of.isInstance(placed.feature().value());
+            }
             int limit = Integer.parseInt(kind[2]);
             o.str(kind[0]);
             // Where the kind does something: of each biome the first chunk - of the biome's own and a few
@@ -1497,7 +1517,8 @@ final class WorldgenFeatures {
     }
 
     /** The attempts of one kind around one chunk, written to `o` if there is one: {how many wrote, how many there were}. */
-    static int[] attemptsAt(WorldgenGolden.Out o, Stand stand, Class<?> type, int limit, String kind, int cx, int cz,
+    static int[] attemptsAt(WorldgenGolden.Out o, Stand stand, java.util.function.Predicate<net.minecraft.world.level.levelgen.placement.PlacedFeature> type,
+                            int limit, String kind, int cx, int cz,
                             List<net.minecraft.world.level.biome.FeatureSorter.StepFeatureData> steps) throws Exception {
         int wrote = 0, tried = 0;
         {
@@ -1523,7 +1544,7 @@ final class WorldgenFeatures {
                         for (var feature : features.get(s)) indices.add(steps.get(s).indexMapping().applyAsInt(feature.value()));
                     }
                     for (int index : indices)
-                        if (type.isInstance(steps.get(s).features().get(index).feature().value())) which.add(new int[] {s, index});
+                        if (type.test(steps.get(s).features().get(index))) which.add(new int[] {s, index});
                 }
                 if (o != null) {
                     o.i32(cx);
@@ -1651,6 +1672,11 @@ final class WorldgenFeatures {
         JsonArray snow = new JsonArray();
         for (int id = 0; id < net.minecraft.world.level.block.Block.BLOCK_STATE_REGISTRY.size(); ++id) snow.add(snowSurvivesOn(net.minecraft.world.level.block.Block.stateById(id)) ? 1 : 0);
         root.add("snow_survives_on", snow);
+        // VineBlock.isAcceptableNeighbour (MultifaceBlock.canAttachTo): what grows on faces holds on to this state,
+        // which lies in a direction from it - a bit a direction, as above.
+        JsonArray attaches = new JsonArray();
+        for (int id = 0; id < net.minecraft.world.level.block.Block.BLOCK_STATE_REGISTRY.size(); ++id) attaches.add(vineAttaches(net.minecraft.world.level.block.Block.stateById(id)));
+        root.add("vine_attaches", attaches);
         // The blocks of every block tag in the order the game holds them: what a provider draws one of
         // (RandomBlockProvider: HolderSet.getRandomElement) is the n-th of them.
         JsonObject tags = new JsonObject();
@@ -1738,6 +1764,14 @@ final class WorldgenFeatures {
                     return method.invoke(net.minecraft.world.level.EmptyBlockGetter.INSTANCE, args);
                 throw new UnsupportedOperationException(method.getName());
             });
+    }
+
+    static int vineAttaches(BlockState neighbour) {
+        int bits = 0;
+        var level = everywhere(new BlockState[] {neighbour});
+        for (net.minecraft.core.Direction direction : net.minecraft.core.Direction.values())
+            if (net.minecraft.world.level.block.VineBlock.isAcceptableNeighbour(level, BlockPos.ZERO, direction)) bits |= 1 << direction.ordinal();
+        return bits;
     }
 
     static boolean snowSurvivesOn(BlockState below) {

@@ -104,6 +104,12 @@ class Decorator {
     bool place_iceberg(u16 state, FeatureRandom& random, Pos origin);
     bool place_freeze_top_layer(Pos origin);
     bool place_simple_block(const ft::Feature& feature, FeatureRandom& random, Pos origin);
+    bool place_block_column(const ft::Column& column, FeatureRandom& random, Pos origin);
+    bool place_bamboo(const ft::Bamboo& bamboo, FeatureRandom& random, Pos origin);
+    bool place_vines(u32 states, Pos origin);
+    bool place_coral_tree(u32 block, FeatureRandom& random, Pos origin);
+    bool place_coral_claw(u32 block, FeatureRandom& random, Pos origin);
+    bool place_huge_mushroom(const ft::Mushroom& mushroom, bool red, FeatureRandom& random, Pos origin);
     u16 noise_state(const ft::NoiseProvider& provider, FeatureRandom& random, Pos at);
     i32 optional_state(const ft::Provider& provider, FeatureRandom& random, Pos at);
     u16 state_of(const ft::Provider& provider, FeatureRandom& random, Pos at);

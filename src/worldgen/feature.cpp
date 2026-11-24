@@ -336,6 +336,13 @@ bool Decorator::place_feature(u32 feature, FeatureRandom& random, Pos at) {
         case ft::FeatureType::kIceberg: return place_iceberg(static_cast<u16>(f.a), random, at);
         case ft::FeatureType::kFreezeTopLayer: return place_freeze_top_layer(at);
         case ft::FeatureType::kSimpleBlock: return place_simple_block(f, random, at);
+        case ft::FeatureType::kBlockColumn: return place_block_column(ft::kColumns[f.a], random, at);
+        case ft::FeatureType::kBamboo: return place_bamboo(ft::kBamboos[f.a], random, at);
+        case ft::FeatureType::kVines: return place_vines(f.a, at);
+        case ft::FeatureType::kCoralTree: return place_coral_tree(f.a, random, at);
+        case ft::FeatureType::kCoralClaw: return place_coral_claw(f.a, random, at);
+        case ft::FeatureType::kHugeBrownMushroom: return place_huge_mushroom(ft::kMushrooms[f.a], false, random, at);
+        case ft::FeatureType::kHugeRedMushroom: return place_huge_mushroom(ft::kMushrooms[f.a], true, random, at);
     }
     return false;
 }
@@ -674,6 +681,243 @@ bool Decorator::place_simple_block(const ft::Feature& f, FeatureRandom& random, 
         region.set_block(o.x, o.y, o.z, static_cast<u16>(made), 2);
     }
     if (f.c) region.schedule_tick(o.x, o.y, o.z, world::block_of(region.block(o.x, o.y, o.z)), false);
+    return true;
+}
+
+// BlockColumnFeature: layers of blocks one after the other in a direction - a cactus with its flower,
+// kelp with its tip - as far as the way is free; what does not fit is taken off the layers at one end.
+bool Decorator::place_block_column(const ft::Column& column, FeatureRandom& random, Pos origin) {
+    Region& region = region_;
+    i32 heights[16];
+    DCHECK(column.layers <= std::size(heights));
+    i32 total = 0;
+    for (u32 i = 0; i < column.layers; ++i) {
+        heights[i] = sample(ft::kInts[ft::kColumnLayers[column.first + i].height], random);
+        total += heights[i];
+    }
+    if (total == 0) return false;
+    const i32 dx = world::kStepX[column.direction], dy = world::kStepY[column.direction], dz = world::kStepZ[column.direction];
+    const ft::Predicate& allowed = ft::kPredicates[column.allowed_placement];
+    Pos next{origin.x + dx, origin.y + dy, origin.z + dz};
+    for (i32 y = 0; y < total; ++y) {
+        if (!test(region, allowed, next)) {
+            // truncate: from the first layer on where the tip counts, else from the last.
+            i32 remove = total - y;
+            const i32 step = column.prioritize_tip ? 1 : -1;
+            for (i32 i = column.prioritize_tip ? 0 : static_cast<i32>(column.layers) - 1;
+                 i >= 0 && i < static_cast<i32>(column.layers) && remove > 0; i += step) {
+                const i32 from_layer = std::min(heights[i], remove);
+                remove -= from_layer;
+                heights[i] -= from_layer;
+            }
+            break;
+        }
+        next = {next.x + dx, next.y + dy, next.z + dz};
+    }
+    Pos place = origin;
+    for (u32 i = 0; i < column.layers; ++i) {
+        const ft::Provider& provider = ft::kProviders[ft::kColumnLayers[column.first + i].provider];
+        for (i32 y = 0; y < heights[i]; ++y) {
+            region.set_block(place.x, place.y, place.z, state_of(provider, random, place), 2);
+            place = {place.x + dx, place.y + dy, place.z + dz};
+        }
+    }
+    return true;
+}
+
+// BambooFeature: a stalk of bamboo with its leaves at the top, and now and then podzol round its foot.
+bool Decorator::place_bamboo(const ft::Bamboo& bamboo, FeatureRandom& random, Pos origin) {
+    Region& region = region_;
+    if (!world::is_air(region.block(origin.x, origin.y, origin.z))) return false;
+    if (!survives(region, ft::kSurvive[bamboo.survive], origin.x, origin.y, origin.z)) return true;
+    const i32 height = random.next_int(12) + 5;
+    if (random.next_float() < bamboo.probability) {
+        const i32 r = random.next_int(4) + 1;
+        for (i32 x = origin.x - r; x <= origin.x + r; ++x)
+            for (i32 z = origin.z - r; z <= origin.z + r; ++z) {
+                const i32 xd = x - origin.x, zd = z - origin.z;
+                if (xd * xd + zd * zd > r * r) continue;
+                const i32 y = region.height(hm::kWorldSurface, x, z) - 1;
+                if (in_state_set(bamboo.podzol_replaces, region.block(x, y, z))) region.set_block(x, y, z, bamboo.podzol, 2);
+            }
+    }
+    i32 y = origin.y;
+    for (i32 i = 0; i < height && world::is_air(region.block(origin.x, y, origin.z)); ++i) {
+        region.set_block(origin.x, y, origin.z, bamboo.trunk, 2);
+        ++y;
+    }
+    if (y - origin.y >= 3) {
+        region.set_block(origin.x, y, origin.z, bamboo.final_large, 2);
+        region.set_block(origin.x, y - 1, origin.z, bamboo.top_large, 2);
+        region.set_block(origin.x, y - 2, origin.z, bamboo.top_small, 2);
+    }
+    return true;
+}
+
+// VinesFeature: a vine on the first side of an empty block that it can hold on to (never from below).
+bool Decorator::place_vines(u32 states, Pos o) {
+    Region& region = region_;
+    if (!world::is_air(region.block(o.x, o.y, o.z))) return false;
+    for (u32 d = world::kUp; d < 6; ++d) {  // Direction.values()
+        if (!in_state_set(ft::kSetVineAttaches[d],
+                          region.block(o.x + world::kStepX[d], o.y + world::kStepY[d], o.z + world::kStepZ[d])))
+            continue;
+        region.set_block(o.x, o.y, o.z, ft::kProviderStates[states + d - 1], 2);
+        return true;
+    }
+    return false;
+}
+
+namespace {
+
+// Direction.Plane.HORIZONTAL: north, east, south, west - and a turn to the right of each.
+constexpr u32 kHorizontal[4] = {world::kNorth, world::kEast, world::kSouth, world::kWest};
+u32 clockwise(u32 direction) {
+    switch (direction) {
+        case world::kNorth: return world::kEast;
+        case world::kEast: return world::kSouth;
+        case world::kSouth: return world::kWest;
+        default: return world::kNorth;
+    }
+}
+u32 counter_clockwise(u32 direction) { return clockwise(clockwise(clockwise(direction))); }
+// Util.shuffle
+void shuffle(u32* list, i32 size, FeatureRandom& random) {
+    for (i32 i = size; i > 1; --i) std::swap(list[i - 1], list[random.next_int(i)]);
+}
+Pos moved(Pos at, u32 direction) {
+    return {at.x + world::kStepX[direction], at.y + world::kStepY[direction], at.z + world::kStepZ[direction]};
+}
+
+}  // namespace
+
+// CoralTreeFeature: a trunk of coral blocks and branches off its top, each block a placed feature of its own.
+bool Decorator::place_coral_tree(u32 block, FeatureRandom& random, Pos origin) {
+    Pos at = origin;
+    const i32 trunk_height = random.next_int(3) + 1;
+    for (i32 i = 0; i < trunk_height; ++i) {
+        if (!place(block, random, at, nullptr)) return true;
+        ++at.y;
+    }
+    const Pos trunk_top = at;
+    const i32 branches = random.next_int(3) + 2;
+    u32 directions[4] = {kHorizontal[0], kHorizontal[1], kHorizontal[2], kHorizontal[3]};
+    shuffle(directions, 4, random);
+    for (i32 b = 0; b < branches; ++b) {
+        const u32 direction = directions[b];
+        at = moved(trunk_top, direction);
+        const i32 branch_height = random.next_int(5) + 2;
+        i32 segment = 0;
+        for (i32 j = 0; j < branch_height; ++j) {
+            if (!place(block, random, at, nullptr)) break;
+            ++segment;
+            ++at.y;
+            if (j == 0 || (segment >= 2 && random.next_float() < 0.25f)) {
+                at = moved(at, direction);
+                segment = 0;
+            }
+        }
+    }
+    return true;
+}
+
+// CoralClawFeature: a block and two or three arms that reach out to one side and up.
+bool Decorator::place_coral_claw(u32 block, FeatureRandom& random, Pos origin) {
+    if (!place(block, random, origin, nullptr)) return false;
+    const u32 claw = kHorizontal[random.next_int(4)];
+    const i32 branches = random.next_int(2) + 2;
+    u32 possible[3] = {claw, clockwise(claw), counter_clockwise(claw)};
+    shuffle(possible, 3, random);
+    for (i32 b = 0; b < branches; ++b) {
+        const u32 branch = possible[b];
+        Pos at = origin;
+        const i32 sideway = random.next_int(2) + 1;
+        at = moved(at, branch);
+        u32 segment;
+        i32 inway;
+        if (branch == claw) {
+            segment = claw;
+            inway = random.next_int(3) + 2;
+        } else {
+            ++at.y;
+            segment = random.next_int(2) == 0 ? branch : static_cast<u32>(world::kUp);
+            inway = random.next_int(3) + 3;
+        }
+        for (i32 i = 0; i < sideway; ++i) {
+            if (!place(block, random, at, nullptr)) break;
+            at = moved(at, segment);
+        }
+        at = moved(at, world::opposite(segment));
+        ++at.y;
+        for (i32 i = 0; i < inway; ++i) {
+            at = moved(at, claw);
+            if (!place(block, random, at, nullptr)) break;
+            if (random.next_float() < 0.25f) ++at.y;
+        }
+    }
+    return true;
+}
+
+// AbstractHugeMushroomFeature, HugeBrownMushroomFeature and HugeRedMushroomFeature: a stem and a
+// cap - flat and wide, or a dome - whose blocks show their skin on the sides that are outside.
+bool Decorator::place_huge_mushroom(const ft::Mushroom& mushroom, bool red, FeatureRandom& random, Pos origin) {
+    Region& region = region_;
+    // getTreeHeight
+    i32 height = random.next_int(3) + 4;
+    if (random.next_int(12) == 0) height *= 2;
+    // isValidPosition. (The red mushroom's radius is asked for with a height of -1 and is 0 at every
+    // level: only the place of the stem is looked at.)
+    if (origin.y < Region::kMinY + 1 || origin.y + height + 1 > Region::kMinY + Region::kHeight - 1) return false;
+    if (!test(region, ft::kPredicates[mushroom.can_place_on], {origin.x, origin.y - 1, origin.z})) return false;
+    for (i32 dy = 0; dy <= height; ++dy) {
+        const i32 radius = red || dy <= 3 ? 0 : mushroom.foliage_radius;
+        for (i32 dx = -radius; dx <= radius; ++dx)
+            for (i32 dz = -radius; dz <= radius; ++dz)
+                if (!in_state_set(ft::kSetMushroomHasRoomIn, region.block(origin.x + dx, origin.y + dy, origin.z + dz)))
+                    return false;
+    }
+    // placeMushroomBlock
+    const auto put = [&](i32 x, i32 y, i32 z, u16 state) {
+        if (in_state_set(ft::kSetMushroomGrowsThrough, region.block(x, y, z))) region.set_block(x, y, z, state, 3);
+    };
+    // A block of the cap as the provider gives it, with the faces the cap says: `faces` by west << 3 |
+    // east << 2 | north << 1 | south, `up` as it is where none is given (-1).
+    const auto cap = [&](i32 up, u32 faces) -> u16 {
+        const u16 state = state_of(ft::kProviders[mushroom.cap], random, origin);
+        for (u32 i = mushroom.caps; i < static_cast<u32>(mushroom.caps) + mushroom.cap_count; ++i)
+            if (ft::kMushroomCaps[i].state == state)
+                return ft::kMushroomCaps[i].to[static_cast<u32>(up < 0 ? ft::kMushroomCaps[i].up : up) << 4 | faces];
+        return state;
+    };
+    const i32 r = mushroom.foliage_radius;
+    if (!red) {
+        for (i32 dx = -r; dx <= r; ++dx)
+            for (i32 dz = -r; dz <= r; ++dz) {
+                const bool min_x = dx == -r, max_x = dx == r, min_z = dz == -r, max_z = dz == r;
+                const bool x_edge = min_x || max_x, z_edge = min_z || max_z;
+                if (x_edge && z_edge) continue;
+                const bool west = min_x || (z_edge && dx == 1 - r), east = max_x || (z_edge && dx == r - 1);
+                const bool north = min_z || (x_edge && dz == 1 - r), south = max_z || (x_edge && dz == r - 1);
+                put(origin.x + dx, origin.y + height, origin.z + dz,
+                    cap(-1, static_cast<u32>(west) << 3 | static_cast<u32>(east) << 2 | static_cast<u32>(north) << 1 | south));
+            }
+    } else {
+        for (i32 dy = height - 3; dy <= height; ++dy) {
+            const i32 radius = dy < height ? r : r - 1;
+            const i32 center = r - 2;
+            for (i32 dx = -radius; dx <= radius; ++dx)
+                for (i32 dz = -radius; dz <= radius; ++dz) {
+                    const bool x_edge = dx == -radius || dx == radius, z_edge = dz == -radius || dz == radius;
+                    if (dy < height && x_edge == z_edge) continue;
+                    put(origin.x + dx, origin.y + dy, origin.z + dz,
+                        cap(dy >= height - 1, static_cast<u32>(dx < -center) << 3 | static_cast<u32>(dx > center) << 2 |
+                                                  static_cast<u32>(dz < -center) << 1 | static_cast<u32>(dz > center)));
+                }
+        }
+    }
+    // placeTrunk
+    for (i32 dy = 0; dy < height; ++dy)
+        put(origin.x, origin.y + dy, origin.z, state_of(ft::kProviders[mushroom.stem], random, origin));
     return true;
 }
 
