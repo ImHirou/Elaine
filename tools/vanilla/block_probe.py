@@ -969,7 +969,8 @@ def record_ours(exe: str, out: str, name_a: str, name_b: str, only: set | None =
     log = open(tmp / "server.log", "w")
     proc = subprocess.Popen([exe, "--server-ip=127.0.0.1", f"--server-port={port}", "--online-mode=false", "--view-distance=2",
                              "--simulation-distance=2", f"--random-tick-speed={RANDOM_TICK_SPEED}", "--config=/nonexistent",
-                             "--level-name=", f"--ops-file={tmp / 'ops.json'}"], stdin=subprocess.PIPE, stdout=log, stderr=log)
+                             "--level-name=", "--level-type=minecraft:flat", f"--ops-file={tmp / 'ops.json'}"],
+                            stdin=subprocess.PIPE, stdout=log, stderr=log)
     try:
         end = time.time() + 30
         while "listening on" not in (tmp / "server.log").read_text():

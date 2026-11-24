@@ -2062,8 +2062,8 @@ What does differ, and is a gap rather than a difference of the import:
 
 ## World generation (src/worldgen/, tools/mcgen/gen_worldgen.py, tools/mcgen/extract/Worldgen*.java)
 
-`level-type=minecraft:normal` makes a world out of its seed the way vanilla's
-`NoiseBasedChunkGenerator` does. The aim is not terrain that looks like vanilla's: it is, for the
+`level-type=minecraft:normal` - the default, as it is vanilla's - makes a world out of its seed the
+way vanilla's `NoiseBasedChunkGenerator` does. The aim is not terrain that looks like vanilla's: it is, for the
 same seed, vanilla's terrain - the same block at every place - made by code that is laid out for
 speed. Everything here is a port, held to what the jar's own classes compute; nothing is "near
 enough", because a float that is one unit in the last place off decides, somewhere, whether a

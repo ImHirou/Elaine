@@ -262,7 +262,8 @@ def run_session(probes: list[str], args, work: Path, port: int, env: dict, stamp
     jar = ROOT / ".cache" / "mc" / mc.META["version"] / "server.jar"
     vanilla = Server("vanilla", [JAVA, "-jar", str(jar), "--nogui", "--world", PROBE_WORLD], SERVER_DIR, "Done (", work)
     ours = Server("ours", [args.exe, "--server-ip=127.0.0.1", f"--server-port={our_port}", "--online-mode=false", "--view-distance=2",
-                           "--max-players=20", f"--ops-file={work / 'ops.json'}", f"--level-name={world}", "--random-tick-speed=0"],
+                           "--max-players=20", f"--ops-file={work / 'ops.json'}", f"--level-name={world}", "--random-tick-speed=0",
+                           "--level-type=minecraft:flat"],
                   work, "listening on", work)
     out = {}
     try:

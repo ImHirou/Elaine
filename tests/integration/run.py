@@ -85,9 +85,11 @@ class Server:
         self.world = world or self.own_world
         # No random ticks unless a scenario asks for them: grass under a stone that was placed dies
         # whenever chance has it, and what a scenario is told must not depend on when.
+        # A flat world unless a scenario asks for terrain (the server's default, as vanilla's): what most
+        # scenarios stand on and count is the flat world's ground.
         opts = {"server-ip": "127.0.0.1", "server-port": self.port, "online-mode": "false", "debug": "true",
                 "config": "/nonexistent/server.properties", "ops-file": self.ops_file, "level-name": self.world,
-                "random-tick-speed": 0, "tick-rate": TICK_RATE}
+                "level-type": "minecraft:flat", "random-tick-speed": 0, "tick-rate": TICK_RATE}
         start_timeout = float(args.pop("start_timeout", 5))  # (importing a world takes its time)
         opts.update({k.replace("_", "-"): v for k, v in args.items()})
         self.tick = 1.0 / float(opts["tick-rate"])   # seconds a tick
