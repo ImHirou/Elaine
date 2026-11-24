@@ -51,6 +51,10 @@ stand. That is its light engine's answer, given by another thread: bright as lon
 around has been handed to the engine, dark once one beside it has, and later whatever spills over
 (SkyLightSectionStorage.getLightValue). A replay says bright, and names every block it asked about
 after the server had begun to light a chunk at or beside it; `diff` leaves those blocks out.
+What it cannot leave out is what follows from them: a mushroom the server's light let stand is in
+the way of the sugar cane that comes after it, and the cane's draws go on differently. A chunk
+that differs so differs from the jar's own classes in the same blocks (`jar`, then `diff`): that
+is the server's light, and no difference of the port.
 
 The world is terrain_probe.py's - written by hand, this seed, no structures - with the game's own
 features in it. Vanilla runs under the rules of AGENTS.md (from .cache/vanilla-server/, the cached
@@ -355,7 +359,9 @@ def read_replay(path: str) -> tuple[int, dict]:
         c["block_entities"] = []
         for _ in range(r.take("i")):
             raw = r.bytes(r.take("i"))
-            c["block_entities"].append(mc.snbt(mc.Reader(raw[:1] + raw[3:]).nbt()))    # (NbtIo.write: a root with the empty name)
+            be = mc.Reader(raw[:1] + raw[3:]).nbt()    # (NbtIo.write: a root with the empty name)
+            c["block_entities"].append(f"(nothing known of the one at {int(be['x'])}, {int(be['y'])}, {int(be['z'])})" if be.get("id") == "DUMMY"
+                                       else mc.snbt(be))
         c["tainted"] = [tuple(r.take("3i")) for _ in range(r.take("i"))]
         chunks[f"{x},{z}"] = c
     return seed, chunks

@@ -2529,6 +2529,11 @@ left out: where a mushroom asked for the light beside a chunk the server was lig
 `--stops=X:Z,...` takes the player to other chunks, for what is rare: around a chunk of sulfur
 caves the springs of fifteen chunks were the server's. A fossil (one chunk in sixty-four) and a
 well (one in a thousand) were in none of the chunks compared: those two are held to the jar alone.
+In a world of another seed (`--seed=7`) one chunk of 352 differs, by four blocks: a mushroom that
+the server's light let stand - one of the blocks left out - was in the way of a sugar cane, whose
+draws went on differently. The jar's own classes, replaying that order on the stand, differ from
+the server in the same four blocks (`feature_probe.py jar`, `diff`): the light of a server is
+not a function of the order, and what follows from it is not either.
 
 **Trees** (`tree.cpp`, `tools/mcgen/gen_trees.py`). `TreeFeature` is the largest feature there
 is, and nearly all of it is data: a trunk placer (ten types), a foliage placer (twelve), a size
