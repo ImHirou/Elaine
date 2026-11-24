@@ -375,12 +375,13 @@ def a_world_of_terrain(srv: Server):
     bedrock, deepslate = mc.BLOCK["kBedrock"], mc.BLOCK["kDeepslate"]
     # The world begins where its climate says a world should (NoiseSpawnFinder: for this seed, 262
     # blocks west of the origin's frozen sea), and a player appears on the ground there: grass under
-    # its feet, air about it.
+    # its feet - with the snow of that cold place on it, which is a feature - and air about it.
     x, y, z = (math.floor(v) for v in j["teleport"]["pos"])
     assert (cx, cz) == (-17, -1) and (x >> 4, z >> 4) == (cx, cz), (j["teleport"], cx, cz)
     here = j["chunks"][(cx, cz)]
-    assert mc.chunk_block(here, x & 15, y - 1, z & 15) == mc.BLOCK["kGrassBlock"], mc.chunk_block(here, x & 15, y - 1, z & 15)
-    assert mc.chunk_block(here, x & 15, y, z & 15) == 0 and mc.chunk_block(here, x & 15, y + 1, z & 15) == 0
+    snowy = mc.BLOCK["kGrassBlock"] - 1  # snowy=true comes before the default snowy=false
+    assert mc.chunk_block(here, x & 15, y - 1, z & 15) == snowy, mc.chunk_block(here, x & 15, y - 1, z & 15)
+    assert mc.chunk_block(here, x & 15, y, z & 15) == mc.BLOCK["kSnow"] and mc.chunk_block(here, x & 15, y + 1, z & 15) == 0
     biomes = mc.load_registry("worldgen_biome")
     seen, kinds = set(), set()
     for ch in j["chunks"].values():

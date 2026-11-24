@@ -2431,11 +2431,46 @@ section holds nothing but cave air it sees cave air, not the plain air `ProtoChu
 (`Region::raw`, `put_raw`). An ore that shuns the open draws a number for a block only once a
 target's rule held for it - the order of the draws is the order of the blocks.
 
-**Decorations held to the jar.** Beside the placements, the golden script has whole decorations:
+**The features that ask no block whether it can stay** (`feature.cpp`, a function a class):
+disks (`DiskFeature`: a round patch of what a state provider says - sand with sandstone where
+it would hang in the air, grass only where nothing lies on it), springs, the lava lake, magma in
+the floor under flooded caves, the mossy rocks of old forests, ice spikes, icebergs, blue ice,
+and the snow and ice a cold biome has on top (`SnowAndFreezeFeature`). What they need beside
+themselves:
+
+- *State providers* (`BlockStateProvider`) are rows like predicates: a state, or rules - the
+  first whose predicate holds - with what else if none does. The kinds that draw (weighted,
+  rotated, random ints) wait for the features that use them.
+- *A biome's temperature at a block* (`warm_enough_to_rain`): the biome's own, 0.2 in patches
+  for the frozen oceans, and above y 80 colder by height and by a noise - three simplex noises
+  of fixed seeds (`Biome.TEMPERATURE_NOISE` and the two the surface already had). Snow falls
+  where it is under 0.15 and the biome has precipitation.
+- *What code asks of a state by itself* is a set of states with a name, like the predicates'
+  sets and checked the same way: `liquid()`, whether a face occludes
+  (`getFaceOcclusionShape`: asked of every state by the extractor - the light engine's table
+  answers only for states that are lit by their shape), whether a layer of snow may lie on it
+  (`SnowLayerBlock.canSurvive`, asked of every state too).
+- *Light.* Snow and ice ask for block light under 10; while a chunk is decorated there is none.
+
+26.3 again is not 1.21: a spring's fluid is written as a falling source and placed as a full
+one (`FlowingFluid.getLegacyLevel`), the lake's hollow is cave air with a tick of its own, the
+features are records with their predicates in the data (`can_place_on`, `can_replace`,
+`can_replace_with_barrier`). An iceberg's angle comes from a double: its sine is our own
+(above), and what it decides is which side of an ellipse a block lies on - all 48 icebergs of
+the golden script come out the same.
+
+**Decorations held to the jar.** A kind of feature is first placed again and again in one place
+(`KINDS_TO_ATTEMPT`): nine chunks of terrain where the kind does something - the script looks
+for them - and every placed feature of the kind tried with source after source, each attempt
+on what the ones before left, until a dozen have written something. What a chunk rarely has
+(an iceberg: one chunk in sixteen; a blue one: one in two hundred) happens here by the dozen,
+and what was built is in the way of what follows. Every attempt writes what vanilla's writes -
+or nothing where vanilla's writes nothing - and the nine chunks end the same: 39894 attempts
+of the nine kinds above, 326 of them writing. Beside the placements, the golden script has whole decorations:
 with the features of one kind alone - so far ores: four areas of 4 x 4 chunks (windswept hills,
 badlands, dripstone and lush caves) - and with every feature that is ported (six areas; the
 tables say which, `ported_features.txt`), the inner four chunks decorated one after the other
-in the order of a task. Of each of the features that run (404 and 612): everything it wrote, where and
+in the order of a task. Of each of the features that run (404 and 824): everything it wrote, where and
 what, folded into one number (on vanilla's side by sections that say what is set in them - an
 ore's raw writes too), and the long its source gives afterwards; then the sixteen chunks -
 blocks, heightmaps, marks, ticks. A feature that goes wrong is named by the test, with its chunk.
@@ -2446,10 +2481,11 @@ decorated in the order it is given). A world is not the same without the feature
 ported - an ore does not lie where a lake is - so vanilla's world has a data pack in which every
 feature of a biome that is not ported places nothing, under its own name: `FeatureSorter` goes
 by which features the biomes name, so the order, and with it each feature's random source,
-stays. With the 30 placed features of ores: 352 chunks the server saved before they were chunks
-of the world, 160 with their own ores and 192 with what the neighbours' put into them - blobs
-lie across the borders of chunks, so this is the order replayed, too - the same block for block,
-heightmaps, marks and ticks. (And of the 128 chunks of the world that never ticked, all.)
+stays. With the 47 placed features that are ported: 352 chunks the server saved before they
+were chunks of the world, 160 with their own features and 192 with what the neighbours' put
+into them - blobs of ore, lakes and icebergs lie across the borders of chunks, so this is the
+order replayed, too - the same block for block, heightmaps, the marks in order, the scheduled
+ticks of springs and lakes in order.
 
 ### Features: one order, and the workers (`world/gen_pipeline.*`)
 
@@ -2519,7 +2555,7 @@ polls and sweeps in an order drawn at random. The same through a `Dimension` wit
 goes on). And `a_world_is_the_same_whoever_makes_it`: two servers of one seed, one with three
 workers and one with all there are, send their clients the same bytes. The task itself - the
 generator's `decorate` over an area of real terrain - is held to the jar's classes with the
-decorations above ("ported": six areas, 612 features).
+decorations above ("ported": six areas, 824 features).
 
 ### What is there, and what is not
 
@@ -2527,10 +2563,12 @@ There: biomes, and all of the `terrain` status - the shape of the ground with it
 (`doFill`); the surface, bedrock, deepslate and the ore veins (`buildSurface`); the caves and
 canyons of the carvers (`generateCarvers`).
 
-And of the `features` status the ores, in every chunk of a world.
+And of the `features` status what asks no block whether it can stay: ores, disks, springs,
+lava lakes, magma, forest rocks, ice spikes, icebergs, blue ice, snow and ice - in every chunk
+of a world.
 
-Not there yet: the other features - a world of terrain has its ground, its ores and no tree on
-it - and structures. Where a world begins is still looked for on bare terrain. Beyond those:
+Not there yet: what grows - a world of terrain has no tree, no grass and no kelp - what hangs
+and stands in caves, and structures. Where a world begins is still looked for on bare terrain. Beyond those:
 only the overworld, only the preset `normal`; an imported vanilla world does not go on with this
 generator yet.
 

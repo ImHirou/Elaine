@@ -33,4 +33,11 @@ bool top_material(const Overworld& world, NoiseChunk& chunk, CarverBiomes& biome
 // Biome.BIOME_INFO_NOISE - the same in every world: what the count of some features goes by.
 float biome_info_noise(double x, double z);
 
+// Biome.warmEnoughToRain(pos, seaLevel): the biome's temperature at a block - its own, colder in
+// patches where it is of the frozen kind, and the higher above the sea the colder, by a noise of
+// its own - is 0.15 at least. Where it is not, water freezes and snow falls.
+bool warm_enough_to_rain(u16 biome, i32 x, i32 y, i32 z);
+// Biome.hasPrecipitation
+bool has_precipitation(u16 biome);
+
 }  // namespace worldgen

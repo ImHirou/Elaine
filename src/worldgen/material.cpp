@@ -32,16 +32,20 @@ double map(double value, double from_min, double from_max, double to_min, double
 // Math.round(float)
 i32 java_round(float v) { return static_cast<i32>(std::floor(static_cast<double>(v) + 0.5)); }
 
-// Biome's own noises (Biome.FROZEN_TEMPERATURE_NOISE, BIOME_INFO_NOISE): the same in every world.
+// Biome's own noises (Biome.TEMPERATURE_NOISE, FROZEN_TEMPERATURE_NOISE, BIOME_INFO_NOISE): the
+// same in every world.
 struct BiomeNoises {
     Simplex frozen[3];
     Simplex info;
+    Simplex temperature;
 
     BiomeNoises() {
         WorldgenRandom<LegacyRandom> a{LegacyRandom(3456)};
         for (Simplex& s : frozen) s.seed(a);
         WorldgenRandom<LegacyRandom> b{LegacyRandom(2345)};
         info.seed(b);
+        WorldgenRandom<LegacyRandom> c{LegacyRandom(1234)};
+        temperature.seed(c);
     }
     // NoiseStack.get(x, y) of the three: at 1, 1/2 and 1/4 of the frequency.
     float frozen_temperature(double x, double z) const {
@@ -57,9 +61,9 @@ const BiomeNoises& biome_noises() {
     return noises;
 }
 
-// Biome.shouldMeltFrozenOceanIcebergSlightly at the sea's level: is the biome's temperature
-// there above 0.1? A frozen biome (TemperatureModifier.FROZEN) is 0.2 in patches, whatever it is else.
-bool melts_iceberg_slightly(u16 biome, i32 x, i32 z) {
+// TemperatureModifier.modifyTemperature: a biome's own temperature - but a frozen biome
+// (TemperatureModifier.FROZEN) is 0.2 in patches, whatever it is else.
+float modified_temperature(u16 biome, i32 x, i32 z) {
     const wg::BiomeTemperature& b = wg::kBiomeTemperature[biome];
     float temperature = b.temperature;
     if (b.frozen) {
@@ -72,8 +76,12 @@ bool melts_iceberg_slightly(u16 biome, i32 x, i32 z) {
             if (small < 0.8) temperature = 0.2f;
         }
     }
-    return temperature > 0.1f;
+    return temperature;
 }
+
+// Biome.shouldMeltFrozenOceanIcebergSlightly at the sea's level: is the biome's temperature
+// there above 0.1?
+bool melts_iceberg_slightly(u16 biome, i32 x, i32 z) { return modified_temperature(biome, x, z) > 0.1f; }
 
 // MaterialRuleContext, with the rule compiled over it: where the surface is being asked about,
 // and what was worked out for this column or this block already.
@@ -462,5 +470,20 @@ bool top_material(const Overworld& world, NoiseChunk& chunk, CarverBiomes& biome
 }
 
 float biome_info_noise(double x, double z) { return biome_noises().info.get(x, z); }
+
+bool warm_enough_to_rain(u16 biome, i32 x, i32 y, i32 z) {
+    // Biome.getHeightAdjustedTemperature (what getTemperature remembers of it changes nothing).
+    float temperature = modified_temperature(biome, x, z);
+    const i32 snow_level = settings::kSeaLevel + 17;
+    if (y > snow_level) {
+        const float v = biome_noises().temperature.get(static_cast<double>(static_cast<float>(x) / 8.0f),
+                                                       static_cast<double>(static_cast<float>(z) / 8.0f)) *
+                        8.0f;
+        temperature = temperature - (v + static_cast<float>(y) - static_cast<float>(snow_level)) * 0.05f / 40.0f;
+    }
+    return temperature >= 0.15f;
+}
+
+bool has_precipitation(u16 biome) { return wg::kBiomeTemperature[biome].has_precipitation != 0; }
 
 }  // namespace worldgen

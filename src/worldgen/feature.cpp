@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "worldgen/feature.hpp"
 
+#include <algorithm>
 #include <cmath>
 
 #include "phys/mth.hpp"
@@ -11,6 +12,7 @@
 namespace worldgen {
 
 namespace hm = world::heightmap;
+namespace blk = proto::gen::block;
 
 namespace {
 
@@ -326,6 +328,16 @@ bool Decorator::place_feature(u32 feature, FeatureRandom& random, Pos at) {
             return any;
         }
         case ft::FeatureType::kOre: return place_ore(ft::kOres[f.a], random, at);
+        case ft::FeatureType::kDisk: return place_disk(ft::kDisks[f.a], random, at);
+        case ft::FeatureType::kUnderwaterMagma: return place_underwater_magma(ft::kMagmas[f.a], random, at);
+        case ft::FeatureType::kBlockBlob: return place_block_blob(static_cast<u16>(f.a), ft::kPredicates[f.b], random, at);
+        case ft::FeatureType::kSpring: return place_spring(ft::kSprings[f.a], at);
+        case ft::FeatureType::kLake: return place_lake(ft::kLakes[f.a], random, at);
+        case ft::FeatureType::kBlueIce: return place_blue_ice(random, at);
+        case ft::FeatureType::kSpike:
+            return place_spike(static_cast<u16>(f.a), ft::kPredicates[f.b], ft::kPredicates[f.c], random, at);
+        case ft::FeatureType::kIceberg: return place_iceberg(static_cast<u16>(f.a), random, at);
+        case ft::FeatureType::kFreezeTopLayer: return place_freeze_top_layer(at);
     }
     return false;
 }
@@ -458,6 +470,544 @@ bool Decorator::place_ore(const ft::Ore& ore, FeatureRandom& random, Pos origin)
         }
     }
     return placed > 0;
+}
+
+// ---------------------------------------------------------------------------- what the features share
+
+namespace {
+
+// state.is(Blocks.WATER), state.is(Blocks.SNOW): any state of the block.
+bool is_water(u16 state) { return world::block_of(state) == world::block_of(blk::kWater); }
+bool is_snow_layer(u16 state) { return world::block_of(state) == world::block_of(blk::kSnow); }
+
+// LevelAccessor.getBrightness(LightLayer.BLOCK, pos) while a chunk is decorated: no light has been
+// let into it yet (docs/architecture.md, "Features").
+constexpr i32 kBlockLight = 0;
+
+// Biome.shouldFreeze(level, pos, false): cold, and a source of water in a block of water.
+bool should_freeze(Region& region, u16 biome, i32 x, i32 y, i32 z) {
+    if (warm_enough_to_rain(biome, x, y, z)) return false;
+    if (Region::outside_height(y) || kBlockLight >= 10) return false;
+    const u16 state = region.block(x, y, z);
+    return world::holds_water_source(state) && is_water(state);
+}
+
+// Biome.shouldSnow: snow falls there, and a layer of it can lie on what is below.
+bool should_snow(Region& region, u16 biome, i32 x, i32 y, i32 z) {
+    if (!has_precipitation(biome) || warm_enough_to_rain(biome, x, y, z)) return false;
+    if (Region::outside_height(y) || kBlockLight >= 10) return false;
+    const u16 state = region.block(x, y, z);
+    if (!world::is_air(state) && !is_snow_layer(state)) return false;
+    return in_state_set(ft::kSetSnowSurvivesOn, region.block(x, y - 1, z));
+}
+
+}  // namespace
+
+// BlockStateProvider.getOptionalState: a state, or none (-1).
+i32 Decorator::optional_state(const ft::Provider& p, FeatureRandom& random, Pos at) {
+    switch (p.op) {
+        case ft::ProviderOp::kSimple: return static_cast<i32>(p.a);
+        case ft::ProviderOp::kRuleBased:
+            for (u32 i = p.a; i < p.a + p.b; ++i) {
+                const ft::ProviderRule& rule = ft::kProviderRules[i];
+                if (!test(region_, ft::kPredicates[rule.predicate], at)) continue;
+                const i32 state = optional_state(ft::kProviders[rule.provider], random, at);
+                if (state >= 0) return state;
+            }
+            return p.c ? optional_state(ft::kProviders[p.c - 1], random, at) : -1;
+        case ft::ProviderOp::kUnported: break;
+    }
+    DCHECK(false);  // (a feature with a provider that is not ported is not placed)
+    return -1;
+}
+
+// BlockStateProvider.getState: where a provider of rules has no state, what is there stays.
+u16 Decorator::state_of(const ft::Provider& p, FeatureRandom& random, Pos at) {
+    const i32 state = optional_state(p, random, at);
+    return state >= 0 ? static_cast<u16>(state) : region_.block(at.x, at.y, at.z);
+}
+
+// Feature.markAboveForPostProcessing: the two blocks above, as far as there is no air.
+void Decorator::mark_above(i32 x, i32 y, i32 z) {
+    for (i32 i = 0; i < 2; ++i) {
+        ++y;
+        if (world::is_air(region_.block(x, y, z))) return;
+        region_.mark_post_process(x, y, z);
+    }
+}
+
+// DiskFeature: a round patch, a few blocks thick, of what its provider says wherever its target is.
+bool Decorator::place_disk(const ft::Disk& disk, FeatureRandom& random, Pos origin) {
+    Region& region = region_;
+    bool placed_any = false;
+    const i32 top = origin.y + disk.half_height, bottom = origin.y - disk.half_height - 1;
+    const i32 r = sample(ft::kInts[disk.radius], random);
+    const ft::Predicate& target = ft::kPredicates[disk.target];
+    const ft::Provider& provider = ft::kProviders[disk.provider];
+    for (i32 z = origin.z - r; z <= origin.z + r; ++z) {  // (BlockPos.betweenClosed: x first)
+        for (i32 x = origin.x - r; x <= origin.x + r; ++x) {
+            const i32 xd = x - origin.x, zd = z - origin.z;
+            if (xd * xd + zd * zd > r * r) continue;
+            // placeColumn, from the top down
+            bool placed_above = false;
+            for (i32 y = top; y > bottom; --y) {
+                if (!test(region, target, {x, y, z})) {
+                    placed_above = false;
+                    continue;
+                }
+                const i32 state = optional_state(provider, random, {x, y, z});
+                if (state < 0) continue;
+                region.set_block(x, y, z, static_cast<u16>(state), 2);
+                if (!placed_above) mark_above(x, y, z);
+                placed_any = true;
+                placed_above = true;
+            }
+        }
+    }
+    return placed_any;
+}
+
+// UnderwaterMagmaFeature: magma blocks in the floor under a column of water, where they are
+// walled in on every side but the top.
+bool Decorator::place_underwater_magma(const ft::Magma& magma, FeatureRandom& random, Pos origin) {
+    Region& region = region_;
+    // Column.scan, downwards: the floor is where the water ends, if that is within reach.
+    if (!is_water(region.block(origin.x, origin.y, origin.z))) return false;
+    i32 floor = origin.y;
+    for (i32 i = 1; i < magma.floor_search_range && is_water(region.block(origin.x, floor, origin.z)); ++i) --floor;
+    if (is_water(region.block(origin.x, floor, origin.z))) return false;
+    // BlockState.getFaceOcclusionShape(direction) is not a whole face: what is behind it shows.
+    const auto visible = [&](i32 x, i32 y, i32 z, world::Direction covered) {
+        return !in_state_set(ft::kSetFaceOccludes[static_cast<u32>(covered)], region.block(x, y, z));
+    };
+    const i32 r = magma.placement_radius_around_floor;
+    i32 placed = 0;
+    for (i32 z = origin.z - r; z <= origin.z + r; ++z) {  // (BlockPos.betweenClosedStream: x first, then y)
+        for (i32 y = floor - r; y <= floor + r; ++y) {
+            for (i32 x = origin.x - r; x <= origin.x + r; ++x) {
+                if (!(random.next_float() < magma.placement_probability_per_valid_position)) continue;
+                // isValidPlacement
+                const u16 state = region.block(x, y, z);
+                if (is_water(state) || world::is_air(state) || visible(x, y - 1, z, world::kUp)) continue;
+                if (visible(x, y, z - 1, world::kSouth) || visible(x + 1, y, z, world::kWest) ||
+                    visible(x, y, z + 1, world::kNorth) || visible(x - 1, y, z, world::kEast))
+                    continue;
+                region.set_block(x, y, z, blk::kMagmaBlock, 2);
+                ++placed;
+            }
+        }
+    }
+    return placed > 0;
+}
+
+// BlockBlobFeature: three lumps of a block, each beside the last, on the first ground below
+// that it may lie on (the mossy rocks of an old forest).
+bool Decorator::place_block_blob(u16 state, const ft::Predicate& can_place_on, FeatureRandom& random, Pos origin) {
+    Region& region = region_;
+    while (origin.y > Region::kMinY + 3 && !test(region, can_place_on, {origin.x, origin.y - 1, origin.z})) --origin.y;
+    if (origin.y <= Region::kMinY + 3) return false;
+    for (i32 c = 0; c < 3; ++c) {
+        const i32 xr = random.next_int(2);
+        const i32 yr = random.next_int(2);
+        const i32 zr = random.next_int(2);
+        const float tr = static_cast<float>(xr + yr + zr) * 0.333f + 0.5f;
+        for (i32 dz = -zr; dz <= zr; ++dz)
+            for (i32 dy = -yr; dy <= yr; ++dy)
+                for (i32 dx = -xr; dx <= xr; ++dx)
+                    if (!(static_cast<double>(dx * dx + dy * dy + dz * dz) > static_cast<double>(tr * tr)))
+                        region.set_block(origin.x + dx, origin.y + dy, origin.z + dz, state, 3);
+        const i32 mx = -1 + random.next_int(2);
+        const i32 my = -random.next_int(2);
+        const i32 mz = -1 + random.next_int(2);
+        origin = {origin.x + mx, origin.y + my, origin.z + mz};
+    }
+    return true;
+}
+
+// SpringFeature: a block of a fluid in a wall - rock on so many sides, air on so many - that
+// begins to run when the chunk first ticks.
+bool Decorator::place_spring(const ft::Spring& spring, Pos o) {
+    Region& region = region_;
+    const auto rock = [&](i32 x, i32 y, i32 z) { return in_state_set(spring.valid_blocks, region.block(x, y, z)); };
+    const auto hole = [&](i32 x, i32 y, i32 z) { return world::is_air(region.block(x, y, z)); };
+    if (!rock(o.x, o.y + 1, o.z)) return false;
+    if (spring.requires_block_below && !rock(o.x, o.y - 1, o.z)) return false;
+    const u16 current = region.block(o.x, o.y, o.z);
+    if (!world::is_air(current) && !in_state_set(spring.valid_blocks, current)) return false;
+    const i32 rocks = rock(o.x - 1, o.y, o.z) + rock(o.x + 1, o.y, o.z) + rock(o.x, o.y, o.z - 1) + rock(o.x, o.y, o.z + 1) +
+                      rock(o.x, o.y - 1, o.z);
+    const i32 holes = hole(o.x - 1, o.y, o.z) + hole(o.x + 1, o.y, o.z) + hole(o.x, o.y, o.z - 1) + hole(o.x, o.y, o.z + 1) +
+                      hole(o.x, o.y - 1, o.z);
+    if (rocks != spring.rock_count || holes != spring.hole_count) return false;
+    region.set_block(o.x, o.y, o.z, spring.state, 2);
+    region.schedule_tick(o.x, o.y, o.z, spring.fluid, true);
+    return true;
+}
+
+// LakeFeature: a hollow of a few blobs in a box of 16 x 8 x 16, its lower half filled with a
+// fluid, its upper half with air, and walled in with a barrier where the ground was solid.
+bool Decorator::place_lake(const ft::Lake& lake, FeatureRandom& random, Pos origin) {
+    Region& region = region_;
+    if (origin.y <= Region::kMinY + 4) return false;
+    origin = {origin.x - 8, origin.y - 4, origin.z - 8};
+    bool grid[2048] = {};
+    const auto in = [&](i32 xx, i32 zz, i32 yy) -> bool& { return grid[(xx * 16 + zz) * 8 + yy]; };
+    const i32 spots = random.next_int(4) + 4;
+    for (i32 i = 0; i < spots; ++i) {
+        const double xr = random.next_double() * 6.0 + 3.0;
+        const double yr = random.next_double() * 4.0 + 2.0;
+        const double zr = random.next_double() * 6.0 + 3.0;
+        const double xp = random.next_double() * (16.0 - xr - 2.0) + 1.0 + xr / 2.0;
+        const double yp = random.next_double() * (8.0 - yr - 4.0) + 2.0 + yr / 2.0;
+        const double zp = random.next_double() * (16.0 - zr - 2.0) + 1.0 + zr / 2.0;
+        for (i32 xx = 1; xx < 15; ++xx)
+            for (i32 zz = 1; zz < 15; ++zz)
+                for (i32 yy = 1; yy < 7; ++yy) {
+                    const double xd = (static_cast<double>(xx) - xp) / (xr / 2.0);
+                    const double yd = (static_cast<double>(yy) - yp) / (yr / 2.0);
+                    const double zd = (static_cast<double>(zz) - zp) / (zr / 2.0);
+                    const double d = xd * xd + yd * yd + zd * zd;
+                    if (d < 1.0) in(xx, zz, yy) = true;
+                }
+    }
+    const u16 fluid = state_of(ft::kProviders[lake.fluid], random, origin);
+    // A cell of the box that is not hollow and has a hollow one beside it, above or below it.
+    const auto edge = [&](i32 xx, i32 zz, i32 yy) {
+        return !in(xx, zz, yy) &&
+               ((xx < 15 && in(xx + 1, zz, yy)) || (xx > 0 && in(xx - 1, zz, yy)) || (zz < 15 && in(xx, zz + 1, yy)) ||
+                (zz > 0 && in(xx, zz - 1, yy)) || (yy < 7 && in(xx, zz, yy + 1)) || (yy > 0 && in(xx, zz, yy - 1)));
+    };
+    const ft::Predicate& can_place = ft::kPredicates[lake.can_place_feature];
+    for (i32 xx = 0; xx < 16; ++xx)
+        for (i32 zz = 0; zz < 16; ++zz)
+            for (i32 yy = 0; yy < 8; ++yy) {
+                if (!edge(xx, zz, yy)) continue;
+                const Pos at{origin.x + xx, origin.y + yy, origin.z + zz};
+                const u16 state = region.block(at.x, at.y, at.z);
+                if (yy >= 4 && in_state_set(ft::kSetLiquid, state)) return false;
+                if (yy < 4 && !world::is_solid(state) && state != fluid) return false;
+                if (!test(region, can_place, at)) return false;
+            }
+    const ft::Predicate& can_replace = ft::kPredicates[lake.can_replace_with_air_or_fluid];
+    for (i32 xx = 0; xx < 16; ++xx)
+        for (i32 zz = 0; zz < 16; ++zz)
+            for (i32 yy = 0; yy < 8; ++yy) {
+                if (!in(xx, zz, yy)) continue;
+                const Pos at{origin.x + xx, origin.y + yy, origin.z + zz};
+                if (!test(region, can_replace, at)) continue;
+                const bool place_air = yy >= 4;
+                region.set_block(at.x, at.y, at.z, place_air ? static_cast<u16>(blk::kCaveAir) : fluid, 2);
+                if (place_air) {
+                    region.schedule_tick(at.x, at.y, at.z, world::block_of(blk::kCaveAir), false);
+                    mark_above(at.x, at.y, at.z);
+                }
+            }
+    const u16 barrier = state_of(ft::kProviders[lake.barrier], random, origin);
+    if (!world::is_air(barrier)) {
+        const ft::Predicate& can_wall = ft::kPredicates[lake.can_replace_with_barrier];
+        for (i32 xx = 0; xx < 16; ++xx)
+            for (i32 zz = 0; zz < 16; ++zz)
+                for (i32 yy = 0; yy < 8; ++yy) {
+                    if (!edge(xx, zz, yy)) continue;
+                    if (yy >= 4 && random.next_int(2) == 0) continue;
+                    const Pos at{origin.x + xx, origin.y + yy, origin.z + zz};
+                    if (!world::is_solid(region.block(at.x, at.y, at.z)) || !test(region, can_wall, at)) continue;
+                    region.set_block(at.x, at.y, at.z, barrier, 2);
+                    mark_above(at.x, at.y, at.z);
+                }
+    }
+    // A lake of water has ice on it where it is cold.
+    if (world::fluid_family(world::fluid_of(fluid)) == proto::gen::fluid::kFamily[proto::gen::fluid::kWater]) {
+        for (i32 xx = 0; xx < 16; ++xx)
+            for (i32 zz = 0; zz < 16; ++zz) {
+                const Pos at{origin.x + xx, origin.y + 4, origin.z + zz};
+                if (should_freeze(region, region.biome(at.x, at.y, at.z), at.x, at.y, at.z) && test(region, can_replace, at))
+                    region.set_block(at.x, at.y, at.z, blk::kIce, 2);
+            }
+    }
+    return true;
+}
+
+// BlueIceFeature: blue ice under the sea, grown from a block beside packed ice.
+bool Decorator::place_blue_ice(FeatureRandom& random, Pos o) {
+    Region& region = region_;
+    static constexpr i32 kStep[6][3] = {{0, -1, 0}, {0, 1, 0},  {0, 0, -1},
+                                        {0, 0, 1},  {-1, 0, 0}, {1, 0, 0}};  // Direction.values()
+    if (o.y > settings::kSeaLevel - 1) return false;
+    if (!is_water(region.block(o.x, o.y, o.z)) && !is_water(region.block(o.x, o.y - 1, o.z))) return false;
+    bool packed = false;
+    for (u32 d = 1; d < 6 && !packed; ++d)
+        packed = region.block(o.x + kStep[d][0], o.y + kStep[d][1], o.z + kStep[d][2]) == blk::kPackedIce;
+    if (!packed) return false;
+    region.set_block(o.x, o.y, o.z, blk::kBlueIce, 2);
+    for (i32 i = 0; i < 200; ++i) {
+        const i32 up = random.next_int(5);
+        const i32 y_off = up - random.next_int(6);
+        i32 xz_diff = 3;
+        if (y_off < 2) xz_diff += y_off / 2;
+        if (xz_diff < 1) continue;
+        const i32 x1 = random.next_int(xz_diff);
+        const i32 x2 = random.next_int(xz_diff);
+        const i32 z1 = random.next_int(xz_diff);
+        const i32 z2 = random.next_int(xz_diff);
+        const Pos at{o.x + x1 - x2, o.y + y_off, o.z + z1 - z2};
+        const u16 state = region.block(at.x, at.y, at.z);
+        if (!world::is_air(state) && !is_water(state) && state != blk::kPackedIce && state != blk::kIce) continue;
+        for (const auto& step : kStep) {
+            if (region.block(at.x + step[0], at.y + step[1], at.z + step[2]) != blk::kBlueIce) continue;
+            region.set_block(at.x, at.y, at.z, blk::kBlueIce, 2);
+            break;
+        }
+    }
+    return true;
+}
+
+// SpikeFeature: a spike of ice on the snow - now and then a tall one - with a root below it.
+bool Decorator::place_spike(u16 state, const ft::Predicate& can_place_on, const ft::Predicate& can_replace, FeatureRandom& random,
+                            Pos origin) {
+    Region& region = region_;
+    while (world::is_air(region.block(origin.x, origin.y, origin.z)) && origin.y > Region::kMinY + 2) --origin.y;
+    if (!test(region, can_place_on, origin)) return false;
+    origin.y += random.next_int(4);
+    const i32 height = random.next_int(4) + 7;
+    const i32 width = height / 4 + random.next_int(2);
+    if (width > 1 && random.next_int(60) == 0) origin.y += 10 + random.next_int(30);
+    const auto put = [&](i32 x, i32 y, i32 z) {
+        if (world::is_air(region.block(x, y, z)) || test(region, can_replace, {x, y, z})) region.set_block(x, y, z, state, 3);
+    };
+    for (i32 y_off = 0; y_off < height; ++y_off) {
+        const float scale = (1.0f - static_cast<float>(y_off) / static_cast<float>(height)) * static_cast<float>(width);
+        const i32 new_width = ceil_int(scale);
+        for (i32 xo = -new_width; xo <= new_width; ++xo) {
+            const float dx = static_cast<float>(std::abs(xo)) - 0.25f;
+            for (i32 zo = -new_width; zo <= new_width; ++zo) {
+                const float dz = static_cast<float>(std::abs(zo)) - 0.25f;
+                if ((xo != 0 || zo != 0) && dx * dx + dz * dz > scale * scale) continue;
+                if ((xo == -new_width || xo == new_width || zo == -new_width || zo == new_width) && random.next_float() > 0.75f)
+                    continue;
+                put(origin.x + xo, origin.y + y_off, origin.z + zo);
+                if (y_off != 0 && new_width > 1) put(origin.x + xo, origin.y - y_off, origin.z + zo);
+            }
+        }
+    }
+    const i32 pillar = std::clamp(width - 1, 0, 1);
+    for (i32 xo = -pillar; xo <= pillar; ++xo) {
+        for (i32 zo = -pillar; zo <= pillar; ++zo) {
+            i32 y = origin.y - 1;
+            i32 run = 50;
+            if (std::abs(xo) == 1 && std::abs(zo) == 1) run = random.next_int(5);
+            while (y > 50) {
+                const u16 there = region.block(origin.x + xo, y, origin.z + zo);
+                if (!world::is_air(there) && !test(region, can_replace, {origin.x + xo, y, origin.z + zo}) && there != state)
+                    break;
+                region.set_block(origin.x + xo, y, origin.z + zo, state, 3);
+                --y;
+                if (--run <= 0) {
+                    y -= random.next_int(5) + 1;
+                    run = random.next_int(5);
+                }
+            }
+        }
+    }
+    return true;
+}
+
+namespace {
+
+// IcebergFeature's arithmetic. (Math.pow(x, 2.0) is x * x.)
+i32 radius_round(FeatureRandom& random, i32 y_off, i32 height, i32 width) {
+    const float k = 3.5f - random.next_float();
+    float scale =
+        (1.0f - static_cast<float>(static_cast<double>(y_off) * static_cast<double>(y_off)) / (static_cast<float>(height) * k)) *
+        static_cast<float>(width);
+    if (height > 15 + random.next_int(5)) {
+        const i32 temp_y_off = y_off < 3 + random.next_int(6) ? y_off / 2 : y_off;
+        scale = (1.0f - static_cast<float>(temp_y_off) / (static_cast<float>(height) * k * 0.4f)) * static_cast<float>(width);
+    }
+    return ceil_int(scale / 2.0f);
+}
+i32 radius_ellipse(i32 y_off, i32 height, i32 width) {
+    const float scale = (1.0f - static_cast<float>(static_cast<double>(y_off) * static_cast<double>(y_off)) /
+                                    (static_cast<float>(height) * 1.0f)) *
+                        static_cast<float>(width);
+    return ceil_int(scale / 2.0f);
+}
+i32 radius_steep(FeatureRandom& random, i32 y_off, i32 height, i32 width) {
+    const float k = 1.0f + random.next_float() / 2.0f;
+    const float scale = (1.0f - static_cast<float>(y_off) / (static_cast<float>(height) * k)) * static_cast<float>(width);
+    return ceil_int(scale / 2.0f);
+}
+// signedDistanceEllipse, with the cosine and sine of its angle.
+double distance_ellipse(i32 xo, i32 zo, i32 origin_x, i32 origin_z, i32 a, i32 c, double cosine, double sine) {
+    const double along =
+        (static_cast<double>(xo - origin_x) * cosine - static_cast<double>(zo - origin_z) * sine) / static_cast<double>(a);
+    const double across =
+        (static_cast<double>(xo - origin_x) * sine + static_cast<double>(zo - origin_z) * cosine) / static_cast<double>(c);
+    return along * along + across * across - 1.0;
+}
+bool is_iceberg(u16 state) { return state == blk::kPackedIce || state == blk::kSnowBlock || state == blk::kBlueIce; }
+
+}  // namespace
+
+// IcebergFeature: a round or a long iceberg at the sea's level - a cone above the water, a blunter
+// one below it, smoothed, and sometimes with a bay cut out of it.
+bool Decorator::place_iceberg(u16 main, FeatureRandom& random, Pos origin) {
+    Region& region = region_;
+    origin.y = settings::kSeaLevel;
+    const bool snow_on_top = random.next_double() > 0.7;
+    const double shape_angle = random.next_double() * 2.0 * 3.141592653589793;
+    const i32 shape_ellipse_a = 11 - random.next_int(5);
+    const i32 shape_ellipse_c = 3 + random.next_int(3);
+    const bool is_ellipse = random.next_double() > 0.7;
+    i32 over_water_height = is_ellipse ? random.next_int(6) + 6 : random.next_int(15) + 3;
+    if (!is_ellipse && random.next_double() > 0.9) over_water_height += random.next_int(19) + 7;
+    const i32 under_water_height = std::min(over_water_height + random.next_int(11), 18);
+    const i32 wider = random.next_int(7);
+    const i32 width = std::min(over_water_height + wider - random.next_int(5), 11);
+    const i32 a = is_ellipse ? shape_ellipse_a : 11;
+    // (An angle that comes from a double: our own cosine, which is the JVM's but for the last bit
+    // of one angle in nine hundred - jmath.hpp.)
+    const double cosine = jmath::cos(shape_angle), sine = jmath::sin(shape_angle);
+
+    // setIcebergBlock
+    const auto set_block = [&](Pos at, i32 h_diff, i32 height) {
+        const u16 state = region.block(at.x, at.y, at.z);
+        if (!world::is_air(state) && state != blk::kSnowBlock && state != blk::kIce && !is_water(state)) return;
+        const bool randomness = !is_ellipse || random.next_double() > 0.05;
+        const i32 divisor = is_ellipse ? 3 : 2;
+        if (snow_on_top && !is_water(state) &&
+            !(static_cast<double>(h_diff) >
+              static_cast<double>(random.next_int(std::max(1, height / divisor))) + static_cast<double>(height) * 0.6) &&
+            randomness)
+            region.set_block(at.x, at.y, at.z, blk::kSnowBlock, 3);
+        else
+            region.set_block(at.x, at.y, at.z, main, 3);
+    };
+    // generateIcebergBlock
+    const auto generate = [&](i32 height, i32 xo, i32 y_off, i32 zo, i32 radius, i32 ellipse_a) {
+        double signed_dist;
+        if (is_ellipse) {
+            // getEllipseC
+            i32 c = shape_ellipse_c;
+            if (y_off > 0 && height - y_off <= 3) c = c - (4 - (height - y_off));
+            signed_dist = distance_ellipse(xo, zo, 0, 0, ellipse_a, c, cosine, sine);
+        } else {
+            // signedDistanceCircle
+            const float off = 10.0f * std::clamp(random.next_float(), 0.2f, 0.8f) / static_cast<float>(radius);
+            signed_dist = static_cast<double>(off) + static_cast<double>(xo) * static_cast<double>(xo) +
+                          static_cast<double>(zo) * static_cast<double>(zo) -
+                          static_cast<double>(radius) * static_cast<double>(radius);
+        }
+        if (!(signed_dist < 0.0)) return;
+        const double compare = is_ellipse ? -0.5 : static_cast<double>(-6 - random.next_int(3));
+        if (signed_dist > compare && random.next_double() > 0.9) return;
+        set_block({origin.x + xo, origin.y + y_off, origin.z + zo}, height - y_off, height);
+    };
+
+    for (i32 xo = -a; xo < a; ++xo)
+        for (i32 zo = -a; zo < a; ++zo)
+            for (i32 y_off = 0; y_off < over_water_height; ++y_off) {
+                const i32 radius = is_ellipse ? radius_ellipse(y_off, over_water_height, width)
+                                              : radius_round(random, y_off, over_water_height, width);
+                if (is_ellipse || xo < radius) generate(over_water_height, xo, y_off, zo, radius, a);
+            }
+
+    // smooth: what hangs in the air goes, and what sticks out on three sides.
+    {
+        const i32 reach = is_ellipse ? shape_ellipse_a : width / 2;
+        for (i32 x = -reach; x <= reach; ++x)
+            for (i32 z = -reach; z <= reach; ++z)
+                for (i32 y_off = 0; y_off <= over_water_height; ++y_off) {
+                    const Pos at{origin.x + x, origin.y + y_off, origin.z + z};
+                    const u16 state = region.block(at.x, at.y, at.z);
+                    if (!is_iceberg(state) && !is_snow_layer(state)) continue;
+                    if (world::is_air(region.block(at.x, at.y - 1, at.z))) {
+                        region.set_block(at.x, at.y, at.z, world::kAir, 3);
+                        region.set_block(at.x, at.y + 1, at.z, world::kAir, 3);
+                    } else if (is_iceberg(state)) {
+                        const i32 open =
+                            !is_iceberg(region.block(at.x - 1, at.y, at.z)) + !is_iceberg(region.block(at.x + 1, at.y, at.z)) +
+                            !is_iceberg(region.block(at.x, at.y, at.z - 1)) + !is_iceberg(region.block(at.x, at.y, at.z + 1));
+                        if (open >= 3) region.set_block(at.x, at.y, at.z, world::kAir, 3);
+                    }
+                }
+    }
+
+    for (i32 xo = -a; xo < a; ++xo)
+        for (i32 zo = -a; zo < a; ++zo)
+            for (i32 y_off = -1; y_off > -under_water_height; --y_off) {
+                const i32 new_a =
+                    is_ellipse ? ceil_int(static_cast<float>(a) *
+                                          (1.0f - static_cast<float>(static_cast<double>(y_off) * static_cast<double>(y_off)) /
+                                                      (static_cast<float>(under_water_height) * 8.0f)))
+                               : a;
+                const i32 radius = radius_steep(random, -y_off, under_water_height, width);
+                if (xo < radius) generate(under_water_height, xo, y_off, zo, radius, new_a);
+            }
+
+    const bool do_cut_out = is_ellipse ? random.next_double() > 0.1 : random.next_double() > 0.7;
+    if (!do_cut_out) return true;
+
+    // generateCutOut
+    const i32 sign_x = random.next_boolean() ? -1 : 1;
+    const i32 sign_z = random.next_boolean() ? -1 : 1;
+    const i32 height = over_water_height;
+    i32 x_off = random.next_int(std::max(width / 2 - 2, 1));
+    if (random.next_boolean()) x_off = width / 2 + 1 - random.next_int(std::max(width - width / 2 - 1, 1));
+    i32 z_off = random.next_int(std::max(width / 2 - 2, 1));
+    if (random.next_boolean()) z_off = width / 2 + 1 - random.next_int(std::max(width - width / 2 - 1, 1));
+    if (is_ellipse) x_off = z_off = random.next_int(std::max(shape_ellipse_a - 5, 1));  // (one draw for the two)
+    const i32 local_x = sign_x * x_off, local_z = sign_z * z_off;
+    const double angle = is_ellipse ? shape_angle + 1.5707963267948966 : random.next_double() * 2.0 * 3.141592653589793;
+    const double cut_cosine = jmath::cos(angle), cut_sine = jmath::sin(angle);
+    const auto carve = [&](i32 radius, i32 y_off, bool under_water) {
+        const i32 ca = radius + 1 + shape_ellipse_a / 3;
+        const i32 cc = std::min(radius - 3, 3) + shape_ellipse_c / 2 - 1;
+        for (i32 xo = -ca; xo < ca; ++xo)
+            for (i32 zo = -ca; zo < ca; ++zo) {
+                if (!(distance_ellipse(xo, zo, local_x, local_z, ca, cc, cut_cosine, cut_sine) < 0.0)) continue;
+                const Pos at{origin.x + xo, origin.y + y_off, origin.z + zo};
+                const u16 state = region.block(at.x, at.y, at.z);
+                if (!is_iceberg(state) && state != blk::kSnowBlock) continue;
+                if (under_water) {
+                    region.set_block(at.x, at.y, at.z, blk::kWater, 3);
+                } else {
+                    region.set_block(at.x, at.y, at.z, world::kAir, 3);
+                    // removeFloatingSnowLayer
+                    if (is_snow_layer(region.block(at.x, at.y + 1, at.z))) region.set_block(at.x, at.y + 1, at.z, world::kAir, 3);
+                }
+            }
+    };
+    for (i32 y_off = 0; y_off < height - 3; ++y_off) {
+        const i32 radius = radius_round(random, y_off, height, width);
+        carve(radius, y_off, false);
+    }
+    for (i32 y_off = -1; y_off > -height + random.next_int(5); --y_off) {
+        const i32 radius = radius_steep(random, -y_off, height, width);
+        carve(radius, y_off, true);
+    }
+    return true;
+}
+
+// SnowAndFreezeFeature: ice on the water and snow on the ground of a chunk, where its biome is
+// cold enough.
+bool Decorator::place_freeze_top_layer(Pos origin) {
+    Region& region = region_;
+    for (i32 dx = 0; dx < 16; ++dx) {
+        for (i32 dz = 0; dz < 16; ++dz) {
+            const i32 x = origin.x + dx, z = origin.z + dz;
+            const i32 y = region.height(hm::kMotionBlocking, x, z);
+            const u16 biome = region.biome(x, y, z);
+            if (should_freeze(region, biome, x, y - 1, z)) region.set_block(x, y - 1, z, blk::kIce, 2);
+            if (!should_snow(region, biome, x, y, z)) continue;
+            region.set_block(x, y, z, blk::kSnow, 2);
+            // A block that shows whether snow lies on it does.
+            const u16 below = region.block(x, y - 1, z);
+            for (const auto& snowy : ft::kSnowy)
+                if (snowy[0] == below) region.set_block(x, y - 1, z, snowy[1], 2);
+        }
+    }
+    return true;
 }
 
 void Decorator::decorate() {

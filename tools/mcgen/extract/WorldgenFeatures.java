@@ -485,6 +485,7 @@ final class WorldgenFeatures {
                 long h = stand.writes;
                 for (int v : new int[] {x0 + x, y0 + y, z0 + z, net.minecraft.world.level.block.Block.getId(state)}) h = WorldgenGolden.fnv(h, v);
                 stand.writes = h;
+                if (stand.tracing) System.err.println("TRACE " + (x0 + x) + " " + (y0 + y) + " " + (z0 + z) + " " + net.minecraft.world.level.block.Block.getId(state));
             }
             return super.setBlockState(x, y, z, state, checkThreading);
         }
@@ -538,6 +539,8 @@ final class WorldgenFeatures {
         /** While `logging`: every block set in a chunk of this stand - where, and to what - folded into `writes`. */
         boolean logging;
         long writes;
+        /** ...and each of them said on stderr (WORLDGEN_TRACE: for whoever looks for where two decorations part). */
+        boolean tracing;
 
         Stand(WorldgenRef.World world) throws Exception {
             this.world = world;
@@ -1031,6 +1034,7 @@ final class WorldgenFeatures {
      *               place: the hash of its name (the JSON, keys in order) and of the set of the states
      *               it holds for, a bit a state
      *   decorations whole decorations with the features of one kind alone, kind by kind (decorations())
+     *   attempts    a kind of feature placed again and again in one place (attempts())
      *   math        Math.sin and Math.cos of every angle a feature can make of a float: all of the answers
      *               as one number, and a few of them written out (WorldgenMath.golden; at the end of the file)
      *   placements  chunks of real terrain around which, between them, every feature of the overworld's
@@ -1097,6 +1101,13 @@ final class WorldgenFeatures {
             if (e.isJsonArray()) e.getAsJsonArray().forEach(open::add);
             if (!e.isJsonObject()) continue;
             e.getAsJsonObject().asMap().values().forEach(open::add);
+            if (e.getAsJsonObject().has("valid_blocks")) {
+                // (A spring's blocks are a set of states to src/worldgen as well: the predicate that names the same blocks.)
+                JsonObject same = new JsonObject();
+                same.addProperty("type", "minecraft:matching_blocks");
+                same.add("blocks", e.getAsJsonObject().get("valid_blocks"));
+                open.add(same);
+            }
             if (!e.getAsJsonObject().has("type") && !e.getAsJsonObject().has("predicate_type")) continue;
             StringBuilder name = new StringBuilder();
             canon(e, name);
@@ -1131,6 +1142,19 @@ final class WorldgenFeatures {
                 continue;
             }
             sets.put(name.toString(), fnv(0xcbf29ce484222325L, bits));
+        }
+        // ...and what the code of src/worldgen asks of a state by itself, with no predicate of the data behind
+        // it: sets like the others, under the names gen_features.py gives them.
+        Map<String, java.util.function.Predicate<BlockState>> facts = new java.util.LinkedHashMap<>();
+        facts.put("kSetLiquid", BlockState::liquid);
+        for (net.minecraft.core.Direction direction : net.minecraft.core.Direction.values())
+            facts.put("kSetFaceOccludes " + direction.getName(), state -> (faceOccludes(state) >> direction.ordinal() & 1) != 0);
+        facts.put("kSetSnowSurvivesOn", WorldgenFeatures::snowSurvivesOn);
+        for (var fact : facts.entrySet()) {
+            byte[] bits = new byte[(states + 7) / 8];
+            for (int id = 0; id < states; ++id)
+                if (fact.getValue().test(net.minecraft.world.level.block.Block.stateById(id))) bits[id >> 3] |= (byte) (1 << (id & 7));
+            sets.put('"' + fact.getKey() + '"', fnv(0xcbf29ce484222325L, bits));
         }
         o.i32(sets.size());
         for (Map.Entry<String, Long> e : sets.entrySet()) {
@@ -1241,6 +1265,7 @@ final class WorldgenFeatures {
         System.err.println("worldgen: golden features: " + sets.size() + " sets of block states; " + sites.size() + " chunks, " + placed
             + " placed features in them come to " + positions + " positions (" + unrecorded + " more have a feature of their own written out)");
         decorations(o, world, steps, every);
+        attempts(o, world, steps, every);
         WorldgenMath.golden(o);
         return o.save(file);
     }
@@ -1373,6 +1398,136 @@ final class WorldgenFeatures {
         }
     }
 
+    /**
+     * The kinds of feature that are held to vanilla by placing them over and over: a name, the class, how many
+     * attempts at most, and biomes that have features of the kind.
+     */
+    static final String[][] KINDS_TO_ATTEMPT = {
+        {"disk", "DiskFeature", "3000", "minecraft:river", "minecraft:mangrove_swamp", "minecraft:ice_spikes"},
+        {"underwater_magma", "UnderwaterMagmaFeature", "3000", "minecraft:ocean", "minecraft:dripstone_caves"},
+        {"block_blob", "BlockBlobFeature", "3000", "minecraft:old_growth_pine_taiga", "minecraft:old_growth_spruce_taiga"},
+        {"spring_feature", "SpringFeature", "3000", "minecraft:windswept_hills", "minecraft:grove", "minecraft:dripstone_caves"},
+        {"lake", "LakeFeature", "3000", "minecraft:plains", "minecraft:desert"},
+        {"blue_ice", "BlueIceFeature", "3000", "minecraft:deep_frozen_ocean", "minecraft:frozen_ocean"},
+        {"spike", "SpikeFeature", "3000", "minecraft:ice_spikes"},
+        {"iceberg", "IcebergFeature", "3000", "minecraft:frozen_ocean", "minecraft:deep_frozen_ocean"},
+        {"freeze_top_layer", "SnowAndFreezeFeature", "2", "minecraft:snowy_plains", "minecraft:frozen_ocean", "minecraft:grove", "minecraft:windswept_hills",
+            "minecraft:frozen_peaks"},
+    };
+
+    /**
+     * A kind of feature placed again and again in one place: nine chunks of terrain, and every placed feature of
+     * the kind that the biomes there have, each tried with source after source - seeded as a decoration seeds a
+     * feature, with the number of the attempt added - until a dozen attempts have written something (or the kind's
+     * limit of attempts is reached). What rarely happens in a chunk happens here; what has been built is in the way
+     * of what comes after. Of every attempt that wrote: what, as one number, and the long its source gave
+     * afterwards; then the nine chunks.
+     */
+    static void attempts(WorldgenGolden.Out o, WorldgenRef.World world, List<net.minecraft.world.level.biome.FeatureSorter.StepFeatureData> steps,
+                         Map<String, List<int[]>> every) throws Exception {
+        o.i32(KINDS_TO_ATTEMPT.length);
+        for (String[] kind : KINDS_TO_ATTEMPT) {
+            Class<?> type = Class.forName("net.minecraft.world.level.levelgen.feature." + kind[1]);
+            int limit = Integer.parseInt(kind[2]);
+            o.str(kind[0]);
+            // Where the kind does something: of each biome the first chunk - of the biome's own and a few
+            // around them - in which an attempt writes. (Looked for with the attempts themselves, in a stand
+            // that is thrown away: what is written down is made again, from nothing.)
+            List<int[]> places = new ArrayList<>();
+            for (int site = 3; site < kind.length; ++site) {
+                List<int[]> candidates = new ArrayList<>();
+                for (int ring = 0; ring < 4; ++ring)
+                    for (int[] at : every.get(kind[site]))
+                        for (int[] step : new int[][] {{0, 0}, {3, 0}, {0, 3}, {-3, 0}, {0, -3}})
+                            if (ring > 0 || (step[0] == 0 && step[1] == 0)) candidates.add(new int[] {at[0] + step[0] * ring, at[1] + step[1] * ring});
+                for (int[] candidate : candidates) {
+                    if (attemptsAt(null, new Stand(world), type, limit, kind[0], candidate[0], candidate[1], steps)[0] == 0) continue;
+                    places.add(candidate);
+                    break;
+                }
+            }
+            o.i32(places.size());
+            int wrote = 0, tried = 0;
+            for (int[] place : places) {
+                int[] counted = attemptsAt(o, new Stand(world), type, limit, kind[0], place[0], place[1], steps);
+                wrote += counted[0];
+                tried += counted[1];
+            }
+            System.err.println("worldgen: golden features: " + kind[0] + ": " + places.size() + " places, " + tried + " attempts, " + wrote + " of them wrote");
+        }
+    }
+
+    /** The attempts of one kind around one chunk, written to `o` if there is one: {how many wrote, how many there were}. */
+    static int[] attemptsAt(WorldgenGolden.Out o, Stand stand, Class<?> type, int limit, String kind, int cx, int cz,
+                            List<net.minecraft.world.level.biome.FeatureSorter.StepFeatureData> steps) throws Exception {
+        int wrote = 0, tried = 0;
+        {
+            {
+                Region region = stand.regionAround(cx, cz);
+                ProtoChunk center = stand.chunks.get(Stand.key(cx, cz));
+                stand.region = region;
+                BlockPos origin = net.minecraft.core.SectionPos.of(center.getPos(), region.getMinSectionY()).origin();
+                var random = source(0L);
+                long decorationSeed = random.setDecorationSeed(region.getSeed(), origin.getX(), origin.getZ());
+                java.util.Set<net.minecraft.core.Holder<net.minecraft.world.level.biome.Biome>> possible = new java.util.HashSet<>();
+                for (int dx = -1; dx <= 1; ++dx)
+                    for (int dz = -1; dz <= 1; ++dz)
+                        for (var section : region.getChunk(cx + dx, cz + dz).getSections()) section.getBiomes().getAll(possible::add);
+                possible.retainAll(stand.maker.biomeSource.possibleBiomes());
+                var placer = new net.minecraft.world.level.levelgen.placement.FeaturePlacer(region, stand.maker.generator);
+                List<int[]> which = new ArrayList<>();
+                for (int s = 0; s < steps.size(); ++s) {
+                    java.util.TreeSet<Integer> indices = new java.util.TreeSet<>();
+                    for (var biome : possible) {
+                        var features = stand.maker.generator.getBiomeGenerationSettings(biome).features();
+                        if (s >= features.size()) continue;
+                        for (var feature : features.get(s)) indices.add(steps.get(s).indexMapping().applyAsInt(feature.value()));
+                    }
+                    for (int index : indices)
+                        if (type.isInstance(steps.get(s).features().get(index).feature().value())) which.add(new int[] {s, index});
+                }
+                if (o != null) {
+                    o.i32(cx);
+                    o.i32(cz);
+                    o.i32(which.size());
+                }
+                for (int[] at : which) {
+                    var placed = steps.get(at[0]).features().get(at[1]);
+                    List<long[]> writers = new ArrayList<>();
+                    int attempt = 0;
+                    for (; attempt < limit && (attempt < 24 || writers.size() < 12); ++attempt) {
+                        random.setFeatureSeed(decorationSeed + attempt, at[1], at[0]);
+                        stand.writes = 0xcbf29ce484222325L;
+                        stand.logging = true;
+                        // WORLDGEN_TRACE=<kind>:<chunk x>:<chunk z>:<attempt>: every block that attempt sets, on stderr.
+                        stand.tracing = o != null && (kind + ":" + cx + ":" + cz + ":" + attempt).equals(System.getenv("WORLDGEN_TRACE"));
+                        placer.placeWithBiomeCheck(placed, random, origin);
+                        stand.logging = stand.tracing = false;
+                        if (stand.writes != 0xcbf29ce484222325L) writers.add(new long[] {attempt, stand.writes, random.nextLong()});
+                    }
+                    if (o != null) {
+                        o.u8(at[0]);
+                        o.i32(at[1]);
+                        o.i32(attempt);
+                        o.i32(writers.size());
+                        for (long[] w : writers) {
+                            o.i32((int) w[0]);
+                            o.i64(w[1]);
+                            o.i64(w[2]);
+                        }
+                    }
+                    wrote += writers.size();
+                    tried += attempt;
+                }
+                stand.region = null;
+                if (o != null)
+                    for (int dz = -1; dz <= 1; ++dz)
+                        for (int dx = -1; dx <= 1; ++dx) chunkState(o, stand.terrain(cx + dx, cz + dz));
+            }
+        }
+        return new int[] {wrote, tried};
+    }
+
     // ------------------------------------------------------------------------------- tables
 
     /**
@@ -1447,7 +1602,42 @@ final class WorldgenFeatures {
         post.add("self", self);
         post.add("above", above);
         root.add("post_process", post);
+        // BlockState.getFaceOcclusionShape(direction) is a whole face: a bit a direction (its ordinal), for every state.
+        // (Not the light engine's question, which mcgen.py blockdata answers: that one is asked only of states
+        // that are lit by their shape.)
+        JsonArray occludes = new JsonArray();
+        for (int id = 0; id < net.minecraft.world.level.block.Block.BLOCK_STATE_REGISTRY.size(); ++id) occludes.add(faceOccludes(net.minecraft.world.level.block.Block.stateById(id)));
+        root.add("face_occludes", occludes);
+        // SnowLayerBlock.canSurvive, asked of the state below: 1 where a layer of snow may lie on it.
+        JsonArray snow = new JsonArray();
+        for (int id = 0; id < net.minecraft.world.level.block.Block.BLOCK_STATE_REGISTRY.size(); ++id) snow.add(snowSurvivesOn(net.minecraft.world.level.block.Block.stateById(id)) ? 1 : 0);
+        root.add("snow_survives_on", snow);
         return root;
+    }
+
+    /** A level in which one block state is everywhere, and nothing else is known - as the tables of mcgen.py gamedata see a block. */
+    static net.minecraft.world.level.LevelAccessor everywhere(BlockState[] asked) {
+        return (net.minecraft.world.level.LevelAccessor) java.lang.reflect.Proxy.newProxyInstance(
+            WorldgenFeatures.class.getClassLoader(), new Class<?>[] {net.minecraft.world.level.LevelAccessor.class}, (proxy, method, args) -> {
+                if (method.getName().equals("getBlockState")) return asked[0];
+                if (method.getName().equals("getFluidState")) return asked[0].getFluidState();
+                if (method.getDeclaringClass().isInstance(net.minecraft.world.level.EmptyBlockGetter.INSTANCE))
+                    return method.invoke(net.minecraft.world.level.EmptyBlockGetter.INSTANCE, args);
+                throw new UnsupportedOperationException(method.getName());
+            });
+    }
+
+    static boolean snowSurvivesOn(BlockState below) {
+        return net.minecraft.world.level.block.Blocks.SNOW.defaultBlockState().canSurvive(everywhere(new BlockState[] {below}), BlockPos.ZERO);
+    }
+
+    static int faceOccludes(BlockState state) {
+        int bits = 0;
+        for (net.minecraft.core.Direction direction : net.minecraft.core.Direction.values()) {
+            var shape = state.getFaceOcclusionShape(direction);
+            if (shape != net.minecraft.world.phys.shapes.Shapes.empty() && net.minecraft.world.level.block.Block.isShapeFullBlock(shape)) bits |= 1 << direction.ordinal();
+        }
+        return bits;
     }
 
     /** Which sections of WorldgenRef want the game loaded with its resources kept. */

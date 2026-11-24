@@ -168,6 +168,7 @@ void Region::log_write(i32 x, i32 y, i32 z, u16 state) {
     for (const u32 v : {static_cast<u32>(x), static_cast<u32>(y), static_cast<u32>(z), static_cast<u32>(state)})
         for (u32 i = 0; i < 4; ++i) h = (h ^ ((v >> (8 * i)) & 0xFF)) * 0x100000001b3ull;
     *log_ = h;
+    if (trace_) trace_->insert(trace_->end(), {x, y, z, static_cast<i32>(state)});
 }
 
 u16 Region::biome(i32 x, i32 y, i32 z) const {

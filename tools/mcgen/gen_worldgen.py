@@ -892,11 +892,13 @@ struct OreVein {
     out.append(f"inline constexpr u32 kBiomeCount = {len(t.biome_ids)};\n")
     out.append("}  // namespace surface\n")
     out.append("""
-// A biome's temperature (Biome.ClimateSettings): what it is at the sea's level, and whether it is
-// of the kind that is colder in patches (TemperatureModifier.FROZEN: the frozen oceans).
+// A biome's temperature (Biome.ClimateSettings): what it is at the sea's level, whether it is
+// of the kind that is colder in patches (TemperatureModifier.FROZEN: the frozen oceans), and
+// whether anything falls from its sky.
 struct BiomeTemperature {
     float temperature;
     u8 frozen;
+    u8 has_precipitation;
 };
 """)
     out.append(f"inline constexpr BiomeTemperature kBiomeTemperature[{len(t.biome_ids)}] = {{\n")
@@ -905,7 +907,9 @@ struct BiomeTemperature {
         modifier = biome.get("temperature_modifier", "none")
         if modifier not in ("none", "frozen"):
             die(f"gen_worldgen: biome {name} has the temperature modifier {modifier}")
-        out.append(f"    {{{cfloat(f32(biome['temperature']))}, {int(modifier == 'frozen')}}},  // {name}\n")
+        if not isinstance(biome.get("has_precipitation"), bool):
+            die(f"gen_worldgen: biome {name} does not say whether it has precipitation")
+        out.append(f"    {{{cfloat(f32(biome['temperature']))}, {int(modifier == 'frozen')}, {int(biome['has_precipitation'])}}},  // {name}\n")
     out.append("};\n")
     return "".join(out)
 

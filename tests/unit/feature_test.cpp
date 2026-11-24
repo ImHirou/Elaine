@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <bit>
+#include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -80,6 +82,19 @@ struct Script {
                 in.skip(8);
                 for (u32 chunk = 0; chunk < 4; ++chunk) in.skip(usize{in.num<u32>()} * 21);
                 in.skip(16 * 40);
+            }
+        }
+    }
+    void skip_attempts() {
+        for (u32 kinds = in.num<u32>(); kinds; --kinds) {
+            in.str();
+            for (u32 sites = in.num<u32>(); sites; --sites) {
+                in.skip(8);
+                for (u32 placed = in.num<u32>(); placed; --placed) {
+                    in.skip(9);
+                    in.skip(usize{in.num<u32>()} * 20);
+                }
+                in.skip(9 * 40);
             }
         }
     }
@@ -261,6 +276,30 @@ TEST(WorldgenFeature, PlacementsComeToWhereVanillasDo) {
     RecordProperty("placements_waiting", static_cast<int>(waiting));
 }
 
+// A chunk as the script has it (WorldgenFeatures.chunkState): its blocks, the four heightmaps it
+// keeps, its marks section by section - each as one number - and how many ticks and block entities.
+void expect_chunk(In& in, const world::GenChunk& c, const std::string& name) {
+    namespace hm = world::heightmap;
+    u64 blocks = kFnv;
+    for (u32 si = 0; si < c.sections_count; ++si)
+        for (u32 b = 0; b < 4096; ++b) blocks = fnv(blocks, c.sections[si].get(b));
+    EXPECT_EQ(blocks, in.num<u64>()) << name << ": the blocks of chunk " << c.x << ", " << c.z;
+    u64 heights = kFnv;
+    for (const u32 map : {hm::kWorldSurface, hm::kOceanFloor, hm::kMotionBlocking, hm::kMotionBlockingNoLeaves})
+        for (u32 column = 0; column < 256; ++column)
+            heights = fnv(heights, static_cast<u32>(c.height[map][column] + Region::kMinY));
+    EXPECT_EQ(heights, in.num<u64>()) << name << ": the heightmaps of chunk " << c.x << ", " << c.z;
+    std::vector<u32> marks = c.marks;
+    std::stable_sort(marks.begin(), marks.end(), [](u32 a, u32 b) { return a >> 12 < b >> 12; });
+    u64 marked = kFnv;
+    for (const u32 mark : marks) marked = fnv(marked, mark);
+    EXPECT_EQ(marks.size(), in.num<u32>()) << name << ": the marks of chunk " << c.x << ", " << c.z;
+    EXPECT_EQ(marked, in.num<u64>()) << name << ": the marks of chunk " << c.x << ", " << c.z;
+    EXPECT_EQ(c.block_ticks.size(), in.num<u32>()) << name << ": the block ticks of chunk " << c.x << ", " << c.z;
+    EXPECT_EQ(c.fluid_ticks.size(), in.num<u32>()) << name << ": the fluid ticks of chunk " << c.x << ", " << c.z;
+    EXPECT_EQ(c.block_entities.size(), in.num<u32>()) << name << ": the block entities of chunk " << c.x << ", " << c.z;
+}
+
 // Whole decorations: areas of 4 x 4 chunks of terrain, the inner four decorated one after the
 // other - with the features of one kind alone, kind by kind, and with every feature that is
 // ported, which is the server's decoration. Every feature that runs writes what vanilla's writes
@@ -351,27 +390,94 @@ TEST(WorldgenFeature, DecorationsAreVanillas) {
                     for (const u32 map : {hm::kWorldSurface, hm::kOceanFloor, hm::kMotionBlocking, hm::kMotionBlockingNoLeaves})
                         EXPECT_TRUE(std::equal(std::begin(t.height[map]), std::end(t.height[map]), std::begin(c.height[map])));
                 }
-                u64 blocks = kFnv;
-                for (u32 si = 0; si < c.sections_count; ++si)
-                    for (u32 b = 0; b < 4096; ++b) blocks = fnv(blocks, c.sections[si].get(b));
-                EXPECT_EQ(blocks, in.num<u64>()) << name << ": the blocks of chunk " << c.x << ", " << c.z;
-                u64 heights = kFnv;
-                for (const u32 map : {hm::kWorldSurface, hm::kOceanFloor, hm::kMotionBlocking, hm::kMotionBlockingNoLeaves})
-                    for (u32 column = 0; column < 256; ++column)
-                        heights = fnv(heights, static_cast<u32>(c.height[map][column] + Region::kMinY));
-                EXPECT_EQ(heights, in.num<u64>()) << name << ": the heightmaps of chunk " << c.x << ", " << c.z;
-                std::vector<u32> marks = c.marks;
-                std::stable_sort(marks.begin(), marks.end(), [](u32 a, u32 b) { return a >> 12 < b >> 12; });
-                u64 marked = kFnv;
-                for (const u32 mark : marks) marked = fnv(marked, mark);
-                EXPECT_EQ(marks.size(), in.num<u32>()) << name << ": the marks of chunk " << c.x << ", " << c.z;
-                EXPECT_EQ(marked, in.num<u64>()) << name << ": the marks of chunk " << c.x << ", " << c.z;
-                EXPECT_EQ(c.block_ticks.size(), in.num<u32>()) << name << ": the block ticks of chunk " << c.x << ", " << c.z;
-                EXPECT_EQ(c.fluid_ticks.size(), in.num<u32>()) << name << ": the fluid ticks of chunk " << c.x << ", " << c.z;
-                EXPECT_EQ(c.block_entities.size(), in.num<u32>())
-                    << name << ": the block entities of chunk " << c.x << ", " << c.z;
+                expect_chunk(in, c, name);
             }
         }
+    }
+}
+
+// A kind of feature placed again and again in one place - nine chunks of terrain, every placed
+// feature of the kind that the biomes there have, with source after source: what rarely happens in
+// a chunk happens here, and what was built is in the way of what comes after. Every attempt writes
+// what vanilla's writes - or nothing, where vanilla's writes nothing - and leaves its source where
+// vanilla's is; and the nine chunks end as vanilla's do.
+TEST(WorldgenFeature, FeaturesPlacedAgainAndAgainAreVanillas) {
+    Script s;
+    s.skip_ints();
+    s.skip_heights();
+    s.skip_sets();
+    s.skip_placements();
+    s.skip_decorations();
+    In& in = s.in;
+    OverworldGenerator generator(s.seed);
+    const auto work = std::make_unique<RegionWork>();
+    FeatureWork feature_work;
+    const u32 kinds = in.num<u32>();
+    ASSERT_GT(kinds, 0u);
+    for (u32 kind = 0; kind < kinds; ++kind) {
+        const std::string name = in.str();
+        u32 wrote = 0;
+        for (u32 sites = in.num<u32>(); sites; --sites) {
+            const i32 cx = in.num<i32>(), cz = in.num<i32>();
+            std::vector<std::unique_ptr<world::GenChunk>> owned;
+            world::GenChunk* nine[9];
+            for (i32 i = 0; i < 9; ++i) {
+                owned.push_back(std::make_unique<world::GenChunk>());
+                generator.make_base(cx - 1 + i % 3, cz - 1 + i / 3, *owned.back());
+                nine[i] = owned.back().get();
+            }
+            Region region(*work, generator.world(), nine, cx - 1, cz - 1, 3, 3);
+            region.begin(cx, cz);
+            Decorator decorator(region, feature_work);
+            const Pos origin{cx * 16, Region::kMinY, cz * 16};
+            FeatureRandom random{XoroshiroRandom{u64{0}, u64{0}}};
+            const i64 decoration_seed = random.set_decoration_seed(generator.world().seed(), origin.x, origin.z);
+            for (u32 placed = in.num<u32>(); placed; --placed) {
+                const u32 step = in.num<u8>(), index = static_cast<u32>(in.num<i32>());
+                const i32 attempts = in.num<i32>();
+                u32 writers = in.num<u32>();
+                const u32 row = ft::kStepPlaced[ft::kStepFirst[step] + index];
+                const std::string_view placed_name = ft::kPlacedNames[row];
+                ASSERT_TRUE(ft::kPlaced[row].ported) << placed_name << " is in the script and not ported";
+                const Decorator::Top top{step, index};
+                i32 next_writer = writers ? in.num<i32>() : -1;
+                for (i32 attempt = 0; attempt < attempts; ++attempt) {
+                    random.set_feature_seed(decoration_seed + attempt, static_cast<i32>(index), static_cast<i32>(step));
+                    u64 writes = kFnv;
+                    region.set_log(&writes);
+                    // FEATURE_TRACE=<kind>:<chunk x>:<chunk z>:<attempt>: every block that attempt sets, as the
+                    // extractor says its own with WORLDGEN_TRACE.
+                    std::vector<i32> trace;
+                    const char* wanted = std::getenv("FEATURE_TRACE");
+                    if (wanted &&
+                        wanted == name + ":" + std::to_string(cx) + ":" + std::to_string(cz) + ":" + std::to_string(attempt))
+                        region.set_trace(&trace);
+                    decorator.place(row, random, origin, &top);
+                    region.set_log(nullptr);
+                    region.set_trace(nullptr);
+                    for (usize i = 0; i + 3 < trace.size(); i += 4)
+                        std::fprintf(stderr, "TRACE %d %d %d %d\n", trace[i], trace[i + 1], trace[i + 2], trace[i + 3]);
+                    if (attempt != next_writer) {
+                        ASSERT_EQ(writes, kFnv) << placed_name << " at chunk " << cx << ", " << cz << ", attempt " << attempt
+                                                << ": vanilla's wrote nothing";
+                        continue;
+                    }
+                    const u64 want = in.num<u64>();
+                    const i64 next = in.num<i64>();
+                    ASSERT_EQ(writes, want) << placed_name << " at chunk " << cx << ", " << cz << ", attempt " << attempt
+                                            << ": what it wrote";
+                    ASSERT_EQ(random.next_long(), next) << placed_name << " at chunk " << cx << ", " << cz << ", attempt "
+                                                        << attempt << ": its source afterwards";
+                    ++wrote;
+                    next_writer = --writers ? in.num<i32>() : -1;
+                }
+                ASSERT_EQ(writers, 0u);
+            }
+            EXPECT_EQ(region.counts().far_reads, 0u);
+            region.commit();
+            for (const world::GenChunk* c : nine) expect_chunk(in, *c, name);
+        }
+        EXPECT_GT(wrote, 0u) << "nothing of the kind " << name << " was ever placed";
     }
 }
 
@@ -384,6 +490,7 @@ TEST(WorldgenFeature, SineAndCosineOfEveryAngleOfAFloatAreTheJvms) {
     s.skip_sets();
     s.skip_placements();
     s.skip_decorations();
+    s.skip_attempts();
     In& in = s.in;
     const u64 want_sines = in.num<u64>(), want_cosines = in.num<u64>();
     u64 sines = kFnv, cosines = kFnv;

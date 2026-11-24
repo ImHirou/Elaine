@@ -164,6 +164,8 @@ class Region {
     // For whoever holds a decoration to vanilla's feature by feature: every block that is set from
     // here on - where, and to what - is folded into `*log` (FNV-1a), in the order it is set.
     void set_log(u64* log) { log_ = log; }
+    // ...and written down one by one - x, y, z, state - for whoever looks for where two decorations part.
+    void set_trace(std::vector<i32>* trace) { trace_ = trace; }
 
     // WorldGenRegion.getRandom: one source for the whole decoration of a chunk, made from where the
     // chunk is ("worldgen_region_random").
@@ -203,6 +205,7 @@ class Region {
     i32 brightness_ = 0;
     std::vector<Pos>* asked_ = nullptr;
     u64* log_ = nullptr;
+    std::vector<i32>* trace_ = nullptr;
     XoroshiroRandom random_{0, 0};
     Counts counts_;
 };

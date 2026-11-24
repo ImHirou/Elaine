@@ -93,6 +93,19 @@ class Decorator {
   private:
     bool place_feature(u32 feature, FeatureRandom& random, Pos at);
     bool place_ore(const ft::Ore& ore, FeatureRandom& random, Pos origin);
+    bool place_disk(const ft::Disk& disk, FeatureRandom& random, Pos origin);
+    bool place_underwater_magma(const ft::Magma& magma, FeatureRandom& random, Pos origin);
+    bool place_block_blob(u16 state, const ft::Predicate& can_place_on, FeatureRandom& random, Pos origin);
+    bool place_spring(const ft::Spring& spring, Pos origin);
+    bool place_lake(const ft::Lake& lake, FeatureRandom& random, Pos origin);
+    bool place_blue_ice(FeatureRandom& random, Pos origin);
+    bool place_spike(u16 state, const ft::Predicate& can_place_on, const ft::Predicate& can_replace, FeatureRandom& random,
+                     Pos origin);
+    bool place_iceberg(u16 state, FeatureRandom& random, Pos origin);
+    bool place_freeze_top_layer(Pos origin);
+    i32 optional_state(const ft::Provider& provider, FeatureRandom& random, Pos at);
+    u16 state_of(const ft::Provider& provider, FeatureRandom& random, Pos at);
+    void mark_above(i32 x, i32 y, i32 z);
 
     Region& region_;
     FeatureWork& work_;

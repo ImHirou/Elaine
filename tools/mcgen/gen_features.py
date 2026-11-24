@@ -40,14 +40,18 @@ PORTED_FEATURES = {
     "no_op": "kNoOp", "random_selector": "kRandomSelector", "simple_random_selector": "kSimpleRandomSelector",
     "weighted_random_selector": "kWeightedRandomSelector", "random_boolean_selector": "kRandomBooleanSelector",
     "sequence": "kSequence", "overlay": "kOverlay", "ore": "kOre",
+    "disk": "kDisk", "underwater_magma": "kUnderwaterMagma", "block_blob": "kBlockBlob", "spring_feature": "kSpring", "lake": "kLake",
+    "blue_ice": "kBlueIce", "spike": "kSpike", "iceberg": "kIceberg", "freeze_top_layer": "kFreezeTopLayer",
 }
 # ...and the types of the overworld that wait for theirs. A type in neither list stops the run.
 UNPORTED_FEATURES = {
-    "simple_block", "tree", "block_column", "template", "disk", "coral_tree", "coral_claw", "fallen_tree", "vegetation_patch",
-    "speleothem", "spring_feature", "lake", "multiface_growth", "iceberg", "fossil", "bamboo", "speleothem_cluster", "root_system",
-    "geode", "monster_room", "underwater_magma", "huge_brown_mushroom", "huge_red_mushroom", "freeze_top_layer", "blue_ice",
-    "block_blob", "vines", "spike", "large_dripstone", "waterlogged_vegetation_patch", "sculk_patch",
+    "simple_block", "tree", "block_column", "template", "coral_tree", "coral_claw", "fallen_tree", "vegetation_patch",
+    "speleothem", "multiface_growth", "fossil", "bamboo", "speleothem_cluster", "root_system",
+    "geode", "monster_room", "huge_brown_mushroom", "huge_red_mushroom",
+    "vines", "large_dripstone", "waterlogged_vegetation_patch", "sculk_patch",
 }
+# BlockStateProvider types that wait for theirs (a block state written out and "rule_based" are there).
+UNPORTED_PROVIDERS = {"weighted", "rotated", "randomized_int", "random_block"}
 # Predicates that ask a block what it would do, which is the block's own code: until that is here.
 UNPORTED_PREDICATES = {"would_survive"}
 
@@ -83,6 +87,13 @@ class StateSets:
             die("gen_features: gamedata/states.json: the directions are not down, up, north, south, west, east")
         for d, name in enumerate(DIRECTIONS):
             self.facts[f"sturdy_{name}"] = column(v >> d & 1 for v in sturdy["columns"]["sturdy_full"])
+        self.facts["liquid"] = column(sturdy["columns"]["liquid"])
+        faces = worldgen.load(version, "features").get("face_occludes")
+        if not faces or len(faces) != self.count:
+            die("gen_features: worldgen/features.json does not say which faces of a state occlude - run: mcgen.py worldgen")
+        for d, name in enumerate(DIRECTIONS):
+            self.facts[f"face_occludes_{name}"] = column(v >> d & 1 for v in faces)
+        self.facts["snow_survives_on"] = column(worldgen.load(version, "features")["snow_survives_on"])
         self.kept: list[int] = []
         self.sources: list[str] = []   # of each: the predicate it was first made of, as the jar writes it
         self.index: dict[int, int] = {}
@@ -175,6 +186,9 @@ class FeatureTables:
         self.features, self.chances, self.placed_lists, self.weighted = Pool(), Pool(), Pool(), Pool()
         self.rules, self.rule_lists = Pool(), Pool()
         self.ores, self.ore_targets = Pool(), Pool()
+        self.providers, self.provider_rules = Pool(), Pool()
+        self.named_providers: dict[str, tuple[int, bool]] = {}
+        self.disks, self.magmas, self.springs, self.lakes = Pool(), Pool(), Pool(), Pool()
         self.placed: list = []                 # (feature, first modifier, modifiers, ported, where); None while it is made
         self.placed_names: list[str] = []      # "" for one that is written out inside a feature
         self.named_placed: dict[str, int] = {}
@@ -357,6 +371,41 @@ class FeatureTables:
     def predicate(self, value) -> tuple[int, bool]:
         made = self._predicate(value)
         return self._row(made), self._ported(made)
+
+    # ---------------------------------------------------------------- state providers
+
+    def provider(self, value) -> tuple[int, bool]:
+        """A Holder<BlockStateProvider> - a name, a block state written out, or a provider with its type: its row,
+        and whether src/worldgen has all of it."""
+        if isinstance(value, str):
+            if value not in self.named_providers:
+                self.named_providers[value] = self.provider(self.load("block_state_provider", value))
+            return self.named_providers[value]
+        if not isinstance(value, dict):
+            die(f"gen_features: a state provider written as {value!r}")
+        if "type" not in value:  # (BlockStateProvider.STATE_OR_PROVIDER_CODEC: one or the other, never both)
+            if not set(value) <= {"id", "properties"}:
+                die(f"gen_features: a block state written as {canon(value)[:200]}")
+            return self.providers.add(("kSimple", self.blocks.state(value), 0, 0)), True
+        kind = strip(value["type"])
+        if kind == "rule_based":
+            self.need(kind, value, {"rules"}, {"fallback"})
+            rules, ported = [], True
+            for rule in value["rules"]:
+                if set(rule) != {"if_true", "then"}:
+                    die(f"gen_features: a rule of a state provider written as {canon(rule)[:200]}")
+                at, has_predicate = self.predicate(rule["if_true"])
+                then, has_then = self.provider(rule["then"])
+                rules.append((at, then))
+                ported = ported and has_predicate and has_then
+            fallback = 0
+            if "fallback" in value:
+                at, has_fallback = self.provider(value["fallback"])
+                fallback, ported = at + 1, ported and has_fallback
+            return self.providers.add(("kRuleBased", self.provider_rules.run(rules), len(rules), fallback)), ported
+        if kind in UNPORTED_PROVIDERS:
+            return self.providers.add(("kUnported", 0, 0, 0)), False
+        die(f"gen_features: a state provider of the type {kind}: neither ported nor known to wait for it")
 
     # ---------------------------------------------------------------- rule tests
 
@@ -552,6 +601,7 @@ class FeatureTables:
             self.feature_ported.append(False)
             return self.features.run([("kUnported", 0, 0, 0)])
         uses: list[int] = []
+        parts = True  # the providers and predicates it is made of are ported too
         if kind == "no_op":
             self.need(kind, value, set())
             row = ("kNoOp", 0, 0, 0)
@@ -592,10 +642,54 @@ class FeatureTables:
             if not 0 <= value["size"] <= 64:
                 die(f"gen_features: an ore of the size {value['size']}")
             row = ("kOre", self.ores.run([(value["size"], float(value["discard_chance_on_air_exposure"]), self.ore_targets.run(targets), len(targets))]), 0, 0)
+        elif kind == "disk":
+            self.need(kind, value, {"state_provider", "target", "radius", "half_height"})
+            provider, has = self.provider(value["state_provider"])
+            target, has_target = self.predicate(value["target"])
+            parts = parts and has and has_target
+            row = ("kDisk", self.disks.run([(provider, target, self.int_provider(value["radius"]), value["half_height"])]), 0, 0)
+        elif kind == "underwater_magma":
+            self.need(kind, value, {"floor_search_range", "placement_radius_around_floor", "placement_probability_per_valid_position"})
+            row = ("kUnderwaterMagma", self.magmas.run([(value["floor_search_range"], value["placement_radius_around_floor"],
+                                                           float(value["placement_probability_per_valid_position"]))]), 0, 0)
+        elif kind == "block_blob":
+            self.need(kind, value, {"state", "can_place_on"})
+            on, has = self.predicate(value["can_place_on"])
+            parts = parts and has
+            row = ("kBlockBlob", self.blocks.state(value["state"]), on, 0)
+        elif kind == "spring_feature":
+            self.need(kind, value, {"state", "valid_blocks"}, {"requires_block_below", "rock_count", "hole_count"})
+            # FluidState.CODEC, and FluidState.createLegacyBlock: the fluid's own block, as full as the fluid is.
+            fluid = value["state"]
+            if set(fluid) - {"id", "properties"} or fluid.get("id") not in ("minecraft:water", "minecraft:lava") or \
+                    fluid.get("properties", {}) != {"falling": "true"}:
+                die(f"gen_features: a spring of {canon(fluid)}: src/worldgen knows the falling source of water and of lava")
+            block = self.blocks.state({"id": fluid["id"], "properties": {"level": "0"}})  # (FlowingFluid.getLegacyLevel: a source is 0, falling or not)
+            valid = self.sets.keep(self.sets.blocks_in(value["valid_blocks"]), {"type": "minecraft:matching_blocks", "blocks": value["valid_blocks"]})
+            row = ("kSpring", self.springs.run([(block, self.sets.fluid_names.index(fluid["id"]), int(value.get("requires_block_below", True)),
+                                                 value.get("rock_count", 4), value.get("hole_count", 1), valid)]), 0, 0)
+        elif kind == "lake":
+            self.need(kind, value, {"fluid", "barrier", "can_place_feature", "can_replace_with_air_or_fluid", "can_replace_with_barrier"})
+            made = [self.provider(value["fluid"]), self.provider(value["barrier"]), self.predicate(value["can_place_feature"]),
+                    self.predicate(value["can_replace_with_air_or_fluid"]), self.predicate(value["can_replace_with_barrier"])]
+            parts = parts and all(has for _, has in made)
+            row = ("kLake", self.lakes.run([tuple(at for at, _ in made)]), 0, 0)
+        elif kind in ("blue_ice", "freeze_top_layer"):
+            self.need(kind, value, set())
+            row = (PORTED_FEATURES[kind], 0, 0, 0)
+        elif kind == "spike":
+            self.need(kind, value, {"state", "can_place_on", "can_replace"})
+            on, has_on = self.predicate(value["can_place_on"])
+            replace, has_replace = self.predicate(value["can_replace"])
+            parts = parts and has_on and has_replace
+            row = ("kSpike", self.blocks.state(value["state"]), on, replace)
+        elif kind == "iceberg":
+            self.need(kind, value, {"state"})
+            row = ("kIceberg", self.blocks.state(value["state"]), 0, 0)
         else:
             die(f"gen_features: {kind} is listed as ported and has no table")
         self.nested.update(uses)
-        self.feature_ported.append(all(self.placed[p][3] for p in uses))
+        self.feature_ported.append(parts and all(self.placed[p][3] for p in uses))
         return self.features.run([row])
 
 
@@ -682,10 +776,13 @@ struct Modifier {
 // Feature. kRandomSelector: kChances[a .. a + b) one after the other, else the placed feature c.
 // kSimpleRandomSelector, kSequence, kOverlay: kPlacedLists[a .. a + b). kWeightedRandomSelector:
 // kWeighted[a .. a + b), whose weights add up to c. kRandomBooleanSelector: a if true, else b.
-// kOre: kOres[a]. kUnported: a type that waits for its code.
+// kOre: kOres[a]. kDisk: kDisks[a]. kUnderwaterMagma: kMagmas[a]. kBlockBlob: state a, on what the
+// predicate b holds for. kSpring: kSprings[a]. kLake: kLakes[a]. kSpike: state a, on what predicate b
+// holds for, through what predicate c holds for. kIceberg: of state a. kBlueIce, kFreezeTopLayer: no
+// more to say. kUnported: a type that waits for its code.
 enum class FeatureType : u8 {
     kUnported, kNoOp, kRandomSelector, kSimpleRandomSelector, kWeightedRandomSelector, kRandomBooleanSelector, kSequence, kOverlay,
-    kOre,
+    kOre, kDisk, kUnderwaterMagma, kBlockBlob, kSpring, kLake, kBlueIce, kSpike, kIceberg, kFreezeTopLayer,
 };
 struct Feature {
     FeatureType type;
@@ -715,6 +812,39 @@ struct Ore {
     u8 targets;
     u16 first;
     float discard_chance_on_air_exposure;
+};
+
+// BlockStateProvider. kSimple: the state a. kRuleBased: kProviderRules[a .. a + b) in order - the
+// first whose predicate holds and whose provider has a state - and failing them the provider c - 1,
+// if c is not 0. kUnported: a type that waits for its code.
+enum class ProviderOp : u8 { kSimple, kRuleBased, kUnported };
+struct Provider {
+    ProviderOp op;
+    u32 a, b, c;
+};
+struct ProviderRule {
+    u16 predicate, provider;
+};
+// DiskFeature, UnderwaterMagmaFeature, SpringFeature, LakeFeature: their fields, with predicates,
+// providers and numbers as rows of their tables.
+struct Disk {
+    u16 provider, target, radius;
+    u8 half_height;
+};
+struct Magma {
+    i32 floor_search_range, placement_radius_around_floor;
+    float placement_probability_per_valid_position;
+};
+struct Spring {
+    u16 state;  // FluidState.createLegacyBlock
+    u8 fluid;   // the fluid that is ticked
+    bool requires_block_below;
+    i32 rock_count, hole_count;
+    u16 valid_blocks;  // a state set
+};
+struct Lake {
+    u16 fluid, barrier;  // providers
+    u16 can_place_feature, can_replace_with_air_or_fluid, can_replace_with_barrier;
 };
 
 // PlacedFeature: kModifiers[first .. first + modifiers), then the feature.
@@ -762,6 +892,35 @@ struct Placed {
                + ", ".join(f"{{{rule}, {state}}}" for rule, state in t.ore_targets.rows) + "};\n")
     out.append(f"inline constexpr Ore kOres[{max(1, len(t.ores.rows))}] = {{"
                + ", ".join(f"{{{size}, {count}, {first}, {cfloat(chance)}}}" for size, chance, first, count in t.ores.rows) + "};\n")
+    out.append(f"inline constexpr Provider kProviders[{max(1, len(t.providers.rows))}] = {{"
+               + ", ".join(f"{{ProviderOp::{op}, {a}, {b}, {c}}}" for op, a, b, c in t.providers.rows) + "};\n")
+    out.append(f"inline constexpr ProviderRule kProviderRules[{max(1, len(t.provider_rules.rows))}] = {{"
+               + ", ".join(f"{{{a}, {b}}}" for a, b in t.provider_rules.rows) + "};\n")
+    out.append(f"inline constexpr Disk kDisks[{max(1, len(t.disks.rows))}] = {{"
+               + ", ".join(f"{{{a}, {b}, {c}, {d}}}" for a, b, c, d in t.disks.rows) + "};\n")
+    out.append(f"inline constexpr Magma kMagmas[{max(1, len(t.magmas.rows))}] = {{"
+               + ", ".join(f"{{{a}, {b}, {cfloat(c)}}}" for a, b, c in t.magmas.rows) + "};\n")
+    out.append(f"inline constexpr Spring kSprings[{max(1, len(t.springs.rows))}] = {{"
+               + ", ".join(f"{{{a}, {b}, {'true' if c else 'false'}, {d}, {e}, {f}}}" for a, b, c, d, e, f in t.springs.rows) + "};\n")
+    out.append(f"inline constexpr Lake kLakes[{max(1, len(t.lakes.rows))}] = {{"
+               + ", ".join("{" + ", ".join(map(str, row)) + "}" for row in t.lakes.rows) + "};\n")
+    # What feature.cpp asks of a state by name: sets like any other, each with a name of its own.
+    sets = t.sets
+    code = {"kSetLiquid": sets.facts["liquid"], "kSetSnowSurvivesOn": sets.facts["snow_survives_on"]}
+    out.append("\n// Sets of block states that src/worldgen/feature.cpp asks about by name: BlockState.liquid(); what a\n"
+               "// layer of snow may lie on (SnowLayerBlock.canSurvive, asked of the state below); and - a set a\n"
+               "// direction, by its ordinal - whether BlockState.getFaceOcclusionShape(direction) is a whole face.\n")
+    for name, bits in code.items():
+        out.append(f"inline constexpr u32 {name} = {sets.keep(bits, name)};\n")
+    out.append("inline constexpr u32 kSetFaceOccludes[6] = {" + ", ".join(str(sets.keep(sets.facts[f'face_occludes_{d}'], f'kSetFaceOccludes {d}')) for d in DIRECTIONS) + "};\n")
+    # SnowyBlock.SNOWY: a state without snow on it, and the same with.
+    snowy = []
+    for name, block in t.blocks.blocks.items():
+        for state in block["states"]:
+            if "snowy" in state.get("properties", {}):
+                snowy.append((state["id"], t.blocks.state({"id": name, "properties": {**state["properties"], "snowy": "true"}})))
+    out.append("// BlockState.setValue(SnowyBlock.SNOWY, true), for every state that has the property (one that is snowy: itself).\n")
+    out.append(f"inline constexpr u16 kSnowy[{len(snowy)}][2] = {{" + ", ".join(f"{{{a}, {b}}}" for a, b in sorted(snowy)) + "};\n")
     if len(t.placed) > 65535 or len(t.features.rows) > 65535 or len(t.modifiers.rows) > 65535:
         die("gen_features: more rows than the tables' 16 bits count")
     out.append(f"""
