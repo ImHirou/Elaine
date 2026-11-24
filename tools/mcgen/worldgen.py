@@ -11,6 +11,8 @@ section into .cache/mc/<version>/worldgen/:
             looked at when their chunk first ticks
   math      where java.lang.Math's sine and cosine are not the ones src/worldgen computes for itself,
             for every angle a feature can make of a float (math.bin beside math.json)
+  survive   BlockState.canSurvive of every block world generation names, asked state by state: the states it
+            may stand on where that is all it asks, and its class where it asks more
   census    vanilla's features run over chunks of every biome: what they do that needs a rule
   replay    chunks decorated in an order that is given (tools/vanilla/feature_probe.py)
   golden    what vanilla computes, as the scripts the unit tests of src/worldgen replay - written
@@ -31,8 +33,8 @@ from pathlib import Path
 
 from mcgen import ROOT, die, find_tool, vdir, version_info, write_stamp
 
-SECTIONS = ("program", "climate", "features", "math", "golden", "census", "replay")
-TABLES = ("program", "climate", "features", "math")  # what a run without arguments writes, and `generate` reads
+SECTIONS = ("program", "climate", "features", "math", "survive", "golden", "census", "replay")
+TABLES = ("program", "climate", "features", "math", "survive")  # what a run without arguments writes, and `generate` reads
 
 
 def out_dir(version: str) -> Path:

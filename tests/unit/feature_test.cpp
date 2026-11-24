@@ -18,6 +18,7 @@
 #include "worldgen/feature.hpp"
 #include "worldgen/generator.hpp"
 #include "worldgen/jmath.hpp"
+#include "worldgen/survive.hpp"
 
 using namespace worldgen;
 
@@ -96,6 +97,13 @@ struct Script {
                 }
                 in.skip(9 * 40);
             }
+        }
+    }
+    void skip_survive() {
+        in.skip(usize{in.num<u32>()} * 4);
+        for (u32 entries = in.num<u32>(); entries; --entries) {
+            in.skip(8);
+            in.skip((usize{in.num<u32>()} + 7) / 8);
         }
     }
     void skip_placements() {
@@ -481,6 +489,76 @@ TEST(WorldgenFeature, FeaturesPlacedAgainAndAgainAreVanillas) {
     }
 }
 
+// The rules a block stays by (BlockState.canSurvive: survive.hpp), each held to the method itself in
+// worlds drawn at random - the blocks within one of the place and two above and below it, any
+// block state or one of a few that a rule is likely to tell apart, and light or none.
+TEST(WorldgenFeature, BlocksStayWhereVanillasWould) {
+    Script s;
+    s.skip_ints();
+    s.skip_heights();
+    s.skip_sets();
+    s.skip_placements();
+    s.skip_decorations();
+    s.skip_attempts();
+    In& in = s.in;
+    struct Mix {  // (SplitMix64: the same numbers as WorldgenSurvive.Mix)
+        u64 x;
+        u64 next() {
+            x += 0x9E3779B97F4A7C15ull;
+            u64 z = x;
+            z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+            z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+            return z ^ (z >> 31);
+        }
+    };
+    struct Cells {
+        u16 cell[45], rest;
+        i32 light;
+        u16 block(i32 x, i32 y, i32 z) const {
+            if (x < -1 || x > 1 || y < -2 || y > 2 || z < -1 || z > 1) return rest;
+            return cell[(x + 1) * 15 + (y + 2) * 3 + (z + 1)];
+        }
+        i32 raw_brightness(i32, i32, i32) const { return light; }
+    };
+    std::vector<u16> telling(in.num<u32>());
+    for (u16& state : telling) state = static_cast<u16>(in.num<i32>());
+    const u32 entries = in.num<u32>();
+    ASSERT_GT(entries, 20u);
+    u32 held = 0, waiting = 0, stayed = 0, went = 0;
+    for (u32 entry = 0; entry < entries; ++entry) {
+        const u32 state = static_cast<u32>(in.num<i32>()), rule = static_cast<u32>(in.num<i32>());
+        const u32 trials = in.num<u32>();
+        const u8* answers = in.p;
+        in.skip((usize{trials} + 7) / 8);
+        ASSERT_LT(rule, std::size(ft::kSurvive));
+        if (ft::kSurvive[rule].op == ft::SurviveOp::kUnported) {
+            ++waiting;
+            continue;
+        }
+        ++held;
+        for (u32 trial = 0; trial < trials; ++trial) {
+            Mix mix{u64{state} * 1000003ull + trial};
+            const auto pick = [&] {
+                const u64 r = mix.next();
+                return r & 1 ? telling[(r >> 1) % telling.size()] : static_cast<u16>((r >> 1) % world::state::kCount);
+            };
+            Cells cells;
+            cells.light = mix.next() & 1 ? 15 : 0;
+            cells.rest = pick();
+            for (u16& cell : cells.cell) cell = pick();
+            const bool want = answers[trial >> 3] >> (trial & 7) & 1;
+            ASSERT_EQ(survives(cells, ft::kSurvive[rule], 0, 0, 0), want)
+                << world::block_name(world::block_of(static_cast<world::BlockState>(state))) << " (state " << state << "), world "
+                << trial;
+            (want ? stayed : went) += 1;
+        }
+    }
+    EXPECT_GT(held, 20u);
+    EXPECT_GT(stayed, 1000u);
+    EXPECT_GT(went, 1000u);
+    (void)waiting;
+}
+
 // Math.sin and Math.cos of every angle an ore can have - its random float times pi - are the
 // JVM's, all 2^24 of them: our own sine, and the table of where HotSpot's is the next double.
 TEST(WorldgenFeature, SineAndCosineOfEveryAngleOfAFloatAreTheJvms) {
@@ -491,6 +569,7 @@ TEST(WorldgenFeature, SineAndCosineOfEveryAngleOfAFloatAreTheJvms) {
     s.skip_placements();
     s.skip_decorations();
     s.skip_attempts();
+    s.skip_survive();
     In& in = s.in;
     const u64 want_sines = in.num<u64>(), want_cosines = in.num<u64>();
     u64 sines = kFnv, cosines = kFnv;

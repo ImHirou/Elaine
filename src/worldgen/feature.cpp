@@ -8,6 +8,7 @@
 #include "worldgen/jmath.hpp"
 #include "worldgen/material.hpp"
 #include "worldgen/mth.hpp"
+#include "worldgen/survive.hpp"
 
 namespace worldgen {
 
@@ -129,11 +130,7 @@ bool test(Region& region, const ft::Predicate& p, Pos at) {
                         if (!test(region, match, {at.x + x, at.y + y, at.z + z})) return false;
             return true;
         }
-        case ft::PredicateOp::kWouldSurvive:
-            // (The block's own canSurvive: world/block_rules is still to come, and a placed feature
-            // that asks is not ported until then.)
-            DCHECK(false);
-            return false;
+        case ft::PredicateOp::kWouldSurvive: return survives(region, ft::kSurvive[p.a], at.x + p.dx, at.y + p.dy, at.z + p.dz);
     }
     return false;
 }
@@ -338,6 +335,7 @@ bool Decorator::place_feature(u32 feature, FeatureRandom& random, Pos at) {
             return place_spike(static_cast<u16>(f.a), ft::kPredicates[f.b], ft::kPredicates[f.c], random, at);
         case ft::FeatureType::kIceberg: return place_iceberg(static_cast<u16>(f.a), random, at);
         case ft::FeatureType::kFreezeTopLayer: return place_freeze_top_layer(at);
+        case ft::FeatureType::kSimpleBlock: return place_simple_block(f, random, at);
     }
     return false;
 }
@@ -480,6 +478,9 @@ namespace {
 bool is_water(u16 state) { return world::block_of(state) == world::block_of(blk::kWater); }
 bool is_snow_layer(u16 state) { return world::block_of(state) == world::block_of(blk::kSnow); }
 
+// FluidTags.WATER: water, running or not.
+constexpr u32 kWaterFamily = proto::gen::fluid::kFamily[proto::gen::fluid::kWater];
+
 // LevelAccessor.getBrightness(LightLayer.BLOCK, pos) while a chunk is decorated: no light has been
 // let into it yet (docs/architecture.md, "Features").
 constexpr i32 kBlockLight = 0;
@@ -503,6 +504,94 @@ bool should_snow(Region& region, u16 biome, i32 x, i32 y, i32 z) {
 
 }  // namespace
 
+namespace {
+
+// The noises of the state providers that go by one (NoiseBasedStateProvider): made of a fixed seed, so
+// the same in every world - laid out once as the layers they are.
+const Noise& provider_noise(u32 first, u32 count) {
+    static const std::vector<Layer> layers = [] {
+        std::vector<Layer> made(std::size(ft::kProviderLayers));
+        for (usize i = 0; i < made.size(); ++i) {
+            const ft::ProviderLayer& from = ft::kProviderLayers[i];
+            made[i].noise.offset_x = from.offsets[0];
+            made[i].noise.offset_y = from.offsets[1];
+            made[i].noise.offset_z = from.offsets[2];
+            made[i].noise.fudge_y_scale = 0.0;
+            std::copy(std::begin(from.perms), std::end(from.perms), made[i].noise.perms);
+            made[i].frequency = from.frequency;
+            made[i].amplitude = from.amplitude;
+        }
+        return made;
+    }();
+    static const std::vector<Noise> noises = [] {
+        // (One for every run of layers that a provider names.)
+        std::vector<Noise> made;
+        for (const ft::NoiseProvider& p : ft::kNoiseProviders) {
+            made.push_back({layers.data() + p.noise, p.layers, false});
+            made.push_back({layers.data() + p.slow, p.slow_layers, false});
+        }
+        return made;
+    }();
+    for (const Noise& n : noises)
+        if (n.layers == layers.data() + first && n.count == count) return n;
+    return noises[0];
+}
+
+// NoiseProvider.getRandomState(states, noiseValue): which of so many states a noise value picks.
+u32 by_noise(float noise_value, u32 count) {
+    const float v = (1.0f + noise_value) / 2.0f;
+    const float placement = v < 0.0f ? 0.0f : std::min(v, 0.9999f);
+    return static_cast<u32>(static_cast<i32>(placement * static_cast<float>(count)));
+}
+
+// Mth.clampedMap
+double clamped_map(double value, double from_min, double from_max, double to_min, double to_max) {
+    const double factor = (value - from_min) / (from_max - from_min);
+    if (factor < 0.0) return to_min;
+    if (factor > 1.0) return to_max;
+    return lerp(factor, to_min, to_max);
+}
+
+}  // namespace
+
+// NoiseProvider, NoiseThresholdProvider, DualNoiseProvider: the flowers of a field go by where they are.
+u16 Decorator::noise_state(const ft::NoiseProvider& p, FeatureRandom& random, Pos at) {
+    const Noise& noise = provider_noise(p.noise, p.layers);
+    const double scale = static_cast<double>(p.scale);
+    // NoiseBasedStateProvider.getNoiseValue
+    const float value =
+        noise.get(static_cast<double>(at.x) * scale, static_cast<double>(at.y) * scale, static_cast<double>(at.z) * scale);
+    switch (p.kind) {
+        case ft::NoiseKind::kNoise: return ft::kProviderStates[p.states + by_noise(value, p.state_count)];
+        case ft::NoiseKind::kNoiseThreshold: {
+            if (static_cast<double>(value) < static_cast<double>(p.threshold))
+                return ft::kProviderStates[p.low + static_cast<u32>(random.next_int(static_cast<i32>(p.low_count)))];
+            if (random.next_float() < p.high_chance)
+                return ft::kProviderStates[p.high + static_cast<u32>(random.next_int(static_cast<i32>(p.high_count)))];
+            return p.default_state;
+        }
+        case ft::NoiseKind::kDualNoise: {
+            // A slower noise says how many kinds grow here, and which: each from a place of its own on it.
+            const Noise& slow = provider_noise(p.slow, p.slow_layers);
+            const auto slow_value = [&](i32 x, i32 y, i32 z) {
+                return slow.get(static_cast<double>(static_cast<float>(x) * p.slow_scale),
+                                static_cast<double>(static_cast<float>(y) * p.slow_scale),
+                                static_cast<double>(static_cast<float>(z) * p.slow_scale));
+            };
+            const double variety_noise = static_cast<double>(slow_value(at.x, at.y, at.z));
+            const i32 variety = static_cast<i32>(clamped_map(variety_noise, -1.0, 1.0, static_cast<double>(p.variety_min),
+                                                             static_cast<double>(p.variety_max + 1)));
+            u16 possible[64];
+            DCHECK(variety > 0 && variety <= 64);
+            for (i32 i = 0; i < variety; ++i)
+                possible[i] =
+                    ft::kProviderStates[p.states + by_noise(slow_value(at.x + i * 54545, at.y, at.z + i * 34234), p.state_count)];
+            return possible[by_noise(value, static_cast<u32>(variety))];
+        }
+    }
+    return 0;
+}
+
 // BlockStateProvider.getOptionalState: a state, or none (-1).
 i32 Decorator::optional_state(const ft::Provider& p, FeatureRandom& random, Pos at) {
     switch (p.op) {
@@ -515,6 +604,31 @@ i32 Decorator::optional_state(const ft::Provider& p, FeatureRandom& random, Pos 
                 if (state >= 0) return state;
             }
             return p.c ? optional_state(ft::kProviders[p.c - 1], random, at) : -1;
+        case ft::ProviderOp::kWeighted:
+            return static_cast<i32>(pick(ft::kProviderEntries, p.a, p.b, static_cast<i32>(p.c), random));
+        case ft::ProviderOp::kRotated: {
+            // RotatedBlockProvider: the direction first (Direction.getRandom), then the state it turns.
+            const u32 direction = p.d ? p.d - 1 : static_cast<u32>(random.next_int(6));
+            const u16 inner = state_of(ft::kProviders[p.a], random, at);
+            for (u32 i = p.b; i < p.b + p.c; ++i)
+                if (ft::kRotations[i].state == inner) return ft::kRotations[i].to[direction];
+            return inner;
+        }
+        case ft::ProviderOp::kRandomizedInt: {
+            // RandomizedIntStateProvider: a number is drawn only for a state that has the property.
+            const u16 inner = state_of(ft::kProviders[p.a], random, at);
+            for (u32 i = p.b; i < p.b + p.c; ++i) {
+                const ft::IntStates& row = ft::kIntStates[i];
+                if (row.state != inner) continue;
+                const i32 value = sample(ft::kInts[p.d], random);
+                DCHECK(value >= row.min && value < row.min + row.count);
+                return ft::kProviderStates[row.first + static_cast<u32>(value - row.min)];
+            }
+            return inner;
+        }
+        case ft::ProviderOp::kRandomBlock:  // HolderSet.getRandomElement
+            return p.b ? ft::kProviderStates[p.a + static_cast<u32>(random.next_int(static_cast<i32>(p.b)))] : -1;
+        case ft::ProviderOp::kNoise: return noise_state(ft::kNoiseProviders[p.a], random, at);
         case ft::ProviderOp::kUnported: break;
     }
     DCHECK(false);  // (a feature with a provider that is not ported is not placed)
@@ -534,6 +648,33 @@ void Decorator::mark_above(i32 x, i32 y, i32 z) {
         if (world::is_air(region_.block(x, y, z))) return;
         region_.mark_post_process(x, y, z);
     }
+}
+
+// SimpleBlockFeature: one block of what a provider says, if that could stay there - a plant of two
+// blocks with both its halves.
+bool Decorator::place_simple_block(const ft::Feature& f, FeatureRandom& random, Pos o) {
+    Region& region = region_;
+    const i32 made = optional_state(ft::kProviders[f.a], random, o);
+    if (made < 0) return false;
+    const ft::SimpleBlock* row = nullptr;
+    for (u32 i = f.b & 0xFFFFF; i < (f.b & 0xFFFFF) + (f.b >> 20) && !row; ++i)
+        if (ft::kSimpleBlocks[i].state == made) row = &ft::kSimpleBlocks[i];
+    DCHECK(row);  // (the table has every state the provider can give)
+    if (!row || !survives(region, ft::kSurvive[row->survive], o.x, o.y, o.z)) return false;
+    if (row->halves[0] | row->halves[1]) {
+        const u16 above = region.block(o.x, o.y + 1, o.z);
+        if (!world::is_air(above) && !world::is_replaceable(above)) return false;
+        // DoublePlantBlock.placeAt: each half as it is where it stands - in water, or not (copyWaterloggedFrom).
+        const auto water_at = [&](i32 y) {
+            return world::fluid_family(world::fluid_of(region.block(o.x, y, o.z))) == kWaterFamily;
+        };
+        region.set_block(o.x, o.y, o.z, row->halves[water_at(o.y) ? 2 : 0], 2);
+        region.set_block(o.x, o.y + 1, o.z, row->halves[water_at(o.y + 1) ? 3 : 1], 2);
+    } else {
+        region.set_block(o.x, o.y, o.z, static_cast<u16>(made), 2);
+    }
+    if (f.c) region.schedule_tick(o.x, o.y, o.z, world::block_of(region.block(o.x, o.y, o.z)), false);
+    return true;
 }
 
 // DiskFeature: a round patch, a few blocks thick, of what its provider says wherever its target is.
@@ -717,7 +858,7 @@ bool Decorator::place_lake(const ft::Lake& lake, FeatureRandom& random, Pos orig
                 }
     }
     // A lake of water has ice on it where it is cold.
-    if (world::fluid_family(world::fluid_of(fluid)) == proto::gen::fluid::kFamily[proto::gen::fluid::kWater]) {
+    if (world::fluid_family(world::fluid_of(fluid)) == kWaterFamily) {
         for (i32 xx = 0; xx < 16; ++xx)
             for (i32 zz = 0; zz < 16; ++zz) {
                 const Pos at{origin.x + xx, origin.y + 4, origin.z + zz};

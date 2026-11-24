@@ -2459,18 +2459,44 @@ features are records with their predicates in the data (`can_place_on`, `can_rep
 (above), and what it decides is which side of an ellipse a block lies on - all 48 icebergs of
 the golden script come out the same.
 
+**One block of a plant** (`SimpleBlockFeature`, the predicate `would_survive`) is where the
+blocks themselves have a say: a flower is placed if `canSurvive` says it can stay. That is
+forty classes of block code - and nearly all of them ask one thing, what the block below is
+(26.3 has a tag for most: `supports_vegetation`, `supports_cactus`, ...). So they are not
+ported. `mcgen.py worldgen survive` runs the method itself: in worlds of blocks drawn at
+random it watches what a state asks about, and where that is one block and nothing else - not
+the light, not a second block - it tries every one of the 35723 block states in that place.
+What comes of it is a set of states (47 sets for 751 states of the blocks the data names;
+1025 more stay or go whatever is around). What asks more is a rule written from its class
+(`survive.hpp`): a cactus about its four sides and what is above it, sugar cane about the water
+beside its ground, a lily pad about the water under it and the air it lies in, a mushroom about
+the light, the dripleaves, the spore blossom, tall seagrass. Every rule - made or written - is
+then held to the method in 400 worlds drawn at random a state, light and dark.
+
+*State providers* that draw came with it: a weighted list, a state turned to a direction that
+is drawn first, a property set to a number drawn after the state, a block of a tag (in the
+order the game holds the tag, which the extractor writes down), and the three that go by a
+noise - the flowers of a field are a function of the place. Those noises are made of a fixed
+seed, so they are the same in every world: the extractor writes them out as they stand
+(layers, offsets, permutations), and nothing of how they are made is ported. A plant of two
+blocks is placed as both halves, each waterlogged or not by where it stands.
+
+The game's own `can_survive` (`server/block_updates.cpp`) is not touched by this: it goes by
+tables of its own for the blocks it has. Where the two come to meet - a cactus that grows -
+the game should take the sets and rules from here.
+
 **Decorations held to the jar.** A kind of feature is first placed again and again in one place
 (`KINDS_TO_ATTEMPT`): nine chunks of terrain where the kind does something - the script looks
 for them - and every placed feature of the kind tried with source after source, each attempt
 on what the ones before left, until a dozen have written something. What a chunk rarely has
 (an iceberg: one chunk in sixteen; a blue one: one in two hundred) happens here by the dozen,
 and what was built is in the way of what follows. Every attempt writes what vanilla's writes -
-or nothing where vanilla's writes nothing - and the nine chunks end the same: 39894 attempts
-of the nine kinds above, 326 of them writing. Beside the placements, the golden script has whole decorations:
+or nothing where vanilla's writes nothing - and the nine chunks end the same: 84478 attempts
+of ten kinds, 1189 of them writing. Beside the placements, the golden script has whole decorations:
 with the features of one kind alone - so far ores: four areas of 4 x 4 chunks (windswept hills,
 badlands, dripstone and lush caves) - and with every feature that is ported (six areas; the
 tables say which, `ported_features.txt`), the inner four chunks decorated one after the other
-in the order of a task. Of each of the features that run (404 and 824): everything it wrote, where and
+in the order of a task. Of each of the features that run (404 and 1074): everything it wrote, where and
 what, folded into one number (on vanilla's side by sections that say what is set in them - an
 ore's raw writes too), and the long its source gives afterwards; then the sixteen chunks -
 blocks, heightmaps, marks, ticks. A feature that goes wrong is named by the test, with its chunk.
@@ -2481,11 +2507,12 @@ decorated in the order it is given). A world is not the same without the feature
 ported - an ore does not lie where a lake is - so vanilla's world has a data pack in which every
 feature of a biome that is not ported places nothing, under its own name: `FeatureSorter` goes
 by which features the biomes name, so the order, and with it each feature's random source,
-stays. With the 47 placed features that are ported: 352 chunks the server saved before they
-were chunks of the world, 160 with their own features and 192 with what the neighbours' put
+stays. With the 110 placed features that are ported: 362 chunks the server saved before they
+were chunks of the world, 160 with their own features and the rest with what the neighbours' put
 into them - blobs of ore, lakes and icebergs lie across the borders of chunks, so this is the
 order replayed, too - the same block for block, heightmaps, the marks in order, the scheduled
-ticks of springs and lakes in order.
+ticks of springs and lakes in order. (231 blocks are left out: where a mushroom asked for the
+light beside a chunk the server was lighting - above.)
 
 ### Features: one order, and the workers (`world/gen_pipeline.*`)
 
@@ -2555,7 +2582,7 @@ polls and sweeps in an order drawn at random. The same through a `Dimension` wit
 goes on). And `a_world_is_the_same_whoever_makes_it`: two servers of one seed, one with three
 workers and one with all there are, send their clients the same bytes. The task itself - the
 generator's `decorate` over an area of real terrain - is held to the jar's classes with the
-decorations above ("ported": six areas, 824 features).
+decorations above ("ported": six areas, 1074 features).
 
 ### What is there, and what is not
 
@@ -2563,12 +2590,12 @@ There: biomes, and all of the `terrain` status - the shape of the ground with it
 (`doFill`); the surface, bedrock, deepslate and the ore veins (`buildSurface`); the caves and
 canyons of the carvers (`generateCarvers`).
 
-And of the `features` status what asks no block whether it can stay: ores, disks, springs,
-lava lakes, magma, forest rocks, ice spikes, icebergs, blue ice, snow and ice - in every chunk
-of a world.
+And of the `features` status: ores, disks, springs, lava lakes, magma, forest rocks, ice
+spikes, icebergs, blue ice, snow and ice, and the plants that are one block (or two) - in
+every chunk of a world.
 
-Not there yet: what grows - a world of terrain has no tree, no grass and no kelp - what hangs
-and stands in caves, and structures. Where a world begins is still looked for on bare terrain. Beyond those:
+Not there yet: trees, what grows in columns (cactus, sugar cane, kelp, bamboo, vines), corals,
+the big mushrooms, what hangs and stands in caves, and structures. Where a world begins is still looked for on bare terrain. Beyond those:
 only the overworld, only the preset `normal`; an imported vanilla world does not go on with this
 generator yet.
 

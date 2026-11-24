@@ -42,18 +42,17 @@ PORTED_FEATURES = {
     "sequence": "kSequence", "overlay": "kOverlay", "ore": "kOre",
     "disk": "kDisk", "underwater_magma": "kUnderwaterMagma", "block_blob": "kBlockBlob", "spring_feature": "kSpring", "lake": "kLake",
     "blue_ice": "kBlueIce", "spike": "kSpike", "iceberg": "kIceberg", "freeze_top_layer": "kFreezeTopLayer",
+    "simple_block": "kSimpleBlock",
 }
 # ...and the types of the overworld that wait for theirs. A type in neither list stops the run.
 UNPORTED_FEATURES = {
-    "simple_block", "tree", "block_column", "template", "coral_tree", "coral_claw", "fallen_tree", "vegetation_patch",
+    "tree", "block_column", "template", "coral_tree", "coral_claw", "fallen_tree", "vegetation_patch",
     "speleothem", "multiface_growth", "fossil", "bamboo", "speleothem_cluster", "root_system",
     "geode", "monster_room", "huge_brown_mushroom", "huge_red_mushroom",
     "vines", "large_dripstone", "waterlogged_vegetation_patch", "sculk_patch",
 }
-# BlockStateProvider types that wait for theirs (a block state written out and "rule_based" are there).
-UNPORTED_PROVIDERS = {"weighted", "rotated", "randomized_int", "random_block"}
-# Predicates that ask a block what it would do, which is the block's own code: until that is here.
-UNPORTED_PREDICATES = {"would_survive"}
+# BlockStateProvider types that wait for theirs: none of the overworld's now.
+UNPORTED_PROVIDERS: set = set()
 
 INT_MIN, INT_MAX = -(1 << 31), (1 << 31) - 1
 
@@ -94,6 +93,12 @@ class StateSets:
         for d, name in enumerate(DIRECTIONS):
             self.facts[f"face_occludes_{name}"] = column(v >> d & 1 for v in faces)
         self.facts["snow_survives_on"] = column(worldgen.load(version, "features")["snow_survives_on"])
+        self.facts["solid_render"] = column(states["solid_render"])
+        self.facts["sturdy_center_down"] = column(v >> 0 & 1 for v in sturdy["columns"]["sturdy_center"])
+        # A state's fluid, as much as there is of it (gamedata: FluidState.getAmount).
+        import gamedata as _gamedata
+        amounts = [f["amount"] for f in _gamedata.load(version, "fluids")["states"]]
+        self.facts["fluid_full"] = column(amounts[f] == 8 for f in sturdy["columns"]["fluid_state"])
         self.kept: list[int] = []
         self.sources: list[str] = []   # of each: the predicate it was first made of, as the jar writes it
         self.index: dict[int, int] = {}
@@ -188,6 +193,21 @@ class FeatureTables:
         self.ores, self.ore_targets = Pool(), Pool()
         self.providers, self.provider_rules = Pool(), Pool()
         self.named_providers: dict[str, tuple[int, bool]] = {}
+        self.provider_entries, self.provider_states, self.rotations, self.int_states, self.noise_providers = Pool(), Pool(), Pool(), Pool(), Pool()
+        self.provider_layers: list = []
+        self.extra = worldgen.load(version, "features")
+        self.noise_made = {p["provider"]: p for p in self.extra["noise_providers"]}
+        self.survive_data = worldgen.load(version, "survive")
+        self.survive, self.survive_pairs = Pool(), Pool()
+        self.survive_of: dict[int, int] = {}       # state -> its row of self.survive
+        self.survive_ported: list[bool] = []
+        self.simple_blocks = Pool()
+        import gamedata
+        self.classes = {b["name"]: b["class"] for b in gamedata.load(version, "blocks")["blocks"]}   # a block's class and what it extends
+        self.by_state = {}                          # state id -> (block name, properties)
+        for name, block in blocks.blocks.items():
+            for state in block["states"]:
+                self.by_state[state["id"]] = (name, state.get("properties", {}))
         self.disks, self.magmas, self.springs, self.lakes = Pool(), Pool(), Pool(), Pool()
         self.placed: list = []                 # (feature, first modifier, modifiers, ported, where); None while it is made
         self.placed_names: list[str] = []      # "" for one that is written out inside a feature
@@ -357,7 +377,8 @@ class FeatureTables:
             return ("row", ("kVolume", self.offset({"offset": value["min"]}), self._row(inner), 0, self.offset({"offset": value["max"]})), self._ported(inner))
         if kind == "would_survive":
             self.need(kind, value, {"state"}, {"offset"})
-            return ("row", ("kWouldSurvive", self.offset(value), self.blocks.state(value["state"]), 0, (0, 0, 0)), False)
+            rule, ported = self.survive_rule(self.blocks.state(value["state"]))
+            return ("row", ("kWouldSurvive", self.offset(value), rule, 0, (0, 0, 0)), ported)
         die(f"gen_features: a predicate of the type {kind}: src/worldgen has no word for it")
 
     def _ported(self, made) -> bool:
@@ -372,7 +393,153 @@ class FeatureTables:
         made = self._predicate(value)
         return self._row(made), self._ported(made)
 
+    # ---------------------------------------------------------------- whether a block can stay
+
+    def _survive_row(self, state: int):
+        """BlockState.canSurvive of one state: (row, ported). What asks about one block is a set the jar made
+        (mcgen.py worldgen survive); what asks more is a rule written from its class, of sets made here."""
+        of = self.survive_data["states"].get(str(state))
+        if of is None:
+            die(f"gen_features: worldgen/survive.json knows nothing of block state {state} ({self.by_state[state][0]}) - run: mcgen.py worldgen")
+        sets = self.sets
+        pairs = lambda rows: ("kAll", self.survive_pairs.run(rows), len(rows), 0)
+        kind, cls = of["kind"], of["class"]
+        name, properties = self.by_state[state]
+        if kind in ("always", "never"):
+            return ("kAlways" if kind == "always" else "kNever", 0, 0, 0), True
+        if kind == "one":
+            bits = int.from_bytes(bytes.fromhex(self.survive_data["sets"][of["set"]]), "little")
+            return pairs([(*of["at"], sets.keep(bits, f"survives {of['set']}"))]), True
+        everything = sets.everything
+        own = sets.of_blocks({name})
+        named = lambda bits, what: sets.keep(bits, f"kSet {what}")   # (each is held to the jar under this name: WorldgenFeatures.golden)
+        if cls == "CactusBlock":
+            side = named(everything & ~(sets.facts["solid"] | sets.fluids_in("#minecraft:lava")), "a cactus has beside it")
+            below = named(own | sets.block_tag("minecraft:supports_cactus"), "a cactus stands on")
+            above = named(everything & ~sets.facts["liquid"], "that is no liquid")
+            return pairs([(0, 0, -1, side), (1, 0, 0, side), (0, 0, 1, side), (-1, 0, 0, side), (0, -1, 0, below), (0, 1, 0, above)]), True
+        if cls == "LilyPadBlock":
+            on = named(sets.fluids_in("#minecraft:supports_lily_pad") | sets.block_tag("minecraft:supports_lily_pad"), "a lily pad lies on")
+            return pairs([(0, -1, 0, on), (0, 0, 0, named(sets.fluids_in("minecraft:empty"), "that holds no fluid"))]), True
+        if cls == "BigDripleafStemBlock":
+            below = named(own | sets.block_tag("minecraft:supports_big_dripleaf"), "a big dripleaf's stem stands on")
+            above = named(own | sets.of_blocks({"minecraft:big_dripleaf"}), "a big dripleaf's stem has above it")
+            return pairs([(0, -1, 0, below), (0, 1, 0, above)]), True
+        if cls == "SporeBlossomBlock":
+            above = named(sets.facts["sturdy_center_down"] & ~sets.block_tag("minecraft:unstable_bottom_center"), "a spore blossom hangs from")
+            return pairs([(0, 1, 0, above), (0, 0, 0, named(everything & ~sets.fluids_in("#minecraft:water"), "that holds no water"))]), True
+        if cls == "TallSeagrassBlock" and properties.get("half") == "lower":
+            below = named(sets.facts["sturdy_up"] & ~sets.block_tag("minecraft:cannot_support_seagrass"), "tall seagrass stands on")
+            return pairs([(0, -1, 0, below), (0, 0, 0, named(sets.fluids_in("#minecraft:water") & sets.facts["fluid_full"], "full of water"))]), True
+        if cls == "SmallDripleafBlock" and properties.get("half") == "lower":
+            return ("kSmallDripleaf", named(sets.block_tag("minecraft:supports_small_dripleaf"), "a small dripleaf stands on"),
+                    named(sets.fluids_in("minecraft:water"), "that holds a source of water"),
+                    named(sets.block_tag("minecraft:supports_vegetation"), "plants stand on")), True
+        if cls == "SugarCaneBlock":
+            beside = named(sets.fluids_in("#minecraft:supports_sugar_cane_adjacently") | sets.block_tag("minecraft:supports_sugar_cane_adjacently"),
+                           "sugar cane has beside its ground")
+            return ("kSugarCane", named(own, "of sugar cane"), named(sets.block_tag("minecraft:supports_sugar_cane"), "sugar cane stands on"), beside), True
+        if cls == "MushroomBlock":
+            return ("kMushroom", named(sets.block_tag("minecraft:overrides_mushroom_light_requirement"), "a mushroom needs no dark on"),
+                    named(sets.facts["solid_render"], "of whole blocks that let no light through"), 0), True
+        return ("kUnported", 0, 0, 0), False
+
+    def double_plant(self, state: int) -> tuple[int, int, int, int]:
+        """DoublePlantBlock.placeAt: for a state of such a block its lower and its upper half - each as it is where
+        there is no water, then as it is in water (copyWaterloggedFrom) - and four zeroes for any other block."""
+        name, properties = self.by_state[state]
+        if "DoublePlantBlock" not in self.classes[name]:
+            return 0, 0, 0, 0
+        out = []
+        for wet in ("false", "true"):
+            for half in ("lower", "upper"):
+                out.append(self.blocks.state({"id": name, "properties": {**properties, "half": half, **({"waterlogged": wet} if "waterlogged" in properties else {})}}))
+        return tuple(out)
+
+    def survive_rule(self, state: int) -> tuple[int, bool]:
+        if state not in self.survive_of:
+            row, ported = self._survive_row(state)
+            at = self.survive.add(row)
+            if at == len(self.survive_ported):
+                self.survive_ported.append(ported)
+            self.survive_of[state] = at
+        return self.survive_of[state], self.survive_ported[self.survive_of[state]]
+
     # ---------------------------------------------------------------- state providers
+
+    def _layers(self, made: list) -> tuple[int, int]:
+        first = len(self.provider_layers)
+        self.provider_layers += made
+        return first, len(made)
+
+    def outcomes(self, value) -> set[int]:
+        """Every state a provider can come to give (nothing of what a rule leaves as it is)."""
+        if isinstance(value, str):
+            return self.outcomes(self.load("block_state_provider", value))
+        if "type" not in value:
+            return {self.blocks.state(value)}
+        kind = strip(value["type"])
+        if kind == "rule_based":
+            found = set().union(*[self.outcomes(r["then"]) for r in value["rules"]]) if value["rules"] else set()
+            return found | (self.outcomes(value["fallback"]) if "fallback" in value else set())
+        if kind == "weighted":
+            return {self.blocks.state(e["data"]) for e in value["entries"]}
+        if kind == "rotated":
+            return {to for state in self.outcomes(value["state"]) for to in self.rotated(state)}
+        if kind == "randomized_int":
+            return {to for state in self.outcomes(value["source"]) for to in (self.int_values(state, value["property"]) or (0, [state]))[1]}
+        if kind == "random_block":
+            return {self.blocks.state(name) for name in self.tag_in_order(value["blocks"])}
+        if kind in ("noise", "dual_noise"):
+            return {self.blocks.state(v) for v in value["states"]}
+        if kind == "noise_threshold":
+            return {self.blocks.state(v) for v in [value["default_state"], *value["low_states"], *value["high_states"]]}
+        die(f"gen_features: what a state provider of the type {kind} can give is not known")
+
+    def rotated(self, state: int) -> list[int]:
+        """RotatedBlockProvider: the state turned to each of the six directions (Direction's order) - its axis,
+        its facing, where it has them (trySetValue: by the property itself, which the values it takes tell)."""
+        name, properties = self.by_state[state]
+        block = self.blocks.blocks[name]
+        values = {p: sorted({s["properties"][p] for s in block["states"]}) for p in properties}
+        out = []
+        for direction, axis in (("down", "y"), ("up", "y"), ("north", "z"), ("south", "z"), ("west", "x"), ("east", "x")):
+            turned = dict(properties)
+            if values.get("axis") == ["x", "y", "z"]:                                     # BlockStateProperties.AXIS
+                turned["axis"] = axis
+            if values.get("facing") == sorted(DIRECTIONS):                               # ...FACING
+                turned["facing"] = direction
+            if axis != "y" and values.get("facing") == ["east", "north", "south", "west"]:  # ...HORIZONTAL_FACING
+                turned["facing"] = direction
+            if "facing" in values and values["facing"] not in (sorted(DIRECTIONS), ["east", "north", "south", "west"]):
+                die(f"gen_features: {name} is turned by a provider and faces {values['facing']}: which property that is has to be looked up")
+            if "axis" in values and values["axis"] != ["x", "y", "z"]:
+                die(f"gen_features: {name} is turned by a provider and has the axes {values['axis']}")
+            out.append(self.blocks.state({"id": name, "properties": turned}))
+        return out
+
+    def int_values(self, state: int, prop: str):
+        """RandomizedIntStateProvider: the state with its property at each value it can take, lowest first - or
+        None where the block has no such property."""
+        name, properties = self.by_state[state]
+        if prop not in properties:
+            return None
+        block = self.blocks.blocks[name]
+        values = sorted({int(s["properties"][prop]) for s in block["states"]})
+        if values != list(range(values[0], values[-1] + 1)):
+            die(f"gen_features: the property {prop} of {name} takes the values {values}")
+        return values[0], [self.blocks.state({"id": name, "properties": {**properties, prop: str(v)}}) for v in values]
+
+    def tag_in_order(self, value) -> list[str]:
+        """A HolderSet of blocks in the order the game holds it (what a random element of it is the n-th of)."""
+        if isinstance(value, str) and value.startswith("#"):
+            if value[1:] not in self.extra["block_tags"]:
+                die(f"gen_features: the block tag {value}: worldgen/features.json does not have it")
+            return self.extra["block_tags"][value[1:]]
+        return [value] if isinstance(value, str) else list(value)
+
+    def _states(self, values: list) -> tuple[int, int]:
+        return self.provider_states.run([self.blocks.state(v) for v in values]), len(values)
 
     def provider(self, value) -> tuple[int, bool]:
         """A Holder<BlockStateProvider> - a name, a block state written out, or a provider with its type: its row,
@@ -386,7 +553,7 @@ class FeatureTables:
         if "type" not in value:  # (BlockStateProvider.STATE_OR_PROVIDER_CODEC: one or the other, never both)
             if not set(value) <= {"id", "properties"}:
                 die(f"gen_features: a block state written as {canon(value)[:200]}")
-            return self.providers.add(("kSimple", self.blocks.state(value), 0, 0)), True
+            return self.providers.add(("kSimple", self.blocks.state(value), 0, 0, 0)), True
         kind = strip(value["type"])
         if kind == "rule_based":
             self.need(kind, value, {"rules"}, {"fallback"})
@@ -402,9 +569,58 @@ class FeatureTables:
             if "fallback" in value:
                 at, has_fallback = self.provider(value["fallback"])
                 fallback, ported = at + 1, ported and has_fallback
-            return self.providers.add(("kRuleBased", self.provider_rules.run(rules), len(rules), fallback)), ported
+            return self.providers.add(("kRuleBased", self.provider_rules.run(rules), len(rules), fallback, 0)), ported
+        if kind == "weighted":
+            self.need(kind, value, {"entries"})
+            entries = []
+            for e in value["entries"]:
+                if set(e) != {"data", "weight"}:
+                    die(f"gen_features: an entry of a weighted provider written as {canon(e)[:200]}")
+                entries.append((self.blocks.state(e["data"]), e["weight"]))
+            if not entries or sum(w for _, w in entries) <= 0:
+                die("gen_features: a weighted provider of nothing")
+            return self.providers.add(("kWeighted", self.provider_entries.run(entries), len(entries), sum(w for _, w in entries), 0)), True
+        if kind == "rotated":
+            self.need(kind, value, {"state"}, {"direction"})
+            inner, ported = self.provider(value["state"])
+            rows = [(state, *self.rotated(state)) for state in sorted(self.outcomes(value["state"]))]
+            direction = DIRECTIONS.index(value["direction"]) + 1 if "direction" in value else 0
+            return self.providers.add(("kRotated", inner, self.rotations.run(rows), len(rows), direction)), ported
+        if kind == "randomized_int":
+            self.need(kind, value, {"source", "property", "values"})
+            inner, ported = self.provider(value["source"])
+            rows = []
+            for state in sorted(self.outcomes(value["source"])):
+                made = self.int_values(state, value["property"])
+                if made:
+                    rows.append((state, made[0], len(made[1]), self.provider_states.run(made[1])))
+            return self.providers.add(("kRandomizedInt", inner, self.int_states.run(rows), len(rows), self.int_provider(value["values"]))), ported
+        if kind == "random_block":
+            self.need(kind, value, {"blocks"})
+            first, count = self._states(self.tag_in_order(value["blocks"]))
+            return self.providers.add(("kRandomBlock", first, count, 0, 0)), True
+        if kind in ("noise", "dual_noise", "noise_threshold"):
+            made = self.noise_made.get(canon(value))
+            if made is None:
+                die(f"gen_features: worldgen/features.json has no noise for the provider {canon(value)[:160]} - run: mcgen.py worldgen")
+            row = {"kind": {"noise": "kNoise", "dual_noise": "kDualNoise", "noise_threshold": "kNoiseThreshold"}[kind],
+                   "noise": self._layers(made["noise"]), "slow": (0, 0), "scale": float(value["scale"]), "slow_scale": 0.0,
+                   "states": (0, 0), "variety": (0, 0), "threshold": 0.0, "high_chance": 0.0, "default": 0, "low": (0, 0), "high": (0, 0)}
+            if kind == "noise_threshold":
+                self.need(kind, value, {"seed", "noise", "scale", "threshold", "high_chance", "default_state", "low_states", "high_states"})
+                row.update(threshold=float(value["threshold"]), high_chance=float(value["high_chance"]), default=self.blocks.state(value["default_state"]),
+                           low=self._states(value["low_states"]), high=self._states(value["high_states"]))
+            else:
+                self.need(kind, value, {"seed", "noise", "scale", "states"} | ({"slow_noise", "slow_scale", "variety"} if kind == "dual_noise" else set()))
+                row["states"] = self._states(value["states"])
+                if kind == "dual_noise":
+                    variety = value["variety"]
+                    if isinstance(variety, dict):
+                        variety = [variety["min_inclusive"], variety["max_inclusive"]]
+                    row.update(slow=self._layers(made["slow_noise"]), slow_scale=float(value["slow_scale"]), variety=tuple(variety))
+            return self.providers.add(("kNoise", self.noise_providers.run([row]), 0, 0, 0)), True
         if kind in UNPORTED_PROVIDERS:
-            return self.providers.add(("kUnported", 0, 0, 0)), False
+            return self.providers.add(("kUnported", 0, 0, 0, 0)), False
         die(f"gen_features: a state provider of the type {kind}: neither ported nor known to wait for it")
 
     # ---------------------------------------------------------------- rule tests
@@ -686,6 +902,18 @@ class FeatureTables:
         elif kind == "iceberg":
             self.need(kind, value, {"state"})
             row = ("kIceberg", self.blocks.state(value["state"]), 0, 0)
+        elif kind == "simple_block":
+            self.need(kind, value, {"to_place"}, {"schedule_tick"})
+            provider, has = self.provider(value["to_place"])
+            # What it may come to place is asked whether it can stay - and placed its own way, if its class has one.
+            first = len(self.simple_blocks.rows)
+            for state in sorted(self.outcomes(value["to_place"])):
+                rule, has_rule = self.survive_rule(state)
+                # (MossyCarpetBlock.placeAt - the carpet of pale moss, with its sides - is not here yet.)
+                parts = parts and has_rule and "MossyCarpetBlock" not in self.classes[self.by_state[state][0]]
+                self.simple_blocks.rows.append((state, rule, *self.double_plant(state)))
+            parts = parts and has
+            row = ("kSimpleBlock", provider, first | (len(self.simple_blocks.rows) - first) << 20, int(bool(value.get("schedule_tick", False))))
         else:
             die(f"gen_features: {kind} is listed as ported and has no table")
         self.nested.update(uses)
@@ -737,7 +965,7 @@ struct Height {
 // BlockPredicate. kStateIn: the block at the offset is in state set a. kNot: not kPredicates[a].
 // kAllOf, kAnyOf: kPredicateLists[a .. a + b), asked in that order. kInsideWorld: the offset is
 // within the world's height. kVolume: kPredicates[a] of every block from the offset to `to`.
-// kWouldSurvive: the block state a could stand at the offset (its own canSurvive).
+// kWouldSurvive: a block state could stand at the offset - by kSurvive[a], its own canSurvive.
 enum class PredicateOp : u8 { kStateIn, kNot, kAllOf, kAnyOf, kInsideWorld, kVolume, kWouldSurvive };
 struct Predicate {
     PredicateOp op;
@@ -779,10 +1007,11 @@ struct Modifier {
 // kOre: kOres[a]. kDisk: kDisks[a]. kUnderwaterMagma: kMagmas[a]. kBlockBlob: state a, on what the
 // predicate b holds for. kSpring: kSprings[a]. kLake: kLakes[a]. kSpike: state a, on what predicate b
 // holds for, through what predicate c holds for. kIceberg: of state a. kBlueIce, kFreezeTopLayer: no
-// more to say. kUnported: a type that waits for its code.
+// more to say. kSimpleBlock: what the provider a gives - one of kSimpleBlocks[b & 0xFFFFF .. + (b >> 20)) -
+// if it can stay; with a tick asked for if c. kUnported: a type that waits for its code.
 enum class FeatureType : u8 {
     kUnported, kNoOp, kRandomSelector, kSimpleRandomSelector, kWeightedRandomSelector, kRandomBooleanSelector, kSequence, kOverlay,
-    kOre, kDisk, kUnderwaterMagma, kBlockBlob, kSpring, kLake, kBlueIce, kSpike, kIceberg, kFreezeTopLayer,
+    kOre, kDisk, kUnderwaterMagma, kBlockBlob, kSpring, kLake, kBlueIce, kSpike, kIceberg, kFreezeTopLayer, kSimpleBlock,
 };
 struct Feature {
     FeatureType type;
@@ -817,13 +1046,71 @@ struct Ore {
 // BlockStateProvider. kSimple: the state a. kRuleBased: kProviderRules[a .. a + b) in order - the
 // first whose predicate holds and whose provider has a state - and failing them the provider c - 1,
 // if c is not 0. kUnported: a type that waits for its code.
-enum class ProviderOp : u8 { kSimple, kRuleBased, kUnported };
+// kWeighted: one of kProviderEntries[a .. a + b), whose weights add up to c. kRotated: what the
+// provider a gives, turned to a direction that is drawn (or, d not 0, to direction d - 1): the row
+// of that state among kRotations[b .. b + c). kRandomizedInt: what the provider a gives with a
+// property of it set to a number drawn of kInts[d] - the row of that state among
+// kIntStates[b .. b + c), or the state as it is where there is none. kRandomBlock: one of
+// kProviderStates[a .. a + b). kNoise: kNoiseProviders[a].
+enum class ProviderOp : u8 { kSimple, kRuleBased, kWeighted, kRotated, kRandomizedInt, kRandomBlock, kNoise, kUnported };
 struct Provider {
     ProviderOp op;
-    u32 a, b, c;
+    u32 a, b, c, d;
 };
 struct ProviderRule {
     u16 predicate, provider;
+};
+struct Rotation {
+    u16 state;
+    u16 to[6];  // by Direction's ordinal
+};
+struct IntStates {
+    u16 state;
+    i32 min;  // the least value of the property
+    u16 count;
+    u32 first;  // kProviderStates[first + value - min]
+};
+// A layer of a noise that is the same in every world: as it stands once it is made.
+struct ProviderLayer {
+    double frequency;
+    float amplitude;
+    double offsets[3];
+    u8 perms[256];
+};
+// NoiseProvider, DualNoiseProvider, NoiseThresholdProvider: kProviderLayers[noise .. noise + layers)
+// and, of the dual one, [slow .. slow + slow_layers); states and the like are runs of kProviderStates.
+enum class NoiseKind : u8 { kNoise, kDualNoise, kNoiseThreshold };
+struct NoiseProvider {
+    NoiseKind kind;
+    u16 noise, layers, slow, slow_layers;
+    float scale, slow_scale;
+    u16 states, state_count;
+    i32 variety_min, variety_max;
+    float threshold, high_chance;
+    u16 default_state;
+    u16 low, low_count, high, high_count;
+};
+
+// BlockState.canSurvive. kAll: each of kSurvivePairs[a .. a + b) holds - the block at its offset is in
+// its set. kSugarCane: the block below is of set a, or of set b with a block of set c on one of its
+// four sides. kSmallDripleaf: the block below is of set a, or the place holds a block of set b and
+// the block below is of set c. kMushroom: the block below is of set a, or it is dark enough and
+// that block is of set b. kUnported: a class that waits for its code.
+enum class SurviveOp : u8 { kAlways, kNever, kAll, kSugarCane, kSmallDripleaf, kMushroom, kUnported };
+struct Survive {
+    SurviveOp op;
+    u32 a, b, c;
+};
+struct SurvivePair {
+    i8 dx, dy, dz;
+    u16 set;
+};
+// SimpleBlockFeature: what a state its provider can give is to it - the rule it stays by, and, of a
+// plant of two blocks, its two halves (dry: lower, upper; in water: the same two).
+struct SimpleBlock {
+    u16 state;
+    u16 survive;
+    u16 halves[4];
 };
 // DiskFeature, UnderwaterMagmaFeature, SpringFeature, LakeFeature: their fields, with predicates,
 // providers and numbers as rows of their tables.
@@ -893,7 +1180,35 @@ struct Placed {
     out.append(f"inline constexpr Ore kOres[{max(1, len(t.ores.rows))}] = {{"
                + ", ".join(f"{{{size}, {count}, {first}, {cfloat(chance)}}}" for size, chance, first, count in t.ores.rows) + "};\n")
     out.append(f"inline constexpr Provider kProviders[{max(1, len(t.providers.rows))}] = {{"
-               + ", ".join(f"{{ProviderOp::{op}, {a}, {b}, {c}}}" for op, a, b, c in t.providers.rows) + "};\n")
+               + ", ".join(f"{{ProviderOp::{op}, {a}, {b}, {c}, {d}}}" for op, a, b, c, d in t.providers.rows) + "};\n")
+    out.append(f"inline constexpr Entry kProviderEntries[{max(1, len(t.provider_entries.rows))}] = {{"
+               + ", ".join(f"{{{state}, {weight}}}" for state, weight in t.provider_entries.rows) + "};\n")
+    out.append(f"inline constexpr u16 kProviderStates[{max(1, len(t.provider_states.rows))}] = {{{', '.join(map(str, t.provider_states.rows)) or '0'}}};\n")
+    out.append(f"inline constexpr Rotation kRotations[{max(1, len(t.rotations.rows))}] = {{"
+               + ", ".join(f"{{{row[0]}, {{{', '.join(map(str, row[1:]))}}}}}" for row in t.rotations.rows) + "};\n")
+    out.append(f"inline constexpr IntStates kIntStates[{max(1, len(t.int_states.rows))}] = {{"
+               + ", ".join(f"{{{a}, {b}, {c}, {d}}}" for a, b, c, d in t.int_states.rows) + "};\n")
+    as_double = lambda bits: struct.unpack("<d", struct.pack("<q", int(bits)))[0].hex()
+    as_float = lambda bits: cfloat(struct.unpack("<f", struct.pack("<i", int(bits)))[0])
+    out.append(f"inline constexpr ProviderLayer kProviderLayers[{max(1, len(t.provider_layers))}] = {{\n")
+    for layer in t.provider_layers:
+        out.append(f"    {{{as_double(layer['frequency'])}, {as_float(layer['amplitude'])}, {{{', '.join(as_double(o) for o in layer['offsets'])}}},\n"
+                   f"     {{{', '.join(map(str, layer['perms']))}}}}},\n")
+    out.append("};\n")
+    out.append(f"inline constexpr NoiseProvider kNoiseProviders[{max(1, len(t.noise_providers.rows))}] = {{\n")
+    for r in t.noise_providers.rows:
+        out.append(f"    {{NoiseKind::{r['kind']}, {r['noise'][0]}, {r['noise'][1]}, {r['slow'][0]}, {r['slow'][1]}, {cfloat(r['scale'])}, {cfloat(r['slow_scale'])}, "
+                   f"{r['states'][0]}, {r['states'][1]}, {r['variety'][0]}, {r['variety'][1]}, {cfloat(r['threshold'])}, {cfloat(r['high_chance'])}, "
+                   f"{r['default']}, {r['low'][0]}, {r['low'][1]}, {r['high'][0]}, {r['high'][1]}}},\n")
+    out.append("};\n")
+    out.append(f"inline constexpr Survive kSurvive[{max(1, len(t.survive.rows))}] = {{"
+               + ", ".join(f"{{SurviveOp::{op}, {a}, {b}, {c}}}" for op, a, b, c in t.survive.rows) + "};\n")
+    out.append(f"inline constexpr SurvivePair kSurvivePairs[{max(1, len(t.survive_pairs.rows))}] = {{"
+               + ", ".join(f"{{{dx}, {dy}, {dz}, {at}}}" for dx, dy, dz, at in t.survive_pairs.rows) + "};\n")
+    out.append(f"inline constexpr SimpleBlock kSimpleBlocks[{max(1, len(t.simple_blocks.rows))}] = {{"
+               + ", ".join(f"{{{state}, {rule}, {{{a}, {b}, {c}, {d}}}}}" for state, rule, a, b, c, d in t.simple_blocks.rows) + "};\n")
+    # For the golden script (WorldgenSurvive.golden) and the test of the rules: which rule a state stays by.
+    (vdir(version) / "worldgen" / "survive_rules.txt").write_text("".join(f"{state} {rule}\n" for state, rule in sorted(t.survive_of.items())))
     out.append(f"inline constexpr ProviderRule kProviderRules[{max(1, len(t.provider_rules.rows))}] = {{"
                + ", ".join(f"{{{a}, {b}}}" for a, b in t.provider_rules.rows) + "};\n")
     out.append(f"inline constexpr Disk kDisks[{max(1, len(t.disks.rows))}] = {{"

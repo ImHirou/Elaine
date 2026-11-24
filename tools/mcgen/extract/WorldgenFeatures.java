@@ -1035,6 +1035,7 @@ final class WorldgenFeatures {
      *               it holds for, a bit a state
      *   decorations whole decorations with the features of one kind alone, kind by kind (decorations())
      *   attempts    a kind of feature placed again and again in one place (attempts())
+     *   survive     the rules of canSurvive held to the method in worlds drawn at random (WorldgenSurvive.golden)
      *   math        Math.sin and Math.cos of every angle a feature can make of a float: all of the answers
      *               as one number, and a few of them written out (WorldgenMath.golden; at the end of the file)
      *   placements  chunks of real terrain around which, between them, every feature of the overworld's
@@ -1150,11 +1151,44 @@ final class WorldgenFeatures {
         for (net.minecraft.core.Direction direction : net.minecraft.core.Direction.values())
             facts.put("kSetFaceOccludes " + direction.getName(), state -> (faceOccludes(state) >> direction.ordinal() & 1) != 0);
         facts.put("kSetSnowSurvivesOn", WorldgenFeatures::snowSurvivesOn);
+        // The sets the rules of canSurvive that are written by hand are made of (src/worldgen/survive.hpp).
+        facts.put("kSet a cactus has beside it", state -> !(state.isSolid() || state.getFluidState().is(net.minecraft.tags.FluidTags.LAVA)));
+        facts.put("kSet a cactus stands on", state -> state.is(net.minecraft.world.level.block.Blocks.CACTUS) || state.is(net.minecraft.tags.BlockTags.SUPPORTS_CACTUS));
+        facts.put("kSet that is no liquid", state -> !state.liquid());
+        facts.put("kSet a lily pad lies on", state -> state.getFluidState().is(net.minecraft.tags.FluidTags.SUPPORTS_LILY_PAD) || state.is(net.minecraft.tags.BlockTags.SUPPORTS_LILY_PAD));
+        facts.put("kSet that holds no fluid", state -> state.getFluidState().is(net.minecraft.world.level.material.Fluids.EMPTY));
+        facts.put("kSet a big dripleaf's stem stands on", state -> state.is(net.minecraft.world.level.block.Blocks.BIG_DRIPLEAF_STEM) || state.is(net.minecraft.tags.BlockTags.SUPPORTS_BIG_DRIPLEAF));
+        facts.put("kSet a big dripleaf's stem has above it", state -> state.is(net.minecraft.world.level.block.Blocks.BIG_DRIPLEAF_STEM) || state.is(net.minecraft.world.level.block.Blocks.BIG_DRIPLEAF));
+        facts.put("kSet a spore blossom hangs from", state -> {
+            asked[0] = state;
+            return net.minecraft.world.level.block.Block.canSupportCenter(everywhere, BlockPos.ZERO, net.minecraft.core.Direction.DOWN);
+        });
+        facts.put("kSet that holds no water", state -> !state.getFluidState().is(net.minecraft.tags.FluidTags.WATER));
+        facts.put("kSet tall seagrass stands on", state -> {
+            asked[0] = state;
+            return state.isFaceSturdy(everywhere, BlockPos.ZERO, net.minecraft.core.Direction.UP) && !state.is(net.minecraft.tags.BlockTags.CANNOT_SUPPORT_SEAGRASS);
+        });
+        facts.put("kSet full of water", state -> state.getFluidState().is(net.minecraft.tags.FluidTags.WATER) && state.getFluidState().isFull());
+        facts.put("kSet a small dripleaf stands on", state -> state.is(net.minecraft.tags.BlockTags.SUPPORTS_SMALL_DRIPLEAF));
+        facts.put("kSet that holds a source of water", state -> state.getFluidState().isSourceOfType(net.minecraft.world.level.material.Fluids.WATER));
+        facts.put("kSet plants stand on", state -> state.is(net.minecraft.tags.BlockTags.SUPPORTS_VEGETATION));
+        facts.put("kSet of sugar cane", state -> state.is(net.minecraft.world.level.block.Blocks.SUGAR_CANE));
+        facts.put("kSet sugar cane stands on", state -> state.is(net.minecraft.tags.BlockTags.SUPPORTS_SUGAR_CANE));
+        facts.put("kSet sugar cane has beside its ground", state -> state.getFluidState().is(net.minecraft.tags.FluidTags.SUPPORTS_SUGAR_CANE_ADJACENTLY)
+            || state.is(net.minecraft.tags.BlockTags.SUPPORTS_SUGAR_CANE_ADJACENTLY));
+        facts.put("kSet a mushroom needs no dark on", state -> state.is(net.minecraft.tags.BlockTags.OVERRIDES_MUSHROOM_LIGHT_REQUIREMENT));
+        facts.put("kSet of whole blocks that let no light through", BlockState::isSolidRender);
         for (var fact : facts.entrySet()) {
             byte[] bits = new byte[(states + 7) / 8];
             for (int id = 0; id < states; ++id)
                 if (fact.getValue().test(net.minecraft.world.level.block.Block.stateById(id))) bits[id >> 3] |= (byte) (1 << (id & 7));
             sets.put('"' + fact.getKey() + '"', fnv(0xcbf29ce484222325L, bits));
+        }
+        // ...and the sets the jar itself made of canSurvive (survive.json): as they lie there, by their number.
+        java.nio.file.Path survive = WorldgenRef.out.resolve("survive.json");
+        if (Files.exists(survive)) {
+            var made = com.google.gson.JsonParser.parseString(Files.readString(survive)).getAsJsonObject().getAsJsonArray("sets");
+            for (int i = 0; i < made.size(); ++i) sets.put("\"survives " + i + "\"", fnv(0xcbf29ce484222325L, java.util.HexFormat.of().parseHex(made.get(i).getAsString())));
         }
         o.i32(sets.size());
         for (Map.Entry<String, Long> e : sets.entrySet()) {
@@ -1266,6 +1300,7 @@ final class WorldgenFeatures {
             + " placed features in them come to " + positions + " positions (" + unrecorded + " more have a feature of their own written out)");
         decorations(o, world, steps, every);
         attempts(o, world, steps, every);
+        WorldgenSurvive.golden(o);
         WorldgenMath.golden(o);
         return o.save(file);
     }
@@ -1413,6 +1448,10 @@ final class WorldgenFeatures {
         {"iceberg", "IcebergFeature", "3000", "minecraft:frozen_ocean", "minecraft:deep_frozen_ocean"},
         {"freeze_top_layer", "SnowAndFreezeFeature", "2", "minecraft:snowy_plains", "minecraft:frozen_ocean", "minecraft:grove", "minecraft:windswept_hills",
             "minecraft:frozen_peaks"},
+        {"simple_block", "SimpleBlockFeature", "300", "minecraft:plains", "minecraft:flower_forest", "minecraft:meadow", "minecraft:forest", "minecraft:swamp",
+            "minecraft:taiga", "minecraft:desert", "minecraft:jungle", "minecraft:lush_caves", "minecraft:warm_ocean", "minecraft:mushroom_fields",
+            "minecraft:savanna", "minecraft:cherry_grove", "minecraft:old_growth_pine_taiga", "minecraft:sunflower_plains", "minecraft:mangrove_swamp",
+            "minecraft:dark_forest", "minecraft:ocean"},
     };
 
     /**
@@ -1612,7 +1651,81 @@ final class WorldgenFeatures {
         JsonArray snow = new JsonArray();
         for (int id = 0; id < net.minecraft.world.level.block.Block.BLOCK_STATE_REGISTRY.size(); ++id) snow.add(snowSurvivesOn(net.minecraft.world.level.block.Block.stateById(id)) ? 1 : 0);
         root.add("snow_survives_on", snow);
+        // The blocks of every block tag in the order the game holds them: what a provider draws one of
+        // (RandomBlockProvider: HolderSet.getRandomElement) is the n-th of them.
+        JsonObject tags = new JsonObject();
+        net.minecraft.core.registries.BuiltInRegistries.BLOCK.getTags().forEach(named -> {
+            JsonArray blocks = new JsonArray();
+            named.forEach(holder -> blocks.add(holder.getRegisteredName()));
+            tags.add(named.key().location().toString(), blocks);
+        });
+        root.add("block_tags", tags);
+        root.add("noise_providers", noiseProviders(registries));
         return root;
+    }
+
+    /** A noise as it is once it is made (NoiseStack): its layers - frequency, amplitude, offsets, permutation - numbers as their bits. */
+    static JsonArray layers(Object noise) throws Exception {
+        JsonArray out = new JsonArray();
+        Object[] made = (Object[]) field(net.minecraft.world.level.levelgen.synth.NoiseStack.class, "layers").get(noise);
+        for (Object layer : made) {
+            Object gradient = field(layer.getClass(), "noise").get(layer);
+            if (gradient.getClass() != net.minecraft.world.level.levelgen.synth.PerlinNoise.class)
+                throw new IllegalStateException("a layer of " + gradient.getClass() + " in a state provider's noise");
+            JsonObject of = new JsonObject();
+            of.addProperty("frequency", Long.toString(Double.doubleToRawLongBits((double) field(layer.getClass(), "frequency").get(layer))));
+            of.addProperty("amplitude", Float.floatToRawIntBits((float) field(layer.getClass(), "amplitude").get(layer)));
+            JsonArray offsets = new JsonArray();
+            for (String name : new String[] {"offsetX", "offsetY", "offsetZ"})
+                offsets.add(Long.toString(Double.doubleToRawLongBits((double) field(net.minecraft.world.level.levelgen.synth.GradientNoise.class, name).get(gradient))));
+            of.add("offsets", offsets);
+            JsonArray perms = new JsonArray();
+            for (byte b : (byte[]) field(net.minecraft.world.level.levelgen.synth.GradientNoise.class, "perms").get(gradient)) perms.add(b & 0xFF);
+            of.add("perms", perms);
+            out.add(of);
+        }
+        return out;
+    }
+
+    static java.lang.reflect.Field field(Class<?> owner, String name) throws Exception {
+        java.lang.reflect.Field f = owner.getDeclaredField(name);
+        f.setAccessible(true);
+        return f;
+    }
+
+    /**
+     * The state providers of the data that go by a noise (NoiseBasedStateProvider): each as it is written, and the
+     * noises it made of its seed - the same in every world, so they are tables to src/worldgen and not code.
+     */
+    static JsonArray noiseProviders(RegistryAccess registries) throws Exception {
+        JsonArray out = new JsonArray();
+        var ops = registries.createSerializationContext(com.mojang.serialization.JsonOps.INSTANCE);
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        java.util.ArrayDeque<com.google.gson.JsonElement> open = new java.util.ArrayDeque<>();
+        for (String kind : new String[] {"worldgen/placed_feature", "worldgen/feature", "worldgen/block_state_provider"})
+            for (var found : resources.listResources(kind, id -> id.getPath().endsWith(".json")).entrySet())
+                try (java.io.Reader reader = found.getValue().openAsReader()) {
+                    open.add(com.google.gson.JsonParser.parseReader(reader));
+                }
+        while (!open.isEmpty()) {
+            com.google.gson.JsonElement e = open.poll();
+            if (e.isJsonArray()) e.getAsJsonArray().forEach(open::add);
+            if (!e.isJsonObject()) continue;
+            e.getAsJsonObject().asMap().values().forEach(open::add);
+            if (!e.getAsJsonObject().has("type") || !e.getAsJsonObject().has("noise") || !e.getAsJsonObject().has("seed")) continue;
+            var parsed = net.minecraft.world.level.levelgen.feature.stateproviders.BlockStateProvider.DIRECT_CODEC.parse(ops, e).result();
+            if (parsed.isEmpty() || !(parsed.get() instanceof net.minecraft.world.level.levelgen.feature.stateproviders.NoiseBasedStateProvider provider)) continue;
+            StringBuilder name = new StringBuilder();
+            canon(e, name);
+            if (!seen.add(name.toString())) continue;
+            JsonObject of = new JsonObject();
+            of.addProperty("provider", name.toString());
+            of.add("noise", layers(field(net.minecraft.world.level.levelgen.feature.stateproviders.NoiseBasedStateProvider.class, "noise").get(provider)));
+            if (provider instanceof net.minecraft.world.level.levelgen.feature.stateproviders.DualNoiseProvider)
+                of.add("slow_noise", layers(field(net.minecraft.world.level.levelgen.feature.stateproviders.DualNoiseProvider.class, "slowNoise").get(provider)));
+            out.add(of);
+        }
+        return out;
     }
 
     /** A level in which one block state is everywhere, and nothing else is known - as the tables of mcgen.py gamedata see a block. */
@@ -1641,5 +1754,5 @@ final class WorldgenFeatures {
     }
 
     /** Which sections of WorldgenRef want the game loaded with its resources kept. */
-    static final List<String> SECTIONS = List.of("census", "replay", "golden");
+    static final List<String> SECTIONS = List.of("features", "census", "replay", "golden", "survive");
 }

@@ -103,6 +103,8 @@ class Decorator {
                      Pos origin);
     bool place_iceberg(u16 state, FeatureRandom& random, Pos origin);
     bool place_freeze_top_layer(Pos origin);
+    bool place_simple_block(const ft::Feature& feature, FeatureRandom& random, Pos origin);
+    u16 noise_state(const ft::NoiseProvider& provider, FeatureRandom& random, Pos at);
     i32 optional_state(const ft::Provider& provider, FeatureRandom& random, Pos at);
     u16 state_of(const ft::Provider& provider, FeatureRandom& random, Pos at);
     void mark_above(i32 x, i32 y, i32 z);
