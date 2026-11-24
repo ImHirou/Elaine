@@ -814,5 +814,53 @@ TEST(WorldgenFeature, SineAndCosineOfEveryAngleOfAFloatAreTheJvms) {
             EXPECT_EQ(std::bit_cast<u64>(jmath::cos(x)), cosine) << name << ": cos " << x;
         }
     }
+    // Math.pow and Math.log, as a large dripstone uses them: its heights - whole numbers - are the
+    // JVM's, every one of some hundred thousand drawn as the feature draws them...
+    struct Mix {  // (SplitMix64: the same numbers as WorldgenSurvive.Mix)
+        u64 x;
+        u64 next() {
+            x += 0x9E3779B97F4A7C15ull;
+            u64 z = x;
+            z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+            z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+            return z ^ (z >> 31);
+        }
+    };
+    const u32 heights = in.num<u32>();
+    ASSERT_GT(heights, 100000u);
+    Mix mix{0x44524950ull};
+    u64 fold = kFnv;
+    for (u32 i = 0; i < heights; ++i) {
+        const u64 a = mix.next(), b = mix.next();
+        const i32 radius = 1 + static_cast<i32>((a >> 8 & 0xFFFF) % 19);
+        const float blunt = 0.3f + (static_cast<float>(static_cast<i32>(a >> 40)) * 5.9604645E-8f) * 0.7f;
+        const float scale = 0.4f + (static_cast<float>(static_cast<i32>(b >> 40)) * 5.9604645E-8f) * 1.6f;
+        const i32 dx = static_cast<i32>((b & 0xFFFF) % 39) - 19, dz = static_cast<i32>((b >> 16 & 0xFFFF) % 39) - 19;
+        const float check =
+            (a & 1) == 0 ? 0.0f : static_cast<float>(std::sqrt(static_cast<double>(static_cast<float>(dx * dx + dz * dz))));
+        fold = fnv(fold, static_cast<u32>(speleothem_height(static_cast<double>(check), static_cast<double>(radius),
+                                                            static_cast<double>(scale), static_cast<double>(blunt))));
+    }
+    EXPECT_EQ(fold, in.num<u64>()) << "the heights of large dripstones";
+    // ...and our own logarithm and power, which the heights nearest a whole number are made of,
+    // are the JVM's to the last bit or the one beside it - the nearest double to the true value,
+    // which HotSpot's mostly is.
+    const u32 samples = in.num<u32>();
+    ASSERT_GT(samples, 1000u);
+    u32 same = 0, beside = 0;
+    for (u32 i = 0; i < samples; ++i) {
+        const double r = std::bit_cast<double>(in.num<u64>());
+        const u64 want[3] = {in.num<u64>(), in.num<u64>(), in.num<u64>()};
+        const u64 ours[3] = {std::bit_cast<u64>(jmath::log(r)), std::bit_cast<u64>(jmath::pow(r, 1.3333333333333333)),
+                             std::bit_cast<u64>(jmath::pow(r, 0.6666666666666666))};
+        for (u32 k = 0; k < 3; ++k) {
+            const u64 apart = ours[k] > want[k] ? ours[k] - want[k] : want[k] - ours[k];
+            same += apart == 0;
+            beside += apart == 1;
+            EXPECT_LE(apart, 1u) << (k == 0 ? "log " : "pow ") << r;
+        }
+    }
+    EXPECT_GT(same, samples * 3 * 9 / 10) << beside << " are the next double";
+    std::printf("of %u logarithms and powers %u are the JVM's, %u the double beside it\n", samples * 3, same, beside);
     EXPECT_EQ(in.p, in.end);
 }

@@ -92,6 +92,10 @@ class Server:
         opts.update({k.replace("_", "-"): v for k, v in args.items()})
         self.tick = 1.0 / float(opts["tick-rate"])   # seconds a tick
         self.log = tempfile.NamedTemporaryFile("w+", suffix=".log", delete=False)
+        # A world of terrain that is new finds where it begins before the game runs - its first
+        # chunks, with all that grows in them, which takes a build with sanitizers many seconds. That
+        # is waited for by the line that says so, not by every scenario's first wait.
+        begins = opts.get("level-type") == "minecraft:normal" and not os.path.exists(os.path.join(self.world, "world.json"))
         # stdin is the server's console: a pipe, so that a test can type on it.
         self.proc = subprocess.Popen([exe] + [f"--{k}={v}" for k, v in opts.items()], stderr=self.log, stdout=self.log,
                                      stdin=subprocess.PIPE)
@@ -101,12 +105,14 @@ class Server:
                 raise RuntimeError(f"server exited with {self.proc.returncode}:\n{self.read_log()}")
             try:
                 socket.create_connection(("127.0.0.1", self.port), timeout=0.2).close()
-                return
+                break
             except OSError:
                 if time.time() > deadline:
                     self.stop()
                     raise RuntimeError("server did not start listening")
                 time.sleep(0.002)
+        if begins:
+            self.wait_log("the world begins at", timeout=180)
 
     def client(self, timeout: float = 5.0) -> Client:
         return Client("127.0.0.1", self.port, timeout)

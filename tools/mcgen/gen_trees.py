@@ -37,6 +37,15 @@ PROPS = [
     ("kWest", "west", ["true", "false"]),
     ("kTip", "tip", ["true", "false"]),
     ("kHanging", "hanging", ["true", "false"]),
+    ("kFacing", "facing", ["north", "east", "south", "west", "up", "down"]),
+    ("kThickness", "thickness", ["tip_merge", "tip", "frustum", "middle", "base"]),
+    ("kVerticalDirection", "vertical_direction", ["up", "down"]),
+    ("kBottom", "bottom", ["true", "false"]),
+    ("kWallNorth", "north", ["none", "low", "tall"]),
+    ("kWallEast", "east", ["none", "low", "tall"]),
+    ("kWallSouth", "south", ["none", "low", "tall"]),
+    ("kWallWest", "west", ["none", "low", "tall"]),
+    ("kCanSummon", "can_summon", ["true", "false"]),
 ]
 
 TRUNKS = {
@@ -84,10 +93,11 @@ SHAPES = {
     "BambooSaplingBlock": "kBambooSapling",
     "BeehiveBlock": "kNone",          # (it lets its bees out beside a fire: nothing of the block changes)
     "CreakingHeartBlock": "kTick",
+    "MossyCarpetBlock": "kMossyCarpet",
 }
 # Which of them ask BlockState.canSurvive.
 SHAPES_THAT_SURVIVE = {"kSurviveOrAir", "kDoublePlant", "kSeagrass", "kCocoa", "kShelfMushroom", "kMangrovePropagule", "kSurviveOrTick",
-                       "kBamboo", "kBambooSapling"}
+                       "kBamboo", "kBambooSapling", "kMossyCarpet"}
 
 
 class TreeTables:

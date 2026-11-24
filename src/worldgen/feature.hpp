@@ -26,6 +26,7 @@
 
 #include "base/buf.hpp"
 #include "worldgen/java_hash.hpp"
+#include "worldgen/noise.hpp"
 #include "worldgen/region.hpp"
 
 #include PROTO_GEN_WORLDGEN_FEATURES_HPP
@@ -66,6 +67,19 @@ struct FeatureWork {
     std::vector<Limb> fancy;
     std::vector<u64> shape;  // the blocks of the tree, a bit a block of its box (BitSetDiscreteVoxelShape)
     base::ByteBuf tag;       // a block entity's tag while it is written (a nest's bees)
+
+    // Caves (cave.cpp).
+    JavaHashSet patch, patch_water;  // VegetationPatchFeature: the ground it laid, and where that holds water
+    std::vector<Pos> patch_spots;    // ...in the order vegetation is put on it
+    bool geode_made = false;         // GeodeFeature's noise, which is the world's: made when a world's first geode is
+    i64 geode_seed = 0;
+    Layer geode_layers[2];
+    struct SculkCursor {  // SculkSpreader.ChargeCursor; facings: -1 for none yet, else a bit a direction
+        i32 x, y, z;
+        i32 charge, update_delay, decay_delay;
+        i32 facings;
+    };
+    std::vector<SculkCursor> cursors;
 };
 
 // IntProvider.sample, HeightProvider.sample.
@@ -136,6 +150,14 @@ class Decorator {
     bool place_huge_mushroom(const ft::Mushroom& mushroom, bool red, FeatureRandom& random, Pos origin);
     bool place_tree(const ft::Tree& tree, FeatureRandom& random, Pos origin);
     bool place_fallen_tree(const ft::FallenTree& fallen, FeatureRandom& random, Pos origin);
+    bool place_vegetation_patch(const ft::Patch& patch, FeatureRandom& random, Pos origin);
+    bool place_root_system(const ft::RootSystem& roots, FeatureRandom& random, Pos origin);
+    bool place_speleothem(const ft::Speleothem& speleothem, FeatureRandom& random, Pos origin);
+    bool place_speleothem_cluster(const ft::SpeleothemCluster& cluster, FeatureRandom& random, Pos origin);
+    bool place_large_dripstone(const ft::LargeDripstone& dripstone, FeatureRandom& random, Pos origin);
+    bool place_geode(const ft::Geode& geode, FeatureRandom& random, Pos origin);
+    bool place_multiface_growth(const ft::Multiface& growth, FeatureRandom& random, Pos origin);
+    bool place_sculk_patch(const ft::SculkPatch& patch, FeatureRandom& random, Pos origin);
     friend struct TreeBuilder;  // (tree.cpp)
     u16 noise_state(const ft::NoiseProvider& provider, FeatureRandom& random, Pos at);
     i32 optional_state(const ft::Provider& provider, FeatureRandom& random, Pos at);
@@ -149,6 +171,12 @@ class Decorator {
     std::vector<Top>* log_ = nullptr;
     std::vector<Trace>* trace_ = nullptr;
 };
+
+// LargeDripstone.getHeightAtRadius (cave.cpp): (int) SpeleothemUtils.getSpeleothemHeight.
+i32 speleothem_height(double xz_from_center, double radius, double scale, double bluntness);
+
+// MossyCarpetBlock.placeAt (cave.cpp): a carpet of pale moss, with what it sends up the walls beside it.
+void place_mossy_carpet(Region& region, Pos at);
 
 // RuleTest.test: what a block state at a height is to whoever would replace it.
 bool test(const ft::Rule& rule, u32 state, i32 y);

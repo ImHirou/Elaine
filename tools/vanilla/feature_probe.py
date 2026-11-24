@@ -157,7 +157,9 @@ def read_chunk(tag: dict, states: States) -> dict | None:
     out["marks"] = marks
     for kind in ("block_ticks", "fluid_ticks"):
         out[kind] = [[t["i"], int(t["x"]), int(t["y"]), int(t["z"]), int(t["t"]), int(t["p"])] for t in tag.get(kind, [])]
-    out["block_entities"] = [mc.snbt(be) for be in tag.get("block_entities", [])]
+    # (A block entity a chunk in the making only knows to be there is {id: "DUMMY"} and its place.)
+    out["block_entities"] = [f"(nothing known of the one at {int(be['x'])}, {int(be['y'])}, {int(be['z'])})" if be.get("id") == "DUMMY" else mc.snbt(be)
+                             for be in tag.get("block_entities", [])]
     return out
 
 

@@ -2503,12 +2503,12 @@ for them - and every placed feature of the kind tried with source after source, 
 on what the ones before left, until a dozen have written something. What a chunk rarely has
 (an iceberg: one chunk in sixteen; a blue one: one in two hundred) happens here by the dozen,
 and what was built is in the way of what follows. Every attempt writes what vanilla's writes -
-or nothing where vanilla's writes nothing - and the nine chunks end the same: 91066 attempts
-of sixteen kinds, 1523 of them writing. Beside the placements, the golden script has whole decorations:
+or nothing where vanilla's writes nothing - and the nine chunks end the same: 94005 attempts
+of twenty-four kinds, 1769 of them writing. Beside the placements, the golden script has whole decorations:
 with the features of one kind alone - so far ores: four areas of 4 x 4 chunks (windswept hills,
-badlands, dripstone and lush caves) - and with every feature that is ported (sixteen areas; the
+badlands, dripstone and lush caves) - and with every feature that is ported (nineteen areas; the
 tables say which, `ported_features.txt`), the inner four chunks decorated one after the other
-in the order of a task. Of each of the features that run (404 and 3176): everything it wrote, where and
+in the order of a task. Of each of the features that run (404 and 4154): everything it wrote, where and
 what, folded into one number (on vanilla's side by sections that say what is set in them - an
 ore's raw writes too), and the long its source gives afterwards; then the sixteen chunks -
 blocks, heightmaps, marks, ticks. A feature that goes wrong is named by the test, with its chunk.
@@ -2519,7 +2519,7 @@ decorated in the order it is given). A world is not the same without the feature
 ported - an ore does not lie where a lake is - so vanilla's world has a data pack in which every
 feature of a biome that is not ported places nothing, under its own name: `FeatureSorter` goes
 by which features the biomes name, so the order, and with it each feature's random source,
-stays. With the 150 placed features that are ported: 352 chunks the server saved before they
+stays. With the 165 placed features that are ported: 352 chunks the server saved before they
 were chunks of the world, 160 with their own features and the rest with what the neighbours' put
 into them - blobs of ore, lakes, icebergs and the crowns of trees lie across the borders of
 chunks, so this is the order replayed, too - the same block for block, heightmaps, the marks in
@@ -2574,9 +2574,49 @@ the JVM's. A bee nest is the first block entity a feature fills in - two or thre
 long in the hive; the tag is written as a chunk in the making saves it, and does not reach the
 game yet (the nest stands empty there). Held to the jar: every placed feature of trees there
 is, in 24 places - forests of every kind, the mangrove swamp, the cherry grove, the dappled
-forest - placed again and again on what the attempts before left, 183 attempts that wrote; and
-whole decorations of sixteen areas, ten of them wooded. Not ported: the two trees of the pale
-garden, whose decorator places a patch of moss (a feature of the caves' kind).
+forest, the pale garden - placed again and again on what the attempts before left, 192
+attempts that wrote; and whole decorations of nineteen areas, eleven of them wooded.
+
+**Caves** (`cave.cpp`, `tools/mcgen/gen_caves.py`). Nine types of feature, each a function
+written from its class, with what it is made of written from theirs:
+
+- *Patches* (`VegetationPatchFeature`, and the waterlogged kind): ground laid over a floor or a
+  ceiling, column by column, and a placed feature set on some of it - moss with its azaleas, clay
+  with dripleaves in pools. The columns that got ground are kept in a `HashSet` and walked for the
+  vegetation with a draw each: `JavaHashSet` again. A carpet of pale moss places itself
+  (`MossyCarpetBlock.placeAt`: what it sends up the walls beside it, a side at a time by the
+  *level's* random source, not the feature's).
+- *The azalea's roots* (`RootSystemFeature`): up from a cave to where a tree may stand, the tree
+  (a placed feature: the one tree with a trunk that bends), rooted dirt down the column, roots
+  hanging from the ceiling below.
+- *Dripstone* (`SpeleothemFeature`, `SpeleothemClusterFeature`, `LargeDripstoneFeature`, with
+  `SpeleothemUtils` and `Column`): a single point, a field of them between a floor and a ceiling
+  with pools, and the big ones - two cones leaning in a wind. The same classes make the spikes of
+  the sulfur caves.
+- *Geodes* (`GeodeFeature`): shells by a sum of inverse distances to a few points, bent by a
+  noise that is the world's (made of the seed by the 48-bit source; its layers are a table).
+- *Lichen and veins* (`MultifaceGrowthFeature`, `MultifaceSpreader`): a block that lies on its
+  neighbours' faces and spreads to another face, the block beside, or round a corner - by one
+  set of rules for lichen and another for a sculk vein.
+- *Sculk* (`SculkPatchFeature`): `SculkSpreader` as a world is made - charges that wander from
+  block to block as cursors, turning what a vein lies on into sculk, growing a sensor or a
+  shrieker (the first blocks with block entities that many chunks have), leaving veins behind and
+  taking them up again; `SculkBehaviour` of sculk, of a vein and of every other block.
+
+A large dripstone's height is where `Math.pow` and `Math.log` come in
+(`SpeleothemUtils.getSpeleothemHeight`). Their arguments are doubles - a bluntness that is any
+float, over a radius - so there is no asking the JVM about all of them as for the sines, and
+HotSpot's answers are within the last bit of the true value without always being the nearest
+double. But the height is used as a whole number: it is computed with the C library's functions,
+and where it lies within a millionth of a whole number - a thousand million times more than any
+two logarithms differ by - with `jmath::log` and `jmath::pow`, which are worked out as sums of
+two doubles and rounded once (the nearest double; 11997 of 12000 arguments of a dripstone give
+HotSpot's very double, three the one beside it). So the result does not depend on which C
+library it was built with, and it is the JVM's whole number unless HotSpot's last bit and ours
+differ exactly where the height crosses a whole number: 400 000 heights drawn as the feature
+draws them are the JVM's, all of them. Held to the jar besides: every one of the nine types
+placed again and again (eight kinds, 2759 attempts, 237 that wrote), and the deep dark, the pale
+garden and the sulfur caves among the whole decorations.
 
 ### Features: one order, and the workers (`world/gen_pipeline.*`)
 
@@ -2646,7 +2686,7 @@ polls and sweeps in an order drawn at random. The same through a `Dimension` wit
 goes on). And `a_world_is_the_same_whoever_makes_it`: two servers of one seed, one with three
 workers and one with all there are, send their clients the same bytes. The task itself - the
 generator's `decorate` over an area of real terrain - is held to the jar's classes with the
-decorations above ("ported": sixteen areas, 3176 features).
+decorations above ("ported": nineteen areas, 4154 features).
 
 ### What is there, and what is not
 
@@ -2656,12 +2696,12 @@ canyons of the carvers (`generateCarvers`).
 
 And of the `features` status: ores, disks, springs, lava lakes, magma, forest rocks, ice
 spikes, icebergs, blue ice, snow and ice, the plants that are one block (or two), what grows
-in a column, vines, corals, the big mushrooms, and trees with what hangs on them and lies
-under them - 150 of the 171 placed features of the biomes, in every chunk of a world.
+in a column, vines, corals, the big mushrooms, trees with what hangs on them and lies under
+them, and what grows in caves - moss, dripstone, geodes, lichen, sculk: 165 of the 171 placed
+features of the biomes, in every chunk of a world.
 
-Not there yet: the moss, dripstone, sculk and geodes of caves, and the pale garden's trees;
-fossils and the other features made of templates; monster rooms; what a block entity the
-generator made holds; and structures. Beyond those:
+Not there yet: fossils and the other features made of templates; monster rooms; what a block
+entity the generator made holds; and structures. Beyond those:
 only the overworld, only the preset `normal`; an imported vanilla world does not go on with this
 generator yet.
 

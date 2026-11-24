@@ -345,6 +345,14 @@ bool Decorator::place_feature(u32 feature, FeatureRandom& random, Pos at) {
         case ft::FeatureType::kHugeRedMushroom: return place_huge_mushroom(ft::kMushrooms[f.a], true, random, at);
         case ft::FeatureType::kTree: return place_tree(ft::kTrees[f.a], random, at);
         case ft::FeatureType::kFallenTree: return place_fallen_tree(ft::kFallenTrees[f.a], random, at);
+        case ft::FeatureType::kVegetationPatch: return place_vegetation_patch(ft::kPatches[f.a], random, at);
+        case ft::FeatureType::kRootSystem: return place_root_system(ft::kRootSystems[f.a], random, at);
+        case ft::FeatureType::kSpeleothem: return place_speleothem(ft::kSpeleothems[f.a], random, at);
+        case ft::FeatureType::kSpeleothemCluster: return place_speleothem_cluster(ft::kSpeleothemClusters[f.a], random, at);
+        case ft::FeatureType::kLargeDripstone: return place_large_dripstone(ft::kLargeDripstones[f.a], random, at);
+        case ft::FeatureType::kGeode: return place_geode(ft::kGeodes[f.a], random, at);
+        case ft::FeatureType::kMultifaceGrowth: return place_multiface_growth(ft::kMultifaces[f.a], random, at);
+        case ft::FeatureType::kSculkPatch: return place_sculk_patch(ft::kSculkPatches[f.a], random, at);
     }
     return false;
 }
@@ -679,6 +687,8 @@ bool Decorator::place_simple_block(const ft::Feature& f, FeatureRandom& random, 
         };
         region.set_block(o.x, o.y, o.z, row->halves[water_at(o.y) ? 2 : 0], 2);
         region.set_block(o.x, o.y + 1, o.z, row->halves[water_at(o.y + 1) ? 3 : 1], 2);
+    } else if (world::block_of(static_cast<u16>(made)) == world::block_of(blk::kPaleMossCarpet)) {
+        place_mossy_carpet(region, o);
     } else {
         region.set_block(o.x, o.y, o.z, static_cast<u16>(made), 2);
     }

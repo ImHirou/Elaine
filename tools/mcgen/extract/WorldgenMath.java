@@ -244,7 +244,7 @@ final class WorldgenMath {
      * For the golden script: what the JVM answers over the first domain, as one number a function,
      * and a few of the answers themselves; then every argument of the others with its answers.
      */
-    static void golden(WorldgenGolden.Out o) {
+    static void golden(WorldgenGolden.Out o) throws Exception {
         Domain[] domains = domains();
         long sines = 0xcbf29ce484222325L, cosines = 0xcbf29ce484222325L;
         List<long[]> samples = new ArrayList<>();
@@ -286,5 +286,47 @@ final class WorldgenMath {
                 o.i64(Double.doubleToRawLongBits(Math.cos(x)));
             }
         }
+        dripstone(o);
+    }
+
+    /**
+     * Math.pow and Math.log, as a large dripstone uses them (SpeleothemUtils.getSpeleothemHeight, of which
+     * LargeDripstone.getHeightAtRadius takes the whole number): heights by the hundred thousand - a radius, a
+     * bluntness and a scale as the feature draws them, the middle of the dripstone or a block of its row - folded
+     * into one number; and a few thousand of the arguments with what the JVM answers for each, for src/worldgen's
+     * own logarithm and power to be held against.
+     */
+    static void dripstone(WorldgenGolden.Out o) throws Exception {
+        java.lang.reflect.Method height = net.minecraft.world.level.levelgen.feature.SpeleothemUtils.class.getDeclaredMethod(
+            "getSpeleothemHeight", double.class, double.class, double.class, double.class);
+        height.setAccessible(true);
+        final int heights = 400000, samples = 1500;
+        WorldgenSurvive.Mix mix = new WorldgenSurvive.Mix(0x44524950L);
+        long fold = 0xcbf29ce484222325L;
+        o.i32(heights);
+        java.io.ByteArrayOutputStream kept = new java.io.ByteArrayOutputStream();
+        java.io.DataOutputStream keep = new java.io.DataOutputStream(kept);
+        for (int i = 0; i < heights; ++i) {
+            long a = mix.next(), b = mix.next();
+            int radius = 1 + (int) ((a >>> 8 & 0xFFFF) % 19);
+            float blunt = 0.3f + ((float) (int) (a >>> 40) * 5.9604645E-8f) * 0.7f;
+            float scale = 0.4f + ((float) (int) (b >>> 40) * 5.9604645E-8f) * 1.6f;
+            int dx = (int) ((b & 0xFFFF) % 39) - 19, dz = (int) ((b >>> 16 & 0xFFFF) % 39) - 19;
+            float check = (a & 1) == 0 ? 0.0f : (float) Math.sqrt((double) (float) (dx * dx + dz * dz));
+            fold = WorldgenGolden.fnv(fold, (int) (double) height.invoke(null, (double) check, (double) radius, (double) scale, (double) blunt));
+            if (i < samples) {
+                // (The argument the functions are asked about, as getSpeleothemHeight makes it.)
+                double xz = Math.max((double) check, (double) blunt);
+                double r = xz / (double) radius * 0.384;
+                keep.writeLong(Double.doubleToRawLongBits(r));
+                keep.writeLong(Double.doubleToRawLongBits(Math.log(r)));
+                keep.writeLong(Double.doubleToRawLongBits(Math.pow(r, 1.3333333333333333)));
+                keep.writeLong(Double.doubleToRawLongBits(Math.pow(r, 0.6666666666666666)));
+            }
+        }
+        o.i64(fold);
+        o.i32(samples);
+        java.nio.ByteBuffer read = java.nio.ByteBuffer.wrap(kept.toByteArray());
+        while (read.hasRemaining()) o.i64(read.getLong());
     }
 }

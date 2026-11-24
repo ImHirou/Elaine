@@ -1105,7 +1105,8 @@ final class WorldgenFeatures {
             if (!e.isJsonObject()) continue;
             e.getAsJsonObject().asMap().values().forEach(open::add);
             // (What a tree's trunk and roots grow through, and where its roots are muddy: sets of states the same way.)
-            for (String blocks : new String[] {"can_grow_through", "muddy_roots_in"})
+            for (String blocks : new String[] {"can_grow_through", "muddy_roots_in", "replaceable", "root_replaceable", "replaceable_blocks", "cannot_replace",
+                                               "invalid_blocks", "can_be_placed_on"})
                 if (e.getAsJsonObject().has(blocks)) {
                     JsonObject same = new JsonObject();
                     same.addProperty("type", "minecraft:matching_blocks");
@@ -1206,8 +1207,20 @@ final class WorldgenFeatures {
         facts.put("kSet a column of bubbles takes the place of", state -> state.getFluidState().is(net.minecraft.tags.FluidTags.BUBBLE_COLUMN_CAN_OCCUPY)
             && state.getFluidState().isSource() && state.getFluidState().isFull());
         facts.put("kSet of pale oak logs", state -> state.is(net.minecraft.tags.BlockTags.PALE_OAK_LOGS));
-        facts.put("kSet with a whole face on top", state -> state.isFaceSturdy(net.minecraft.world.level.EmptyBlockGetter.INSTANCE, BlockPos.ZERO,
-            net.minecraft.core.Direction.UP));
+        for (net.minecraft.core.Direction direction : net.minecraft.core.Direction.values())
+            facts.put("kSetSturdy " + direction.getName(), state -> state.isFaceSturdy(net.minecraft.world.level.EmptyBlockGetter.INSTANCE, BlockPos.ZERO, direction));
+        // Caves.
+        facts.put("kSet whose collision shape is a whole block", state -> state.isCollisionShapeFullBlock(net.minecraft.world.level.EmptyBlockGetter.INSTANCE, BlockPos.ZERO));
+        facts.put("kSet sculk takes the place of", state -> state.is(net.minecraft.tags.BlockTags.SCULK_REPLACEABLE));
+        facts.put("kSet sculk takes the place of as a world is made", state -> state.is(net.minecraft.tags.BlockTags.SCULK_REPLACEABLE_WORLD_GEN));
+        facts.put("kSet that keeps sculk from growing things", state -> state.is(net.minecraft.tags.BlockTags.SCULK_GROWTH_INHIBITORS));
+        facts.put("kSet of fire", state -> state.is(net.minecraft.tags.BlockTags.FIRE));
+        facts.put("kSet of the overworld's stone", state -> state.is(net.minecraft.tags.BlockTags.BASE_STONE_OVERWORLD));
+        facts.put("kSet whose fluid fills the block", state -> state.getFluidState().isFull());
+        facts.put("kSet that holds lava", state -> state.getFluidState().is(net.minecraft.tags.FluidTags.LAVA));
+        facts.put("kSet that is solid", BlockState::isSolid);
+        facts.put("kSet that holds water and nothing else of a fluid", state -> state.getFluidState().isEmpty()
+            || state.getFluidState().is(net.minecraft.world.level.material.Fluids.WATER));
         for (var fact : facts.entrySet()) {
             byte[] bits = new byte[(states + 7) / 8];
             for (int id = 0; id < states; ++id)
@@ -1345,7 +1358,8 @@ final class WorldgenFeatures {
         // `mcgen.py generate` writes) - a chunk's whole decoration as the server's generator makes it.
         {"ported", null, "minecraft:windswept_hills", "minecraft:badlands", "minecraft:dripstone_caves", "minecraft:lush_caves", "minecraft:plains",
             "minecraft:ocean", "minecraft:forest", "minecraft:jungle", "minecraft:old_growth_spruce_taiga", "minecraft:swamp", "minecraft:dark_forest",
-            "minecraft:mangrove_swamp", "minecraft:savanna", "minecraft:cherry_grove", "minecraft:dappled_forest", "minecraft:bamboo_jungle"},
+            "minecraft:mangrove_swamp", "minecraft:savanna", "minecraft:cherry_grove", "minecraft:dappled_forest", "minecraft:bamboo_jungle",
+            "minecraft:deep_dark", "minecraft:pale_garden", "minecraft:sulfur_caves"},
     };
 
     static void chunkState(WorldgenGolden.Out o, ProtoChunk chunk) {
@@ -1493,13 +1507,24 @@ final class WorldgenFeatures {
             + "minecraft:trees_taiga,minecraft:trees_snowy,minecraft:trees_grove,minecraft:trees_windswept_hills,minecraft:trees_windswept_forest,"
             + "minecraft:trees_old_growth_pine_taiga,minecraft:trees_old_growth_spruce_taiga,minecraft:trees_savanna,minecraft:trees_windswept_savanna,"
             + "minecraft:trees_jungle,minecraft:trees_sparse_jungle,minecraft:bamboo_vegetation,minecraft:trees_swamp,minecraft:trees_mangrove,"
-            + "minecraft:dark_forest_vegetation,minecraft:trees_cherry,minecraft:trees_meadow,minecraft:trees_badlands,"
+            + "minecraft:dark_forest_vegetation,minecraft:pale_garden_vegetation,minecraft:trees_cherry,minecraft:trees_meadow,minecraft:trees_badlands,"
             + "minecraft:trees_dappled_forest", "60",
             "minecraft:plains", "minecraft:forest", "minecraft:birch_forest", "minecraft:old_growth_birch_forest", "minecraft:flower_forest",
             "minecraft:taiga", "minecraft:snowy_taiga", "minecraft:grove", "minecraft:windswept_hills", "minecraft:windswept_forest",
             "minecraft:old_growth_pine_taiga", "minecraft:old_growth_spruce_taiga", "minecraft:savanna", "minecraft:windswept_savanna",
             "minecraft:jungle", "minecraft:sparse_jungle", "minecraft:bamboo_jungle", "minecraft:swamp", "minecraft:mangrove_swamp",
-            "minecraft:dark_forest", "minecraft:cherry_grove", "minecraft:meadow", "minecraft:wooded_badlands", "minecraft:dappled_forest"},
+            "minecraft:dark_forest", "minecraft:pale_garden", "minecraft:cherry_grove", "minecraft:meadow", "minecraft:wooded_badlands",
+            "minecraft:dappled_forest"},
+        // Caves: patches of moss and clay, the azalea's roots, dripstone small and large, geodes, lichen, sculk.
+        {"vegetation_patch", "=minecraft:lush_caves_ceiling_vegetation,minecraft:lush_caves_clay,minecraft:lush_caves_vegetation,minecraft:pale_moss_patch",
+            "120", "minecraft:lush_caves", "minecraft:pale_garden"},
+        {"root_system", "=minecraft:rooted_azalea_tree", "400", "minecraft:lush_caves"},
+        {"speleothem", "=minecraft:pointed_dripstone,minecraft:sulfur_spike", "200", "minecraft:dripstone_caves", "minecraft:sulfur_caves"},
+        {"speleothem_cluster", "=minecraft:dripstone_cluster,minecraft:sulfur_spike_cluster", "120", "minecraft:dripstone_caves", "minecraft:sulfur_caves"},
+        {"large_dripstone", "=minecraft:large_dripstone", "200", "minecraft:dripstone_caves"},
+        {"geode", "=minecraft:amethyst_geode", "3000", "minecraft:plains", "minecraft:dripstone_caves", "minecraft:ocean"},
+        {"multiface_growth", "=minecraft:glow_lichen,minecraft:sculk_vein", "200", "minecraft:dripstone_caves", "minecraft:deep_dark", "minecraft:plains"},
+        {"sculk_patch", "=minecraft:sculk_patch_deep_dark", "200", "minecraft:deep_dark"},
         {"simple_block", "SimpleBlockFeature", "300", "minecraft:plains", "minecraft:flower_forest", "minecraft:meadow", "minecraft:forest", "minecraft:swamp",
             "minecraft:taiga", "minecraft:desert", "minecraft:jungle", "minecraft:lush_caves", "minecraft:warm_ocean", "minecraft:mushroom_fields",
             "minecraft:savanna", "minecraft:cherry_grove", "minecraft:old_growth_pine_taiga", "minecraft:sunflower_plains", "minecraft:mangrove_swamp",
@@ -1727,6 +1752,28 @@ final class WorldgenFeatures {
         });
         root.add("block_tags", tags);
         root.add("noise_providers", noiseProviders(registries));
+        // GeodeFeature.NOISE_PARAMETERS as a noise is made of it: how often and how much each layer counts (which is
+        // the same for every seed; the seed is the layers' gradients, which src/worldgen makes).
+        java.lang.reflect.Field geode = field(net.minecraft.world.level.levelgen.feature.GeodeFeature.class, "NOISE_PARAMETERS");
+        Object stack = ((net.minecraft.world.level.levelgen.synth.NormalNoise) geode.get(null)).create(
+            new net.minecraft.world.level.levelgen.WorldgenRandom(new net.minecraft.world.level.levelgen.LegacyRandomSource(0L)));
+        JsonObject geodeNoise = new JsonObject();
+        geodeNoise.addProperty("first_octave", -4);
+        JsonArray geodeLayers = new JsonArray();
+        for (com.google.gson.JsonElement layer : layers(stack)) {
+            JsonObject of = new JsonObject();
+            of.add("frequency", layer.getAsJsonObject().get("frequency"));
+            of.add("amplitude", layer.getAsJsonObject().get("amplitude"));
+            geodeLayers.add(of);
+        }
+        geodeNoise.add("layers", geodeLayers);
+        root.add("geode_noise", geodeNoise);
+        // BlockState.isCollisionShapeFullBlock, a state at a time (what sculk may begin beside).
+        JsonArray collisionFull = new JsonArray();
+        for (int id = 0; id < net.minecraft.world.level.block.Block.BLOCK_STATE_REGISTRY.size(); ++id)
+            collisionFull.add(net.minecraft.world.level.block.Block.stateById(id).isCollisionShapeFullBlock(
+                net.minecraft.world.level.EmptyBlockGetter.INSTANCE, BlockPos.ZERO) ? 1 : 0);
+        root.add("collision_full", collisionFull);
         return root;
     }
 

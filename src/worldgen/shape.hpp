@@ -26,6 +26,42 @@ inline i32 optional_leaf_distance(u32 state) {
     return -1;
 }
 
+// MossyCarpetBlock.getUpdatedState: a carpet of pale moss with the sides it sends up the walls
+// beside it - low, or tall under more of it, or none where there is nothing to climb. A side by
+// its direction (kMossyWall); none, low, tall are 0, 1, 2.
+inline constexpr proto::gen::worldgen::feature::Prop kMossyWall[6] = {
+    proto::gen::worldgen::feature::Prop::kBottom,    proto::gen::worldgen::feature::Prop::kBottom,
+    proto::gen::worldgen::feature::Prop::kWallNorth, proto::gen::worldgen::feature::Prop::kWallSouth,
+    proto::gen::worldgen::feature::Prop::kWallWest,  proto::gen::worldgen::feature::Prop::kWallEast};
+template <class Level>
+u16 mossy_carpet_updated(Level& level, u16 state, i32 x, i32 y, i32 z, bool create_sides) {
+    namespace ft = proto::gen::worldgen::feature;
+    namespace blk = proto::gen::block;
+    using ft::Prop;
+    constexpr u32 kHorizontal[4] = {world::kNorth, world::kEast, world::kSouth, world::kWest};
+    const u32 carpet = world::block_of(blk::kPaleMossCarpet);
+    bool have_above = false, have_below = false;
+    u16 above = 0, below = 0;
+    const bool base = prop::flag(state, Prop::kBottom);
+    create_sides |= base;
+    for (const u32 direction : kHorizontal) {
+        const Prop wall = kMossyWall[direction];
+        u32 side = 0;
+        if (state_in(ft::kSetVineAttaches[direction], level.block(x + world::kStepX[direction], y, z + world::kStepZ[direction])))
+            side = create_sides ? 1u : prop::get(state, wall);
+        if (side == 1) {
+            if (!have_above) above = level.block(x, y + 1, z), have_above = true;
+            if (world::block_of(above) == carpet && prop::get(above, wall) != 0 && !prop::flag(above, Prop::kBottom)) side = 2;
+            if (!base) {
+                if (!have_below) below = level.block(x, y - 1, z), have_below = true;
+                if (world::block_of(below) == carpet && prop::get(below, wall) == 0) side = 0;
+            }
+        }
+        state = prop::with(state, wall, side);
+    }
+    return state;
+}
+
 // `level`: block(x, y, z), raw_brightness(x, y, z), schedule_tick(x, y, z, type, fluid).
 // `direction`: from the block to the neighbour whose state is `neighbour`.
 template <class Level>
@@ -140,6 +176,14 @@ u16 update_shape(Level& level, u16 state, i32 x, i32 y, i32 z, u32 direction, u1
             if (direction == world::kUp && world::block_of(neighbour) == world::block_of(blk::kBamboo)) return blk::kBamboo;
             return state;
         case ShapeOp::kTick: block_tick(); return state;
+        case ShapeOp::kMossyCarpet: {
+            if (!survives_here()) return world::kAir;
+            const u16 made = mossy_carpet_updated(level, state, x, y, z, false);
+            // hasFaces: the carpet itself, or a side.
+            bool any = prop::flag(made, Prop::kBottom);
+            for (u32 d = 2; d < 6; ++d) any |= prop::get(made, kMossyWall[d]) != 0;
+            return any ? made : static_cast<u16>(world::kAir);
+        }
         case ShapeOp::kUnported: break;
     }
     ++unported;

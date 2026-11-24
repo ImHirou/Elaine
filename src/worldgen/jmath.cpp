@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "worldgen/jmath.hpp"
 
+#include <cmath>
+
 #include <bit>
 
 #include "proto/gen/current.hpp"
@@ -165,5 +167,55 @@ double cos_own(double x) {
 
 double sin(double x) { return corrected(sin_own(x), x, kSineKeys, kSineDeltas, kSines); }
 double cos(double x) { return corrected(cos_own(x), x, kCosineKeys, kCosineDeltas, kCosines); }
+
+// ---------------------------------------------------------------------------- log and pow
+//
+// The natural logarithm and a power, each to the nearest double: worked out as a sum of two
+// doubles, a hundred bits and more, and rounded once at the end. (HotSpot's are right to within
+// the last bit, not always to the nearest double; see jmath.hpp for what follows from that.)
+
+namespace {
+
+DD neg(DD x) { return {-x.hi, -x.lo}; }
+DD div(DD a, DD b) {
+    const double q1 = a.hi / b.hi;
+    DD r = add(a, neg(mul(DD{q1, 0.0}, b)));
+    const double q2 = r.hi / b.hi;
+    r = add(r, neg(mul(DD{q2, 0.0}, b)));
+    const double q3 = r.hi / b.hi;
+    return add(quick_two_sum(q1, q2), DD{q3, 0.0});
+}
+
+constexpr DD kLn2{0x1.62e42fefa39efp-1, 0x1.abc9e3b39803fp-56};
+
+// log(x), x > 0: x = m * 2^e with m about 1; log(m) = 2 atanh((m - 1) / (m + 1)) by its series.
+DD log_pair(double x) {
+    int e = 0;
+    double m = std::frexp(x, &e);
+    if (m < 0x1.6a09e667f3bcdp-1) {  // (the square root of a half)
+        m *= 2.0;
+        --e;
+    }
+    const DD s = div(DD{m - 1.0, 0.0}, two_sum(m, 1.0));
+    const DD s2 = mul(s, s);
+    DD p{0.0, 0.0};
+    for (i32 k = 30; k >= 1; --k) p = mul(add(p, div(DD{1.0, 0.0}, DD{static_cast<double>(2 * k + 1), 0.0})), s2);
+    const DD of_m = mul(DD{2.0 * s.hi, 2.0 * s.lo}, add(DD{1.0, 0.0}, p));
+    return add(mul(DD{static_cast<double>(e), 0.0}, kLn2), of_m);
+}
+
+// exp(y): y = k ln 2 + t with t small; e^t by its series.
+DD exp_pair(DD y) {
+    const i32 k = static_cast<i32>(std::floor(y.hi / kLn2.hi + 0.5));
+    const DD t = add(y, neg(mul(DD{static_cast<double>(k), 0.0}, kLn2)));
+    DD p{1.0, 0.0};
+    for (i32 n = 30; n >= 1; --n) p = add(DD{1.0, 0.0}, div(mul(t, p), DD{static_cast<double>(n), 0.0}));
+    return {std::ldexp(p.hi, k), std::ldexp(p.lo, k)};
+}
+
+}  // namespace
+
+double log(double x) { return log_pair(x).hi; }
+double pow(double x, double y) { return exp_pair(mul(log_pair(x), DD{y, 0.0})).hi; }
 
 }  // namespace worldgen::jmath

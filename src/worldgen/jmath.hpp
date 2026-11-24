@@ -37,4 +37,13 @@ double cos_own(double x);
 double sin(double x);
 double cos(double x);
 
+// The natural logarithm of a positive number, and a positive number to a power: each the nearest
+// double to the true value. HotSpot's Math.log and Math.pow are within the last bit of that and
+// not always the same double, and their arguments are doubles - there is no asking the JVM about
+// all of them, as for the sines of a float. So whoever uses these must not hang on the last bit:
+// the one who does, a large dripstone's height (cave.cpp), rounds the result down to a whole
+// number, and takes this slow way only where that number is in doubt.
+double log(double x);
+double pow(double x, double y);
+
 }  // namespace worldgen::jmath

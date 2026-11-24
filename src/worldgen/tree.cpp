@@ -1361,7 +1361,9 @@ bool Decorator::place_fallen_tree(const ft::FallenTree& fallen, FeatureRandom& r
         region.set_block(p.x, p.y, p.z, state, 3);
         mark_above(p.x, p.y, p.z);
     };
-    const auto over_solid_ground = [&](Pos p) { return in_state_set(ft::kSetSturdyUp, region.block(p.x, p.y - 1, p.z)); };
+    const auto over_solid_ground = [&](Pos p) {
+        return in_state_set(ft::kSetSturdy[world::kUp], region.block(p.x, p.y - 1, p.z));
+    };
     const auto decorate_logs = [&](u32 first, u32 count) {
         if (count == 0) return;
         work.root_list.clear();

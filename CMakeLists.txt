@@ -198,6 +198,7 @@ add_library(core STATIC
   src/worldgen/region.cpp
   src/worldgen/feature.cpp
   src/worldgen/tree.cpp
+  src/worldgen/cave.cpp
   src/worldgen/generator.cpp
   src/phys/physics.cpp
   src/item/components.cpp
@@ -225,12 +226,20 @@ mc_needs_generated(core)
 if(MC_SANITIZE)
   # World generation is arithmetic by the million a chunk. Unoptimized and under ASan a scenario that
   # joins a world of terrain held the cores for 26 s (the release build: 2 s), and five scenarios beside
-  # it timed out. Optimized, the sanitizers still see every load and store of it.
+  # it timed out. Optimized, the sanitizers still see every load and store of what places features.
+  set_source_files_properties(
+    src/worldgen/generator.cpp src/worldgen/region.cpp src/worldgen/feature.cpp
+    src/worldgen/jmath.cpp src/worldgen/tree.cpp src/worldgen/java_hash.cpp src/worldgen/cave.cpp
+    PROPERTIES COMPILE_OPTIONS "-O2")
+  # The terrain itself - noise, density, biomes, aquifers, the surface, the carvers - is the larger part
+  # by far (a chunk of features needs the terrain of 96): with the sanitizers a new world's first chunk
+  # took 9 s where it takes 3 s without them on these seven files, and the scenarios of such worlds,
+  # which run on this build too, held the cores for a minute each. These files read no input but the
+  # seed and index nothing by it; they ran under both sanitizers until trees and caves were here.
   set_source_files_properties(
     src/worldgen/noise.cpp src/worldgen/density.cpp src/worldgen/climate.cpp src/worldgen/aquifer.cpp src/worldgen/terrain.cpp
-    src/worldgen/material.cpp src/worldgen/carver.cpp src/worldgen/generator.cpp src/worldgen/region.cpp src/worldgen/feature.cpp
-    src/worldgen/jmath.cpp src/worldgen/tree.cpp src/worldgen/java_hash.cpp
-    PROPERTIES COMPILE_OPTIONS "-O2")
+    src/worldgen/material.cpp src/worldgen/carver.cpp
+    PROPERTIES COMPILE_OPTIONS "-O2;-fno-sanitize=all")
 endif()
 if(MC_PCH)
   target_precompile_headers(core PRIVATE ${CMAKE_SOURCE_DIR}/src/server/game.hpp)

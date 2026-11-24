@@ -30,6 +30,7 @@ from mcgen import die, vdir
 
 import worldgen
 from gen_trees import TreeTables, emit_trees
+from gen_caves import CaveTables, emit_caves
 
 HEIGHTMAPS = ["WORLD_SURFACE_WG", "WORLD_SURFACE", "OCEAN_FLOOR_WG", "OCEAN_FLOOR", "MOTION_BLOCKING", "MOTION_BLOCKING_NO_LEAVES"]
 DIRECTIONS = ["down", "up", "north", "south", "west", "east"]
@@ -46,12 +47,12 @@ PORTED_FEATURES = {
     "simple_block": "kSimpleBlock", "block_column": "kBlockColumn", "bamboo": "kBamboo", "vines": "kVines",
     "coral_tree": "kCoralTree", "coral_claw": "kCoralClaw", "huge_brown_mushroom": "kHugeBrownMushroom", "huge_red_mushroom": "kHugeRedMushroom",
     "tree": "kTree", "fallen_tree": "kFallenTree",
+    "vegetation_patch": "kVegetationPatch", "waterlogged_vegetation_patch": "kVegetationPatch", "root_system": "kRootSystem",
+    "speleothem": "kSpeleothem", "speleothem_cluster": "kSpeleothemCluster", "large_dripstone": "kLargeDripstone", "geode": "kGeode",
+    "multiface_growth": "kMultifaceGrowth", "sculk_patch": "kSculkPatch",
 }
 # ...and the types of the overworld that wait for theirs. A type in neither list stops the run.
-UNPORTED_FEATURES = {
-    "template", "vegetation_patch", "speleothem", "multiface_growth", "fossil", "speleothem_cluster", "root_system",
-    "geode", "monster_room", "large_dripstone", "waterlogged_vegetation_patch", "sculk_patch",
-}
+UNPORTED_FEATURES = {"template", "fossil", "monster_room"}
 # BlockStateProvider types that wait for theirs: none of the overworld's now.
 UNPORTED_PROVIDERS: set = set()
 
@@ -102,6 +103,10 @@ class StateSets:
         for d, name in enumerate(DIRECTIONS):
             self.facts[f"vine_attaches_{name}"] = column(v >> d & 1 for v in attaches)
         self.facts["sturdy_center_down"] = column(v >> 0 & 1 for v in sturdy["columns"]["sturdy_center"])
+        full = worldgen.load(version, "features").get("collision_full")
+        if not full or len(full) != self.count:
+            die("gen_features: worldgen/features.json does not say whose collision shape is a whole block - run: mcgen.py worldgen")
+        self.facts["collision_full"] = column(full)
         # A state's fluid, as much as there is of it (gamedata: FluidState.getAmount).
         import gamedata as _gamedata
         amounts = [f["amount"] for f in _gamedata.load(version, "fluids")["states"]]
@@ -185,10 +190,11 @@ class Pool:
         return first
 
 
-class FeatureTables(TreeTables):
+class FeatureTables(TreeTables, CaveTables):
     def __init__(self, version: str, vanilla, blocks, settings: dict):
         self.vanilla, self.blocks, self.version = vanilla, blocks, version
         self.init_trees()
+        self.init_caves()
         self.sets = StateSets(version, vanilla, blocks)
         self.min_y, self.height = settings["noise"]["min_y"], settings["noise"]["height"]
         self.biome_ids = {name: i for i, name in enumerate(vanilla.entries("worldgen/biome"))}
@@ -968,8 +974,7 @@ class FeatureTables(TreeTables):
             first = len(self.simple_blocks.rows)
             for state in sorted(self.outcomes(value["to_place"])):
                 rule, has_rule = self.survive_rule(state)
-                # (MossyCarpetBlock.placeAt - the carpet of pale moss, with its sides - is not here yet.)
-                parts = parts and has_rule and "MossyCarpetBlock" not in self.classes[self.by_state[state][0]]
+                parts = parts and has_rule
                 self.simple_blocks.rows.append((state, rule, *self.double_plant(state)))
             parts = parts and has
             row = ("kSimpleBlock", provider, first | (len(self.simple_blocks.rows) - first) << 20, int(bool(value.get("schedule_tick", False))))
@@ -979,6 +984,25 @@ class FeatureTables(TreeTables):
         elif kind == "fallen_tree":
             row, has = self.fallen_tree(value)
             parts = parts and has
+        elif kind in ("vegetation_patch", "waterlogged_vegetation_patch"):
+            row, uses, has = self.vegetation_patch(value, kind == "waterlogged_vegetation_patch")
+            parts = parts and has
+        elif kind == "root_system":
+            row, uses, has = self.root_system(value)
+            parts = parts and has
+        elif kind == "speleothem":
+            row = self.speleothem(value)
+        elif kind == "speleothem_cluster":
+            row = self.speleothem_cluster(value)
+        elif kind == "large_dripstone":
+            row = self.large_dripstone(value)
+        elif kind == "geode":
+            row, has = self.geode(value)
+            parts = parts and has
+        elif kind == "multiface_growth":
+            row = self.multiface_growth(value)
+        elif kind == "sculk_patch":
+            row = self.sculk_patch(value)
         else:
             die(f"gen_features: {kind} is listed as ported and has no table")
         self.nested.update(uses)
@@ -1082,6 +1106,7 @@ enum class FeatureType : u8 {
     kUnported, kNoOp, kRandomSelector, kSimpleRandomSelector, kWeightedRandomSelector, kRandomBooleanSelector, kSequence, kOverlay,
     kOre, kDisk, kUnderwaterMagma, kBlockBlob, kSpring, kLake, kBlueIce, kSpike, kIceberg, kFreezeTopLayer, kSimpleBlock,
     kBlockColumn, kBamboo, kVines, kCoralTree, kCoralClaw, kHugeBrownMushroom, kHugeRedMushroom, kTree, kFallenTree,
+    kVegetationPatch, kRootSystem, kSpeleothem, kSpeleothemCluster, kLargeDripstone, kGeode, kMultifaceGrowth, kSculkPatch,
 };
 struct Feature {
     FeatureType type;
@@ -1333,6 +1358,7 @@ struct Placed {
     out.append(f"inline constexpr Lake kLakes[{max(1, len(t.lakes.rows))}] = {{"
                + ", ".join("{" + ", ".join(map(str, row)) + "}" for row in t.lakes.rows) + "};\n")
     emit_trees(t, out)
+    emit_caves(t, out)
     # What feature.cpp asks of a state by name: sets like any other, each with a name of its own.
     sets = t.sets
     code = {"kSetLiquid": sets.facts["liquid"], "kSetSnowSurvivesOn": sets.facts["snow_survives_on"],
@@ -1357,7 +1383,18 @@ struct Placed {
         ("kSetBubbleColumnIn", "a column of bubbles takes the place of",                                              # LiquidBlock.shouldBubbleColumnOccupy
          sets.fluids_in("#minecraft:bubble_column_can_occupy") & sets.facts["fluid_source"] & sets.facts["fluid_full"]),
         ("kSetPaleOakLogs", "of pale oak logs", tag("pale_oak_logs")),
-        ("kSetSturdyUp", "with a whole face on top", sets.facts["sturdy_up"]),                                       # BlockState.isFaceSturdy(.., UP)
+        # Caves (cave.cpp).
+        ("kSetCollisionFull", "whose collision shape is a whole block", sets.facts["collision_full"]),                # BlockState.isCollisionShapeFullBlock
+        ("kSetSculkReplaceable", "sculk takes the place of", tag("sculk_replaceable")),
+        ("kSetSculkReplaceableWorldGen", "sculk takes the place of as a world is made", tag("sculk_replaceable_world_gen")),
+        ("kSetSculkGrowthInhibitors", "that keeps sculk from growing things", tag("sculk_growth_inhibitors")),
+        ("kSetFire", "of fire", tag("fire")),
+        ("kSetBaseStoneOverworld", "of the overworld's stone", tag("base_stone_overworld")),
+        ("kSetFluidFull", "whose fluid fills the block", sets.facts["fluid_full"]),                                  # FluidState.isFull()
+        ("kSetHoldsLava", "that holds lava", sets.fluids_in("#minecraft:lava")),
+        ("kSetSolid", "that is solid", sets.facts["solid"]),                                                         # BlockState.isSolid()
+        ("kSetNoFluidButWater", "that holds water and nothing else of a fluid",                                      # FluidState.isEmpty() || is(Fluids.WATER)
+         sum(1 << i for i, f in enumerate(sets.fluid_of) if sets.fluid_names[f] in ("minecraft:empty", "minecraft:water"))),
     ):
         code[name] = bits
         names[name] = "kSet " + words
@@ -1366,6 +1403,8 @@ struct Placed {
                "// direction, by its ordinal - whether BlockState.getFaceOcclusionShape(direction) is a whole face.\n")
     for name, bits in code.items():
         out.append(f"inline constexpr u32 {name} = {sets.keep(bits, names.get(name, name))};\n")
+    out.append("// BlockState.isFaceSturdy(direction): a whole face on that side.\n")
+    out.append("inline constexpr u32 kSetSturdy[6] = {" + ", ".join(str(sets.keep(sets.facts[f'sturdy_{d}'], f'kSetSturdy {d}')) for d in DIRECTIONS) + "};\n")
     out.append("inline constexpr u32 kSetFaceOccludes[6] = {" + ", ".join(str(sets.keep(sets.facts[f'face_occludes_{d}'], f'kSetFaceOccludes {d}')) for d in DIRECTIONS) + "};\n")
     out.append("// VineBlock.isAcceptableNeighbour: what a vine holds on to, lying in that direction from it.\n")
     out.append("inline constexpr u32 kSetVineAttaches[6] = {" + ", ".join(str(sets.keep(sets.facts[f'vine_attaches_{d}'], f'kSetVineAttaches {d}')) for d in DIRECTIONS) + "};\n")
