@@ -180,6 +180,7 @@ add_library(core STATIC
   src/world/store.cpp
   src/world/ticks.cpp
   src/world/fluid.cpp
+  src/world/gen_chunk.cpp
   src/world/generator.cpp
   src/world/dimension.cpp
   src/world/collide.cpp

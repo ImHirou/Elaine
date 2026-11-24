@@ -113,6 +113,13 @@ class ChunkArena {
         return p;
     }
     usize reserved_bytes() const { return reserved_; }
+    // What the two hold changes hands; pointers into either stay good.
+    void swap(ChunkArena& o) {
+        std::swap(at_, o.at_);
+        std::swap(left_, o.left_);
+        std::swap(reserved_, o.reserved_);
+        slabs_.swap(o.slabs_);
+    }
 
   private:
     static constexpr usize kSlabBytes = 64 * 1024;

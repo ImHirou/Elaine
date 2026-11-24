@@ -14,6 +14,10 @@ class OverworldGenerator final : public world::ChunkGenerator {
   public:
     explicit OverworldGenerator(i64 seed) : world_(seed) {}
 
+    // The chunk as the `biomes` and `terrain` statuses leave it, with the heightmaps a chunk keeps
+    // from then on (Heightmap.primeHeightmaps, at the end of buildTerrain).
+    void make_base(i32 cx, i32 cz, world::GenChunk& out) override;
+    // A chunk of terrain alone, in one go: make_base, handed on as it is.
     bool generate_whole(world::LoadedChunk& out) override;
     i32 sea_level() const override { return settings::kSeaLevel; }
     i32 spawn_height() const override { return 64; }  // ChunkGenerator.getSpawnHeight

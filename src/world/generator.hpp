@@ -10,6 +10,7 @@
 namespace world {
 
 struct LoadedChunk;
+struct GenChunk;
 
 class ChunkGenerator {
   public:
@@ -22,6 +23,12 @@ class ChunkGenerator {
     // it made the chunk, and the above is not asked. (Every virtual here is inline: the tests
     // derive from this class with RTTI on, the server is built without.)
     virtual bool generate_whole(LoadedChunk&) { return false; }
+    // A generator whose chunks are decorated makes a chunk in stages (world/gen_chunk.hpp): what
+    // a chunk is of itself, read from no other chunk - then, area by area, what the features of the
+    // chunks put into each other.
+    virtual bool staged() const { return false; }
+    // The chunk at (cx, cz) as it is before any feature: version 0.
+    virtual void make_base(i32 /*cx*/, i32 /*cz*/, GenChunk& /*out*/) {}
     virtual i32 sea_level() const = 0;     // ChunkGenerator.getSeaLevel(): sent in the login packet
     virtual i32 spawn_height() const = 0;  // ChunkGenerator.getSpawnHeight(): first free y at spawn
     virtual bool is_flat() const = 0;      // "isFlat" in the login packet (changes the client's horizon)

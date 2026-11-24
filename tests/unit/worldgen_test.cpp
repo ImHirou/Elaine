@@ -17,6 +17,7 @@
 
 #include "world/block.hpp"
 #include "world/chunk_io.hpp"
+#include "world/gen_chunk.hpp"
 #include "world/region.hpp"
 #include "worldgen/carver.hpp"
 #include "worldgen/climate.hpp"
@@ -731,4 +732,66 @@ TEST(Worldgen, GeneratorHandsAWorkerItsChunk) {
             for (u32 k = 0; k < kinds; ++k) EXPECT_EQ(b->palette[k], first[k]) << "section " << si << ", palette entry " << k;
         }
     }
+}
+
+// A chunk between its terrain and its features: the heightmaps it keeps from then on are those of
+// its blocks, column by column (Heightmap.primeHeightmaps), and what it hands on when it is
+// finished is what it holds.
+TEST(Worldgen, ChunkOfTerrainHasTheHeightmapsItKeeps) {
+    In in(kTerrain);
+    in.magic("WGTERR03");
+    const i64 seed = in.i64_();
+    in.num<u32>();
+    in.num<u32>();
+    const i32 cx = in.i32_(), cz = in.i32_();
+    OverworldGenerator generator(seed);
+    EXPECT_FALSE(generator.staged());  // (until a chunk's features are made)
+    world::GenChunk made;
+    generator.make_base(cx, cz, made);
+    EXPECT_EQ(made.x, cx);
+    EXPECT_EQ(made.z, cz);
+    EXPECT_EQ(made.sections_count, Terrain::kSections);
+    EXPECT_FALSE(made.decorated);
+    const auto block = [&](u32 x, i32 y, u32 z) {
+        const u32 from_bottom = static_cast<u32>(y - settings::kMinY);
+        return made.sections[from_bottom >> 4].get(x, from_bottom & 15, z);
+    };
+    namespace hm = world::heightmap;
+    const u32 kept[] = {hm::kWorldSurface, hm::kOceanFloor, hm::kMotionBlocking, hm::kMotionBlockingNoLeaves};
+    u32 differ = 0, columns_with_water = 0;
+    for (u32 z = 0; z < 16; ++z)
+        for (u32 x = 0; x < 16; ++x) {
+            for (const u32 type : kept) {
+                i32 y = settings::kMinY + settings::kHeight - 1;
+                while (y >= settings::kMinY && !(wg::kHeightmaps[block(x, y, z)] >> type & 1)) --y;
+                differ += made.height[type][x + z * 16] != y + 1 - settings::kMinY;
+            }
+            // The two the terrain was made by are still there, and never above the ones that count more.
+            EXPECT_LE(made.height[hm::kOceanFloorWg][x + z * 16], made.height[hm::kWorldSurfaceWg][x + z * 16]);
+            EXPECT_EQ(made.height[hm::kWorldSurfaceWg][x + z * 16], made.height[hm::kWorldSurface][x + z * 16]);
+            columns_with_water += made.height[hm::kOceanFloor][x + z * 16] < made.height[hm::kMotionBlocking][x + z * 16];
+        }
+    EXPECT_EQ(differ, 0u);
+    (void)columns_with_water;
+
+    // Finished, it is the chunk a worker hands on: the same blocks, its marks section by section.
+    u64 blocks = kFnv;
+    for (u32 si = 0; si < Terrain::kSections; ++si)
+        for (u32 i = 0; i < 4096; ++i) blocks = fnv(blocks, made.sections[si].get(i));
+    std::vector<u32> marks = made.marks;
+    std::stable_sort(marks.begin(), marks.end(), [](u32 a, u32 b) { return a >> 12 < b >> 12; });
+    world::LoadedChunk out;
+    out.chunk.x = cx;
+    out.chunk.z = cz;
+    out.chunk.sections_count = static_cast<u8>(Terrain::kSections);
+    world::finish_chunk(made, out);
+    u64 handed = kFnv;
+    for (u32 si = 0; si < Terrain::kSections; ++si)
+        for (u32 i = 0; i < 4096; ++i) handed = fnv(handed, out.chunk.sections[si].get(i));
+    EXPECT_EQ(handed, blocks);
+    ASSERT_EQ(out.chunk.post_process.len, marks.size() * 4);
+    for (usize i = 0; i < marks.size(); ++i)
+        EXPECT_EQ(load_le<u32>(out.chunk.post_process.bytes + 4 * i), marks[i]) << "mark " << i;
+    EXPECT_TRUE(out.parts.ticks.empty());
+    EXPECT_TRUE(out.parts.fluid_ticks.empty());
 }

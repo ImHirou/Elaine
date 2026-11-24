@@ -4,6 +4,7 @@
 #include <memory>
 
 #include "world/chunk_io.hpp"
+#include "world/gen_chunk.hpp"
 #include "worldgen/carver.hpp"
 #include "worldgen/climate.hpp"
 #include "worldgen/material.hpp"
@@ -103,50 +104,53 @@ void find_world_spawn(const Overworld& world, i32 spawn[3]) {
     }
 }
 
-bool OverworldGenerator::generate_whole(world::LoadedChunk& out) {
-    world::Chunk& c = out.chunk;
-    DCHECK(c.sections_count == Terrain::kSections);
+void OverworldGenerator::make_base(i32 cx, i32 cz, world::GenChunk& out) {
+    namespace wg = proto::gen::worldgen;
+    namespace hm = world::heightmap;
     Work& w = work_for(world_);
-    Terrain& t = make_terrain(w, world_, c.x, c.z);
+    const Terrain& t = make_terrain(w, world_, cx, cz);
+    out.x = cx;
+    out.z = cz;
+    out.sections_count = static_cast<u8>(Terrain::kSections);
+    out.version = 0;
+    out.decorated = false;
+    for (u32 si = 0; si < Terrain::kSections; ++si) out.sections[si].assign(out.alloc, &t.blocks[si * 4096]);
+    std::copy(std::begin(w.biome), std::end(w.biome), out.cells);
 
-    // The biomes, a cell at a time; a section's palette in the order vanilla comes to its cells
-    // (x, then y, then z).
-    c.biomes = nullptr;
-    for (u32 si = 0; si < Terrain::kSections; ++si) {
-        world::BiomeSection made;
-        for (u32 x = 0; x < 4; ++x) {
-            for (u32 y = 0; y < 4; ++y) {
-                for (u32 z = 0; z < 4; ++z) {
-                    const u32 cell = y << 4 | z << 2 | x;
-                    const u16 id = w.biome[si * 64 + cell];
-                    u32 slot = 0;
-                    while (slot < made.count && made.palette[slot] != id) ++slot;
-                    if (slot == made.count) made.palette[made.count++] = id;
-                    made.index[cell] = static_cast<u8>(slot);
-                }
-            }
+    // The two heightmaps the terrain was made by stay as they are; the four a chunk keeps are
+    // counted now, each column from the top down to the first block that counts for it.
+    const i32 top = (t.highest_filled_section() + 1) * 16 + settings::kMinY;
+    for (u32 i = 0; i < 256; ++i) {
+        const i32 x = static_cast<i32>(i & 15), z = static_cast<i32>(i >> 4);
+        out.height[hm::kWorldSurfaceWg][i] = static_cast<i16>(t.world_surface_wg[i] - settings::kMinY);
+        out.height[hm::kOceanFloorWg][i] = static_cast<i16>(t.ocean_floor_wg[i] - settings::kMinY);
+        u32 open = wg::kWorldSurface | wg::kOceanFloor | wg::kMotionBlocking | wg::kMotionBlockingNoLeaves;
+        for (const u32 type : {hm::kWorldSurface, hm::kOceanFloor, hm::kMotionBlocking, hm::kMotionBlockingNoLeaves})
+            out.height[type][i] = 0;
+        for (i32 y = top - 1; y >= settings::kMinY && open; --y) {
+            const u32 found = wg::kHeightmaps[t.block(x, y, z)] & open;
+            if (!found) continue;
+            for (const u32 type : {hm::kWorldSurface, hm::kOceanFloor, hm::kMotionBlocking, hm::kMotionBlockingNoLeaves})
+                if (found >> type & 1) out.height[type][i] = static_cast<i16>(y + 1 - settings::kMinY);
+            open &= ~found;
         }
-        c.biome[si] = made.palette[0];
-        if (made.count == 1) continue;  // (a section of one biome is told by Chunk::biome alone)
-        if (!c.biomes)
-            c.biomes =
-                new (out.arena.alloc(sizeof(world::BiomeSection) * world::kMaxSections)) world::BiomeSection[world::kMaxSections];
-        c.biomes[si] = made;
     }
-    for (u32 si = 0; si < Terrain::kSections; ++si) c.sections[si].assign(out.alloc, &t.blocks[si * 4096]);
-    // What is to be let flow when the chunk first ticks (world::Chunk::post_process).
-    usize marks = 0;
-    for (const std::vector<u16>& of : t.post_process) marks += of.size();
-    c.post_process = {};
-    if (marks) {
-        u8* p = static_cast<u8*>(out.arena.alloc(marks * 4));
-        c.post_process = {static_cast<u32>(marks * 4), p};
-        for (u32 si = 0; si < Terrain::kSections; ++si)
-            for (const u16 mark : t.post_process[si]) {
-                store_le<u32>(p, si << 12 | mark);
-                p += 4;
-            }
-    }
+
+    // What is to be let flow when the chunk first ticks, section by section.
+    out.marks.clear();
+    for (u32 si = 0; si < Terrain::kSections; ++si)
+        for (const u16 mark : t.post_process[si]) out.marks.push_back(si << 12 | mark);
+    out.block_ticks.clear();
+    out.fluid_ticks.clear();
+    out.block_entities.clear();
+    out.tags.clear();
+}
+
+bool OverworldGenerator::generate_whole(world::LoadedChunk& out) {
+    DCHECK(out.chunk.sections_count == Terrain::kSections);
+    world::GenChunk made;
+    make_base(out.chunk.x, out.chunk.z, made);
+    world::finish_chunk(made, out);
     return true;
 }
 
