@@ -2519,7 +2519,7 @@ decorated in the order it is given). A world is not the same without the feature
 ported - an ore does not lie where a lake is - so vanilla's world has a data pack in which every
 feature of a biome that is not ported places nothing, under its own name: `FeatureSorter` goes
 by which features the biomes name, so the order, and with it each feature's random source,
-stays. With the 165 placed features that are ported: 352 chunks the server saved before they
+stays. With the 167 placed features that are ported: 352 chunks the server saved before they
 were chunks of the world, 160 with their own features and the rest with what the neighbours' put
 into them - blobs of ore, lakes, icebergs and the crowns of trees lie across the borders of
 chunks, so this is the order replayed, too - the same block for block, heightmaps, the marks in
@@ -2697,11 +2697,24 @@ canyons of the carvers (`generateCarvers`).
 And of the `features` status: ores, disks, springs, lava lakes, magma, forest rocks, ice
 spikes, icebergs, blue ice, snow and ice, the plants that are one block (or two), what grows
 in a column, vines, corals, the big mushrooms, trees with what hangs on them and lies under
-them, and what grows in caves - moss, dripstone, geodes, lichen, sculk: 165 of the 171 placed
-features of the biomes, in every chunk of a world.
+them, what grows in caves - moss, dripstone, geodes, lichen, sculk - and monster rooms: 167
+of the 171 placed features of the biomes, in every chunk of a world.
 
-Not there yet: fossils and the other features made of templates; monster rooms; what a block
-entity the generator made holds; and structures. Beyond those:
+**Block entities of generation.** A feature that sets a block with a block entity leaves a
+record with the chunk it is making (`world::GenBlockEntity`): only that one is there - what
+vanilla's `{id: "DUMMY"}` says - or, where the feature fills it in, its tag as a chunk in the
+making saves it (`BlockEntity.saveWithFullMetadata`): a monster room's spawner with the mob drawn
+for it, its chests with the loot table they name and the seed drawn for each, a tree's nest with
+two or three bees and how long each has been in. The tags are held to a vanilla server's with
+the rest of a chunk (`feature_probe.py`). When the chunk arrives the game takes them over
+(`ChunkParts::made_block_entities` -> `Game::read_made_block_entities`) as it takes an imported
+world's: a chest, a furnace or a sign it can read becomes its own, anything else is kept as the
+tag and written with the chunk - so a dungeon's chest is there, with its loot table unrolled,
+until loot tables are (`a_world_of_terrain_comes_back` asks a spawner, a chest and a nest what
+they hold, before a restart and after).
+
+Not there yet: the four features made of templates - fossils above and below, the desert's
+well, a sulfur spring - and structures. Beyond those:
 only the overworld, only the preset `normal`; an imported vanilla world does not go on with this
 generator yet.
 

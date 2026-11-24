@@ -906,7 +906,6 @@ struct TreeBuilder {
                 w.begin_compound("components");
                 w.end_compound();
                 w.put_string("id", "minecraft:beehive");
-                w.put_byte("keepPacked", 0);
                 w.put_int("x", p.x);
                 w.put_int("y", p.y);
                 w.put_int("z", p.z);

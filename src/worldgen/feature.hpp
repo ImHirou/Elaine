@@ -158,6 +158,7 @@ class Decorator {
     bool place_geode(const ft::Geode& geode, FeatureRandom& random, Pos origin);
     bool place_multiface_growth(const ft::Multiface& growth, FeatureRandom& random, Pos origin);
     bool place_sculk_patch(const ft::SculkPatch& patch, FeatureRandom& random, Pos origin);
+    bool place_monster_room(FeatureRandom& random, Pos origin);
     friend struct TreeBuilder;  // (tree.cpp)
     u16 noise_state(const ft::NoiseProvider& provider, FeatureRandom& random, Pos at);
     i32 optional_state(const ft::Provider& provider, FeatureRandom& random, Pos at);

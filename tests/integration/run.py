@@ -485,6 +485,18 @@ def a_world_of_terrain_comes_back():
         # nothing has, but for what ran across a border.
         ran = sorted(pos for pos in b.chunks if flowing(b.chunks[pos]))
         assert ran and all(far(pos) <= 4 for pos in ran), ran
+        # What generation left in block entities is the game's: a monster room five chunks from where
+        # this world begins has its spawner with the mob it was made for and a chest that names its
+        # loot, and a tree further on a nest with its bees.
+        def made(x: int, y: int, z: int) -> str:
+            at = len(srv.read_log())
+            srv.console(f"data get block {x} {y} {z}")
+            said = srv.wait_log(f"{x}, {y}, {z} has the following block data", since=at)[at:]
+            return said[said.index("block data"):].splitlines()[0]
+        spawner, chest, nest = made(140, -5, 511), made(139, -5, 513), made(296, 65, 555)
+        assert 'SpawnData: {entity: {id: "minecraft:' in spawner and "MaxSpawnDelay: 800s" in spawner, spawner
+        assert 'LootTable: "minecraft:chests/simple_dungeon"' in chest and "LootTableSeed: " in chest, chest
+        assert 'bees: [{' in nest and "min_ticks_in_hive: 600" in nest, nest
         assert srv.stop() == 0, srv.read_log()
         os.unlink(srv.log.name)
 
@@ -501,6 +513,8 @@ def a_world_of_terrain_comes_back():
         assert set(after) == set(before)
         differ = sorted(pos for pos in before if before[pos] != after[pos])
         assert not differ, f"chunks that came back different: {differ}"
+        # ...and they hold what they held (the same words: the chest's seed, the bees' ticks).
+        assert (made(140, -5, 511), made(139, -5, 513), made(296, 65, 555)) == (spawner, chest, nest)
         # Carol goes where no chunk has ticked yet: the marks those chunks were saved with are run
         # now. Four chunks west - she has those chunks already, as they were saved - there is water
         # that has somewhere to go, and she is told.

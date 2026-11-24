@@ -49,10 +49,10 @@ PORTED_FEATURES = {
     "tree": "kTree", "fallen_tree": "kFallenTree",
     "vegetation_patch": "kVegetationPatch", "waterlogged_vegetation_patch": "kVegetationPatch", "root_system": "kRootSystem",
     "speleothem": "kSpeleothem", "speleothem_cluster": "kSpeleothemCluster", "large_dripstone": "kLargeDripstone", "geode": "kGeode",
-    "multiface_growth": "kMultifaceGrowth", "sculk_patch": "kSculkPatch",
+    "multiface_growth": "kMultifaceGrowth", "sculk_patch": "kSculkPatch", "monster_room": "kMonsterRoom",
 }
 # ...and the types of the overworld that wait for theirs. A type in neither list stops the run.
-UNPORTED_FEATURES = {"template", "fossil", "monster_room"}
+UNPORTED_FEATURES = {"template", "fossil"}
 # BlockStateProvider types that wait for theirs: none of the overworld's now.
 UNPORTED_PROVIDERS: set = set()
 
@@ -1003,6 +1003,9 @@ class FeatureTables(TreeTables, CaveTables):
             row = self.multiface_growth(value)
         elif kind == "sculk_patch":
             row = self.sculk_patch(value)
+        elif kind == "monster_room":
+            self.need(kind, value, set())
+            row = ("kMonsterRoom", 0, 0, 0)
         else:
             die(f"gen_features: {kind} is listed as ported and has no table")
         self.nested.update(uses)
@@ -1107,6 +1110,7 @@ enum class FeatureType : u8 {
     kOre, kDisk, kUnderwaterMagma, kBlockBlob, kSpring, kLake, kBlueIce, kSpike, kIceberg, kFreezeTopLayer, kSimpleBlock,
     kBlockColumn, kBamboo, kVines, kCoralTree, kCoralClaw, kHugeBrownMushroom, kHugeRedMushroom, kTree, kFallenTree,
     kVegetationPatch, kRootSystem, kSpeleothem, kSpeleothemCluster, kLargeDripstone, kGeode, kMultifaceGrowth, kSculkPatch,
+    kMonsterRoom,
 };
 struct Feature {
     FeatureType type;
@@ -1389,6 +1393,7 @@ struct Placed {
         ("kSetSculkReplaceableWorldGen", "sculk takes the place of as a world is made", tag("sculk_replaceable_world_gen")),
         ("kSetSculkGrowthInhibitors", "that keeps sculk from growing things", tag("sculk_growth_inhibitors")),
         ("kSetFire", "of fire", tag("fire")),
+        ("kSetFeaturesCannotReplace", "that no feature takes the place of", tag("features_cannot_replace")),
         ("kSetBaseStoneOverworld", "of the overworld's stone", tag("base_stone_overworld")),
         ("kSetFluidFull", "whose fluid fills the block", sets.facts["fluid_full"]),                                  # FluidState.isFull()
         ("kSetHoldsLava", "that holds lava", sets.fluids_in("#minecraft:lava")),

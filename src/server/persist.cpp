@@ -183,6 +183,44 @@ void Game::write_block_entities(const world::Chunk& c, base::ByteBuf& out) const
     }
 }
 
+// What generation made of block entities in a chunk that is new (world::ChunkParts::made_block_entities):
+// each becomes the game's as one of an imported world does - a chest, a furnace or a sign that the
+// game can read is its own, anything else is kept as its tag (a spawner, a nest of bees, a chest that
+// names its loot) - and one generation only knew to be there is as its block makes it. The chunk has
+// them from now on, and is written with them.
+void Game::read_made_block_entities(world::Chunk& c, std::span<const u8> bytes) {
+    if (bytes.empty()) return;
+    usize at = 0;
+    bool any = false;
+    while (at + 8 <= bytes.size()) {
+        const u32 place = load_le<u32>(bytes.data() + at), len = load_le<u32>(bytes.data() + at + 4);
+        at += 8;
+        if (len > bytes.size() - at) break;
+        const std::span<const u8> tag = bytes.subspan(at, len);
+        at += len;
+        const BlockPos pos{c.x * 16 + static_cast<i32>(place & 15), world_.min_y() + static_cast<i32>(place >> 8),
+                           c.z * 16 + static_cast<i32>(place >> 4 & 15)};
+        const world::BlockState state = world_.block(pos.x, pos.y, pos.z);
+        const world::BlockInfo& info = world::block_info_of(state);
+        const u32 type = info.block_entity;
+        if (!(world::flags_of(state) & world::state::kBlockEntity) || world_.block_entity(pos.x, pos.y, pos.z) ||
+            type >= gen::block_entity_type::kCount)
+            continue;
+        any = true;
+        if (!tag.empty() && adopt_kept_block_entity(pos, state, type, tag)) continue;
+        if (tag.empty() && chest_kind(info.kind)) {
+            world_.add_block_entity(pos.x, pos.y, pos.z, type, new_chest(pos));
+        } else if (tag.empty() && info.kind == block_kind::kFurnace) {
+            world_.add_block_entity(pos.x, pos.y, pos.z, type, new_furnace(pos, cooker_of(type)));
+        } else if (tag.empty() && sign_kind(info.kind)) {
+            world_.add_block_entity(pos.x, pos.y, pos.z, type, new_sign(pos));
+        } else {
+            world_.add_block_entity(pos.x, pos.y, pos.z, type, keep_tag(tag) | kOpaqueBlockEntity);
+        }
+    }
+    if (any) world_.mark_dirty(c.x, c.z);
+}
+
 void Game::read_block_entities(world::Chunk& c, std::span<const u8> bytes) {
     if (bytes.empty()) return;
     Reader r(bytes.data(), bytes.size());

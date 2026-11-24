@@ -1215,6 +1215,7 @@ final class WorldgenFeatures {
         facts.put("kSet sculk takes the place of as a world is made", state -> state.is(net.minecraft.tags.BlockTags.SCULK_REPLACEABLE_WORLD_GEN));
         facts.put("kSet that keeps sculk from growing things", state -> state.is(net.minecraft.tags.BlockTags.SCULK_GROWTH_INHIBITORS));
         facts.put("kSet of fire", state -> state.is(net.minecraft.tags.BlockTags.FIRE));
+        facts.put("kSet that no feature takes the place of", state -> state.is(net.minecraft.tags.BlockTags.FEATURES_CANNOT_REPLACE));
         facts.put("kSet of the overworld's stone", state -> state.is(net.minecraft.tags.BlockTags.BASE_STONE_OVERWORLD));
         facts.put("kSet whose fluid fills the block", state -> state.getFluidState().isFull());
         facts.put("kSet that holds lava", state -> state.getFluidState().is(net.minecraft.tags.FluidTags.LAVA));
@@ -1525,6 +1526,8 @@ final class WorldgenFeatures {
         {"geode", "=minecraft:amethyst_geode", "3000", "minecraft:plains", "minecraft:dripstone_caves", "minecraft:ocean"},
         {"multiface_growth", "=minecraft:glow_lichen,minecraft:sculk_vein", "200", "minecraft:dripstone_caves", "minecraft:deep_dark", "minecraft:plains"},
         {"sculk_patch", "=minecraft:sculk_patch_deep_dark", "200", "minecraft:deep_dark"},
+        {"monster_room", "=minecraft:monster_room,minecraft:monster_room_deep", "4000", "minecraft:plains", "minecraft:dripstone_caves", "minecraft:forest",
+            "minecraft:jungle", "minecraft:windswept_hills"},
         {"simple_block", "SimpleBlockFeature", "300", "minecraft:plains", "minecraft:flower_forest", "minecraft:meadow", "minecraft:forest", "minecraft:swamp",
             "minecraft:taiga", "minecraft:desert", "minecraft:jungle", "minecraft:lush_caves", "minecraft:warm_ocean", "minecraft:mushroom_fields",
             "minecraft:savanna", "minecraft:cherry_grove", "minecraft:old_growth_pine_taiga", "minecraft:sunflower_plains", "minecraft:mangrove_swamp",

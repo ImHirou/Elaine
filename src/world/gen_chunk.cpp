@@ -70,8 +70,20 @@ void finish_chunk(GenChunk& g, LoadedChunk& out) {
     base::ByteBuf scratch;
     out.parts.ticks = packed_ticks(g.block_ticks, out.arena, scratch);
     out.parts.fluid_ticks = packed_ticks(g.fluid_ticks, out.arena, scratch);
-    // (Block entities are the game's records, written by the game. What generation made of them - a
-    // nest of bees in a tree - does not reach it yet: the block stands, and holds nothing.)
+    // Block entities are the game's records, written by the game: it is handed what generation
+    // made of them as it lies (ChunkParts::made_block_entities).
+    if (!g.block_entities.empty()) {
+        usize bytes = 0;
+        for (const GenBlockEntity& e : g.block_entities) bytes += 8 + e.len;
+        u8* p = static_cast<u8*>(out.arena.alloc(bytes));
+        out.parts.made_block_entities = {p, bytes};
+        for (const GenBlockEntity& e : g.block_entities) {
+            store_le<u32>(p, e.at);
+            store_le<u32>(p + 4, e.len);
+            if (e.len) std::memcpy(p + 8, g.tags.data() + e.tag, e.len);
+            p += 8 + e.len;
+        }
+    }
 }
 
 }  // namespace world

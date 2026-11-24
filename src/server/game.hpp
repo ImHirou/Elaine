@@ -276,6 +276,7 @@ class Game {
     void write_block_entities(const world::Chunk& c, base::ByteBuf& out) const;
     void write_entities(u64 chunk_key, base::ByteBuf& out);
     void read_block_entities(world::Chunk& c, std::span<const u8> bytes);
+    void read_made_block_entities(world::Chunk& c, std::span<const u8> bytes);
     void read_entities(world::Chunk& c, std::span<const u8> bytes);
     void drop_block_entities(world::Chunk& c);
     void free_block_entity(u32 kind, u32 data);

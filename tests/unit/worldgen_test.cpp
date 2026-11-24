@@ -787,11 +787,23 @@ TEST(Worldgen, ChunkOfTerrainHasTheHeightmapsItKeeps) {
         for (u32 i = 0; i < 4096; ++i) blocks = fnv(blocks, made.sections[si].get(i));
     std::vector<u32> marks = made.marks;
     std::stable_sort(marks.begin(), marks.end(), [](u32 a, u32 b) { return a >> 12 < b >> 12; });
+    // (...and two block entities, as a feature leaves them: one that is only known to be there, one with its tag.)
+    const u8 tag[] = {10, 1, 0, 1, 'a', 7, 0};
+    made.tags.assign(std::begin(tag), std::end(tag));
+    made.block_entities.push_back({0x1234, 0, 0});
+    made.block_entities.push_back({0x0421, 0, sizeof tag});
     world::LoadedChunk out;
     out.chunk.x = cx;
     out.chunk.z = cz;
     out.chunk.sections_count = static_cast<u8>(Terrain::kSections);
     world::finish_chunk(made, out);
+    const std::span<const u8> handed_on = out.parts.made_block_entities;
+    ASSERT_EQ(handed_on.size(), 8 + 8 + sizeof tag);
+    EXPECT_EQ(load_le<u32>(handed_on.data()), 0x1234u);
+    EXPECT_EQ(load_le<u32>(handed_on.data() + 4), 0u);
+    EXPECT_EQ(load_le<u32>(handed_on.data() + 8), 0x0421u);
+    EXPECT_EQ(load_le<u32>(handed_on.data() + 12), sizeof tag);
+    EXPECT_EQ(std::memcmp(handed_on.data() + 16, tag, sizeof tag), 0);
     u64 handed = kFnv;
     for (u32 si = 0; si < Terrain::kSections; ++si)
         for (u32 i = 0; i < 4096; ++i) handed = fnv(handed, out.chunk.sections[si].get(i));

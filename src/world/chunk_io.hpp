@@ -45,6 +45,12 @@ namespace world {
 // Dimension::save writes itself.
 struct ChunkParts {
     std::span<const u8> block_entities = {}, entities = {}, ticks = {}, fluid_ticks = {};
+    // What generation made of block entities (a chunk that was just made has these and none of the
+    // game's; nothing is stored of them - the game makes its own of them when the chunk arrives, and
+    // those are what is saved). One after the other: u32 place ((y - min_y) << 8 | z << 4 | x),
+    // u32 length, then so many bytes - one nameless NBT compound as vanilla saves the block entity,
+    // or nothing where generation only knows that one is there.
+    std::span<const u8> made_block_entities = {};
 };
 
 // Appends the chunk to `out`. The chunk is only read.

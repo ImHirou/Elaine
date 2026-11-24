@@ -9,6 +9,7 @@
 #include <cmath>
 #include <string>
 
+#include "nbt/nbt.hpp"
 #include "phys/mth.hpp"
 #include "worldgen/feature.hpp"
 #include "worldgen/jmath.hpp"
@@ -1157,6 +1158,157 @@ bool Decorator::place_sculk_patch(const ft::SculkPatch& patch, FeatureRandom& ra
         }
     }
     cursors.clear();
+    return true;
+}
+
+// ----------------------------------------------------------------------------- MonsterRoomFeature
+
+namespace {
+
+// What a block entity saves besides what it holds, as a chunk in the making writes it
+// (BlockEntity.saveWithFullMetadata).
+void end_block_entity(nbt::Writer& w, std::string_view id, Pos p) {
+    w.begin_compound("components");
+    w.end_compound();
+    w.put_string("id", id);
+    w.put_int("x", p.x);
+    w.put_int("y", p.y);
+    w.put_int("z", p.z);
+    w.end_compound();
+}
+
+}  // namespace
+
+// A room of cobblestone round a spawner, with a chest or two - where there is a hollow with a
+// floor, a ceiling and a few ways in.
+bool Decorator::place_monster_room(FeatureRandom& random, Pos origin) {
+    Region& region = region_;
+    const auto at = [&](i32 x, i32 y, i32 z) { return region.block(x, y, z); };
+    const auto solid = [&](i32 x, i32 y, i32 z) { return in_state_set(ft::kSetSolid, at(x, y, z)); };
+    const auto safe_set = [&](Pos p, u16 state) {  // Feature.safeSetBlock, but for what features may not replace
+        if (in_state_set(ft::kSetFeaturesCannotReplace, at(p.x, p.y, p.z))) return false;
+        return region.set_block(p.x, p.y, p.z, state, 2);
+    };
+    const i32 xr = random.next_int(2) + 2;
+    const i32 min_x = -xr - 1, max_x = xr + 1;
+    const i32 zr = random.next_int(2) + 2;
+    const i32 min_z = -zr - 1, max_z = zr + 1;
+    i32 holes = 0;
+    for (i32 dx = min_x; dx <= max_x; ++dx)
+        for (i32 dy = -1; dy <= 4; ++dy)
+            for (i32 dz = min_z; dz <= max_z; ++dz) {
+                const Pos p{origin.x + dx, origin.y + dy, origin.z + dz};
+                const bool is_solid = solid(p.x, p.y, p.z);
+                if ((dy == -1 || dy == 4) && !is_solid) return false;
+                if ((dx == min_x || dx == max_x || dz == min_z || dz == max_z) && dy == 0 && world::is_air(at(p.x, p.y, p.z)) &&
+                    world::is_air(at(p.x, p.y + 1, p.z)))
+                    ++holes;
+            }
+    if (holes < 1 || holes > 5) return false;
+    const u16 air = static_cast<u16>(blk::kCaveAir);
+    for (i32 dx = min_x; dx <= max_x; ++dx)
+        for (i32 dy = 3; dy >= -1; --dy)
+            for (i32 dz = min_z; dz <= max_z; ++dz) {
+                const Pos p{origin.x + dx, origin.y + dy, origin.z + dz};
+                const u16 state = at(p.x, p.y, p.z);
+                if (dx == min_x || dy == -1 || dz == min_z || dx == max_x || dy == 4 || dz == max_z) {
+                    if (p.y >= Region::kMinY && !solid(p.x, p.y - 1, p.z)) {
+                        region.set_block(p.x, p.y, p.z, air, 2);
+                    } else if (in_state_set(ft::kSetSolid, state) && !is_block(state, blk::kChest)) {
+                        if (dy == -1 && random.next_int(4) != 0)
+                            safe_set(p, static_cast<u16>(blk::kMossyCobblestone));
+                        else
+                            safe_set(p, static_cast<u16>(blk::kCobblestone));
+                    }
+                } else if (!is_block(state, blk::kChest) && !is_block(state, blk::kSpawner)) {
+                    safe_set(p, air);
+                }
+            }
+    base::ByteBuf& tag = work_.tag;
+    for (i32 chest = 0; chest < 2; ++chest)
+        for (i32 attempt = 0; attempt < 3; ++attempt) {
+            const i32 x = origin.x + random.next_int(xr * 2 + 1) - xr;
+            const i32 z = origin.z + random.next_int(zr * 2 + 1) - zr;
+            const Pos p{x, origin.y, z};
+            if (!world::is_air(at(p.x, p.y, p.z))) continue;
+            i32 walls = 0;
+            for (const u32 d : kHorizontal) walls += solid(p.x + world::kStepX[d], p.y, p.z + world::kStepZ[d]);
+            if (walls != 1) continue;
+            // StructurePiece.reorient: away from the one wall beside it - or, with none or several, from whatever is behind.
+            u16 state = static_cast<u16>(blk::kChest);
+            const auto solid_render = [&](u32 d) {
+                return in_state_set(ft::kSetSolidRender, at(p.x + world::kStepX[d], p.y, p.z + world::kStepZ[d]));
+            };
+            const auto clockwise = [](u32 d) {
+                return d == world::kNorth   ? world::kEast
+                       : d == world::kEast  ? world::kSouth
+                       : d == world::kSouth ? world::kWest
+                                            : world::kNorth;
+            };
+            bool beside_chest = false, several = false;
+            i32 wall = -1;
+            for (const u32 d : kHorizontal) {
+                if (is_block(at(p.x + world::kStepX[d], p.y, p.z + world::kStepZ[d]), blk::kChest)) {
+                    beside_chest = true;
+                    break;
+                }
+                if (!solid_render(d)) continue;
+                if (wall >= 0) {
+                    several = true;
+                    break;
+                }
+                wall = static_cast<i32>(d);
+            }
+            if (!beside_chest) {
+                if (wall >= 0 && !several) {
+                    state = prop::with(state, Prop::kHorizontalFacing, prop::facing_of(world::opposite(static_cast<u32>(wall))));
+                } else {
+                    u32 lock = prop::direction_of(prop::get(state, Prop::kHorizontalFacing));
+                    if (solid_render(lock)) lock = world::opposite(lock);
+                    if (solid_render(lock)) lock = clockwise(lock);
+                    if (solid_render(lock)) lock = world::opposite(lock);
+                    state = prop::with(state, Prop::kHorizontalFacing, prop::facing_of(lock));
+                }
+            }
+            // RandomizableContainer.setBlockEntityLootTable: the chest's loot is drawn when it is first opened, from this seed.
+            if (safe_set(p, state) || is_block(at(p.x, p.y, p.z), blk::kChest)) {
+                if (region.block_entity(p.x, p.y, p.z)) {
+                    const i64 seed = random.next_long();
+                    tag.len = 0;
+                    nbt::Writer w(tag);
+                    w.root(nbt::kCompound);
+                    w.put_string("LootTable", "minecraft:chests/simple_dungeon");
+                    w.put_long("LootTableSeed", seed);
+                    end_block_entity(w, "minecraft:chest", p);
+                    region.set_block_entity_tag(p.x, p.y, p.z, {tag.data, tag.len});
+                }
+            }
+            break;
+        }
+    safe_set(origin, static_cast<u16>(blk::kSpawner));
+    if (is_block(at(origin.x, origin.y, origin.z), blk::kSpawner) && region.block_entity(origin.x, origin.y, origin.z)) {
+        // SpawnerBlockEntity.setEntityId: a skeleton, a zombie (twice as likely) or a spider.
+        constexpr std::string_view kMobs[4] = {"minecraft:skeleton", "minecraft:zombie", "minecraft:zombie", "minecraft:spider"};
+        const std::string_view mob = kMobs[random.next_int(4)];
+        tag.len = 0;
+        nbt::Writer w(tag);
+        w.root(nbt::kCompound);
+        w.put_short("Delay", 20);
+        w.put_short("MinSpawnDelay", 200);
+        w.put_short("MaxSpawnDelay", 800);
+        w.put_short("SpawnCount", 4);
+        w.put_short("MaxNearbyEntities", 6);
+        w.put_short("RequiredPlayerRange", 16);
+        w.put_short("SpawnRange", 4);
+        w.begin_compound("SpawnData");
+        w.begin_compound("entity");
+        w.put_string("id", mob);
+        w.end_compound();
+        w.end_compound();
+        w.begin_list("SpawnPotentials", nbt::kEnd, 0);
+        end_block_entity(w, "minecraft:mob_spawner", origin);
+        region.set_block_entity_tag(origin.x, origin.y, origin.z, {tag.data, tag.len});
+    }
     return true;
 }
 

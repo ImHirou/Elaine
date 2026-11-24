@@ -353,6 +353,7 @@ bool Decorator::place_feature(u32 feature, FeatureRandom& random, Pos at) {
         case ft::FeatureType::kGeode: return place_geode(ft::kGeodes[f.a], random, at);
         case ft::FeatureType::kMultifaceGrowth: return place_multiface_growth(ft::kMultifaces[f.a], random, at);
         case ft::FeatureType::kSculkPatch: return place_sculk_patch(ft::kSculkPatches[f.a], random, at);
+        case ft::FeatureType::kMonsterRoom: return place_monster_room(random, at);
     }
     return false;
 }

@@ -280,6 +280,7 @@ void Game::pump_chunks(u64 tick_start_ns) {
     for (const world::Dimension::Adopted& a : world_.adopted()) {
         const bool dirty = a.chunk->dirty;
         read_block_entities(*a.chunk, a.from->parts.block_entities);
+        read_made_block_entities(*a.chunk, a.from->parts.made_block_entities);
         read_entities(*a.chunk, a.from->parts.entities);
         a.chunk->dirty = dirty;  // what it came with is what is on disk
         simulate_adopted(*a.chunk);
