@@ -2,9 +2,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Are the features put into a world the ones a vanilla server puts there?
 
-    feature_probe.py run [--keep=DIR]               # all three below, one after the other
-    feature_probe.py vanilla <out.json> [bot]       # runs vanilla in a world of this probe's own; what it saved, and in which order it made it
+    feature_probe.py run [--keep=DIR]               # vanilla, the jar's own classes in its order, their diff: is the probe sound?
+    feature_probe.py ported <exe> [--only=WORD,...] [--keep=DIR]   # vanilla, src/worldgen in its order, their diff
+    feature_probe.py vanilla <out.json> [bot] [--ported=<exe>] [--only=WORD,...]
+                                                    # runs vanilla in a world of this probe's own; what it saved, and in which order it made it
     feature_probe.py jar <out.bin> <vanilla.json>   # the jar's own classes, asked without a server, decorating in that order
+    feature_probe.py ours <exe> <out.bin> <vanilla.json>   # src/worldgen, the same (build/<preset>/feature_dump)
     feature_probe.py diff <vanilla.json> <out.bin>
 
 A vanilla server decorates one chunk at a time, and what a chunk's features find depends on which
@@ -16,9 +19,8 @@ there is no "vanilla's chunk" to hold a generator's to.
 But the server says what it did. Started with `--jfrProfile` it keeps a flight recording, and
 `minecraft.ChunkGeneration` is an event in it for every status of every chunk; the `features` of
 two chunks never run at once. `vanilla` takes the order out of the recording and writes it beside
-what the server saved. Whoever can decorate chunks in a given order - the jar's own classes on the
-extractor's stand (`jar`: tools/mcgen/extract/WorldgenFeatures.java) - is then asked for exactly
-that run, and has to come out with what the server saved:
+what the server saved. Whoever can decorate chunks in a given order is then asked for exactly that
+run, and has to come out with what the server saved:
 
   * the chunks around what a player sees that were saved before they were chunks of the world -
     with their own features and those of the neighbours that came before, or with their terrain
@@ -28,6 +30,19 @@ that run, and has to come out with what the server saved:
   * of the chunks of the world the ring that never began to tick. Those lie beside chunks that do
     tick, whose water runs into them and whose changes their leaves are told of: how many are still
     as generation left them is said, and does not fail the probe.
+
+Two can be asked. The jar's own classes on the extractor's stand (`jar`:
+tools/mcgen/extract/WorldgenFeatures.java) - that is `run`, which says whether the probe itself is
+sound: the same code as the server's, so whatever differs is the order or the stand. And
+src/worldgen (`ours`: tools/vanilla/feature_dump.cpp) - that is `ported`, and `compare.py
+feature_probe`.
+
+src/worldgen places the features that are ported, and a world is not the same without the others:
+an ore does not lie where a lake is. So for `ported` vanilla's world has a data pack in which
+every feature of a biome that is not ported (`feature_dump --ported` says which) places nothing,
+under its own name: the order of the features, and with it the random source of each, stays as it
+is (FeatureSorter goes by which features the biomes name, not by what they are). `--only` leaves
+still fewer: the ported ones with one of these words in their names.
 
 One thing a server's answer depends on beyond the order: how light it is where a mushroom would
 stand. That is its light engine's answer, given by another thread: bright as long as no chunk
@@ -146,7 +161,45 @@ def read_chunk(tag: dict, states: States) -> dict | None:
     return out
 
 
-def record_vanilla(out: str, seed: int, name: str | None = None) -> None:
+PACK = "only-some-features"
+
+
+def dump_tool(exe: str) -> Path:
+    """build/<preset>/feature_dump beside the server `exe`, built."""
+    tool = Path(exe).resolve().parent / "feature_dump"
+    built = subprocess.run(["cmake", "--build", "--preset", tool.parent.name, "--target", "feature_dump"], cwd=ROOT, capture_output=True, text=True)
+    if built.returncode != 0 or not tool.exists():
+        raise SystemExit(f"could not build {tool}:\n{built.stdout[-3000:]}{built.stderr[-3000:]}")
+    return tool
+
+
+def ported_features(exe: str) -> dict[str, bool]:
+    """Every feature a biome of the overworld names, and whether src/worldgen places it."""
+    said = subprocess.run([str(dump_tool(exe)), "--ported"], capture_output=True, text=True, check=True).stdout.split()
+    return {name: flag == "1" for name, flag in zip(said[0::2], said[1::2])}
+
+
+def isolation_pack(features: dict[str, bool], kept: list[str]):
+    """Writes a data pack in which every feature of a biome but `kept` places nothing, under its own name."""
+    def write(path: Path) -> None:
+        import zipfile
+        jar = zipfile.ZipFile(ROOT / ".cache" / "mc" / mc.META["version"] / "server-inner.jar")
+        data = json.loads(jar.read("version.json"))["pack_version"]["data_major"]
+        (path / "data" / "probe" / "worldgen" / "feature").mkdir(parents=True)
+        (path / "data" / "probe" / "worldgen" / "feature" / "nothing.json").write_text(json.dumps({"type": "minecraft:no_op"}))
+        placed = path / "data" / "minecraft" / "worldgen" / "placed_feature"
+        placed.mkdir(parents=True)
+        for name in features:
+            if f"data/minecraft/worldgen/placed_feature/{name}.json" not in jar.namelist():
+                raise SystemExit(f"the jar has no placed feature {name}")
+            if name not in kept:
+                (placed / f"{name}.json").write_text(json.dumps({"feature": "probe:nothing", "placement": []}))
+        (path / "pack.mcmeta").write_text(json.dumps({"pack": {"description": "feature_probe.py: only some features", "min_format": data, "max_format": data}}))
+    return write
+
+
+def record_vanilla(out: str, seed: int, name: str | None = None, features: dict[str, bool] | None = None, kept: list[str] | None = None) -> None:
+    """`kept`: the features of the biomes that are left in the world (None: the game's own, all of them)."""
     world = SERVER_DIR / WORLD
     if world.exists():
         shutil.rmtree(world)
@@ -154,7 +207,7 @@ def record_vanilla(out: str, seed: int, name: str | None = None) -> None:
     debug = SERVER_DIR / "debug"
     before = set(debug.glob("*.jfr")) if debug.exists() else set()
     try:
-        write_world(world, seed, pack=None)
+        write_world(world, seed, pack=None if kept is None else isolation_pack(features, kept), pack_name=PACK)
         v = Vanilla(WORLD, log, ("--jfrProfile",))
         try:
             v.until(r"Done \(")
@@ -190,7 +243,9 @@ def record_vanilla(out: str, seed: int, name: str | None = None) -> None:
                 chunk = read_chunk(tag, states)
                 if chunk:
                     chunks[f"{int(tag['xPos'])},{int(tag['zPos'])}"] = chunk
-        Path(out).write_text(json.dumps({"seed": seed, "events": events, "chunks": chunks}))
+        Path(out).write_text(json.dumps({"seed": seed, "kept": kept, "events": events, "chunks": chunks}))
+        if kept is not None:
+            print(f"its world has {len(kept)} of the {len(features)} features of the biomes: the others place nothing")
         print(f"vanilla saved {sum(statuses.values())} chunks: " + ", ".join(f"{n} {s.removeprefix('minecraft:')}" for s, n in sorted(statuses.items(), key=lambda kv: rank(kv[0].removeprefix("minecraft:")))))
         by = {}
         for e in events:
@@ -236,6 +291,30 @@ def record_jar(out: str, vanilla_path: str) -> None:
         print(f"read further off than a decoration writes: {said['far']}")
 
 
+def record_ours(exe: str, out: str, vanilla_path: str) -> None:
+    """src/worldgen (tools/vanilla/feature_dump.cpp), in the server's order, with the features the server's world had."""
+    theirs = json.loads(Path(vanilla_path).read_text())
+    tool = dump_tool(exe)
+    asked = "".join(f"{what} {x} {z}\n" for what, x, z in steps(theirs["events"]))
+    only = []
+    names = Path(out).with_suffix(".only")
+    if theirs.get("kept") is not None:
+        names.write_text("".join(f"{name}\n" for name in theirs["kept"]))
+        only = ["--only", str(names)]
+    made = subprocess.run([str(tool), str(theirs["seed"]), out, *only], input=asked, text=True, capture_output=True)
+    names.unlink(missing_ok=True)
+    if made.returncode != 0:
+        raise SystemExit(f"feature_dump failed:\n{made.stdout[-2000:]}{made.stderr[-2000:]}")
+    r = In(Path(out).read_bytes())
+    assert r.bytes(8) == b"FEATDMP1"
+    _, count, *counted = r.take("qI5Q")
+    print(f"src/worldgen: {sum(1 for what, _, _ in steps(theirs['events']) if what == 'F')} chunks decorated in the server's order, {count} with terrain -> {out}")
+    for n, what in zip(counted, ("reads beyond the nine chunks of a decoration", "writes refused there", "marks beyond them", "ticks beyond them",
+                                 "blocks set outside the world's height")):
+        if n:
+            print(f"  {n} {what}")
+
+
 class In:
     def __init__(self, data: bytes):
         self.data, self.at = data, 0
@@ -276,11 +355,39 @@ def read_replay(path: str) -> tuple[int, dict]:
     return seed, chunks
 
 
+def read_ours(path: str) -> tuple[int, dict]:
+    """feature_dump's file (tools/vanilla/feature_dump.cpp), in the same shape."""
+    r = In(Path(path).read_bytes())
+    assert r.bytes(8) == b"FEATDMP1", "not a file of feature_dump"
+    seed, count = r.take("q"), r.take("I")
+    r.take("5Q")
+    registries = json.loads((ROOT / ".cache" / "mc" / mc.META["version"] / "reports" / "registries.json").read_text())
+    names = {kind: {e["protocol_id"]: name for name, e in registries[f"minecraft:{kind}"]["entries"].items()} for kind in ("block", "fluid")}
+    chunks = {}
+    for _ in range(count):
+        x, z, decorated = r.take("i"), r.take("i"), r.take("B")
+        c = {"decorated": bool(decorated), "blocks": zlib.decompress(r.bytes(r.take("I")), wbits=-15), "heights": {}}     # (raw deflate)
+        for kind in HEIGHTMAPS:
+            c["heights"][kind] = list(r.take("256i"))
+        c["marks"] = [r.take("I") for _ in range(r.take("I"))]
+        for kind, of in (("block_ticks", "block"), ("fluid_ticks", "fluid")):
+            c[kind] = [[names[of][t[0]], *t[1:]] for t in (r.take("I5i") for _ in range(r.take("I")))]
+        c["block_entities"] = []
+        for _ in range(r.take("I")):
+            bx, by, bz, size = r.take("3iI")
+            raw = r.bytes(size)
+            c["block_entities"].append(mc.snbt(mc.Reader(raw).nbt()) if raw else f"(nothing known of the one at {bx}, {by}, {bz})")
+        c["tainted"] = [tuple(r.take("3i")) for _ in range(r.take("I"))]
+        chunks[f"{x},{z}"] = c
+    return seed, chunks
+
+
 # ----------------------------------------------------------------------------- diff
 
 def diff(a_path: str, b_path: str) -> int:
     theirs = json.loads(Path(a_path).read_text())
-    seed, ours = read_replay(b_path)
+    replayed = "the jar's classes" if Path(b_path).read_bytes()[:8] == b"WGREPL01" else "src/worldgen"
+    seed, ours = read_replay(b_path) if replayed == "the jar's classes" else read_ours(b_path)
     if theirs["seed"] != seed:
         raise SystemExit(f"two seeds: {theirs['seed']} and {seed}")
     block_names = {}
@@ -313,7 +420,7 @@ def diff(a_path: str, b_path: str) -> int:
         if where:
             i = where[0]
             said.append(f"{len(where)} blocks, first at {x * 16 + (i & 15)}, {(i >> 8) + MIN_Y}, {z * 16 + (i >> 4 & 15)}: vanilla "
-                        f"{block_names.get(va[i], va[i])}, the replay {block_names.get(vb[i], vb[i])}")
+                        f"{block_names.get(va[i], va[i])}, {replayed} {block_names.get(vb[i], vb[i])}")
         columns = {(tx, tz) for tx, _, tz in skip}
         for kind, heights in a["heights"].items():
             wrong = [i for i in range(256) if heights[i] != b["heights"][kind][i] and (i & 15, i >> 4) not in columns]
@@ -342,37 +449,58 @@ def diff(a_path: str, b_path: str) -> int:
         if said:
             counts["bad"] += 1
             if counts["bad"] <= 12:
-                print(f"chunk {key} ({a['status']}{'' if b['decorated'] else ', not decorated itself'}): " + "; ".join(said))
+                print(f"DIFFERENT chunk {key} ({a['status']}{'' if b['decorated'] else ', not decorated itself'}): " + "; ".join(said))
     decorated = sum(1 for k, c in their.items() if c["status"] != "full" and k in ours and ours[k]["decorated"])
-    print(f"{counts['proto']} chunks vanilla saved before they were chunks of the world ({decorated} with their own features, the rest with "
+    print(f"of {counts['edge']} chunks of the world that never ticked, {counts['edge_same']} are still as generation left them; "
+          f"{counts['ticked']} more had ticked")
+    kept = theirs.get("kept")
+    print((f"with {len(kept)} features" if kept is not None else "with the game's features") + f", {replayed} in the server's order: "
+          f"{counts['proto']} chunks vanilla saved before they were chunks of the world ({decorated} with their own features, the rest with "
           f"what their neighbours' put into them): {counts['bad']} differ"
           + (f"; {counts['tainted']} blocks left out (they asked for light beside a chunk the server was lighting)" if counts["tainted"] else "")
           + (f"; {counts['missing']} the replay did not make" if counts["missing"] else ""))
-    print(f"of {counts['edge']} chunks of the world that never ticked, {counts['edge_same']} are still as generation left them; "
-          f"{counts['ticked']} more had ticked")
     if counts["proto"] == 0:
         print("no chunk to compare")
         return 1
     return 1 if counts["bad"] or counts["missing"] else 0
 
 
+def kept_features(exe: str, words: list[str]) -> tuple[dict[str, bool], list[str]]:
+    """The features of the biomes, and the ones a world for `ported` has: the ported ones (with one of `words` in their names)."""
+    features = ported_features(exe)
+    kept = [name for name, ported in features.items() if ported and (not words or any(w in name for w in words))]
+    if not kept:
+        raise SystemExit("no ported feature is named so" if words else "no feature is ported")
+    return features, kept
+
+
 def main() -> int:
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
-    seed = next((int(a.split("=", 1)[1]) for a in sys.argv[1:] if a.startswith("--seed=")), SEED)
+    option = lambda name: next((a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith(f"--{name}=")), None)
+    seed = int(option("seed") or SEED)
+    words = [w for w in (option("only") or "").split(",") if w]
+    keep = option("keep")
     if len(args) >= 2 and args[0] == "vanilla":
-        record_vanilla(args[1], seed, args[2] if len(args) > 2 else None)
+        features, kept = kept_features(option("ported"), words) if option("ported") else (None, None)
+        record_vanilla(args[1], seed, args[2] if len(args) > 2 else None, features, kept)
     elif len(args) >= 3 and args[0] == "jar":
         record_jar(args[1], args[2])
+    elif len(args) >= 4 and args[0] == "ours":
+        record_ours(args[1], args[2], args[3])
     elif len(args) >= 3 and args[0] == "diff":
         return diff(args[1], args[2])
-    elif args == ["run"]:
-        keep = next((a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--keep=")), None)
+    elif args == ["run"] or (len(args) == 2 and args[0] == "ported"):
         work = Path(keep) if keep else Path(tempfile.mkdtemp(prefix="feature-probe-"))
         work.mkdir(parents=True, exist_ok=True)
         try:
-            record_vanilla(str(work / "vanilla.json"), seed)
-            record_jar(str(work / "jar.bin"), str(work / "vanilla.json"))
-            return diff(str(work / "vanilla.json"), str(work / "jar.bin"))
+            if args[0] == "run":
+                record_vanilla(str(work / "vanilla.json"), seed)
+                record_jar(str(work / "jar.bin"), str(work / "vanilla.json"))
+                return diff(str(work / "vanilla.json"), str(work / "jar.bin"))
+            features, kept = kept_features(args[1], words)
+            record_vanilla(str(work / "vanilla.json"), seed, None, features, kept)
+            record_ours(args[1], str(work / "ours.bin"), str(work / "vanilla.json"))
+            return diff(str(work / "vanilla.json"), str(work / "ours.bin"))
         finally:
             if not keep:
                 shutil.rmtree(work, ignore_errors=True)

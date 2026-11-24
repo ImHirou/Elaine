@@ -171,6 +171,9 @@ pseudo-code did not). Where a counter's first value matters, read the `dup_x1` i
   All of it can be run without a server: `tools/mcgen/extract/WorldgenFeatures.java`.
 - **`Math.sin`, `cos`, `pow`, `log` are HotSpot's own**, not the C library's: the last bit differs in about one
   argument of five hundred. `Math.pow(x, 2.0)` is `x * x`. `Mth.sin` is a table (`phys/mth.hpp`), another thing.
+  In src/worldgen, `Math.sin` / `cos` are `jmath::sin` / `cos` (never `std::sin`): exact wherever the argument comes
+  from a float, once the formula it is made by is a domain in `tools/mcgen/extract/WorldgenMath.java` (`mcgen.py
+  worldgen math` asks the JVM about every such argument).
 - **Collision shapes** are `VoxelShape`s: coordinates per axis and a bit a cell. `mcgen.py blockdata` writes both the
   boxes and that grid (`collision_grids`); most joined shapes have exactly the lines their boxes' faces cut, 42 of
   330 have more (a piston's head, a straw bed). `getFaceShape(direction)` is the layer of cells at 1e-7 inside

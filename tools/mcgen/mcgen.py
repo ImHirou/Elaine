@@ -187,7 +187,7 @@ STEPS = {
     "gamedata": (("extract/*.java", "!extract/Worldgen*.java", "gamedata.py"),
                  ("gamedata/states.json", "gamedata/blocks.json", "gamedata/entities.json")),
     "worldgen": (("extract/Worldgen*.java", "extract/GameData.java", "extract/Dump.java", "worldgen.py"),
-                 ("worldgen/program.json", "worldgen/climate.json", "worldgen/features.json")),
+                 ("worldgen/program.json", "worldgen/climate.json", "worldgen/features.json", "worldgen/math.bin")),
 }
 
 

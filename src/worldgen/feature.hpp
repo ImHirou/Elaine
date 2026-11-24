@@ -41,6 +41,7 @@ struct FeatureWork {
     std::vector<Pos> waiting;     // FeaturePlacer.positions: what is still to go through a placement...
     std::vector<u16> waiting_at;  // ...and which (modifierIndices)
     std::vector<Pos> made;        // modifiedPositions: what the placement at hand made
+    std::vector<u64> tested;      // OreFeature.doPlace: the blocks of its box an ore has looked at
 };
 
 // IntProvider.sample, HeightProvider.sample.
@@ -80,15 +81,28 @@ class Decorator {
     void set_record(std::vector<Pos>* record) { record_ = record; }
     // ...and which features of the biomes a decoration ran, in its order.
     void set_log(std::vector<Top>* log) { log_ = log; }
+    // ...and of each that it ran: what it wrote (Region::set_log, begun anew for each) and the long
+    // its source gave afterwards.
+    struct Trace {
+        u32 step, index;
+        u64 writes;
+        i64 next;
+    };
+    void set_trace(std::vector<Trace>* trace) { trace_ = trace; }
 
   private:
     bool place_feature(u32 feature, FeatureRandom& random, Pos at);
+    bool place_ore(const ft::Ore& ore, FeatureRandom& random, Pos origin);
 
     Region& region_;
     FeatureWork& work_;
     std::span<const u8> only_;
     std::vector<Pos>* record_ = nullptr;
     std::vector<Top>* log_ = nullptr;
+    std::vector<Trace>* trace_ = nullptr;
 };
+
+// RuleTest.test: what a block state at a height is to whoever would replace it.
+bool test(const ft::Rule& rule, u32 state, i32 y);
 
 }  // namespace worldgen

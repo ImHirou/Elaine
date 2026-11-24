@@ -192,6 +192,7 @@ add_library(core STATIC
   src/worldgen/terrain.cpp
   src/worldgen/material.cpp
   src/worldgen/carver.cpp
+  src/worldgen/jmath.cpp
   src/worldgen/region.cpp
   src/worldgen/feature.cpp
   src/worldgen/generator.cpp
@@ -291,6 +292,12 @@ add_executable(terrain_dump EXCLUDE_FROM_ALL tools/vanilla/terrain_dump.cpp)
 target_link_libraries(terrain_dump PRIVATE core mc_core_flags)
 mc_needs_generated(terrain_dump)
 mc_lto_cache(terrain_dump)
+
+# ...and what tools/vanilla/feature_probe.py has decorate chunks in a vanilla server's order.
+add_executable(feature_dump EXCLUDE_FROM_ALL tools/vanilla/feature_dump.cpp)
+target_link_libraries(feature_dump PRIVATE core mc_core_flags)
+mc_needs_generated(feature_dump)
+mc_lto_cache(feature_dump)
 
 if(MC_BENCH)
   add_executable(bench bench/bench.cpp bench/world_bench.cpp bench/entity_bench.cpp bench/item_bench.cpp

@@ -3,7 +3,10 @@
 
 #include <cmath>
 
+#include "phys/mth.hpp"
+#include "worldgen/jmath.hpp"
 #include "worldgen/material.hpp"
+#include "worldgen/mth.hpp"
 
 namespace worldgen {
 
@@ -128,6 +131,23 @@ bool test(Region& region, const ft::Predicate& p, Pos at) {
             // (The block's own canSurvive: world/block_rules is still to come, and a placed feature
             // that asks is not ported until then.)
             DCHECK(false);
+            return false;
+    }
+    return false;
+}
+
+bool test(const ft::Rule& rule, u32 state, i32 y) {
+    switch (rule.op) {
+        case ft::RuleOp::kStateIn: return in_state_set(static_cast<u32>(rule.a), state);
+        case ft::RuleOp::kHeight: return rule.a <= y && y <= rule.b;
+        case ft::RuleOp::kNot: return !test(ft::kRules[rule.a], state, y);
+        case ft::RuleOp::kAllOf:
+            for (i32 i = rule.a; i < rule.a + rule.b; ++i)
+                if (!test(ft::kRules[ft::kRuleLists[i]], state, y)) return false;
+            return true;
+        case ft::RuleOp::kAnyOf:
+            for (i32 i = rule.a; i < rule.a + rule.b; ++i)
+                if (test(ft::kRules[ft::kRuleLists[i]], state, y)) return true;
             return false;
     }
     return false;
@@ -305,8 +325,139 @@ bool Decorator::place_feature(u32 feature, FeatureRandom& random, Pos at) {
             for (u32 i = f.a; i < f.a + f.b; ++i) any |= place(ft::kPlacedLists[i], random, at, nullptr);
             return any;
         }
+        case ft::FeatureType::kOre: return place_ore(ft::kOres[f.a], random, at);
     }
     return false;
+}
+
+namespace {
+
+// Mth.ceil(float)
+i32 ceil_int(float v) {
+    const i32 truncated = static_cast<i32>(v);
+    return v > static_cast<float>(truncated) ? truncated + 1 : truncated;
+}
+
+// java.util.BitSet as OreFeature.doPlace uses one: bits that are set and asked for by a number
+// that may lie beyond what the set was made for - it grows. The words are the thread's, kept
+// from one ore to the next.
+struct Tested {
+    std::vector<u64>& words;
+
+    Tested(std::vector<u64>& kept, u32 bits) : words(kept) { words.assign((bits + 63) >> 6, 0); }
+    bool get(u32 bit) const { return bit >> 6 < words.size() && (words[bit >> 6] >> (bit & 63) & 1); }
+    void set(u32 bit) {
+        if (UNLIKELY(bit >> 6 >= words.size())) words.resize((bit >> 6) + 1, 0);
+        words[bit >> 6] |= u64{1} << (bit & 63);
+    }
+};
+
+}  // namespace
+
+// OreFeature.place and doPlace: a blob of ore along a line through the origin - a string of
+// spheres, each a random size, the middle ones larger - laid into whatever its targets say it may
+// replace. It reads and writes the sections themselves (BulkSectionAccess): no heightmap moves.
+bool Decorator::place_ore(const ft::Ore& ore, FeatureRandom& random, Pos origin) {
+    Region& region = region_;
+    const i32 size = ore.size;
+    const float dir = random.next_float() * 3.1415927f;
+    const float spread_xy = static_cast<float>(size) / 8.0f;
+    const i32 max_radius = ceil_int((static_cast<float>(size) / 16.0f * 2.0f + 1.0f) / 2.0f);
+    const double sine = jmath::sin(static_cast<double>(dir)), cosine = jmath::cos(static_cast<double>(dir));
+    const double x0 = static_cast<double>(origin.x) + sine * static_cast<double>(spread_xy);
+    const double x1 = static_cast<double>(origin.x) - sine * static_cast<double>(spread_xy);
+    const double z0 = static_cast<double>(origin.z) + cosine * static_cast<double>(spread_xy);
+    const double z1 = static_cast<double>(origin.z) - cosine * static_cast<double>(spread_xy);
+    const i32 first_y = random.next_int(3);
+    const double y0 = static_cast<double>(origin.y + first_y - 2);
+    const double y1 = static_cast<double>(origin.y + random.next_int(3) - 2);
+    const i32 x_start = origin.x - ceil_int(spread_xy) - max_radius;
+    const i32 y_start = origin.y - 2 - max_radius;
+    const i32 z_start = origin.z - ceil_int(spread_xy) - max_radius;
+    const i32 size_xz = 2 * (ceil_int(spread_xy) + max_radius), size_y = 2 * (2 + max_radius);
+    // Only where the box the blob lies in reaches down to the ground somewhere.
+    bool buried = false;
+    for (i32 x = x_start; x <= x_start + size_xz && !buried; ++x)
+        for (i32 z = z_start; z <= z_start + size_xz && !buried; ++z)
+            buried = y_start <= region.height(world::heightmap::kOceanFloorWg, x, z);
+    if (!buried) return false;
+
+    double data[64 * 4];
+    for (i32 i = 0; i < size; ++i) {
+        const float step = static_cast<float>(i) / static_cast<float>(size);
+        const double xx = lerp(static_cast<double>(step), x0, x1);
+        const double yy = lerp(static_cast<double>(step), y0, y1);
+        const double zz = lerp(static_cast<double>(step), z0, z1);
+        const double ss = random.next_double() * static_cast<double>(size) / 16.0;
+        const double r = (static_cast<double>(phys::mth_sin(static_cast<double>(3.1415927f * step)) + 1.0f) * ss + 1.0) / 2.0;
+        data[i * 4 + 0] = xx;
+        data[i * 4 + 1] = yy;
+        data[i * 4 + 2] = zz;
+        data[i * 4 + 3] = r;
+    }
+    // A sphere that lies wholly within another is not gone through.
+    for (i32 i1 = 0; i1 < size - 1; ++i1) {
+        if (data[i1 * 4 + 3] <= 0.0) continue;
+        for (i32 i2 = i1 + 1; i2 < size; ++i2) {
+            if (data[i2 * 4 + 3] <= 0.0) continue;
+            const double dx = data[i1 * 4 + 0] - data[i2 * 4 + 0];
+            const double dy = data[i1 * 4 + 1] - data[i2 * 4 + 1];
+            const double dz = data[i1 * 4 + 2] - data[i2 * 4 + 2];
+            const double dr = data[i1 * 4 + 3] - data[i2 * 4 + 3];
+            if (dr * dr <= dx * dx + dy * dy + dz * dz) continue;
+            if (dr > 0.0)
+                data[i2 * 4 + 3] = -1.0;
+            else
+                data[i1 * 4 + 3] = -1.0;
+        }
+    }
+
+    i32 placed = 0;
+    Tested tested(work_.tested, static_cast<u32>(size_xz * size_y * size_xz));
+    const float discard = ore.discard_chance_on_air_exposure;
+    for (i32 i = 0; i < size; ++i) {
+        const double r = data[i * 4 + 3];
+        if (r < 0.0) continue;
+        const double xx = data[i * 4 + 0], yy = data[i * 4 + 1], zz = data[i * 4 + 2];
+        const i32 x_min = std::max(floor_int(xx - r), x_start), y_min = std::max(floor_int(yy - r), y_start),
+                  z_min = std::max(floor_int(zz - r), z_start);
+        const i32 x_max = std::max(floor_int(xx + r), x_min), y_max = std::max(floor_int(yy + r), y_min),
+                  z_max = std::max(floor_int(zz + r), z_min);
+        for (i32 x = x_min; x <= x_max; ++x) {
+            const double xd = (static_cast<double>(x) + 0.5 - xx) / r;
+            if (xd * xd >= 1.0) continue;
+            for (i32 y = y_min; y <= y_max; ++y) {
+                const double yd = (static_cast<double>(y) + 0.5 - yy) / r;
+                if (xd * xd + yd * yd >= 1.0) continue;
+                for (i32 z = z_min; z <= z_max; ++z) {
+                    const double zd = (static_cast<double>(z) + 0.5 - zz) / r;
+                    if (xd * xd + yd * yd + zd * zd >= 1.0) continue;
+                    if (Region::outside_height(y)) continue;
+                    const u32 bit = static_cast<u32>((x - x_start) + (y - y_start) * size_xz + (z - z_start) * size_xz * size_y);
+                    if (tested.get(bit)) continue;
+                    tested.set(bit);
+                    if (!region.can_write(x, z)) continue;
+                    const u16 state = region.raw(x, y, z);
+                    for (u32 t = ore.first; t < static_cast<u32>(ore.first) + ore.targets; ++t) {
+                        // AbstractOreFeature.canPlaceOre: the target's test; then, for an ore that shuns the
+                        // open, a draw - and failing that, no air on any of its six sides.
+                        if (!test(ft::kRules[ft::kOreTargets[t].rule], state, y)) continue;
+                        bool can = true;
+                        if (discard > 0.0f && (discard >= 1.0f || random.next_float() < discard)) {
+                            can = !(world::is_air(region.raw(x, y - 1, z)) || world::is_air(region.raw(x, y + 1, z)) ||
+                                    world::is_air(region.raw(x, y, z - 1)) || world::is_air(region.raw(x, y, z + 1)) ||
+                                    world::is_air(region.raw(x - 1, y, z)) || world::is_air(region.raw(x + 1, y, z)));
+                        }
+                        if (!can) continue;
+                        region.put_raw(x, y, z, ft::kOreTargets[t].state);
+                        ++placed;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    return placed > 0;
 }
 
 void Decorator::decorate() {
@@ -339,9 +490,17 @@ void Decorator::decorate() {
                 random.set_feature_seed(decoration_seed, static_cast<i32>(index), static_cast<i32>(step));
                 const Top top{step, index};
                 if (log_) log_->push_back(top);
+                u64 writes = 0xcbf29ce484222325ull;
+                if (trace_) region.set_log(&writes);
                 place(placed, random, origin, &top);
+                if (trace_) {
+                    region.set_log(nullptr);
+                    // (The source is the feature's own until the next is seeded: a long more of it moves nothing.)
+                    trace_->push_back({step, index, writes, random.next_long()});
+                }
             }
     }
+    if (!record_) region.center().decorated = true;  // (ChunkStatus.FEATURES)
 }
 
 }  // namespace worldgen

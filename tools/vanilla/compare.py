@@ -113,6 +113,9 @@ class Server:
 # worlds of their own and with rules of their own: run here both at once, before the shared servers are up
 # (vanilla's port is the same).
 SELF_STARTING = {"block_probe", "terrain_probe"}
+# ...and one whose second recording is made from the first: `vanilla <out> --ported=<exe>`, then
+# `ours <exe> <out> <vanilla's recording>` - vanilla's world, and the order it was made in.
+IN_TURN = {"feature_probe"}
 
 
 def report(probe: str, recordings: dict, work: Path, verbose: bool, took: float, kind: str = "") -> int:
@@ -155,7 +158,7 @@ def both_at_once(record) -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("probes", nargs="+", help="command_probe, component_probe, container_probe, ..., block_probe, terrain_probe")
+    ap.add_argument("probes", nargs="+", help="command_probe, component_probe, container_probe, ..., block_probe, terrain_probe, feature_probe")
     ap.add_argument("-k", action="append", default=[], metavar="WORD", help="only the parts of a probe named so (repeatable)")
     ap.add_argument("-v", action="store_true", help="print the diffs in full")
     ap.add_argument("--exe", default=str(ROOT / "build" / "release" / "elaine"))
@@ -214,7 +217,19 @@ def record_all(args, work: Path, port: int, env: dict, stamp: str) -> dict:
             [sys.executable, str(HERE / f"{probe}.py"), *mode[what], str(recordings[what]), *names, *only],
             stdout=open(work / f"{probe}.{what}.out", "w"), stderr=subprocess.STDOUT, env=env))
         out[probe] = (recordings if recorded(probe, runs, work) else None, time.time() - t1)
-    session = [p for p in args.probes if p not in SELF_STARTING]
+    for probe in (p for p in args.probes if p in IN_TURN):
+        recordings = {"vanilla": work / f"{probe}.vanilla.json", "ours": work / f"{probe}.ours.bin"}
+        mode = {"vanilla": ["vanilla", str(recordings["vanilla"]), f"--ported={args.exe}", *only],
+                "ours": ["ours", args.exe, str(recordings["ours"]), str(recordings["vanilla"])]}
+        t1 = time.time()
+        runs = {}
+        for what in ("vanilla", "ours"):
+            runs[what] = subprocess.run([sys.executable, str(HERE / f"{probe}.py"), *mode[what]],
+                                        stdout=open(work / f"{probe}.{what}.out", "w"), stderr=subprocess.STDOUT, env=env)
+            if runs[what].returncode != 0:
+                break
+        out[probe] = (recordings if recorded(probe, runs, work) else None, time.time() - t1)
+    session = [p for p in args.probes if p not in SELF_STARTING and p not in IN_TURN]
     if session:
         out.update(run_session(session, args, work, port, env, stamp))
     return out

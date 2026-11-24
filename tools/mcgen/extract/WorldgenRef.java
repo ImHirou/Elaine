@@ -406,13 +406,14 @@ public final class WorldgenRef {
 
     static final Map<String, Section> SECTIONS = new LinkedHashMap<>();
     /** What a run without arguments writes: what `generate` reads. */
-    static final List<String> TABLES = List.of("program", "climate", "features");
+    static final List<String> TABLES = List.of("program", "climate", "features", "math");
     static Path out;
 
     static {
         SECTIONS.put("program", WorldgenRef::program);
         SECTIONS.put("climate", WorldgenRef::climate);
         SECTIONS.put("features", WorldgenFeatures::features);
+        SECTIONS.put("math", WorldgenMath::math);
         SECTIONS.put("golden", WorldgenRef::golden);
         SECTIONS.put("census", WorldgenFeatures::census);
         SECTIONS.put("replay", WorldgenFeatures::replay);

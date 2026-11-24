@@ -128,6 +128,7 @@ bool Region::set_block(i32 x, i32 y, i32 z, u16 state, u32 flags) {
     states[i] = state;
     dirty_[slot] |= 1u << (up >> 4);
     non_air_[section] = static_cast<u16>(non_air_[section] + !world::is_air(state) - !world::is_air(old));
+    if (UNLIKELY(log_ != nullptr)) log_write(x, y, z, state);
     world::GenChunk& chunk = *chunks_[slot];
     for (const u32 type : kKept) update_height(chunk, slot, type, x, y, z, state);
     // WorldGenRegion.setBlock: a block that has a block entity gets a placeholder for it, whatever
@@ -158,7 +159,15 @@ bool Region::put_raw(i32 x, i32 y, i32 z, u16 state) {
     states[i] = state;
     dirty_[slot] |= 1u << (up >> 4);
     non_air_[section] = static_cast<u16>(non_air_[section] + !world::is_air(state) - !world::is_air(old));
+    if (UNLIKELY(log_ != nullptr)) log_write(x, y, z, state);
     return true;
+}
+
+void Region::log_write(i32 x, i32 y, i32 z, u16 state) {
+    u64 h = *log_;
+    for (const u32 v : {static_cast<u32>(x), static_cast<u32>(y), static_cast<u32>(z), static_cast<u32>(state)})
+        for (u32 i = 0; i < 4; ++i) h = (h ^ ((v >> (8 * i)) & 0xFF)) * 0x100000001b3ull;
+    *log_ = h;
 }
 
 u16 Region::biome(i32 x, i32 y, i32 z) const {

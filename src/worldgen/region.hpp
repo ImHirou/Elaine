@@ -77,6 +77,8 @@ class Region {
     // Pack what was written; the chunks are their owner's again.
     void commit();
 
+    // The chunk that is decorated.
+    world::GenChunk& center() { return *chunks_[nine_ + 1 + width_]; }
     i32 center_x() const { return center_x_; }
     i32 center_z() const { return center_z_; }
     const Overworld& world() const { return world_; }
@@ -96,6 +98,22 @@ class Region {
         if (non_air_[section] == 0) return world::kAir;
         const u16* states = flat_[section];
         if (UNLIKELY(!states)) states = spread(section);
+        return states[(up & 15) << 8 | (static_cast<u32>(z) & 15) << 4 | (static_cast<u32>(x) & 15)];
+    }
+    // What a section itself holds, as BulkSectionAccess reads it (an ore): no air where air of another
+    // kind is, and air beyond the world's height.
+    ALWAYS_INLINE u16 raw(i32 x, i32 y, i32 z) {
+        const u32 up = static_cast<u32>(y - kMinY);
+        if (UNLIKELY(up >= static_cast<u32>(kHeight))) return world::kAir;
+        const u32 slot = slot_of(x >> 4, z >> 4);
+        if (UNLIKELY(slot == kNoSlot)) return far_read();
+        const u32 section = slot * Terrain::kSections + (up >> 4);
+        const u16* states = flat_[section];
+        if (UNLIKELY(!states)) {
+            const world::Section& packed = chunks_[slot]->sections[up >> 4];
+            if (packed.uniform()) return packed.single;
+            states = spread(section);
+        }
         return states[(up & 15) << 8 | (static_cast<u32>(z) & 15) << 4 | (static_cast<u32>(x) & 15)];
     }
     // WorldGenRegion.setBlock. False: the block is in none of the nine chunks.
@@ -143,6 +161,10 @@ class Region {
     // What a feature filled in (one nameless NBT compound). False: there is no block entity there.
     bool set_block_entity_tag(i32 x, i32 y, i32 z, std::span<const u8> tag);
 
+    // For whoever holds a decoration to vanilla's feature by feature: every block that is set from
+    // here on - where, and to what - is folded into `*log` (FNV-1a), in the order it is set.
+    void set_log(u64* log) { log_ = log; }
+
     // WorldGenRegion.getRandom: one source for the whole decoration of a chunk, made from where the
     // chunk is ("worldgen_region_random").
     XoroshiroRandom& random() { return random_; }
@@ -161,6 +183,7 @@ class Region {
         return world::kAir;
     }
     NOINLINE u16* spread(u32 section);
+    NOINLINE void log_write(i32 x, i32 y, i32 z, u16 state);
     void update_height(world::GenChunk& chunk, u32 slot, u32 type, i32 x, i32 y, i32 z, u16 state);
     void put_placeholder(world::GenChunk& chunk, u32 at);
     void drop_block_entity(world::GenChunk& chunk, u32 at);
@@ -179,6 +202,7 @@ class Region {
     u32 dirty_[RegionWork::kChunks];      // a bit a section: written to
     i32 brightness_ = 0;
     std::vector<Pos>* asked_ = nullptr;
+    u64* log_ = nullptr;
     XoroshiroRandom random_{0, 0};
     Counts counts_;
 };

@@ -3,6 +3,8 @@
 
 #include <limits>
 
+#include "worldgen/jmath.hpp"
+
 #include PROTO_GEN_WORLDGEN_CLIMATE_HPP
 
 namespace worldgen {
@@ -233,8 +235,9 @@ void spawn_origin(Sampler& sampler, i32& x, i32& z) {
         float angle = 0.0f, radius = increment;
         const i32 origin_x = best_x, origin_z = best_z;
         while (radius <= max_radius) {
-            const i32 at_x = origin_x + static_cast<i32>(std::sin(static_cast<double>(angle)) * static_cast<double>(radius));
-            const i32 at_z = origin_z + static_cast<i32>(std::cos(static_cast<double>(angle)) * static_cast<double>(radius));
+            // (Math.sin and Math.cos: the angles are the same for every world, and the JVM was asked about each.)
+            const i32 at_x = origin_x + static_cast<i32>(jmath::sin(static_cast<double>(angle)) * static_cast<double>(radius));
+            const i32 at_z = origin_z + static_cast<i32>(jmath::cos(static_cast<double>(angle)) * static_cast<double>(radius));
             const i64 f = fitness(at_x, at_z);
             if (f < best) {
                 best = f;

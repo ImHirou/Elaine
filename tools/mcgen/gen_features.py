@@ -39,11 +39,11 @@ STEPS = ["raw_generation", "lakes", "local_modifications", "underground_structur
 PORTED_FEATURES = {
     "no_op": "kNoOp", "random_selector": "kRandomSelector", "simple_random_selector": "kSimpleRandomSelector",
     "weighted_random_selector": "kWeightedRandomSelector", "random_boolean_selector": "kRandomBooleanSelector",
-    "sequence": "kSequence", "overlay": "kOverlay",
+    "sequence": "kSequence", "overlay": "kOverlay", "ore": "kOre",
 }
 # ...and the types of the overworld that wait for theirs. A type in neither list stops the run.
 UNPORTED_FEATURES = {
-    "simple_block", "tree", "ore", "block_column", "template", "disk", "coral_tree", "coral_claw", "fallen_tree", "vegetation_patch",
+    "simple_block", "tree", "block_column", "template", "disk", "coral_tree", "coral_claw", "fallen_tree", "vegetation_patch",
     "speleothem", "spring_feature", "lake", "multiface_growth", "iceberg", "fossil", "bamboo", "speleothem_cluster", "root_system",
     "geode", "monster_room", "underwater_magma", "huge_brown_mushroom", "huge_red_mushroom", "freeze_top_layer", "blue_ice",
     "block_blob", "vines", "spike", "large_dripstone", "waterlogged_vegetation_patch", "sculk_patch",
@@ -173,6 +173,8 @@ class FeatureTables:
         self.doubles = Pool()
         self.modifiers = Pool()
         self.features, self.chances, self.placed_lists, self.weighted = Pool(), Pool(), Pool(), Pool()
+        self.rules, self.rule_lists = Pool(), Pool()
+        self.ores, self.ore_targets = Pool(), Pool()
         self.placed: list = []                 # (feature, first modifier, modifiers, ported, where); None while it is made
         self.placed_names: list[str] = []      # "" for one that is written out inside a feature
         self.named_placed: dict[str, int] = {}
@@ -356,6 +358,57 @@ class FeatureTables:
         made = self._predicate(value)
         return self._row(made), self._ported(made)
 
+    # ---------------------------------------------------------------- rule tests
+
+    def _rule(self, value):
+        """A RuleTest (what an ore may replace): ("in", set of states, as written), or ("row", the row)."""
+        if not isinstance(value, dict) or not isinstance(value.get("predicate_type"), str):
+            die(f"gen_features: a rule test written as {value!r}")
+        kind = strip(value["predicate_type"])
+        fields = set(value) - {"predicate_type"}
+
+        def need(*wanted: str) -> None:
+            if fields != set(wanted):
+                die(f"gen_features: the rule test {kind} has the fields {sorted(fields)}: src/worldgen reads {sorted(wanted)}")
+
+        if kind == "always_true":
+            need()
+            return ("in", self.sets.everything, value)
+        if kind == "tag_match":
+            need("tag")
+            return ("in", self.sets.block_tag(value["tag"]), value)
+        if kind == "block_match":
+            need("block")
+            return ("in", self.sets.of_blocks({value["block"]}), value)
+        if kind == "height_match":
+            need("min_inclusive", "max_inclusive")
+            return ("row", ("kHeight", value["min_inclusive"], value["max_inclusive"]))
+        if kind == "not":
+            need("rule")
+            inner = self._rule(value["rule"])
+            if inner[0] == "in":
+                return ("in", self.sets.everything & ~inner[1], value)
+            return ("row", ("kNot", self._rule_row(inner), 0))
+        if kind in ("all_of", "any_of"):
+            need("rules")
+            inner = [self._rule(r) for r in value["rules"]]
+            if inner and all(r[0] == "in" for r in inner):
+                bits = inner[0][1]
+                for r in inner[1:]:
+                    bits = bits & r[1] if kind == "all_of" else bits | r[1]
+                return ("in", bits, value)
+            rows = [self._rule_row(r) for r in inner]
+            return ("row", ("kAllOf" if kind == "all_of" else "kAnyOf", self.rule_lists.run(rows), len(rows)))
+        die(f"gen_features: a rule test of the type {kind}: src/worldgen has no word for it")
+
+    def _rule_row(self, made) -> int:
+        if made[0] == "in":
+            return self.rules.add(("kStateIn", self.sets.keep(made[1], made[2]), 0))
+        return self.rules.add(made[1])
+
+    def rule(self, value) -> int:
+        return self._rule_row(self._rule(value))
+
     # ---------------------------------------------------------------- where
 
     def modifier(self, value) -> tuple[tuple, bool]:
@@ -529,6 +582,16 @@ class FeatureTables:
             self.need(kind, value, {"feature_true", "feature_false"})
             uses = [self.placed_ref(value["feature_true"]), self.placed_ref(value["feature_false"])]
             row = ("kRandomBooleanSelector", uses[0], uses[1], 0)
+        elif kind == "ore":
+            self.need(kind, value, {"targets", "size", "discard_chance_on_air_exposure"})
+            targets = []
+            for target in value["targets"]:
+                if set(target) != {"target", "state"}:
+                    die(f"gen_features: one of an ore's targets written as {canon(target)[:200]}")
+                targets.append((self.rule(target["target"]), self.blocks.state(target["state"])))
+            if not 0 <= value["size"] <= 64:
+                die(f"gen_features: an ore of the size {value['size']}")
+            row = ("kOre", self.ores.run([(value["size"], float(value["discard_chance_on_air_exposure"]), self.ore_targets.run(targets), len(targets))]), 0, 0)
         else:
             die(f"gen_features: {kind} is listed as ported and has no table")
         self.nested.update(uses)
@@ -619,9 +682,10 @@ struct Modifier {
 // Feature. kRandomSelector: kChances[a .. a + b) one after the other, else the placed feature c.
 // kSimpleRandomSelector, kSequence, kOverlay: kPlacedLists[a .. a + b). kWeightedRandomSelector:
 // kWeighted[a .. a + b), whose weights add up to c. kRandomBooleanSelector: a if true, else b.
-// kUnported: a type that waits for its code.
+// kOre: kOres[a]. kUnported: a type that waits for its code.
 enum class FeatureType : u8 {
     kUnported, kNoOp, kRandomSelector, kSimpleRandomSelector, kWeightedRandomSelector, kRandomBooleanSelector, kSequence, kOverlay,
+    kOre,
 };
 struct Feature {
     FeatureType type;
@@ -631,6 +695,26 @@ struct Feature {
 struct Chance {
     u32 placed;
     float chance;
+};
+
+// RuleTest: what a block state at a height is to an ore. kStateIn: in state set a. kHeight: the
+// block's y is a .. b. kNot: not kRules[a]. kAllOf, kAnyOf: kRuleLists[a .. a + b), in that order.
+enum class RuleOp : u8 { kStateIn, kHeight, kNot, kAllOf, kAnyOf };
+struct Rule {
+    RuleOp op;
+    i32 a, b;
+};
+// OreFeature: so many blocks at most, laid into what kOreTargets[first .. first + targets) say
+// may be replaced, each with what replaces it - the first that holds for a block.
+struct OreTarget {
+    u16 rule;
+    u16 state;
+};
+struct Ore {
+    u8 size;
+    u8 targets;
+    u16 first;
+    float discard_chance_on_air_exposure;
 };
 
 // PlacedFeature: kModifiers[first .. first + modifiers), then the feature.
@@ -671,6 +755,13 @@ struct Placed {
                + ", ".join(f"{{{p}, {cfloat(c)}}}" for p, c in t.chances.rows) + "};\n")
     out.append(f"inline constexpr u16 kPlacedLists[{max(1, len(t.placed_lists.rows))}] = {{{', '.join(map(str, t.placed_lists.rows)) or '0'}}};\n")
     entries("kWeighted", t.weighted.rows)
+    out.append(f"\ninline constexpr Rule kRules[{max(1, len(t.rules.rows))}] = {{"
+               + ", ".join(f"{{RuleOp::{op}, {a}, {b}}}" for op, a, b in t.rules.rows) + "};\n")
+    out.append(f"inline constexpr u16 kRuleLists[{max(1, len(t.rule_lists.rows))}] = {{{', '.join(map(str, t.rule_lists.rows)) or '0'}}};\n")
+    out.append(f"inline constexpr OreTarget kOreTargets[{max(1, len(t.ore_targets.rows))}] = {{"
+               + ", ".join(f"{{{rule}, {state}}}" for rule, state in t.ore_targets.rows) + "};\n")
+    out.append(f"inline constexpr Ore kOres[{max(1, len(t.ores.rows))}] = {{"
+               + ", ".join(f"{{{size}, {count}, {first}, {cfloat(chance)}}}" for size, chance, first, count in t.ores.rows) + "};\n")
     if len(t.placed) > 65535 or len(t.features.rows) > 65535 or len(t.modifiers.rows) > 65535:
         die("gen_features: more rows than the tables' 16 bits count")
     out.append(f"""
@@ -747,9 +838,27 @@ inline constexpr std::string_view kStateSetSources[kStateSetCount] = {{
 
 }}  // namespace proto::gen::worldgen::feature
 """)
+    math = (vdir(version) / "worldgen" / "math.bin").read_bytes() if (vdir(version) / "worldgen" / "math.bin").exists() else b""
+    if math[:8] != b"WGMATH01":
+        die("gen_features: worldgen/math.bin is missing or not what WorldgenMath.java writes - run: mcgen.py worldgen")
+    math_hpp = hdr + """
+// Where java.lang.Math's sine and cosine are not the ones src/worldgen computes for itself: for
+// every angle a feature can make of a float, what is to be added to the bits of our own answer
+// (tools/mcgen/extract/WorldgenMath.java, which says how the bytes lie). Included by
+// src/worldgen/jmath.cpp only.
+
+namespace proto::gen::worldgen::math {
+
+inline constexpr unsigned char kCorrections[] = {
+#embed "worldgen_math.bin"
+};
+
+}  // namespace proto::gen::worldgen::math
+"""
     ported = sum(1 for at in range(t.named) if t.placed[at][3])
     where = sum(1 for at in range(t.named) if t.placed[at][4])
     return {"worldgen_features.hpp": "".join(out), "worldgen_state_sets.bin": t.sets.bytes() or b"\0",
+            "worldgen_math.hpp": math_hpp, "worldgen_math.bin": math,
             "_stats": {"placed_features": len(t.placed), "placed_features_named": t.named, "placed_features_ported": ported, "placed_features_whose_placements_are": where,
                        "features": len(t.features.rows), "feature_types_waiting": len(t.unported_types),
                        "placements": len(t.modifiers.rows), "predicates": len(t.predicates.rows), "state_sets": len(t.sets.kept)}}

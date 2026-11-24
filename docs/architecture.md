@@ -2346,11 +2346,14 @@ is ported can be held to the server through the same replay.
 of its own, and they are not glibc's results: over the 2^24 angles an ore can have, sine
 differs in 33106 and cosine in 33153 (the last bit); of four million other arguments `pow`
 differs in 4078 and `log` in 288. `Math.pow(x, 2.0)` is `x * x` exactly. The features that call
-them (ores, icebergs, the fancy oak, dripstone) need HotSpot's results.
+them (ores, icebergs, the fancy oak, dripstone) need HotSpot's results - how they get them is
+below ("Java's sine").
 
 ### Features: the engine (`region.*`, `feature.*`, `tools/mcgen/gen_features.py`)
 
-What exists of the `features` status so far is everything around a feature and no feature.
+What exists of the `features` status so far is everything around a feature, and the first
+kind of feature: ores. No chunk of a world has them yet - a worker's chunk is still its terrain;
+what decorates chunks on the workers is the next thing to be built.
 
 **A chunk between its terrain and the world** is a `world::GenChunk`: packed sections in an
 arena of its own, the biome of every cell, vanilla's six heightmaps (the two the terrain was made
@@ -2394,15 +2397,70 @@ only writes down where it was asked to be, and the positions and the source's ne
 vanilla's for all 1838 of them. Fourteen placed features wait: their placements ask a block
 whether it could stand there, which is the block's own code.
 
+**Java's sine (`jmath.*`, `tools/mcgen/extract/WorldgenMath.java`).** An ore lies along a line
+whose direction is a random float times pi, and the ends of the line are `Math.sin` and
+`Math.cos` of it: HotSpot's, whose last bit is not the C library's for one angle in five hundred,
+and a block at the rim of the blob goes by that bit. HotSpot's routines are not ours to copy
+(GPL 2 only), so there are two parts. A sine and a cosine of our own - the argument less the
+nearest multiple of pi / 2 and the series, in sums and products of pairs of doubles that carry
+their rounding errors along: nothing but IEEE additions and multiplications in a fixed order
+(the build fuses none: `-ffp-contract=off`), so the same bits on every machine, and the same
+again in Java, where the extractor has the same functions operation for operation. And a table:
+the extractor asks the JVM about every argument a feature can have when its angle comes from a
+float - 2^24 of them a formula, so far the ore's - and about the 927 angles of the search for
+where a world begins, which are the same in every world, and writes down where the JVM's
+answer is not ours: 18594 sines and 18627 cosines, each the next double up or down
+(`worldgen_math.bin`, 327 KB; a lookup is a binary search, twice an ore; the JVM is the one the
+extractor ran on, HotSpot on x86-64, which `math.json` names). For those arguments
+`jmath::sin` is `Math.sin`, all of them: the unit test goes through all 2^24 and compares one
+number with the JVM's. An angle that comes from a double (an iceberg's) has too many values to
+ask about; there the answer will be our own - the nearest double, held to exact arithmetic over
+a sample of the angles - which is HotSpot's but for the last bit of one argument in nine
+hundred: that much is not vanilla's, and stays so. The logarithm in a
+Gaussian draw (`random.hpp`) is still the C library's, with the same reservation.
+
+**Ores (`Decorator::place_ore`)** are `OreFeature`: up to 64 spheres strung along the line, the
+ones in the middle larger, a sphere that lies within another dropped; then every block of every
+sphere, once (a bit a block of the blob's box - `java.util.BitSet`, which grows when it is asked
+beyond its size, and so does this one), set to the ore of the first target whose rule holds for
+what is there. A rule (`RuleTest`) is a set of block states wherever it asks nothing else -
+`not` and `all_of` over tags are one set - and a few rows of a table where it asks for the
+block's height as well (26.3's ores: a block of the tag `height_specific_ore_replaceables` is
+replaced by the ore of stone only from y 0 up, by the one of deepslate only from y 8 down). It reads and
+writes the sections themselves, as `BulkSectionAccess` does: no heightmap moves, and where a
+section holds nothing but cave air it sees cave air, not the plain air `ProtoChunk` answers
+(`Region::raw`, `put_raw`). An ore that shuns the open draws a number for a block only once a
+target's rule held for it - the order of the draws is the order of the blocks.
+
+**Decorations held to the jar.** Beside the placements, the golden script has whole decorations
+with the features of one kind alone - so far ores: four areas of 4 x 4 chunks (windswept hills,
+badlands, dripstone and lush caves), the inner four decorated one after the other in the order
+the pipeline will have. Of each of the 404 features that run: everything it wrote, where and
+what, folded into one number (on vanilla's side by sections that say what is set in them - an
+ore's raw writes too), and the long its source gives afterwards; then the sixteen chunks -
+blocks, heightmaps, marks, ticks. A feature that goes wrong is named by the test, with its chunk.
+
+**Held to a vanilla server** (`tools/vanilla/compare.py feature_probe`). The same replay as
+the stand's, with src/worldgen in its place (`tools/vanilla/feature_dump.cpp`: chunks made and
+decorated in the order it is given). A world is not the same without the features that are not
+ported - an ore does not lie where a lake is - so vanilla's world has a data pack in which every
+feature of a biome that is not ported places nothing, under its own name: `FeatureSorter` goes
+by which features the biomes name, so the order, and with it each feature's random source,
+stays. With the 30 placed features of ores: 352 chunks the server saved before they were chunks
+of the world, 160 with their own ores and 192 with what the neighbours' put into them - blobs
+lie across the borders of chunks, so this is the order replayed, too - the same block for block,
+heightmaps, marks and ticks. (And of the 128 chunks of the world that never ticked, all.)
+
 ### What is there, and what is not
 
 There: biomes, and all of the `terrain` status - the shape of the ground with its aquifers
 (`doFill`); the surface, bedrock, deepslate and the ore veins (`buildSurface`); the caves and
 canyons of the carvers (`generateCarvers`).
 
-Not there yet: features, structures. A world of terrain has its ground and no tree on it. Beyond those: only
-the overworld, only the preset `normal`; an imported vanilla world does not go on with this
-generator yet.
+Not there yet: features in a world - of the features only ores are ported, and no chunk a worker
+makes is decorated yet - and structures. A world of terrain has its ground and no tree on it.
+Beyond those: only the overworld, only the preset `normal`; an imported vanilla world does not go
+on with this generator yet.
 
 ## NBT and text components (src/nbt/, src/text/)
 

@@ -31,6 +31,8 @@
     "proto/gen/v777/worldgen_climate.hpp"  // ...its biomes by climate (worldgen/climate.cpp only)
 #define PROTO_GEN_WORLDGEN_FEATURES_HPP \
     "proto/gen/v777/worldgen_features.hpp"  // ...what the biomes put into a chunk: features (worldgen/feature.hpp only)
+#define PROTO_GEN_WORLDGEN_MATH_HPP \
+    "proto/gen/v777/worldgen_math.hpp"  // ...where Java's sine is not ours (worldgen/jmath.cpp only)
 
 namespace proto {
 namespace ids = gen::ids;

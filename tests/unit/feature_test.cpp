@@ -4,8 +4,10 @@
 // jar's own classes. The layout is in the Java file, beside the code that writes it.
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <bit>
 #include <memory>
+#include <string>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
@@ -13,6 +15,7 @@
 #include "world/gen_chunk.hpp"
 #include "worldgen/feature.hpp"
 #include "worldgen/generator.hpp"
+#include "worldgen/jmath.hpp"
 
 using namespace worldgen;
 
@@ -34,6 +37,12 @@ struct In {
         return v;
     }
     void skip(usize bytes) { p += bytes; }
+    std::string str() {
+        const u32 n = num<u32>();
+        std::string text(reinterpret_cast<const char*>(p), n);
+        p += n;
+        return text;
+    }
 };
 
 constexpr u64 kFnv = 0xcbf29ce484222325ull;
@@ -64,6 +73,28 @@ struct Script {
         for (u32 n = in.num<u32>(); n; --n) in.skip(1 + 12 + 8 + 12 * 4 + 8);
     }
     void skip_sets() { in.skip(usize{in.num<u32>()} * 16); }
+    void skip_decorations() {
+        for (u32 kinds = in.num<u32>(); kinds; --kinds) {
+            in.str();
+            for (u32 areas = in.num<u32>(); areas; --areas) {
+                in.skip(8);
+                for (u32 chunk = 0; chunk < 4; ++chunk) in.skip(usize{in.num<u32>()} * 21);
+                in.skip(16 * 40);
+            }
+        }
+    }
+    void skip_placements() {
+        for (u32 sites = in.num<u32>(); sites; --sites) {
+            in.skip(8);
+            const bool whole = in.num<u8>() != 0;
+            for (u32 n = in.num<u32>(); n; --n) {
+                in.skip(5);
+                const i32 positions = in.num<i32>();
+                if (positions < 0) continue;
+                in.skip((whole ? usize{12} * static_cast<u32>(positions) : 0) + 16);
+            }
+        }
+    }
 };
 
 }  // namespace
@@ -224,9 +255,146 @@ TEST(WorldgenFeature, PlacementsComeToWhereVanillasDo) {
         EXPECT_EQ(all, placed_in_all) << "all of a decoration's positions around chunk " << cx << ", " << cz;
         region.commit();
     }
-    EXPECT_EQ(in.p, in.end);
     // Between them the chunks have every feature a biome of the overworld names.
     for (u32 placed = 0; placed < ft::kNamedPlaced; ++placed) EXPECT_TRUE(seen[placed]) << ft::kPlacedNames[placed];
     EXPECT_GT(compared, 1000u);
     RecordProperty("placements_waiting", static_cast<int>(waiting));
+}
+
+// Whole decorations with the features of one kind alone: areas of 4 x 4 chunks of terrain, the
+// inner four decorated one after the other. Every feature that runs writes what vanilla's writes
+// and leaves its source where vanilla's is; and the sixteen chunks end as vanilla's do.
+TEST(WorldgenFeature, DecorationsOfOneKindAreVanillas) {
+    Script s;
+    s.skip_ints();
+    s.skip_heights();
+    s.skip_sets();
+    s.skip_placements();
+    In& in = s.in;
+    OverworldGenerator generator(s.seed);
+    const auto work = std::make_unique<RegionWork>();
+    FeatureWork feature_work;
+    namespace hm = world::heightmap;
+    const u32 kinds = in.num<u32>();
+    ASSERT_GT(kinds, 0u);
+    for (u32 kind = 0; kind < kinds; ++kind) {
+        const std::string name = in.str();
+        ft::FeatureType type = ft::FeatureType::kUnported;
+        if (name == "ore") type = ft::FeatureType::kOre;
+        ASSERT_NE(type, ft::FeatureType::kUnported)
+            << "the script has decorations of " << name << ", which is no kind this test knows";
+        std::vector<u8> only(ft::kStepFirst[ft::kSteps]);
+        for (u32 slot = 0; slot < only.size(); ++slot)
+            only[slot] = ft::kFeatures[ft::kPlaced[ft::kStepPlaced[slot]].feature].type == type;
+        for (u32 areas = in.num<u32>(); areas; --areas) {
+            const i32 x0 = in.num<i32>(), z0 = in.num<i32>();
+            std::vector<std::unique_ptr<world::GenChunk>> owned;
+            world::GenChunk* sixteen[16];
+            for (i32 i = 0; i < 16; ++i) {
+                owned.push_back(std::make_unique<world::GenChunk>());
+                generator.make_base(x0 + (i & 3), z0 + (i >> 2), *owned.back());
+                sixteen[i] = owned.back().get();
+            }
+            Region region(*work, generator.world(), sixteen, x0, z0, 4, 4);
+            for (i32 i = 0; i < 4; ++i) {
+                const i32 cx = x0 + 1 + (i & 1), cz = z0 + 1 + (i >> 1);
+                region.begin(cx, cz);
+                Decorator decorator(region, feature_work);
+                decorator.set_only(only);
+                std::vector<Decorator::Trace> trace;
+                decorator.set_trace(&trace);
+                decorator.decorate();
+                const u32 ran = in.num<u32>();
+                ASSERT_EQ(trace.size(), ran) << name << ": the features that run in chunk " << cx << ", " << cz;
+                for (const Decorator::Trace& t : trace) {
+                    const u32 step = in.num<u8>(), index = static_cast<u32>(in.num<i32>());
+                    const u64 writes = in.num<u64>();
+                    const i64 next = in.num<i64>();
+                    ASSERT_EQ(t.step, step);
+                    ASSERT_EQ(t.index, index);
+                    const std::string_view placed = ft::kPlacedNames[ft::kStepPlaced[ft::kStepFirst[step] + index]];
+                    ASSERT_EQ(t.writes, writes) << placed << " in chunk " << cx << ", " << cz << ": what it wrote";
+                    ASSERT_EQ(t.next, next) << placed << " in chunk " << cx << ", " << cz << ": its source afterwards";
+                }
+                EXPECT_TRUE(sixteen[(cx - x0) + (cz - z0) * 4]->decorated);
+            }
+            EXPECT_EQ(region.counts().far_reads, 0u);
+            EXPECT_EQ(region.counts().refused_writes, 0u);
+            region.commit();
+            for (i32 i = 0; i < 16; ++i) {
+                const world::GenChunk& c = *sixteen[i];
+                u64 blocks = kFnv;
+                for (u32 si = 0; si < c.sections_count; ++si)
+                    for (u32 b = 0; b < 4096; ++b) blocks = fnv(blocks, c.sections[si].get(b));
+                EXPECT_EQ(blocks, in.num<u64>()) << name << ": the blocks of chunk " << c.x << ", " << c.z;
+                u64 heights = kFnv;
+                for (const u32 map : {hm::kWorldSurface, hm::kOceanFloor, hm::kMotionBlocking, hm::kMotionBlockingNoLeaves})
+                    for (u32 column = 0; column < 256; ++column)
+                        heights = fnv(heights, static_cast<u32>(c.height[map][column] + Region::kMinY));
+                EXPECT_EQ(heights, in.num<u64>()) << name << ": the heightmaps of chunk " << c.x << ", " << c.z;
+                std::vector<u32> marks = c.marks;
+                std::stable_sort(marks.begin(), marks.end(), [](u32 a, u32 b) { return a >> 12 < b >> 12; });
+                u64 marked = kFnv;
+                for (const u32 mark : marks) marked = fnv(marked, mark);
+                EXPECT_EQ(marks.size(), in.num<u32>()) << name << ": the marks of chunk " << c.x << ", " << c.z;
+                EXPECT_EQ(marked, in.num<u64>()) << name << ": the marks of chunk " << c.x << ", " << c.z;
+                EXPECT_EQ(c.block_ticks.size(), in.num<u32>()) << name << ": the block ticks of chunk " << c.x << ", " << c.z;
+                EXPECT_EQ(c.fluid_ticks.size(), in.num<u32>()) << name << ": the fluid ticks of chunk " << c.x << ", " << c.z;
+                EXPECT_EQ(c.block_entities.size(), in.num<u32>())
+                    << name << ": the block entities of chunk " << c.x << ", " << c.z;
+            }
+        }
+    }
+}
+
+// Math.sin and Math.cos of every angle an ore can have - its random float times pi - are the
+// JVM's, all 2^24 of them: our own sine, and the table of where HotSpot's is the next double.
+TEST(WorldgenFeature, SineAndCosineOfEveryAngleOfAFloatAreTheJvms) {
+    Script s;
+    s.skip_ints();
+    s.skip_heights();
+    s.skip_sets();
+    s.skip_placements();
+    s.skip_decorations();
+    In& in = s.in;
+    const u64 want_sines = in.num<u64>(), want_cosines = in.num<u64>();
+    u64 sines = kFnv, cosines = kFnv;
+    u32 corrected = 0;
+    for (u32 k = 0; k < 1u << 24; ++k) {
+        const float dir = (static_cast<float>(k) * 5.9604645E-8f) * 3.1415927f;
+        const double x = static_cast<double>(dir);
+        const u64 sine = std::bit_cast<u64>(jmath::sin(x)), cosine = std::bit_cast<u64>(jmath::cos(x));
+        sines = fnv(fnv(sines, static_cast<u32>(sine)), static_cast<u32>(sine >> 32));
+        cosines = fnv(fnv(cosines, static_cast<u32>(cosine)), static_cast<u32>(cosine >> 32));
+        corrected += sine != std::bit_cast<u64>(jmath::sin_own(x));
+    }
+    for (u32 n = in.num<u32>(); n; --n) {
+        const u32 k = static_cast<u32>(in.num<i32>());
+        const double x = std::bit_cast<double>(in.num<u64>());
+        const float dir = (static_cast<float>(k) * 5.9604645E-8f) * 3.1415927f;
+        EXPECT_EQ(std::bit_cast<u64>(static_cast<double>(dir)), std::bit_cast<u64>(x)) << "the angle of float " << k;
+        EXPECT_EQ(std::bit_cast<u64>(jmath::sin(x)), in.num<u64>()) << "sin " << x;
+        EXPECT_EQ(std::bit_cast<u64>(jmath::cos(x)), in.num<u64>()) << "cos " << x;
+    }
+    EXPECT_EQ(sines, want_sines);
+    EXPECT_EQ(cosines, want_cosines);
+    // (Our own sine is the JVM's for all but a few thousand of them.)
+    EXPECT_GT(corrected, 0u);
+    EXPECT_LT(corrected, 1u << 16);
+    // ...and of the angles that are the same in every world, each written out: the rings of the
+    // search for where a world begins (NoiseSpawnFinder.radialSearch).
+    const u32 lists = in.num<u32>();
+    ASSERT_EQ(lists, 1u);
+    for (u32 list = 0; list < lists; ++list) {
+        const std::string name = in.str();
+        const u32 count = in.num<u32>();
+        ASSERT_GT(count, 100u) << name;
+        for (u32 i = 0; i < count; ++i) {
+            const double x = std::bit_cast<double>(in.num<u64>());
+            const u64 sine = in.num<u64>(), cosine = in.num<u64>();
+            EXPECT_EQ(std::bit_cast<u64>(jmath::sin(x)), sine) << name << ": sin " << x;
+            EXPECT_EQ(std::bit_cast<u64>(jmath::cos(x)), cosine) << name << ": cos " << x;
+        }
+    }
+    EXPECT_EQ(in.p, in.end);
 }
