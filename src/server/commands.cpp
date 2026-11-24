@@ -1403,8 +1403,11 @@ struct Game::Commands {
             entity_name = g.display_name(row);
         } else if (in.has("block")) {
             if (!loaded_block_pos(in, "target", pos)) return 0;
-            if (g.save_block_entity(pos.x, pos.y, pos.z, saved) == Saved::kNone)
-                return in.fail(tr("commands.data.block.invalid"));
+            const Saved got = g.save_block_entity(pos.x, pos.y, pos.z, saved);
+            if (got == Saved::kNone) return in.fail(tr("commands.data.block.invalid"));
+            // (Potent sulfur of a world that was generated: vanilla shows what its class saves of a new one.)
+            if (got == Saved::kUnknown)
+                return in.fail(Text::literal("What this block entity holds is not known to this server yet"));
             kind = "block";
         } else {  // CommandStorage.get: of a storage nobody wrote to, an empty compound - and nothing writes one here
             const u8 empty[] = {nbt::kCompound, nbt::kEnd};

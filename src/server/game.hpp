@@ -213,7 +213,8 @@ class Game {
         }
     };
     // A block entity's handle (world::BlockEntityRef::data) with this bit names an entry of
-    // opaque_: one that came with an imported world and is kept as the tag it was (server/persist.cpp).
+    // opaque_: one that came with an imported world or out of generation and is kept as the tag it
+    // was (server/persist.cpp, keep_opaque).
     static constexpr u32 kOpaqueBlockEntity = 1u << 31;
     // ---- a block entity out of the tag vanilla saves it as (server/saved_tags.cpp)
     enum class Loaded : u8 {
@@ -235,6 +236,11 @@ class Game {
     // ...and whether this server can do that for `stack` on `block` (a loot table it cannot roll).
     static bool can_apply_item_to_block(u32 block, const ItemStack& stack);
     u32 keep_tag(std::span<const u8> tag);  // an entry of opaque_ with these bytes; kNone for none
+    // The handle of a block entity that is kept as its tag: kOpaqueBlockEntity and an entry of
+    // opaque_, which is there whatever the tag is - one that generation only knew to be there has
+    // none (the potent sulfur of a spring), and its entry is of no bytes.
+    u32 keep_opaque(std::span<const u8> tag);
+    u32 keep_bytes(std::span<const u8> tag);  // an entry of opaque_ with these bytes, always
     void drop_kept(u32& keep);
     // What is kept beside a chest or a furnace (its CustomName, lock, components...): the entry
     // `name` of it, a view into `doc`.
@@ -491,7 +497,8 @@ class Game {
     // ---- what the game holds, as the tags vanilla saves it as (server/saved_tags.cpp)
     enum class Saved : u8 {
         kOk,
-        kNone,  // nothing there to save
+        kNone,     // nothing there to save
+        kUnknown,  // a block entity that is kept with no tag: nothing here knows what it saves as
     };
     // BlockEntity.saveWithFullMetadata of the block entity at a block: appended in the network form.
     Saved save_block_entity(i32 x, i32 y, i32 z, base::ByteBuf& out);

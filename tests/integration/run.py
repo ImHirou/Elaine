@@ -533,6 +533,45 @@ def a_world_of_terrain_comes_back():
         shutil.rmtree(world, ignore_errors=True)
 
 
+@test(alone=True)
+def potent_sulfur_of_a_spring_is_kept():
+    """Generation leaves most block entities as no more than "one is here" (vanilla's DUMMY): the
+    potent sulfur of a spring, mostly. The game has no class for it and no tag of it - it is kept as
+    nothing but its place, saved with its chunk, and there when the world comes back. (A world went
+    down saving one.) Seed 2 has a spring eight chunks from where it begins."""
+    world = tempfile.mkdtemp(prefix="world-sulfur-")
+    at, chunk = (-152, 27, 139), (-10, 8)
+    srv = None
+    try:
+        def look(name: str, new: bool):
+            c = srv.client()
+            j = join(c, name)
+            if new:   # (who comes back stands where it stood)
+                c.send("move_player_pos", struct.pack(">dddB", at[0] + 0.5, 200.0, at[2] + 0.5, 0))
+            c.sync_chunks(j["view"], chunk)
+            listed = [be for be in c.chunks[chunk]["block_entities"] if be[0] == (at[0] & 15, at[1], at[2] & 15)]
+            assert len(listed) == 1 and listed[0][2] is None, c.chunks[chunk]["block_entities"]
+            # What it holds only vanilla's class of it could say: asked, the server says so.
+            since = len(srv.read_log())
+            srv.console("data get block %d %d %d" % at)
+            srv.wait_log("What this block entity holds is not known to this server yet", since=since)
+            return listed[0][1]
+
+        srv = Server(EXE, world=world, level_type="minecraft:normal", level_seed=2)
+        kind = look("Alice", True)
+        assert srv.stop() == 0, srv.read_log()
+        os.unlink(srv.log.name)
+        srv = Server(EXE, world=world)
+        assert "a new" not in srv.read_log(), srv.read_log()
+        assert look("Alice", False) == kind
+        assert srv.stop() == 0, srv.read_log()
+        os.unlink(srv.log.name)
+    finally:
+        if srv:
+            srv.stop()
+        shutil.rmtree(world, ignore_errors=True)
+
+
 @test()
 def join_offline_compressed(srv: Server):
     c = srv.client()

@@ -2761,7 +2761,10 @@ table a processor gave it and a seed drawn from where it lies. The tags are held
 world's: a chest, a furnace or a sign it can read becomes its own, anything else is kept as the
 tag and written with the chunk - so a dungeon's chest is there, with its loot table unrolled,
 until loot tables are (`a_world_of_terrain_comes_back` asks a spawner, a chest and a nest what
-they hold, before a restart and after).
+they hold, before a restart and after). One that generation only knew to be there, of a block the
+game has no class for - the potent sulfur of a spring - is kept with no tag: its place and its
+type, listed for clients and written with the chunk (a kept record of no bytes), and `/data get`
+says that what it holds is not known here (`potent_sulfur_of_a_spring_is_kept`).
 
 Not there yet: structures. Beyond those:
 only the overworld, only the preset `normal`; an imported vanilla world does not go on with this

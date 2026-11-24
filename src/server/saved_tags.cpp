@@ -402,6 +402,9 @@ Game::Saved Game::save_block_entity(i32 x, i32 y, i32 z, base::ByteBuf& out) {
     if (!ref) return Saved::kNone;
     if (ref->data & kOpaqueBlockEntity) {  // kept as the tag vanilla saved: that is the tag
         const std::vector<u8>& kept = opaque_[ref->data & ~kOpaqueBlockEntity];
+        // One that generation only knew to be there has none: what it would save as is what its
+        // class makes of a new one, and no class of it is here.
+        if (kept.empty()) return Saved::kUnknown;
         out.append(kept.data(), kept.size());
         return Saved::kOk;
     }

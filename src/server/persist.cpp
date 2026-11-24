@@ -7,8 +7,9 @@
 //
 //   block entities   u8 version (3; 2 is the same without kind 4, 1 without kind 3), VarInt count, then per block entity
 //                      u8 xz (x << 4 | z in the chunk), i16 y, VarInt block_entity_type, u8 kind
-//                      kind 0 kept:    VarInt n + n bytes - the tag it came with (an import), as
-//                                      nbt::Doc::write left it. Listed for clients, never opened
+//                      kind 0 kept:    VarInt n + n bytes - the tag it came with (an import, a feature
+//                                      that filled it in), as nbt::Doc::write left it; n = 0 for one
+//                                      generation only knew to be there. Listed for clients, never opened
 //                      kind 1 chest:   27 stacks, then a kept tag (VarInt n + bytes, n = 0: none).
 //                                      A barrel's too: which it is, its block says
 //                      kind 2 furnace: 3 stacks, i32 lit remaining, lit total, cooking, cooking
@@ -122,8 +123,15 @@ void Game::free_block_entity(u32 kind, u32 data) {
     }
 }
 
-u32 Game::keep_tag(std::span<const u8> tag) {
-    if (tag.empty()) return kNone;
+u32 Game::keep_tag(std::span<const u8> tag) { return tag.empty() ? kNone : keep_bytes(tag); }
+
+// A handle with kOpaqueBlockEntity is followed to its entry wherever it is met - written, shown,
+// freed - so it names one whatever the tag is: of no bytes for a block entity nobody has a tag of.
+// (kNone with the bit is kNone, and without it again an index far beyond every entry: a world of
+// terrain went down when it saved the potent sulfur of its first spring.)
+u32 Game::keep_opaque(std::span<const u8> tag) { return keep_bytes(tag) | kOpaqueBlockEntity; }
+
+u32 Game::keep_bytes(std::span<const u8> tag) {
     u32 index;
     if (!opaque_free_.empty()) {
         index = opaque_free_.back();
@@ -186,8 +194,9 @@ void Game::write_block_entities(const world::Chunk& c, base::ByteBuf& out) const
 // What generation made of block entities in a chunk that is new (world::ChunkParts::made_block_entities):
 // each becomes the game's as one of an imported world does - a chest, a furnace or a sign that the
 // game can read is its own, anything else is kept as its tag (a spawner, a nest of bees, a chest that
-// names its loot) - and one generation only knew to be there is as its block makes it. The chunk has
-// them from now on, and is written with them.
+// names its loot) - and one generation only knew to be there is as its block makes it: a new chest,
+// furnace or sign, or - of a block that is not the game's: potent sulfur, a sculk sensor - one that is
+// kept with no tag at all. The chunk has them from now on, and is written with them.
 void Game::read_made_block_entities(world::Chunk& c, std::span<const u8> bytes) {
     if (bytes.empty()) return;
     usize at = 0;
@@ -215,7 +224,7 @@ void Game::read_made_block_entities(world::Chunk& c, std::span<const u8> bytes) 
         } else if (tag.empty() && sign_kind(info.kind)) {
             world_.add_block_entity(pos.x, pos.y, pos.z, type, new_sign(pos));
         } else {
-            world_.add_block_entity(pos.x, pos.y, pos.z, type, keep_tag(tag) | kOpaqueBlockEntity);
+            world_.add_block_entity(pos.x, pos.y, pos.z, type, keep_opaque(tag));
         }
     }
     if (any) world_.mark_dirty(c.x, c.z);
@@ -254,7 +263,7 @@ void Game::read_block_entities(world::Chunk& c, std::span<const u8> bytes) {
             // What an import could not make ours on a worker (a chest with a name, a stack with
             // components) is made ours here, where the item codecs may be used - if it can be.
             if (r.ok && fits && !adopt_kept_block_entity(pos, state, type, tag))
-                world_.add_block_entity(pos.x, pos.y, pos.z, type, keep(tag) | kOpaqueBlockEntity);
+                world_.add_block_entity(pos.x, pos.y, pos.z, type, keep_opaque(tag));
         } else if (record == kChest) {
             Chest chest;
             stacks(chest.items, Chest::kSlots);
