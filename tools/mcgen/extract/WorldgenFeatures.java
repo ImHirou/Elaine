@@ -886,6 +886,83 @@ final class WorldgenFeatures {
         return root;
     }
 
+    // ------------------------------------------------------------------------------- tables
+
+    /**
+     * What vanilla made of the biomes' feature lists - the part of a decoration that is not in the
+     * jar's JSON as it stands:
+     *
+     *   steps         FeatureSorter.buildFeaturesPerStep: per decoration step, the placed features of all
+     *                 biomes in one order. A feature's place in its step is its index, and the index is
+     *                 what its random source is seeded with (WorldgenRandom.setFeatureSeed).
+     *   biomes        per biome of the overworld, per step: the indices of its features (what
+     *                 applyBiomeDecoration collects from the biomes around a chunk), and the indices
+     *                 hasFeature answers true for (BiomeFilter: a set of *equal* features, so not
+     *                 always the same list)
+     *   post_process  BlockBehaviour.Properties.postProcess: the blocks that mark themselves, or the
+     *                 block above, to be looked at when their chunk first ticks
+     */
+    @SuppressWarnings("unchecked")
+    static JsonObject features(RegistryAccess registries) throws Exception {
+        WorldgenGolden.ChunkMaker maker = new WorldgenGolden.ChunkMaker(WorldgenRef.world(registries, WorldgenRef.SEED_A));
+        Field field = ChunkGenerator.class.getDeclaredField("featuresPerStep");
+        field.setAccessible(true);
+        List<net.minecraft.world.level.biome.FeatureSorter.StepFeatureData> steps =
+            ((Supplier<List<net.minecraft.world.level.biome.FeatureSorter.StepFeatureData>>) field.get(maker.generator)).get();
+        var placed = registries.lookupOrThrow(Registries.PLACED_FEATURE);
+        JsonObject root = new JsonObject();
+        root.addProperty("version", SharedConstants.getCurrentVersion().name());
+        JsonArray stepsOut = new JsonArray();
+        for (net.minecraft.world.level.biome.FeatureSorter.StepFeatureData step : steps) {
+            JsonArray names = new JsonArray();
+            for (net.minecraft.world.level.levelgen.placement.PlacedFeature feature : step.features()) {
+                var key = placed.getResourceKey(feature);
+                if (key.isEmpty()) WorldgenRef.problem("a biome has a placed feature that is in no registry: " + feature);
+                names.add(key.map(k -> k.identifier().toString()).orElse("?"));
+            }
+            stepsOut.add(names);
+        }
+        root.add("steps", stepsOut);
+        JsonObject biomes = new JsonObject();
+        for (var biome : maker.biomeSource.possibleBiomes()) {
+            var settings = maker.generator.getBiomeGenerationSettings(biome);
+            JsonArray own = new JsonArray(), has = new JsonArray();
+            for (int s = 0; s < steps.size(); ++s) {
+                JsonArray indices = new JsonArray();
+                if (s < settings.features().size())
+                    for (var feature : settings.features().get(s)) indices.add(steps.get(s).indexMapping().applyAsInt(feature.value()));
+                own.add(indices);
+                JsonArray answered = new JsonArray();
+                for (int i = 0; i < steps.get(s).features().size(); ++i)
+                    if (settings.hasFeature(steps.get(s).features().get(i))) answered.add(i);
+                has.add(answered);
+            }
+            JsonObject of = new JsonObject();
+            of.add("features", own);
+            of.add("has", has);
+            biomes.add(biome.getRegisteredName(), of);
+        }
+        root.add("biomes", biomes);
+        JsonArray self = new JsonArray(), above = new JsonArray();
+        for (net.minecraft.world.level.block.Block block : net.minecraft.core.registries.BuiltInRegistries.BLOCK) {
+            int kind = -1;
+            for (BlockState state : block.getStateDefinition().getPossibleStates()) {
+                BlockPos at = state.getPostProcessPos(net.minecraft.world.level.EmptyBlockGetter.INSTANCE, BlockPos.ZERO);
+                int k = at == null ? 0 : at.equals(BlockPos.ZERO) ? 1 : at.equals(BlockPos.ZERO.above()) ? 2 : 3;
+                if (k == 3 || (kind >= 0 && kind != k)) WorldgenRef.problem(block + " marks a block for its chunk's first tick in a way the tables have no word for");
+                kind = k;
+            }
+            String name = net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(block).toString();
+            if (kind == 1) self.add(name);
+            if (kind == 2) above.add(name);
+        }
+        JsonObject post = new JsonObject();
+        post.add("self", self);
+        post.add("above", above);
+        root.add("post_process", post);
+        return root;
+    }
+
     /** Which sections of WorldgenRef want the game loaded with its resources kept. */
     static final List<String> SECTIONS = List.of("census", "replay");
 }

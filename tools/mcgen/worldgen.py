@@ -6,6 +6,11 @@ section into .cache/mc/<version>/worldgen/:
 
   program   the overworld's density functions as vanilla compiled them: a graph of sampler objects
   climate   the overworld's biome parameters and the R-tree they are searched with
+  features  the order vanilla puts the biomes' features in (a feature's index seeds its random
+            source), which features each biome has, and the blocks that mark themselves to be
+            looked at when their chunk first ticks
+  census    vanilla's features run over chunks of every biome: what they do that needs a rule
+  replay    chunks decorated in an order that is given (tools/vanilla/feature_probe.py)
   golden    what vanilla computes, as the scripts the unit tests of src/worldgen replay - written
             only when asked for (`worldgen golden`); `--emit` copies them into tests/unit/data/
 
@@ -24,8 +29,8 @@ from pathlib import Path
 
 from mcgen import ROOT, die, find_tool, vdir, version_info, write_stamp
 
-SECTIONS = ("program", "climate", "golden", "census", "replay")
-TABLES = ("program", "climate")  # what a run without arguments writes, and `generate` reads
+SECTIONS = ("program", "climate", "features", "golden", "census", "replay")
+TABLES = ("program", "climate", "features")  # what a run without arguments writes, and `generate` reads
 
 
 def out_dir(version: str) -> Path:
