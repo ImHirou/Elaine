@@ -115,6 +115,8 @@ src/worldgen/ random.* (the random sources a world is drawn from: Xoroshiro128++
               terrain.* (a chunk's terrain as it is made: what a world has one of, a chunk's context, the steps of
               vanilla's `terrain` status), region.* (the chunks a decoration works in: vanilla's WorldGenRegion over chunks that
               are being generated - blocks, the six heightmaps, the biome of a block, marks, ticks, block entities),
+              feature.* (a chunk's features: applyBiomeDecoration, the placements of a placed feature in FeaturePlacer's
+              order, predicates as sets of block states, the features that are ported - run from generated tables),
               generator.* (the world::ChunkGenerator of it: a worker's whole chunk),
               mth.hpp (Mth's and Java's arithmetic, as written)
 src/entity/   store.* (the entity table: SoA columns, slots, handles), tracker.* (who sees whom + the per-tick
@@ -163,7 +165,8 @@ tests/unit/   GoogleTest;  tests/integration/  independent Python client (mcprot
 bench/        micro-benchmarks;  tools/mcgen/  protocol data pipeline (gen.py: wire and state tables; gen_game.py: recipes,
               loot, fuel, the ported block classes; gen_physics.py: collision shapes as grids, what a block does to an entity, how each entity type moves;
               gen_commands.py: names, block properties, en_us; gen_worldgen.py: the overworld generator's tables, from the jar's JSON and
-              from what `mcgen.py worldgen` extracted; roadmap.py);  tools/vanilla/  probes that record what a server sends
+              from what `mcgen.py worldgen` extracted; gen_features.py: the tables of a chunk's features - placed features, features,
+              the order of both; roadmap.py);  tools/vanilla/  probes that record what a server sends
               (ours or vanilla) and diff two recordings, compare.py, which runs such a probe on both servers at once, physics_probe.py, which records what vanilla computes, and world_probe.py, which
               has vanilla build a world and compares how the two servers send it, and block_probe.py, which runs both servers
               through what blocks do to each other, and terrain_probe.py, which holds the generator to the chunks a vanilla
@@ -492,6 +495,19 @@ Java plugin (Bukkit/Paper) compatibility is explicitly out of scope for now.
   `tests/unit/worldgen_test.cpp` that replays it, and is then held to a vanilla server
   (`tools/vanilla/compare.py terrain_probe`: what vanilla saved of chunks nothing has run in), before it is called done. A generator is called by several workers
   at once: what a call works with is its thread's (`generator.cpp`), and a chunk reads nothing of another chunk.
+  **Features** (`feature.*`, `region.*`): what a biome puts into a chunk is tables (`tools/mcgen/gen_features.py`, from the jar's
+  `placed_feature/` and `feature/` and from `features.json` - the one order vanilla sorts all biomes' features into, which seeds
+  each feature's random source); what a kind of placement or a type of feature *does* is a function written from its class.
+  A type is ported by its function in `feature.cpp`, its name in `PORTED_FEATURES` (gen_features.py; a type in neither that
+  list nor `UNPORTED_FEATURES` stops the generator) and its table; what is made of an unported type is left out of a
+  decoration (`Placed::ported`), and nothing else moves by that. A predicate that asks only which block state is at a place - a
+  tag, blocks, a fluid, "solid", a sturdy face - is a set of block states made by the generator, never a list in code; the
+  sets are held to vanilla's own predicates over every state (`WorldgenFeature.StateSetsAreVanillasPredicates`). Keep
+  `FeaturePlacer`'s order - a placement makes all its positions, with all their draws, before the first goes on - and every
+  draw a statement of its own. Code reads and writes the world through `worldgen::Region` only: its rules of the edge are about
+  the nine chunks around the one decorated, so a chunk comes out the same in any rectangle. New behaviour gets its records in
+  `WorldgenFeatures.golden` (`mcgen.py worldgen golden --emit`, `tests/unit/feature_test.cpp`) and is held to a vanilla server by
+  `tools/vanilla/feature_probe.py` before it is called done.
 - **Block updates**: a block's reaction to the world is a case in the hook functions of `server/block_updates.cpp`
   (`neighbor_changed`, `update_shape`, `on_place`, `tick_block`, `random_tick`, `can_survive`), written from the method of
   its class and named after it; which states have which hook is generated (`state::kHooks`). The orders are vanilla's

@@ -31,6 +31,7 @@ import struct
 
 from mcgen import die, vdir
 
+import gen_features
 import worldgen
 
 INPUT_FACTOR = 1.0181268882175227  # NormalNoise.INPUT_FACTOR: the second generator of an octave runs this much faster
@@ -994,9 +995,11 @@ inline constexpr BlendedLayer kBlendedLayers[{len(blended)}] = {{
     out.append(emit_carvers(CarverTables(vanilla, biomes, settings)))
     out.append(emit_spawn(settings, dict(tables.roots)))
     out.append("\n}  // namespace proto::gen::worldgen\n")
+    features = gen_features.emit(hdr, version, vanilla, blocks, settings)
     return {"worldgen.hpp": "".join(out), "worldgen_climate.hpp": emit_climate(hdr, climate),
             "worldgen_heightmaps.bin": state_bits(version, vanilla, blocks),
             "worldgen_state_facts.bin": state_facts(version, blocks),
-            "_stats": {"noises": len(noises), "noise_layers": len(layers) + len(blended), "density_nodes": len(tables.nodes),
+            **{name: text for name, text in features.items() if name != "_stats"},
+            "_stats": {**features["_stats"], "noises": len(noises), "noise_layers": len(layers) + len(blended), "density_nodes": len(tables.nodes),
                        "climate_nodes": len(climate), "climate_biomes": len(biomes),
                        "material_rules": len(material.rules), "material_conditions": len(material.conditions)}}

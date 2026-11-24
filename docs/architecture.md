@@ -2348,6 +2348,52 @@ differs in 33106 and cosine in 33153 (the last bit); of four million other argum
 differs in 4078 and `log` in 288. `Math.pow(x, 2.0)` is `x * x` exactly. The features that call
 them (ores, icebergs, the fancy oak, dripstone) need HotSpot's results.
 
+### Features: the engine (`region.*`, `feature.*`, `tools/mcgen/gen_features.py`)
+
+What exists of the `features` status so far is everything around a feature and no feature.
+
+**A chunk between its terrain and the world** is a `world::GenChunk`: packed sections in an
+arena of its own, the biome of every cell, vanilla's six heightmaps (the two the terrain was made
+by, frozen from then on, and the four a chunk keeps, counted when the terrain is done as
+`Heightmap.primeHeightmaps` counts them), the blocks marked for its first tick, its scheduled
+ticks, its block entities. `finish_chunk` hands it on as the `LoadedChunk` a worker makes: the
+arena changes hands and nothing is copied.
+
+**`worldgen::Region` is `WorldGenRegion`**, with the `ProtoChunk` behind it. A feature reads and
+writes nothing but through it: `block` (void air beyond the world; plain air for a section
+that holds nothing but air of some kind, whatever kind - `ProtoChunk.getBlockState`), `set_block`
+(the four heightmaps follow as `Heightmap.update` moves them, a block that has a block entity
+leaves a placeholder, a mushroom or a magma block marks what is to be looked at when the chunk
+first ticks; air into a section of nothing but air is not set at all), `put_raw` (the block
+alone, as an ore sets it), the heightmaps, the biome of a block through `BiomeManager`'s zoom,
+ticks (one a block and type, due at once), the region's own random source. A section is spread
+out into 4096 states of the thread's own the first time it is touched and packed again at the
+end if it was written to; a section's bytes follow from its states alone, so the same chunk is
+the same bytes however it came about. The rules of the edge are about the nine chunks around the
+one that is decorated - not about what else the region holds - so the stand that decorates one
+chunk in a region of nine and the pipeline that decorates four in a region of sixteen cannot
+disagree.
+
+**Placements and features are tables.** `gen_features.py` compiles every placed feature the
+biomes name, and everything those are made of, as vanilla's codecs resolve it (263 placed
+features, 212 features, a thousand placements): numbers, heights with their anchors resolved,
+predicates. A predicate that asks only which block state is at a place - a tag, a list of
+blocks, a fluid, "solid", "replaceable", a sturdy face - becomes a set of block states, a bit a
+state, and `not`, `any_of` and `all_of` over such sets at one place become one set: 22 sets do
+for all of them, and a test is one bit. The order of the features comes from the game itself
+(`features.json`: `FeatureSorter`'s). `Decorator::decorate` is `applyBiomeDecoration` - the steps
+in order, in a step the features of every biome around by index, each from a source seeded with
+that index - and `Decorator::place` is `FeaturePlacer`: a stack, a placement making all of its
+positions before the first of them goes on.
+
+**Held to the jar** (`WorldgenFeatures.golden`, `tests/unit/feature_test.cpp`): numbers drawn
+through every kind of provider; every state set against vanilla's own predicate, over all 35723
+block states; and the placements whole - around 33 chunks of real terrain that between them
+have every feature of every biome, each placed feature is run with a feature in its place that
+only writes down where it was asked to be, and the positions and the source's next number are
+vanilla's for all 1838 of them. Fourteen placed features wait: their placements ask a block
+whether it could stand there, which is the block's own code.
+
 ### What is there, and what is not
 
 There: biomes, and all of the `terrain` status - the shape of the ground with its aquifers

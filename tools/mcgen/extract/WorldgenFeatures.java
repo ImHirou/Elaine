@@ -646,8 +646,8 @@ final class WorldgenFeatures {
             });
         }
 
-        /** ChunkStatusTasks.generateFeatures, and the status the step that ran it then gives the chunk. */
-        void decorate(int cx, int cz) throws Exception {
+        /** The region a decoration of the chunk works in: the eight around it must have their terrain. */
+        Region regionAround(int cx, int cz) throws Exception {
             for (int dx = -1; dx <= 1; ++dx)
                 for (int dz = -1; dz <= 1; ++dz) {
                     if (!live) terrain(cx + dx, cz + dz);
@@ -655,10 +655,16 @@ final class WorldgenFeatures {
                     if (near == null || !near.getPersistedStatus().isOrAfter(ChunkStatus.TERRAIN))
                         throw new IllegalStateException("chunk " + cx + ", " + cz + " is decorated before " + (cx + dx) + ", " + (cz + dz) + " has its terrain");
                 }
+            StaticCache2D<GenerationChunkHolder> cache = StaticCache2D.create(cx, cz, 8, (x, z) -> new Slot(new ChunkPos(x, z), given(cx, cz, x, z)));
+            return new Region(this, cache, chunks.get(key(cx, cz)));
+        }
+
+        /** ChunkStatusTasks.generateFeatures, and the status the step that ran it then gives the chunk. */
+        void decorate(int cx, int cz) throws Exception {
+            Region made = regionAround(cx, cz);
             ProtoChunk center = chunks.get(key(cx, cz));
             if (center.getPersistedStatus().isOrAfter(ChunkStatus.FEATURES)) throw new IllegalStateException("chunk " + cx + ", " + cz + " is decorated twice");
-            StaticCache2D<GenerationChunkHolder> cache = StaticCache2D.create(cx, cz, 8, (x, z) -> new Slot(new ChunkPos(x, z), given(cx, cz, x, z)));
-            region = new Region(this, cache, center);
+            region = made;
             try {
                 maker.generator.applyBiomeDecoration(region, center, new StructureManager(region, options, null));
                 Blender.generateBorderTicks(region, center);
@@ -886,6 +892,299 @@ final class WorldgenFeatures {
         return root;
     }
 
+    // ------------------------------------------------------------------------------- golden
+
+    static long fnv(long h, byte[] bytes) {
+        for (byte b : bytes) h = (h ^ (b & 0xFF)) * 0x100000001b3L;
+        return h;
+    }
+
+    /** JSON as Python's json.dumps(sort_keys=True, separators=(",", ":")) writes it - the name gen_features.py has for a predicate. */
+    static void canon(com.google.gson.JsonElement e, StringBuilder s) {
+        if (e.isJsonObject()) {
+            s.append('{');
+            boolean first = true;
+            for (String key : new java.util.TreeSet<>(e.getAsJsonObject().keySet())) {
+                if (!first) s.append(',');
+                first = false;
+                s.append(new com.google.gson.JsonPrimitive(key)).append(':');
+                canon(e.getAsJsonObject().get(key), s);
+            }
+            s.append('}');
+        } else if (e.isJsonArray()) {
+            s.append('[');
+            for (int i = 0; i < e.getAsJsonArray().size(); ++i) {
+                if (i > 0) s.append(',');
+                canon(e.getAsJsonArray().get(i), s);
+            }
+            s.append(']');
+        } else {
+            s.append(e);
+        }
+    }
+
+    /** The source vanilla draws a chunk's decoration from: WorldgenRandom over a Xoroshiro source. */
+    static net.minecraft.world.level.levelgen.WorldgenRandom source(long seed) {
+        return new net.minecraft.world.level.levelgen.WorldgenRandom(new net.minecraft.world.level.levelgen.XoroshiroRandomSource(seed));
+    }
+
+    // IntProvider, by src/worldgen's IntOp: {op, a, b, c} and two floats.
+    static final Object[][] INTS = {
+        {0, 7, 0, 0, 0f, 0f}, {1, 0, 0, 0, 0f, 0f}, {1, -5, 7, 0, 0f, 0f}, {1, 1, 64, 0, 0f, 0f}, {1, 104, 157, 0, 0f, 0f},
+        {2, -7, 7, 0, 0f, 0f}, {2, -3, 3, 0, 0f, 0f}, {2, 0, 10, 10, 0f, 0f}, {2, 2, 12, 4, 0f, 0f}, {2, -6, 10, 3, 0f, 0f}, {2, 0, 5, 0, 0f, 0f},
+        {5, 0, 16, 0, 8f, 4f}, {5, -3, 3, 0, 0f, 1f}, {5, 1, 4, 0, 2.5f, 0.7f},
+        {6, 0, 10, 0, 0f, 0f}, {6, 3, 3, 0, 0f, 0f}, {7, 1, 17, 0, 0f, 0f}, {7, 0, 0, 0, 0f, 0f},
+    };
+
+    static net.minecraft.util.valueproviders.IntProvider intProvider(Object[] spec) {
+        int a = (Integer) spec[1], b = (Integer) spec[2], c = (Integer) spec[3];
+        return switch ((Integer) spec[0]) {
+            case 0 -> net.minecraft.util.valueproviders.ConstantInt.of(a);
+            case 1 -> net.minecraft.util.valueproviders.UniformInt.of(a, b);
+            case 2 -> net.minecraft.util.valueproviders.TrapezoidInt.of(a, b, c);
+            case 5 -> net.minecraft.util.valueproviders.ClampedNormalInt.of((Float) spec[4], (Float) spec[5], a, b);
+            case 6 -> net.minecraft.util.valueproviders.BiasedToBottomInt.of(a, b);
+            case 7 -> net.minecraft.util.valueproviders.VeryBiasedToBottomInt.of(a, b);
+            default -> throw new IllegalStateException();
+        };
+    }
+
+    // HeightProvider, by HeightOp: {op, min, max, inner}.
+    static final int[][] HEIGHTS = {
+        {0, 17, 0, 0}, {1, -64, 320, 0}, {1, 10, 10, 0}, {1, 20, 5, 0},
+        {2, -64, 64, 0}, {2, 0, 100, 100}, {2, 0, 100, 200}, {2, -24, 56, 12}, {2, 30, 20, 0},
+        {3, 0, 50, 1}, {3, -64, -40, 8}, {3, 5, 5, 3}, {4, -64, 0, 1}, {4, 0, 96, 24},
+    };
+
+    static net.minecraft.world.level.levelgen.heightproviders.HeightProvider heightProvider(int[] spec) {
+        var min = net.minecraft.world.level.levelgen.VerticalAnchor.absolute(spec[1]);
+        var max = net.minecraft.world.level.levelgen.VerticalAnchor.absolute(spec[2]);
+        return switch (spec[0]) {
+            case 0 -> net.minecraft.world.level.levelgen.heightproviders.ConstantHeight.of(min);
+            case 1 -> net.minecraft.world.level.levelgen.heightproviders.UniformHeight.of(min, max);
+            case 2 -> net.minecraft.world.level.levelgen.heightproviders.TrapezoidHeight.of(min, max, spec[3]);
+            case 3 -> net.minecraft.world.level.levelgen.heightproviders.BiasedToBottomHeight.of(min, max, spec[3]);
+            case 4 -> net.minecraft.world.level.levelgen.heightproviders.VeryBiasedToBottomHeight.of(min, max, spec[3]);
+            default -> throw new IllegalStateException();
+        };
+    }
+
+    /** A feature that only says where it was asked to be: what a placed feature's placements come to. */
+    static final class Recorder implements net.minecraft.world.level.levelgen.feature.Feature {
+        final List<BlockPos> at = new ArrayList<>();
+
+        @Override
+        public com.mojang.serialization.MapCodec<? extends net.minecraft.world.level.levelgen.feature.Feature> codec() {
+            return null;
+        }
+
+        @Override
+        public boolean place(net.minecraft.world.level.WorldGenLevel level, ChunkGenerator generator, net.minecraft.util.RandomSource random, BlockPos pos) {
+            at.add(pos.immutable());
+            return true;
+        }
+    }
+
+    /**
+     * features.bin, "WGFEAT01":
+     *
+     *   numbers     IntProviders and HeightProviders made of numbers written here: for each, and for a few
+     *               seeds, what a source gives through them, and the long the source gives next
+     *   sets        every predicate of the jar's features that asks nothing but what block state is at a
+     *               place: the hash of its name (the JSON, keys in order) and of the set of the states
+     *               it holds for, a bit a state
+     *   placements  chunks of real terrain around which, between them, every feature of the overworld's
+     *               biomes is to be placed: for each feature vanilla would run there, in its order, the
+     *               positions its placements come to (a feature that only writes them down stands in its
+     *               place), and the long its source gives afterwards
+     */
+    static int golden(Path file, WorldgenRef.World world) throws Exception {
+        WorldgenGolden.Out o = new WorldgenGolden.Out();
+        o.magic("WGFEAT01");
+        o.i64(world.seed());
+        long[] seeds = {1L, -7046029254386353131L, 20261124L};
+
+        o.i32(INTS.length * seeds.length);
+        for (Object[] spec : INTS)
+            for (long seed : seeds) {
+                o.u8((Integer) spec[0]);
+                for (int i = 1; i <= 3; ++i) o.i32((Integer) spec[i]);
+                o.f32((Float) spec[4]);
+                o.f32((Float) spec[5]);
+                o.i64(seed);
+                var random = source(seed);
+                var provider = intProvider(spec);
+                for (int i = 0; i < 12; ++i) o.i32(provider.sample(random));
+                o.i64(random.nextLong());
+            }
+        Stand stand = new Stand(world);
+        var context = new net.minecraft.world.level.levelgen.WorldGenerationContext(stand.maker.generator, stand.maker.chunk(0, 0));
+        o.i32(HEIGHTS.length * seeds.length);
+        for (int[] spec : HEIGHTS)
+            for (long seed : seeds) {
+                o.u8(spec[0]);
+                for (int i = 1; i <= 3; ++i) o.i32(spec[i]);
+                o.i64(seed);
+                var random = source(seed);
+                var provider = heightProvider(spec);
+                for (int i = 0; i < 12; ++i) o.i32(provider.sample(random, context));
+                o.i64(random.nextLong());
+            }
+
+        // The sets: a level in which every block is the one state that is asked about.
+        BlockState[] asked = new BlockState[1];
+        net.minecraft.world.level.LevelAccessor everywhere = (net.minecraft.world.level.LevelAccessor) java.lang.reflect.Proxy.newProxyInstance(
+            WorldgenFeatures.class.getClassLoader(), new Class<?>[] {net.minecraft.world.level.LevelAccessor.class}, (proxy, method, args) -> {
+                if (method.getName().equals("getBlockState")) return asked[0];
+                if (method.getName().equals("getFluidState")) return asked[0].getFluidState();
+                // (What a block's shape asks of the world around it - a shulker box its block entity - is
+                // answered as for a block that stands alone: the tables are made that way, mcgen.py gamedata.)
+                if (method.getDeclaringClass().isInstance(net.minecraft.world.level.EmptyBlockGetter.INSTANCE))
+                    return method.invoke(net.minecraft.world.level.EmptyBlockGetter.INSTANCE, args);
+                throw new UnsupportedOperationException(method.getName());
+            });
+        var ops = world.registries().createSerializationContext(com.mojang.serialization.JsonOps.INSTANCE);
+        int states = net.minecraft.world.level.block.Block.BLOCK_STATE_REGISTRY.size();
+        Map<String, Long> sets = new TreeMap<>();
+        java.util.ArrayDeque<com.google.gson.JsonElement> open = new java.util.ArrayDeque<>();
+        for (String kind : new String[] {"worldgen/placed_feature", "worldgen/feature", "worldgen/block_state_provider"})
+            for (var found : resources.listResources(kind, id -> id.getPath().endsWith(".json")).entrySet())
+                try (java.io.Reader reader = found.getValue().openAsReader()) {
+                    open.add(com.google.gson.JsonParser.parseReader(reader));
+                }
+        while (!open.isEmpty()) {
+            com.google.gson.JsonElement e = open.poll();
+            if (e.isJsonArray()) e.getAsJsonArray().forEach(open::add);
+            if (!e.isJsonObject()) continue;
+            e.getAsJsonObject().asMap().values().forEach(open::add);
+            if (!e.getAsJsonObject().has("type")) continue;
+            StringBuilder name = new StringBuilder();
+            canon(e, name);
+            if (sets.containsKey(name.toString())) continue;
+            var parsed = net.minecraft.world.level.levelgen.blockpredicates.BlockPredicate.CODEC.parse(ops, e).result();
+            if (parsed.isEmpty()) continue;
+            byte[] bits = new byte[(states + 7) / 8];
+            try {
+                for (int id = 0; id < states; ++id) {
+                    asked[0] = net.minecraft.world.level.block.Block.stateById(id);
+                    if (parsed.get().test(everywhere, BlockPos.ZERO)) bits[id >> 3] |= (byte) (1 << (id & 7));
+                }
+            } catch (java.lang.reflect.UndeclaredThrowableException | UnsupportedOperationException notOfAStateAlone) {
+                continue;
+            }
+            sets.put(name.toString(), fnv(0xcbf29ce484222325L, bits));
+        }
+        o.i32(sets.size());
+        for (Map.Entry<String, Long> e : sets.entrySet()) {
+            o.i64(fnv(0xcbf29ce484222325L, e.getKey().getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+            o.i64(e.getValue());
+        }
+
+        // The placements. A chunk for every biome that has a feature no chunk before it brought.
+        Field field = ChunkGenerator.class.getDeclaredField("featuresPerStep");
+        field.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        List<net.minecraft.world.level.biome.FeatureSorter.StepFeatureData> steps =
+            ((Supplier<List<net.minecraft.world.level.biome.FeatureSorter.StepFeatureData>>) field.get(stand.maker.generator)).get();
+        Map<String, List<int[]>> every = WorldgenGolden.chunksOfEveryBiome(stand.maker);
+        var biomes = world.registries().lookupOrThrow(Registries.BIOME);
+        java.util.Set<Long> brought = new java.util.HashSet<>();
+        List<int[]> sites = new ArrayList<>();
+        for (Map.Entry<String, List<int[]>> e : every.entrySet()) {
+            var settings = stand.maker.generator.getBiomeGenerationSettings(biomes.getOrThrow(net.minecraft.resources.ResourceKey.create(Registries.BIOME,
+                net.minecraft.resources.Identifier.parse(e.getKey()))));
+            boolean news = false;
+            for (int s = 0; s < settings.features().size(); ++s)
+                for (var feature : settings.features().get(s)) news |= !brought.contains((long) s << 32 | steps.get(s).indexMapping().applyAsInt(feature.value()));
+            if (!news) continue;
+            // What runs around that chunk is the features of every biome that is somewhere in the nine.
+            int cx = e.getValue().getFirst()[0], cz = e.getValue().getFirst()[1];
+            sites.add(e.getValue().getFirst());
+            for (int dx = -1; dx <= 1; ++dx)
+                for (int dz = -1; dz <= 1; ++dz) {
+                    java.util.Set<net.minecraft.core.Holder<net.minecraft.world.level.biome.Biome>> there = new java.util.HashSet<>();
+                    for (var section : stand.terrain(cx + dx, cz + dz).getSections()) section.getBiomes().getAll(there::add);
+                    there.retainAll(stand.maker.biomeSource.possibleBiomes());
+                    for (var biome : there) {
+                        var features = stand.maker.generator.getBiomeGenerationSettings(biome).features();
+                        for (int s = 0; s < features.size(); ++s)
+                            for (var feature : features.get(s)) brought.add((long) s << 32 | steps.get(s).indexMapping().applyAsInt(feature.value()));
+                    }
+                }
+        }
+        o.i32(sites.size());
+        Recorder recorder = new Recorder();
+        int placed = 0, unrecorded = 0, positions = 0;
+        for (int n = 0; n < sites.size(); ++n) {
+            int cx = sites.get(n)[0], cz = sites.get(n)[1];
+            boolean whole = n < 2;
+            Region region = stand.regionAround(cx, cz);
+            ProtoChunk center = stand.chunks.get(Stand.key(cx, cz));
+            stand.region = region;
+            // ChunkGenerator.applyBiomeDecoration, down to where a feature is placed.
+            BlockPos origin = net.minecraft.core.SectionPos.of(center.getPos(), region.getMinSectionY()).origin();
+            var random = source(0L);
+            long decorationSeed = random.setDecorationSeed(region.getSeed(), origin.getX(), origin.getZ());
+            java.util.Set<net.minecraft.core.Holder<net.minecraft.world.level.biome.Biome>> possible = new java.util.HashSet<>();
+            for (int dx = -1; dx <= 1; ++dx)
+                for (int dz = -1; dz <= 1; ++dz)
+                    for (var section : region.getChunk(cx + dx, cz + dz).getSections()) section.getBiomes().getAll(possible::add);
+            possible.retainAll(stand.maker.biomeSource.possibleBiomes());
+            var placer = new net.minecraft.world.level.levelgen.placement.FeaturePlacer(region, stand.maker.generator);
+            List<int[]> ran = new ArrayList<>();
+            for (int s = 0; s < steps.size(); ++s) {
+                java.util.TreeSet<Integer> indices = new java.util.TreeSet<>();
+                for (var biome : possible) {
+                    var features = stand.maker.generator.getBiomeGenerationSettings(biome).features();
+                    if (s >= features.size()) continue;
+                    for (var feature : features.get(s)) indices.add(steps.get(s).indexMapping().applyAsInt(feature.value()));
+                }
+                for (int index : indices) ran.add(new int[] {s, index});
+            }
+            o.i32(cx);
+            o.i32(cz);
+            o.u8(whole ? 1 : 0);
+            o.i32(ran.size());
+            for (int[] at : ran) {
+                var feature = steps.get(at[0]).features().get(at[1]);
+                random.setFeatureSeed(decorationSeed, at[1], at[0]);
+                o.u8(at[0]);
+                o.i32(at[1]);
+                if (!(feature.feature() instanceof net.minecraft.core.Holder.Reference<?> reference)) {
+                    o.i32(-1);  // (its feature is written out in place: no other can be put there)
+                    ++unrecorded;
+                    continue;
+                }
+                Object real = reference.value();
+                recorder.at.clear();
+                set(reference, "value", recorder);
+                try {
+                    placer.placeWithBiomeCheck(feature, random, origin);
+                } finally {
+                    set(reference, "value", real);
+                }
+                o.i32(recorder.at.size());
+                long hash = 0xcbf29ce484222325L;
+                for (BlockPos pos : recorder.at) {
+                    hash = WorldgenGolden.fnv(WorldgenGolden.fnv(WorldgenGolden.fnv(hash, pos.getX()), pos.getY()), pos.getZ());
+                    if (whole) {
+                        o.i32(pos.getX());
+                        o.i32(pos.getY());
+                        o.i32(pos.getZ());
+                    }
+                }
+                o.i64(hash);
+                o.i64(random.nextLong());
+                ++placed;
+                positions += recorder.at.size();
+            }
+            stand.region = null;
+        }
+        System.err.println("worldgen: golden features: " + sets.size() + " sets of block states; " + sites.size() + " chunks, " + placed
+            + " placed features in them come to " + positions + " positions (" + unrecorded + " more have a feature of their own written out)");
+        return o.save(file);
+    }
+
     // ------------------------------------------------------------------------------- tables
 
     /**
@@ -964,5 +1263,5 @@ final class WorldgenFeatures {
     }
 
     /** Which sections of WorldgenRef want the game loaded with its resources kept. */
-    static final List<String> SECTIONS = List.of("census", "replay");
+    static final List<String> SECTIONS = List.of("census", "replay", "golden");
 }

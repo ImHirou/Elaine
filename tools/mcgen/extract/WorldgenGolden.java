@@ -15,6 +15,9 @@
 //   terrain.bin  whole chunks as vanilla's `terrain` status makes them, after each of its steps:
 //                the blocks (a few chunks whole, the rest as a hash), the heightmaps generation
 //                goes by, and what is marked to be let flow
+//   features.bin what a chunk's decoration is made of (WorldgenFeatures.golden): numbers as their
+//                providers draw them, the block states a predicate holds for, and where the placed
+//                features of the biomes come to be placed on real terrain
 //   noise.bin    every noise of the overworld for one seed: what the seed made of each layer
 //                (permutation, offsets), its value at points, and what it adds to a buffer over
 //                a volume - the two ways vanilla samples a noise, which are not the same bits
@@ -915,5 +918,6 @@ final class WorldgenGolden {
         FILES.put("climate", WorldgenGolden::climate);
         FILES.put("terrain", WorldgenGolden::terrain);
         FILES.put("spawn", WorldgenGolden::spawn);
+        FILES.put("features", WorldgenFeatures::golden);
     }
 }

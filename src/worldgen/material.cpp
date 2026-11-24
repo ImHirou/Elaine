@@ -461,4 +461,6 @@ bool top_material(const Overworld& world, NoiseChunk& chunk, CarverBiomes& biome
     return true;
 }
 
+float biome_info_noise(double x, double z) { return biome_noises().info.get(x, z); }
+
 }  // namespace worldgen

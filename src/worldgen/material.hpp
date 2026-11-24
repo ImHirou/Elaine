@@ -30,4 +30,7 @@ void build_surface(const Overworld& world, NoiseChunk& chunk, const BiomeGrid& b
 bool top_material(const Overworld& world, NoiseChunk& chunk, CarverBiomes& biomes, const Terrain& terrain, i32 x, i32 y, i32 z,
                   bool under_fluid, u16& out);
 
+// Biome.BIOME_INFO_NOISE - the same in every world: what the count of some features goes by.
+float biome_info_noise(double x, double z);
+
 }  // namespace worldgen

@@ -29,6 +29,8 @@
     "proto/gen/v777/worldgen.hpp"  // the overworld's generator: noises, density functions (src/worldgen only)
 #define PROTO_GEN_WORLDGEN_CLIMATE_HPP \
     "proto/gen/v777/worldgen_climate.hpp"  // ...its biomes by climate (worldgen/climate.cpp only)
+#define PROTO_GEN_WORLDGEN_FEATURES_HPP \
+    "proto/gen/v777/worldgen_features.hpp"  // ...what the biomes put into a chunk: features (worldgen/feature.hpp only)
 
 namespace proto {
 namespace ids = gen::ids;
