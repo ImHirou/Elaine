@@ -258,11 +258,13 @@ void Game::on_use_item(u32 pi, const sb::UseItem& u) {
     // what is not finite.
     if (std::isfinite(u.yaw)) ents_.yaw[pi] = wrap_degrees(u.yaw);
     if (std::isfinite(u.pitch)) ents_.pitch[pi] = std::clamp(wrap_degrees(u.pitch), -90.0f, 90.0f);
-    // Item.use of what it holds: a bucket's. (The stack is copied: what it does may give the
-    // inventory another.) Nothing else implemented answers anything but PASS: a spawn
-    // egg's SpawnEggItem.use - at water further away than a click on a block reaches - is not ported yet.
+    // Item.use of what it holds: a bucket's, a spawn egg's. (The stack is copied: what it does
+    // may give the inventory another.) Nothing else implemented answers anything but PASS.
     const ItemStack held = u.hand == 0 ? inv.selected_item() : inv.items[inv::kOffhand];
-    const Used used = held.info().kind == gen::item_kind::kBucket ? use_bucket(pi, held) : Used::kPass;
+    const u32 kind = held.info().kind;
+    const Used used = kind == gen::item_kind::kBucket     ? use_bucket(pi, held)
+                      : kind == gen::item_kind::kSpawnEgg ? use_spawn_egg(pi, held)
+                                                          : Used::kPass;
     if (used == Used::kPass) return;
     swing(pi, u.hand, {}, used == Used::kSuccessServer);
     // Player.inventoryMenu.broadcastChanges comes with the player's tick; what the hand holds is

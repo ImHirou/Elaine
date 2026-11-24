@@ -603,6 +603,24 @@ def record(port: int, out_path: str, name_a: str, name_b: str, console: str, onl
     hatch("a creeper's egg", "kCreeperSpawnEgg", 0, -1, 3, 1, "creeper")
     if wanted():
         type_on_console("difficulty peaceful")
+    # An egg used on no block (use_item -> SpawnEggItem.use): a look that a source of water stops
+    # makes the mob in the water, at the block's bottom; one that meets a block holding water makes none.
+    def egg_at(yaw: float, pitch: float) -> None:
+        egg_seq[0] += 1
+        a.c.send("use_item", mc.varint(0) + mc.varint(egg_seq[0]) + struct.pack(">ff", yaw, pitch))
+
+    run("setblock ~ ~ ~2 water", ticks=0)
+    step("A's egg at a source of water", lambda: (a.give(36, "kPolarBearSpawnEgg"), egg_at(0.0, 20.0)), ticks=0)
+    for path in ("Pos", "Rotation[1]"):
+        run(f"data get entity @e[type=polar_bear,limit=1,sort=nearest] {path}", ticks=0)
+    run("kill @e[type=polar_bear]", ticks=0)
+    step("...and into the air", lambda: egg_at(0.0, -60.0), ticks=0)
+    run("data get entity @e[type=polar_bear,limit=1,sort=nearest] Pos", ticks=0)
+    run("setblock ~ ~ ~2 oak_slab[waterlogged=true]", ticks=0)
+    step("...at a slab that holds water", lambda: egg_at(0.0, 20.0), ticks=0)
+    run("data get entity @e[type=polar_bear,limit=1,sort=nearest] Pos", ticks=0)
+    run("tp @s ~ ~ ~ 0 0", ticks=0)
+    run("setblock ~ ~ ~2 air", ticks=0)
     # The middle click: a mob's egg, an armor stand's item, into a hand that is empty.
     step("A's egg on the grass again", lambda: (a.give(36, "kPolarBearSpawnEgg"), egg_on(0, -1, 3, 1)), ticks=0)
     step("A picks the polar bear", lambda: (a.give(36, None), a.c.send("pick_item_from_entity",

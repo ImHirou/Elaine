@@ -40,6 +40,20 @@ constexpr float kEyeStanding = 1.62f, kEyeCrouching = 1.27f, kEyeLow = 0.4f;
 
 }  // namespace
 
+// Item.getPlayerPOVHitResult: what its holder looks at - from the eyes of the pose it has, along
+// Entity.calculateViewVector(xRot, yRot), as far as its hand reaches; outlines, and the fluid asked for.
+world::ClipHit Game::pov_hit(u32 pi, world::ClipFluid fluid_mode) const {
+    const u8 pose_now = ents_.pose[pi];
+    const float eyes = pose_now == pose::kStanding ? kEyeStanding : pose_now == pose::kCrouching ? kEyeCrouching : kEyeLow;
+    const double from[3] = {ents_.x[pi], ents_.y[pi] + static_cast<double>(eyes), ents_.z[pi]};
+    const float real_x = ents_.pitch[pi] * 0.017453292f, real_y = -ents_.yaw[pi] * 0.017453292f;
+    const float y_cos = phys::mth_cos(static_cast<double>(real_y)), y_sin = phys::mth_sin(static_cast<double>(real_y));
+    const float x_cos = phys::mth_cos(static_cast<double>(real_x)), x_sin = phys::mth_sin(static_cast<double>(real_x));
+    const double view[3] = {static_cast<double>(y_sin * x_cos), static_cast<double>(-x_sin), static_cast<double>(y_cos * x_cos)};
+    const double to[3] = {from[0] + view[0] * kReach, from[1] + view[1] * kReach, from[2] + view[2] * kReach};
+    return world::clip_outline(world_, from, to, fluid_mode);
+}
+
 // BucketItem.use: where the holder looks - as far as its hand reaches, a source of fluid
 // stopping the look of an empty bucket and nothing but blocks that of a full one - the bucket is
 // emptied into the block that was met if that holds water by itself, else against the side
@@ -49,17 +63,7 @@ Game::Used Game::use_bucket(u32 pi, const ItemStack& held) {
     const u32 content = item == fluid::kBucket[fluid::kWater]  ? fluid::kWater
                         : item == fluid::kBucket[fluid::kLava] ? fluid::kLava
                                                                : fluid::kEmpty;
-    // Item.getPlayerPOVHitResult: from the eyes, along Entity.calculateViewVector(xRot, yRot).
-    const u8 pose_now = ents_.pose[pi];
-    const float eyes = pose_now == pose::kStanding ? kEyeStanding : pose_now == pose::kCrouching ? kEyeCrouching : kEyeLow;
-    const double from[3] = {ents_.x[pi], ents_.y[pi] + static_cast<double>(eyes), ents_.z[pi]};
-    const float real_x = ents_.pitch[pi] * 0.017453292f, real_y = -ents_.yaw[pi] * 0.017453292f;
-    const float y_cos = phys::mth_cos(static_cast<double>(real_y)), y_sin = phys::mth_sin(static_cast<double>(real_y));
-    const float x_cos = phys::mth_cos(static_cast<double>(real_x)), x_sin = phys::mth_sin(static_cast<double>(real_x));
-    const double view[3] = {static_cast<double>(y_sin * x_cos), static_cast<double>(-x_sin), static_cast<double>(y_cos * x_cos)};
-    const double to[3] = {from[0] + view[0] * kReach, from[1] + view[1] * kReach, from[2] + view[2] * kReach};
-    const world::ClipHit hit =
-        world::clip_outline(world_, from, to, content == fluid::kEmpty ? world::ClipFluid::kSourceOnly : world::ClipFluid::kNone);
+    const world::ClipHit hit = pov_hit(pi, content == fluid::kEmpty ? world::ClipFluid::kSourceOnly : world::ClipFluid::kNone);
     if (!hit.hit) return Used::kPass;
     const BlockPos pos{hit.x, hit.y, hit.z};
     const BlockPos beside{hit.x + world::kStepX[hit.face], hit.y + world::kStepY[hit.face], hit.z + world::kStepZ[hit.face]};

@@ -253,8 +253,11 @@ middle click - the same bytes. What differs, and why:
   class, its variant and chance, and mobs here make no sound at all.
 - There is no difficulty: a monster's egg makes the monster, as vanilla's does on any difficulty but
   peaceful.
-- Not there: an egg used at water, or into the air (`use_item` -> `SpawnEggItem.use`: not ported yet - its
-  `getPlayerPOVHitResult` is `world::clip`, which the buckets brought); an egg on a spawner (an imported world's is a kept tag: nothing happens);
+- An egg used on no block (`use_item` -> `SpawnEggItem.use`) looks as a bucket does
+  (`Game::pov_hit`: `getPlayerPOVHitResult`, a source of fluid stopping the look) and makes its mob only
+  where that meets a liquid's own block - not a block that holds water - in that block, at its
+  bottom (`EntityType.create` without `tryMoveDown`).
+- Not there: an egg on a spawner (an imported world's is a kept tag: nothing happens);
   an egg on a mob of its own kind (a baby: `interact` is not handled); the pick of what this server
   does not simulate (boats, minecarts, item frames, paintings, an end crystal, a leash knot) and,
   with ctrl, the profile of a player.

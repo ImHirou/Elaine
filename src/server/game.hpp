@@ -598,9 +598,18 @@ class Game {
     Used use_block(u32 pi, proto::BlockPos pos, world::BlockState state, const ItemStack& held, u32 hand);
     // ---- buckets (server/buckets.cpp)
     Used use_bucket(u32 pi, const ItemStack& held);
+    world::ClipHit pov_hit(u32 pi, world::ClipFluid fluid_mode) const;
     bool empty_bucket(u32 pi, u32 content, proto::BlockPos pos, const world::ClipHit* hit);
     // ---- spawn eggs (server/spawn_eggs.cpp)
     Used use_spawn_egg(u32 pi, const proto::sb::UseItemOn& u, const ItemStack& held);
+    Used use_spawn_egg(u32 pi, const ItemStack& held);
+    struct EggType {
+        u32 type = 0;
+        std::span<const u8> rest;  // the rest of its ENTITY_DATA: a tag
+        bool ok = false;
+    };
+    static EggType egg_type(const ItemStack& held);
+    Used hatch_egg(u32 pi, const ItemStack& held, const EggType& egg, proto::BlockPos at, bool try_move_down, bool moved_up);
     // ---- signs (server/signs.cpp)
     static bool sign_kind(u32 kind);
     static u32 sign_facing(world::BlockState s);    // of the two that hang on a wall: a Direction

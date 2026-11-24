@@ -6543,7 +6543,8 @@ def spawn_eggs(srv: Server):
     block that was clicked, beside it, into a plant - coming down on a slab, on a fence - looking a
     way of its own, with the stack's name and custom data and the egg's own tag on it; an egg of
     nothing, or of what this server cannot make, makes nothing; a falling block's tag is an
-    operator's to give. use_item is acknowledged and turns whoever holds something. (What a vanilla
+    operator's to give. use_item is acknowledged and turns whoever holds something; an egg used so
+    at a source of water makes its mob in the water. (What a vanilla
     server makes of the same eggs is compared by tools/vanilla/command_probe.py, section eggs.)"""
     a, b = srv.client(), srv.client()
     join(a, "Alice", view=3)
@@ -6684,6 +6685,28 @@ def spawn_eggs(srv: Server):
     assert acks(a) == [500]
     collect(b)
     assert b.entities[a.entity_id].yaw == 45.0 and set(b.entities) == before
+    # ---- ...and at water (SpawnEggItem.use): the look is stopped by a source, and the pig is made
+    # in that block, at its bottom - as add_entity says, before a tick moved it.
+    cell = tuple(math.floor(v) for v in b.entities[a.entity_id].pos)
+    run_command(a, "setblock ~ ~ ~ water")
+    collect(b)
+    before = set(b.entities)
+    a.send("use_item", varint(0) + varint(502) + struct.pack(">ff", 45.0, 90.0))
+    assert acks(a) == [502]
+    collect(b)
+    made = [e for i, e in b.entities.items() if i not in before]
+    assert len(made) == 1 and made[0].type == mc.ENTITY_TYPE["kPig"], made
+    assert made[0].spawned[0] == (cell[0] + 0.5, float(cell[1]), cell[2] + 0.5), (made[0].spawned, cell)
+    run_command(a, "kill @e[type=pig]")
+    # A block that only holds water is no LiquidBlock: the look meets it, and nothing is made.
+    run_command(a, "setblock ~ ~ ~ oak_slab[waterlogged=true]")
+    collect(b)
+    before = set(b.entities)
+    a.send("use_item", varint(0) + varint(503) + struct.pack(">ff", 45.0, 90.0))
+    assert acks(a) == [503]
+    collect(b)
+    assert set(b.entities) == before
+    run_command(a, "setblock ~ ~ ~ air")
     # With nothing in hand: acknowledged all the same, but it turns nobody.
     give(a, 36, 0, 0)
     a.send("use_item", varint(0) + varint(501) + struct.pack(">ff", -90.0, 0.0))
