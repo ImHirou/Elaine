@@ -37,7 +37,7 @@ What the block classes lean on. A milestone below is workable once the systems i
 - [x] Random block ticks, at the simulation distance
 - [x] Falling blocks (`FallingBlockEntity`)
 - [x] The particles and the sound of a block breaking, for the others (level event 2001)
-- [ ] The sound of a block being placed (`sound`)
+- [x] The sound of a block being placed, for the others (`sound`)
 - [ ] Fluids: water and lava that flow, fluid ticks, waterlogged blocks that ask for them
 - [ ] Redstone signals beyond the block of redstone
 - [ ] The time of day and the weather: light that changes with them, rain and snow on blocks (`tickPrecipitation`)

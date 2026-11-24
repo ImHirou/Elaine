@@ -281,7 +281,7 @@ FAMILY_LAYOUTS = {
 # Sounds and particles the server sends by id (static registries: sound_event, particle_type).
 SOUNDS = ["block.chest.open", "block.chest.close", "entity.tnt.primed", "entity.generic.explode", "entity.item.pickup",
           "entity.armor_stand.break", "block.barrel.open", "block.barrel.close", "block.copper_chest.open",
-          "block.sponge.absorb", "block.wet_sponge.dries",
+          "block.sponge.absorb", "block.wet_sponge.dries", "block.glass.place",
           "block.copper_chest.close", "block.copper_chest_weathered.open", "block.copper_chest_weathered.close",
           "block.copper_chest_oxidized.open", "block.copper_chest_oxidized.close", "block.chest.locked",
           "item.dye.use", "item.ink_sac.use", "item.glow_ink_sac.use", "item.honeycomb.wax_on",

@@ -863,6 +863,11 @@ def place_and_break_blocks(srv: Server):
     # Bob sees the block; his client relights its own copy, so no light is sent to him.
     expect_block(b, above, mc.BLOCK["kGlowstone"])
     expect_quiet(b)
+    # ...and hears it (BlockItem.place: the block's place sound at its middle, (volume + 1) / 2,
+    # pitch * 0.8). Alice does not: her client made the sound when it predicted the block.
+    f32 = lambda v: struct.unpack(">f", struct.pack(">f", v))[0]
+    assert b.sounds == [(mc.SOUND["kBlockGlassPlace"], 4, (8.5, -59.5, 10.5), 1.0, f32(0.8))], b.sounds
+    assert not a.sounds, a.sounds
     # Carol has chunk (0, 0) at the edge of her view and cannot relight it herself: she gets the
     # light of every border chunk that changed (the glowstone reaches z = -4 and z = 24), then the block.
     lit = {}

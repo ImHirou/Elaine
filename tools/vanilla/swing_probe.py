@@ -32,7 +32,7 @@ Reading the diff:
   * A vanilla flat world has animals in it: what happens to blocks further than four blocks
     from B (a sheep eating grass) and the sounds of anything but players and blocks are left out.
   * Known differences that remain are listed in docs/architecture.md ("Items", "Compared with
-    vanilla"): what a hit does besides the swing, the sound of a placed block, the spear.
+    vanilla"): what a hit does besides the swing, the spear.
 """
 from __future__ import annotations
 

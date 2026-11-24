@@ -1695,6 +1695,9 @@ namespace proto::gen {
                         into, ext_items.get(into["item"]), ported_of[nxt]):
                     die(f"{name}: weathers into {nxt}, which has other properties or cannot be in the world")
                 next_stage = first[nxt]
+        # BlockItem.place plays getSoundType(state).getPlaceSound(): one sound a block here.
+        if kind and "getSoundType" in gb["hooks"]:
+            die(f"{name}: placeable, and {gb['hooks']['getSoundType']}.getSoundType says which sound by more than the block")
         f = kind
         f |= bf["kSnowTag"] if b["id"] in snow else 0
         f |= bf["kInteractive"] if not (hook_default(b, "useItemOn") and hook_default(b, "useWithoutItem")) else 0

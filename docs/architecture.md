@@ -906,9 +906,9 @@ differs:
   placed block;
 - `update_recipes` at join carries the same nine property sets (which items a furnace takes...);
   vanilla also lists the stonecutter's recipes there, which no block here can use yet;
-- not sent at all, each a known gap rather than a difference in what is sent: the sound of a
-  block being placed, a player's footsteps. (A block breaking is seen and heard by the others
-  now: level event 2001.)
+- not sent at all, a known gap rather than a difference in what is sent: a player's footsteps.
+  (A block breaking is seen and heard by the others: level event 2001; a block placed is heard
+  by them: `BlockItem.place`'s sound.)
 - a furnace gives no experience when it is emptied, ores blown up by a player's TNT none
   either: there are no experience orbs;
 - an explosion hurts nothing but items (nothing else has health): a mob is thrown and lives,
@@ -1506,7 +1506,6 @@ tick queue under load and the random pass belong with the first claim that any o
 - **The game time across a restart**: it starts at zero. Delays do not mind; the day will.
 - Falling: anvils and pointed dripstone, which hurt what they land on; a falling block's own
   tag from `/summon` (it is sand).
-- The sound of a block being placed.
 
 ## Physics (src/phys/, src/world/collide.*, src/server/physics.cpp)
 

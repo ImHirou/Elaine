@@ -320,6 +320,11 @@ bool Game::place_block(u32 pi, const sb::UseItemOn& u, const ItemStack& held) {
         apply_item_to_block(at, held);
     if (sign_kind(placed.kind) && world::block_of(world_.block(at.x, at.y, at.z)) == world::block_of(state))
         sign_placed(pi, at);  // setPlacedBy
+    // BlockItem.place: Level.playSound(player, pos, getPlaceSound(placedState), ...) - the sound
+    // of the state that is there now, at the middle of the block, for everyone but the player
+    // (its client made the sound when it predicted the block). Vanilla's floats, as written.
+    play_sound(placed.place_sound, cb::Sound::kSourceBlocks, at.x + 0.5, at.y + 0.5, at.z + 0.5,
+               (placed.sound_volume + 1.0f) / 2.0f, placed.sound_pitch * 0.8f, pi);
     return true;
 }
 
