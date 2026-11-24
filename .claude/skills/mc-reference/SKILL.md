@@ -156,6 +156,21 @@ pseudo-code did not). Where a counter's first value matters, read the `dup_x1` i
 - **Which chunk's changes a tick sends first is no rule**: `ServerChunkCache.chunkHoldersToBroadcast` is a
   `ReferenceOpenHashSet`, walked in identity-hash order. Within a chunk it is sections bottom up, one packet a
   section. A probe that compares the order of block changes must not compare it across chunks.
+- **How a chunk gets its features** (26.3; none of it is 1.21's): statuses run `biomes, terrain, features,
+  initialize_light, light, spawn, full` - there is no `carvers`. `ChunkStatusTasks.generateFeatures` builds a
+  `WorldGenRegion` (centre and eight around at `terrain`, write radius 1: `ensureCanWrite` refuses the rest without a
+  word; a read further off logs) and calls `ChunkGenerator.applyBiomeDecoration`: per step the indices of
+  `FeatureSorter` in ascending order, `WorldgenRandom.setFeatureSeed(decorationSeed, index, step)`, one `FeaturePlacer`
+  (an explicit stack: a modifier makes all its positions, with all their draws, before the first goes on). The four
+  final heightmaps are primed at the end of `terrain` and moved by every `setBlock`; the two `_WG` ones stay as
+  terrain left them; `OreFeature` writes through `BulkSectionAccess`, past all of that. A block entity is a
+  `{id: "DUMMY"}` placeholder until something asks for it; a tick is kept with delay 0. The registry is
+  `worldgen/feature` (not `configured_feature`), a block state is a name or `{id, properties}`. Only one chunk is
+  decorated at a time, in an order of the server's; `--jfrProfile` records it (`minecraft.ChunkGeneration`, field
+  `status`). What a feature is told of light is the light thread's business (docs/architecture.md, "Features").
+  All of it can be run without a server: `tools/mcgen/extract/WorldgenFeatures.java`.
+- **`Math.sin`, `cos`, `pow`, `log` are HotSpot's own**, not the C library's: the last bit differs in about one
+  argument of five hundred. `Math.pow(x, 2.0)` is `x * x`. `Mth.sin` is a table (`phys/mth.hpp`), another thing.
 - **Collision shapes** are `VoxelShape`s: coordinates per axis and a bit a cell. `mcgen.py blockdata` writes both the
   boxes and that grid (`collision_grids`); most joined shapes have exactly the lines their boxes' faces cut, 42 of
   330 have more (a piston's head, a straw bed). `getFaceShape(direction)` is the layer of cells at 1e-7 inside

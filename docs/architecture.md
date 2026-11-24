@@ -2297,6 +2297,57 @@ chunks it looks at). That is asked once, when a world of terrain is opened witho
 kept in world.json. Vanilla asks chunks that have their features, so until those are here the
 block may differ - a tree's leaves are a place to stand, to vanilla.
 
+### Features: what a decoration is, before any is ported
+
+The `features` status (`ChunkGenerator.applyBiomeDecoration`) is next, and what was found out
+about it before a line of the generator was written decides how it is built.
+
+**A decoration writes into nine chunks, and vanilla's world depends on the order.** A chunk is
+decorated once the eight around it have their terrain; its features may write into all nine
+(a write further off is refused), and read them. One chunk is decorated at a time, in an order
+that is the server's - which ticket came first, which worker was done when - and where the
+features of two chunks meet, the later one finds what the earlier one left. So a vanilla world
+is not a function of its seed along the borders of chunks, and any order is a vanilla world.
+This generator will take one order and keep it (four passes over areas of 4x4 chunks, the inner
+four of an area decorated in each: the plan of stage 2).
+
+**Nothing reads further than it writes.** `mcgen.py worldgen census` runs vanilla's own
+features - the real `WorldGenRegion`, on a stand without a server
+(`tools/mcgen/extract/WorldgenFeatures.java`) - over chunks of every biome: in 660 decorated
+chunks, with each of the overworld's 171 placed features run, not one read went beyond the nine
+chunks and not one write was refused. (Mojang's own region stops their debugger at such a read.)
+The rule for one that did - it finds a chunk with nothing in it - is never asked for.
+
+**Light is asked, and the answer is a thread's.** A mushroom stands only where it is dark
+(`MushroomBlock.canSurvive`: raw brightness under 13, unless it stands on mycelium or podzol) -
+the one thing a feature asks the light engine. A chunk that is being decorated is not lit, and
+the engine says 15 of a column it knows nothing of. But once a chunk *beside* it has been handed
+to the engine, the engine keeps layers for the sections around that chunk, empty until light is
+let into them (`LayerLightSectionStorage.updateSectionStatus`,
+`SkyLightSectionStorage.getLightValue`): then it says 0, and later whatever spills over from the
+lit chunk. Which of these a feature gets depends on when the light thread ran. A chunk made
+beside older chunks - every chunk a player walks towards - gets the dark answer: mushrooms are
+put wherever they have ground, and those that stand too bright go when the chunk first ticks
+(a mushroom marks itself for that, `BlockBehaviour.Properties.postProcess`). That is the rule
+here: while a chunk is decorated it is dark, and the light decides when the chunk first ticks.
+
+**The order can be had from the server.** Started with `--jfrProfile`, a vanilla server keeps a
+flight recording with an event for every status of every chunk (`minecraft.ChunkGeneration`);
+the `features` of two chunks never overlap in it. `tools/vanilla/feature_probe.py` takes the
+order out, has the stand replay exactly that run, and compares every chunk the server saved
+before it became a chunk of the world: 352 chunks - 160 with their own features, 192 with
+their terrain and what a neighbour put into it - the same block for block, with their
+heightmaps, the blocks marked for the first tick in order, the scheduled ticks in order, the
+block entities. (A replay answers 15 where a mushroom asks, and names the blocks where the
+server may have said otherwise; those are left out.) So the stand is the server, and whatever
+is ported can be held to the server through the same replay.
+
+**`Math.sin` is not `std::sin`.** HotSpot computes `Math.sin`, `cos`, `pow`, `log` with stubs
+of its own, and they are not glibc's results: over the 2^24 angles an ore can have, sine
+differs in 33106 and cosine in 33153 (the last bit); of four million other arguments `pow`
+differs in 4078 and `log` in 288. `Math.pow(x, 2.0)` is `x * x` exactly. The features that call
+them (ores, icebergs, the fancy oak, dripstone) need HotSpot's results.
+
 ### What is there, and what is not
 
 There: biomes, and all of the `terrain` status - the shape of the ground with its aquifers

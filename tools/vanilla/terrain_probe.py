@@ -101,16 +101,18 @@ def write_pack(path: Path) -> int:
     return len(biomes)
 
 
-def write_world(path: Path, seed: int) -> None:
+def write_world(path: Path, seed: int, pack=write_pack, pack_name: str = PACK) -> None:
     """A world vanilla has not run yet, as LevelStorageSource reads one (26.3: the dimensions and the
-    seed are in data/minecraft/world_gen_settings.dat, the rest in level.dat)."""
+    seed are in data/minecraft/world_gen_settings.dat, the rest in level.dat). `pack` writes the data
+    pack the world has beside vanilla's (None: it has none)."""
     version = mc.META["world_version"]
     (path / "data" / "minecraft").mkdir(parents=True)
-    write_pack(path / "datapacks" / PACK)
+    if pack:
+        pack(path / "datapacks" / pack_name)
     x, z = STOPS[0][0] * 16 + 8, STOPS[0][1] * 16 + 8
     level = {"Data": {
-        "DataPacks": {"Disabled": [], "Enabled": ["vanilla", f"file/{PACK}"]},
-        "DataVersion": version, "GameType": 1, "LastPlayed": mc.Long(int(time.time() * 1000)), "LevelName": WORLD,
+        "DataPacks": {"Disabled": [], "Enabled": ["vanilla"] + ([f"file/{pack_name}"] if pack else [])},
+        "DataVersion": version, "GameType": 1, "LastPlayed": mc.Long(int(time.time() * 1000)), "LevelName": path.name,
         "ServerBrands": ["vanilla"], "Time": mc.Long(0),
         "Version": {"Id": version, "Name": mc.META["version"], "Series": "main", "Snapshot": mc.Byte(0)},
         "WasModded": mc.Byte(0), "allowCommands": mc.Byte(0),

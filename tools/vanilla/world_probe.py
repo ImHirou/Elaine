@@ -100,7 +100,8 @@ FIXTURE = [
 
 
 class Vanilla:
-    def __init__(self, world: str, log_path: Path):
+    def __init__(self, world: str, log_path: Path, options: tuple[str, ...] = ()):
+        """`options`: more of the server's own (`--jfrProfile`: a flight recording, from before the world loads)."""
         eula = SERVER_DIR / "eula.txt"
         if not eula.exists() or "eula=true" not in eula.read_text():
             raise SystemExit(f"{eula} is missing or not accepted: that is the user's to do (AGENTS.md)")
@@ -110,7 +111,7 @@ class Vanilla:
                 raise SystemExit(f"server.properties must have {must}")
         jar = ROOT / ".cache" / "mc" / VERSION / "server.jar"
         self.log = open(log_path, "w")
-        self.proc = subprocess.Popen([JAVA, "-Xms1G", "-Xmx2G", "-jar", str(jar), "--nogui", "--world", world], cwd=SERVER_DIR,
+        self.proc = subprocess.Popen([JAVA, "-Xms1G", "-Xmx2G", "-jar", str(jar), "--nogui", "--world", world, *options], cwd=SERVER_DIR,
                                      text=True, bufsize=1, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.lines: queue.Queue[str] = queue.Queue()
         threading.Thread(target=self._read, daemon=True).start()

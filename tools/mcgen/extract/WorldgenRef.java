@@ -413,6 +413,8 @@ public final class WorldgenRef {
         SECTIONS.put("program", WorldgenRef::program);
         SECTIONS.put("climate", WorldgenRef::climate);
         SECTIONS.put("golden", WorldgenRef::golden);
+        SECTIONS.put("census", WorldgenFeatures::census);
+        SECTIONS.put("replay", WorldgenFeatures::replay);
     }
 
     static JsonObject golden(RegistryAccess registries) throws Exception {
@@ -437,7 +439,8 @@ public final class WorldgenRef {
                 System.err.println("worldgen: no section '" + name + "' (have: " + String.join(", ", SECTIONS.keySet()) + ")");
                 System.exit(2);
             }
-        GameData.Env env = GameData.load();
+        // (a feature reads structure templates out of the game's resources: those sections keep them open)
+        GameData.Env env = wanted.stream().anyMatch(WorldgenFeatures.SECTIONS::contains) ? WorldgenFeatures.load() : GameData.load();
         Dump.index(env.registries());
         Files.createDirectories(out);
         for (String name : wanted) {

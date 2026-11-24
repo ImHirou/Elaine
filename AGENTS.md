@@ -164,7 +164,9 @@ bench/        micro-benchmarks;  tools/mcgen/  protocol data pipeline (gen.py: w
               (ours or vanilla) and diff two recordings, compare.py, which runs such a probe on both servers at once, physics_probe.py, which records what vanilla computes, and world_probe.py, which
               has vanilla build a world and compares how the two servers send it, and block_probe.py, which runs both servers
               through what blocks do to each other, and terrain_probe.py, which holds the generator to the chunks a vanilla
-              server saved (terrain_dump.cpp: the generator asked without a server);  docs/architecture.md  the design in depth;
+              server saved (terrain_dump.cpp: the generator asked without a server), and feature_probe.py, which has a
+              vanilla server say in which order it decorated its chunks and holds a replay of that order to what it saved;
+              docs/architecture.md  the design in depth;
               docs/blocks-roadmap.md  every block, done or to do (generated)
 .claude/skills/  task playbooks (below)
 install.sh    a fresh clone to a built server;  tools/check.py  build + test, quietly;  tools/ci/checks.sh  what CI checks without building;  .github/  CI, templates
@@ -312,6 +314,13 @@ R-tree they are searched by. It compiles for two seeds and stops if anything but
 offsets differs. The JSON under `data/minecraft/worldgen/` in the jar says what a world is made of; these
 files say what vanilla made of it, and the tables of `src/worldgen` are generated from both.
 
+The same extractor decorates chunks (`tools/mcgen/extract/WorldgenFeatures.java`): vanilla's `features` status
+run without a server - the real `WorldGenRegion` over proto chunks made by the steps above, on a level, a
+chunk source and a server that are made without their constructors and answer only what a region and the
+features ask. `mcgen.py worldgen census` decorates chunks of every biome and counts what a generator needs
+a rule for (reads beyond the nine chunks a decoration may write to, refused writes, questions about light);
+`mcgen.py worldgen replay` decorates in an order it is given (`tools/vanilla/feature_probe.py` writes it).
+
 ### The vanilla server as a reference
 
 The vanilla server runs only where Mojang's EULA has been accepted in `.cache/vanilla-server/eula.txt` -
@@ -338,6 +347,11 @@ upgrade old worlds before importing them. Rules:
   structures, and a data pack of the jar's biomes without their features, made of the jar each time - and reads its
   region files: the chunks around what a player sees that were saved before anything ran in them. Its other side is
   no server but the generator (`terrain_dump`, built when the probe runs).
+  `feature_probe.py run` is the same world with the game's features in it and the server started with `--jfrProfile`:
+  a vanilla server decorates one chunk at a time in an order of its own, and what a feature finds depends on that
+  order - so the probe takes the order out of the flight recording (`minecraft.ChunkGeneration`, read with the JDK's
+  `jfr`), has it replayed (`jar`: the extractor's stand), and compares every chunk the server saved before it became a
+  chunk of the world: blocks, heightmaps, marks, scheduled ticks, block entities. About two minutes.
   `block_probe.py` starts them too (`vanilla <out>`, `ours <elaine> <out>`, then `diff`; `compare.py block_probe` runs
   both at once): vanilla in a world of the probe's own (`--world block-probe`), which it removes and makes anew every
   time. It steps the game a tick at a time and stamps every packet with the tick that brought it. `physics_probe.py` starts the vanilla server itself: `record` steps it tick by tick and writes down

@@ -24,7 +24,7 @@ from pathlib import Path
 
 from mcgen import ROOT, die, find_tool, vdir, version_info, write_stamp
 
-SECTIONS = ("program", "climate", "golden")
+SECTIONS = ("program", "climate", "golden", "census", "replay")
 TABLES = ("program", "climate")  # what a run without arguments writes, and `generate` reads
 
 
